@@ -22,7 +22,10 @@ Safety, per the contract's Windows checklist:
 from __future__ import annotations
 
 import ctypes
+import os
+import threading
 import time
+from contextlib import contextmanager
 from ctypes import wintypes
 
 from .injector import InjectionError
@@ -46,6 +49,7 @@ ULONG_PTR = wintypes.WPARAM  # pointer-sized unsigned (matches dwExtraInfo)
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_SCANCODE = 0x0008
 
 VK_RETURN = 0x0D
 VK_TAB = 0x09
@@ -106,6 +110,8 @@ if _user32 is not None:
     _user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
     _user32.GetAsyncKeyState.restype = ctypes.c_short
     _user32.GetForegroundWindow.restype = wintypes.HWND
+    _user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
+    _user32.MapVirtualKeyW.restype = wintypes.UINT
 
 
 def _keyboard_input(*, wVk: int = 0, wScan: int = 0, flags: int = 0) -> _INPUT:
@@ -228,6 +234,45 @@ def _require_foreground_window() -> None:
         )
 
 
+def _foreground_is_own_process() -> bool:
+    """True when Aura's own main window is in front (the pill never takes focus)."""
+    if _user32 is None:
+        return False
+    hwnd = _user32.GetForegroundWindow()
+    if not hwnd:
+        return False
+    pid = wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value == os.getpid()
+
+
+def _refuse_own_window(text: str) -> None:
+    """The Mac's self-target check: a global hotkey pressed while Aura itself
+    is in front would paste into Aura and report success though nothing reached
+    the intended app. Keep the text on the clipboard and say so instead."""
+    if not _foreground_is_own_process():
+        return
+    copied = _clipboard_set_windows(text)
+    where = ("on the clipboard — click a text field in another app and press Ctrl+V"
+             if copied else "in Aura History")
+    raise InjectionError(
+        "Wayfinder Aura was frontmost, so there was no external paste target. "
+        f"Your text is {where}."
+    )
+
+
+def foreground_window_id() -> str | None:
+    """The foreground window handle as a string, or None.
+
+    Backs ``injector.get_active_window`` so the Auto-Enter focus guard can see
+    a window switch between injecting the text and pressing Return.
+    """
+    if _user32 is None:
+        return None
+    hwnd = _user32.GetForegroundWindow()
+    return str(hwnd) if hwnd else None
+
+
 # ---------------------------------------------------------------------------
 # Public injection entry points
 # ---------------------------------------------------------------------------
@@ -251,6 +296,7 @@ def inject_text_windows(text: str, typing_speed: str = "instant") -> None:
     if not text:
         return
     _require_foreground_window()
+    _refuse_own_window(text)
     require_modifier_release_windows()
 
     interval = _TYPING_INTERVALS.get(typing_speed, 0.0)
@@ -268,11 +314,58 @@ def inject_text_windows(text: str, typing_speed: str = "instant") -> None:
         time.sleep(interval)
 
 
+# Game chat (Gamer mode): some engines sample the keyboard once per frame and
+# miss a key whose down and up arrive together, and read hardware scan codes
+# rather than virtual keys. While hold_keys() is active, Ctrl+V and Enter go
+# out as scan codes and each key is held (the Mac's macos_paste.hold_keys).
+_hold = threading.local()
+
+
+@contextmanager
+def hold_keys(seconds: float):
+    """Hold each synthesized Ctrl+V / Enter key for *seconds* (game chat)."""
+    previous = getattr(_hold, "seconds", 0.0)
+    _hold.seconds = max(0.0, float(seconds))
+    try:
+        yield
+    finally:
+        _hold.seconds = previous
+
+
+def _held_seconds() -> float:
+    return getattr(_hold, "seconds", 0.0)
+
+
+def _scan_input(vk: int, *, up: bool) -> _INPUT:
+    scan = _user32.MapVirtualKeyW(vk, 0) if _user32 is not None else 0  # MAPVK_VK_TO_VSC
+    flags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if up else 0)
+    return _keyboard_input(wScan=scan, flags=flags)
+
+
+def _press_keys(vks: list[int]) -> None:
+    """Press *vks* in order and release in reverse.
+
+    Normally one batched SendInput (as before). Inside hold_keys(): scan codes,
+    with the keys held down for the configured time before release.
+    """
+    hold = _held_seconds()
+    if hold <= 0:
+        _send([_keyboard_input(wVk=vk) for vk in vks]
+              + [_keyboard_input(wVk=vk, flags=KEYEVENTF_KEYUP) for vk in reversed(vks)])
+        return
+    _send([_scan_input(vk, up=False) for vk in vks])
+    time.sleep(hold)
+    _send([_scan_input(vk, up=True) for vk in reversed(vks)])
+
+
 def press_enter_windows() -> None:
     """Synthesize a single Enter keypress (Auto-press-Enter setting)."""
     _require_foreground_window()
     # A held Shift would send Shift+Enter — a newline instead of submit.
     require_modifier_release_windows()
+    if _held_seconds() > 0:
+        _press_keys([VK_RETURN])
+        return
     _send(_vkey_inputs(VK_RETURN))
 
 
@@ -296,6 +389,47 @@ if _user32 is not None:
     _kernel32.GlobalLock.restype = ctypes.c_void_p
     _kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
     _kernel32.GlobalUnlock.restype = wintypes.BOOL
+    _user32.RegisterClipboardFormatW.argtypes = (wintypes.LPCWSTR,)
+    _user32.RegisterClipboardFormatW.restype = wintypes.UINT
+
+# Registered formats Windows' clipboard history (Win+V), Cloud Clipboard sync
+# and well-behaved clipboard managers honour. Dictations and the restored
+# previous clipboard are marked with them so each dictation doesn't leave two
+# history entries or sync to the user's other devices.
+_TRANSIENT_FORMATS = (
+    ("ExcludeClipboardContentFromMonitorProcessing", None),
+    ("CanIncludeInClipboardHistory", 0),
+    ("CanUploadToCloudClipboard", 0),
+)
+
+
+def _global_copy(raw: bytes):
+    """A GMEM_MOVEABLE block holding *raw*, or None."""
+    h_global = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, max(1, len(raw)))
+    if not h_global:
+        return None
+    ptr = _kernel32.GlobalLock(h_global)
+    if not ptr:
+        return None
+    if raw:
+        ctypes.memmove(ptr, raw, len(raw))
+    _kernel32.GlobalUnlock(h_global)
+    return h_global
+
+
+def _mark_transient() -> None:
+    """Add the clipboard-history exclusion formats (clipboard already open)."""
+    for name, dword in _TRANSIENT_FORMATS:
+        try:
+            fmt = _user32.RegisterClipboardFormatW(name)
+            if not fmt:
+                continue
+            raw = b"\x00" if dword is None else int(dword).to_bytes(4, "little")
+            h_global = _global_copy(raw)
+            if h_global:
+                _user32.SetClipboardData(fmt, h_global)
+        except Exception:
+            pass  # best effort: the paste itself must not fail over a hint
 
 
 def _open_clipboard(retries: int = 5) -> bool:
@@ -326,8 +460,11 @@ def _clipboard_get_windows() -> str | None:
         _user32.CloseClipboard()
 
 
-def _clipboard_set_windows(text: str) -> bool:
-    """Replace clipboard contents with *text* (CF_UNICODETEXT). True on success."""
+def _clipboard_set_windows(text: str, transient: bool = False) -> bool:
+    """Replace clipboard contents with *text* (CF_UNICODETEXT). True on success.
+
+    *transient* also marks it as excluded from clipboard history and sync.
+    """
     if not _open_clipboard():
         return False
     try:
@@ -346,6 +483,8 @@ def _clipboard_set_windows(text: str) -> bool:
         # Ownership of h_global passes to the system on success.
         if not _user32.SetClipboardData(_CF_UNICODETEXT, h_global):
             return False
+        if transient:
+            _mark_transient()
         return True
     finally:
         _user32.CloseClipboard()
@@ -360,21 +499,15 @@ def inject_text_paste_windows(text: str) -> None:
     if not text:
         return
     _require_foreground_window()
+    _refuse_own_window(text)
     require_modifier_release_windows()
 
     previous = _clipboard_get_windows()
-    if not _clipboard_set_windows(text):
+    if not _clipboard_set_windows(text, transient=True):
         raise InjectionError("Could not write to the Windows clipboard for paste.")
     try:
         time.sleep(0.03)
-        _send(
-            [
-                _keyboard_input(wVk=VK_CONTROL),
-                _keyboard_input(wVk=VK_V),
-                _keyboard_input(wVk=VK_V, flags=KEYEVENTF_KEYUP),
-                _keyboard_input(wVk=VK_CONTROL, flags=KEYEVENTF_KEYUP),
-            ]
-        )
+        _press_keys([VK_CONTROL, VK_V])
     finally:
         # Best-effort restore, only if the clipboard still holds our text
         # (the user may have copied something new in the meantime).
@@ -382,6 +515,6 @@ def inject_text_paste_windows(text: str) -> None:
             try:
                 time.sleep(0.08)
                 if _clipboard_get_windows() == text:
-                    _clipboard_set_windows(previous)
+                    _clipboard_set_windows(previous, transient=True)
             except Exception:
                 pass

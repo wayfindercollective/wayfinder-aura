@@ -19,17 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            packaging/macos/constraints.txt
-
-      - name: Create isolated Python environment
-        run: python scripts/ci/prepare-python.py
+      - name: Verify provisioned macOS Python and create isolated environment
+        run: bash scripts/ci/prepare-macos-python.sh
 
       - name: Enforce self-hosted runner policy
         run: python scripts/ci/check-runner-policy.py

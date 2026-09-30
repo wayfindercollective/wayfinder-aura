@@ -145,6 +145,52 @@ _ALL_MODIFIER_KEYS = {k for ks in MODIFIER_KEYS.values() for k in ks}
 # macOS Detect may bind these alone (tap/hold). Right-hand keys only: the left
 # ones are pressed constantly as part of ordinary shortcuts.
 _SOLO_CAPTURE_KEYS = {k for k in (_k("alt_r"), _k("cmd_r")) if k is not None}
+# Windows: Right Ctrl, and Right Alt / Alt Gr (the Mac's Right Option). Many
+# laptops (e.g. LG Gram) have no Right Ctrl. Alt Gr alone types nothing, and
+# an Alt Gr + key combo (Alt Gr+4 = euro) cancels the gesture. The Windows keys
+# belong to the Start menu.
+_WIN32_SOLO_CAPTURE_KEYS = {k for k in (_k("ctrl_r"), _k("alt_r")) if k is not None}
+
+
+# Released on its own, Alt opens the menu bar / KeyTips of the app in front
+# (Notepad, Explorer, Office, Firefox), and the words Aura then types would run
+# menu commands. A key event while Alt is down makes it an Alt+key chord
+# instead; 0xE8 is unassigned, so no app acts on it (AutoHotkey's mask key).
+_WIN32_MENU_MASK_VK = 0xE8
+
+
+def _win32_send_menu_mask() -> None:
+    """Inject the mask key's press and release. Never raises."""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.keybd_event(_WIN32_MENU_MASK_VK, 0, 0, 0)
+        user32.keybd_event(_WIN32_MENU_MASK_VK, 0, 0x0002, 0)  # KEYEVENTF_KEYUP
+    except Exception:
+        pass
+
+
+def _is_win32_menu_mask(key) -> bool:
+    return getattr(key, "vk", None) == _WIN32_MENU_MASK_VK
+
+
+def _win32_normalize_key(key):
+    """Windows reports Right Alt as Key.alt_gr on layouts with Alt Gr (UK, most
+    of Europe), preceded by a synthetic Left Ctrl. Same physical key, same vk
+    (165): treat it as alt_r, which is what the stored hotkey code maps to."""
+    alt_gr = _k("alt_gr")
+    if alt_gr is not None and key == alt_gr:
+        return _k("alt_r") or key
+    return key
+
+
+def _solo_capture_keys() -> set:
+    if sys.platform == "darwin":
+        return _SOLO_CAPTURE_KEYS
+    if sys.platform == "win32":
+        return _WIN32_SOLO_CAPTURE_KEYS
+    return set()
 
 
 # macOS tap/hold gesture for a hotkey that is one bare modifier (Right Option).
@@ -328,6 +374,82 @@ def _darwin_virtual_keycode(evdev_code: object) -> int | None:
     value = getattr(key, "value", key)
     vk = getattr(value, "vk", None)
     return int(vk) if isinstance(vk, int) else None
+
+
+def _win32_key_pressed(evdev_code: object) -> bool | None:
+    """Windows physical key state (GetAsyncKeyState); None when unknown.
+
+    The Mac's lost-key-up repair: a release swallowed by a UAC prompt, a lock
+    screen or an elevated window must not leave the chord latched.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        key = evdev_code_to_pynput(int(evdev_code))
+        value = getattr(key, "value", key)
+        vk = getattr(value, "vk", None)
+        if not isinstance(vk, int):
+            return None
+        import ctypes
+
+        return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+    except Exception:
+        return None
+
+
+def _win32_foreground_elevated() -> tuple[bool | None, str]:
+    """Whether the window in front runs as administrator (and its exe name).
+
+    Windows (UIPI) hides that window's keystrokes from a normal-rights app
+    and blocks typing into it - the closest thing to the Mac's Secure Input.
+    (None, "") when unknown or when Aura itself runs elevated.
+    """
+    if sys.platform != "win32":
+        return None, ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, kernel32, advapi32 = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.advapi32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+
+        def elevated(process) -> bool | None:
+            token = wintypes.HANDLE()
+            if not advapi32.OpenProcessToken(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                return True if ctypes.GetLastError() == 5 else None  # denied: a higher-rights token
+            try:
+                value, size = wintypes.DWORD(), wintypes.DWORD()
+                if not advapi32.GetTokenInformation(token, 20, ctypes.byref(value),  # TokenElevation
+                                                    ctypes.sizeof(value), ctypes.byref(size)):
+                    return None
+                return bool(value.value)
+            finally:
+                kernel32.CloseHandle(token)
+
+        if elevated(kernel32.GetCurrentProcess()):
+            return None, ""  # Aura is elevated too: nothing is hidden from it
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None, ""
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+        if not process:
+            return None, ""
+        try:
+            name = ""
+            buf = ctypes.create_unicode_buffer(520)
+            size = wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(process, 0, buf, ctypes.byref(size)):
+                name = buf.value.rsplit("\\", 1)[-1]
+            return elevated(process), name
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:
+        return None, ""
 
 
 def _darwin_key_pressed(evdev_code: object) -> bool:
@@ -545,9 +667,10 @@ def pynput_hotkey_listener(
     solo_capture: dict = {"key": None}
 
     def _solo_target_active() -> bool:
-        """macOS: the record hotkey is one bare modifier (e.g. Right Option)."""
+        """macOS/Windows: the record hotkey is one bare modifier (Right Option;
+        Windows: Right Ctrl or Right Alt / Alt Gr)."""
         return (
-            sys.platform == "darwin"
+            sys.platform in ("darwin", "win32")
             and not required_modifiers
             and target_key in _ALL_MODIFIER_KEYS
         )
@@ -577,6 +700,10 @@ def pynput_hotkey_listener(
         if sys.platform == "darwin" and injected:
             return
 
+        if sys.platform == "win32":
+            if _is_win32_menu_mask(key):
+                return  # our own mask key: not "another key" for the gesture
+            key = _win32_normalize_key(key)
         if sys.platform == "darwin":
             key = _darwin_normalize_key(key)
             if _darwin_fn_pressed():
@@ -594,7 +721,7 @@ def pynput_hotkey_listener(
         # buttons grabbed by the host trigger daemon never reach here — this is keyboard keys.
         if capture_state is not None and capture_state.get("armed"):
             if key in _ALL_MODIFIER_KEYS:
-                if sys.platform == "darwin" and key in _SOLO_CAPTURE_KEYS:
+                if key in _solo_capture_keys():
                     solo_capture["key"] = key  # captured on release if nothing else is pressed
                 return  # wait for a real (non-modifier) key
             solo_capture["key"] = None
@@ -620,16 +747,22 @@ def pynput_hotkey_listener(
 
         now = time.time()
 
-        # macOS has no compositor-owned global-shortcut portal. While Aura is
-        # recording, the app consumes this event as "discard"; at all other
-        # times it is a harmless no-op. Do not suppress the physical Escape —
-        # the foreground application should still receive its normal key.
-        if sys.platform == "darwin" and key == _k("esc"):
+        # While Aura is recording, the app consumes this event as "discard"; at
+        # all other times it is a harmless no-op. Do not suppress the physical
+        # Escape — the foreground application should still receive its normal
+        # key. macOS has no compositor-owned global-shortcut portal; pynput's
+        # hooks see Esc from any app on Windows and from any X11 client on Linux
+        # (Linux portal sessions use the cancel-dictation shortcut instead).
+        if key == _k("esc"):
             event_queue.put((EventType.CANCEL_RECORDING, None))
 
         solo_mode = _solo_target_active()
         if solo_mode:
             if key == target_key:
+                if sys.platform == "win32" and key == _k("alt_r"):
+                    # On every press, auto-repeat included: a repeat after the
+                    # mask would make the release a lone Alt again.
+                    _win32_send_menu_mask()
                 solo_gesture.press_target()
             else:
                 solo_gesture.press_other()
@@ -640,7 +773,8 @@ def pynput_hotkey_listener(
         # validates the actual physical CGEvent before any chord-based action.
         # Bare-modifier tap/hold gestures remain here because they are driven
         # by macOS modifier flag-change events rather than a key chord.
-        if sys.platform != "darwin" and (
+        # (Windows tap/hold: the gesture above owns the key, never the chord path.)
+        if sys.platform != "darwin" and not solo_mode and (
             key == target_key
             and check_modifiers(required_modifiers)
             and "record" not in active_actions
@@ -670,6 +804,10 @@ def pynput_hotkey_listener(
         if sys.platform == "darwin" and injected:
             return
 
+        if sys.platform == "win32":
+            if _is_win32_menu_mask(key):
+                return
+            key = _win32_normalize_key(key)
         if sys.platform == "darwin":
             key = _darwin_normalize_key(key)
 
@@ -832,6 +970,7 @@ def pynput_hotkey_listener(
     log("🎧 Cross-platform hotkey listener active (pynput)")
     
     secure_input_on = False
+    win_ticks, elevated_front = 0, False  # Windows: elevated-foreground warning state
     try:
         while not stop_event.is_set() and not (
             restart_event is not None and restart_event.is_set()
@@ -880,6 +1019,39 @@ def pynput_hotkey_listener(
                     active_actions.discard("style")
                 if not getattr(listener, "running", True):
                     raise RuntimeError("macOS event tap stopped")
+            elif sys.platform == "win32":
+                win_ticks += 1
+                if win_ticks % 10 == 0:  # once a second: an elevated app in front
+                    elevated, exe = _win32_foreground_elevated()
+                    if elevated is not None and elevated != elevated_front:
+                        elevated_front = elevated
+                        if elevated:
+                            log("⚠ " + (exe or "The app in front") + " runs as administrator — "
+                                "Windows hides its keystrokes from Aura and blocks typing into "
+                                "it, so the hotkey can't work there. Switch to another window, "
+                                "or run Aura as administrator too.")
+                        else:
+                            log("✓ Hotkey active again (the administrator app is no longer in front)")
+                # Lost key-up repair (the Mac reconciles against Quartz state).
+                current_record_code = (
+                    config_ref.get("hotkey_key", hotkey_key)
+                    if config_ref is not None else hotkey_key
+                )
+                current_style_code = (
+                    config_ref.get("style_toggle_key", style_toggle_key or 0)
+                    if config_ref is not None else (style_toggle_key or 0)
+                )
+                if "record" in active_actions and _win32_key_pressed(current_record_code) is False:
+                    active_actions.discard("record")
+                if solo_gesture.is_down and (
+                    not _solo_target_active()
+                    or _win32_key_pressed(current_record_code) is False
+                ):
+                    # Lost Right Ctrl/Alt release (lock screen, UAC) or the hotkey
+                    # changed mid-gesture: end it so push-to-talk can't run on.
+                    solo_gesture.release_target()
+                if "style" in active_actions and _win32_key_pressed(current_style_code) is False:
+                    active_actions.discard("style")
             time.sleep(0.1)
     finally:
         # DELIBERATELY no liveness monitoring here. Watching the inner listener

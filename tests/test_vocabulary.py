@@ -161,3 +161,20 @@ def test_inserted_text_is_not_rescanned_by_other_corrections():
     out = T.apply_vocabulary_replacements("run git now", pairs)
     assert out == "run git commit now"
     assert T.apply_vocabulary_replacements(out, pairs) == out
+
+
+def test_two_column_corrections_editor_rows():
+    """Settings ▸ Vocabulary: one Heard and one Write-as field per correction."""
+    import wayfinder_main as wm
+
+    pairs, incomplete = wm._collect_vocabulary_corrections([
+        ("Iran", "Arawn"),          # the field case: a name the model keeps mishearing
+        ("  way finder ", "Wayfinder"),
+        ("", ""),                   # blank row: ignored
+        ("aura", ""),               # one side only: counted, not saved
+        ("", "Cyrus"),
+        ("iran", "Arawn"),          # duplicate heard (any case): first wins
+        ("same", "same"),           # no-op correction: dropped
+    ])
+    assert pairs == [("Iran", "Arawn"), ("way finder", "Wayfinder")]
+    assert incomplete == 2

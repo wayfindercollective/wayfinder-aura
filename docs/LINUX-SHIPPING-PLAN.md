@@ -1,0 +1,115 @@
+# Shipping Aura on Linux for gamers
+
+Plan and status for making the Linux build dependable on every desktop a
+player has, not only on the machine it was developed on. Written 2026-09-28;
+status is updated as items land.
+
+## Why
+
+Inside the Flatpak (X11 socket only) Aura typed with xdotool, which reaches
+X11/XWayland windows only. Wine/Proton games and some apps are XWayland, so
+dictation worked there; native Wayland apps (most KDE/GNOME apps, Firefox on
+Wayland) got nothing without host-side workarounds (ydotool, input group).
+X11 sessions are being retired, so Wayland has to be the primary path.
+
+## Input backends
+
+| Session | Typing | Enter / held keys | Game detection |
+|---|---|---|---|
+| KDE Plasma 6 / GNOME 45+ (Wayland) | RemoteDesktop portal (keyboard), approved once, remembered with a restore token | same portal | X11 window of the game (XWayland) |
+| X11 session (KDE X11 etc.) | xdotool (XTEST) | xdotool | X11 window |
+| SteamOS Game Mode (gamescope) | xdotool on gamescope's X server | xdotool | X11 window + STEAM_GAME |
+| Portal missing or declined | xdotool (XWayland windows only), with a hint | xdotool | X11 window |
+
+Wine and Proton games are XWayland windows in every session type, so game
+detection (WM_CLASS exe name, `steam_app_<id>`, gamescope's `STEAM_GAME`)
+behaves the same everywhere.
+
+## Work items
+
+1. **RemoteDesktop portal typing** (`core/portal_keyboard.py`, done
+   2026-09-28): keyboard-only session, `persist_mode=2`, restore token in
+   `portal-keyboard.json` next to the config, started at app launch on
+   Wayland desktops so the approval dialog appears once, never mid-dictation.
+   Text is typed as key codes from the current layout (XWayland mirrors the
+   compositor's keymap), with Shift pressed around Shift-level runs; Enter,
+   Ctrl+V and Gamer mode's held keys too. Keysyms were the first design and
+   remain the fallback without an X server: KWin 6.4 (SteamOS 3.8) types a
+   keysym's key without Shift into XWayland windows ("X11: Hello, World!"
+   arrived as "x11; hello, world1"), and XWayland is where games live.
+   Characters the keyboard layout has no key for (é on a US layout, emoji) are
+   pasted: the Tk window owns the X11 clipboard, KWin hands it to Wayland
+   apps, the portal presses Ctrl+V. Falls back to xdotool when the portal is
+   missing or declined; a failure after some keys landed is never retyped.
+   Settings → System → "Type into every app" turns it off (or asks again after
+   a decline).
+   KDE shows a "Remote Control Started" notice when the session starts and a
+   "Remote Control" tray icon while Aura runs: the portal's own indicator.
+2. **xdotool hardening (done 2026-09-28)**: a stale XWayland modifier bit no
+   longer blocks typing; Shift is released again after every shifted run
+   (a dropped release left dictations shifted: "... BUGS>").
+3. **Gamer mode on Linux (done 2026-09-28)**: `core/linux_game_chat.py`,
+   Games tab, Dark Age of Camelot (Eden, Lutris) typed + sent, Proton titles
+   by Steam app id.
+4. **Wine focus misrouting (done 2026-09-28)**: before Gamer mode types, if
+   the X input focus is on another window than the active game window (Wine
+   handed focus to a hidden launcher window), the game window gets it back
+   (`linux_game_chat.ensure_game_focus`). The DAoC note in the Games tab names
+   the permanent fix (Wine `UseTakeFocus=N`).
+5. **Update banner on Linux (done 2026-09-28)**: the `.flatpak` from GitHub
+   has no update channel (built without `--repo-url`), so "update via your
+   software center" was wrong. Get Update now downloads the release's
+   `.flatpak` (or the AppImage for AppImage installs) and the banner says to
+   open the file; installing a newer bundle over a bundle install updates it
+   in place (checked with a throwaway app in an isolated FLATPAK_USER_DIR).
+   `.flatpak` files open in Discover, GNOME Software or (Bazzite) Warehouse.
+   Real automatic updates need Flathub or a hosted repo + `--repo-url`.
+6. **Release candidate**: version bump, release notes, bundle built and
+   installed from the bundle, smoke-tested.
+
+## Off-screen KWin rig
+
+`kwin_wayland --virtual --xwayland` inside `dbus-run-session`, started under
+`env -i` with private XDG config/data/cache/state/runtime dirs so the rig's
+portal, permission store and shortcut state are its own (D-Bus-activated
+services inherit the bus daemon's environment, not the launching script's).
+GTK4 windows (Wayland and X11) record what they receive; `spectacle -b` takes
+screenshots of the virtual screen. A second, restored portal session presses
+keys on the first-run dialog, so Approve and Deny are testable without a
+person. Results 2026-09-28 (KWin 6.7.5, xdg-desktop-portal 1.22.1): xdotool
+reached no Wayland window; the portal typed exactly into both; restore token
+skipped the dialog; Escape = declined; X11 clipboard pasted into a Wayland
+window with é/ï/emoji intact; layout-less characters are dropped when typed.
+
+## Test matrix
+
+Automated: unit tests (fake D-Bus for the portal), off-screen gamescope
+harness (dictation, Game Mode, cancel, stand-in game windowed / fullscreen).
+Manual: a short pass on real hardware and games.
+
+| Setup | How it is covered | Status |
+|---|---|---|
+| KDE Plasma 6.7 Wayland (desktop) | isolated KWin rig: portal module + the real Aura Flatpak end to end (golden clips → GTK4 Wayland and X11 windows, 0.8 s to first text) | rig passed; live on Peter's desktop pending his one-time Approve |
+| KDE Plasma 6.4 Wayland (SteamOS 3.8 desktop mode) | same rig on the Steam machine (KWin 6.4.3; its CreateSession needs KWin's screencast protocol, so the rig's KWin runs with permission checks off) | rig passed with key codes (keysyms lost Shift in XWayland); live pending |
+| GNOME 45+ Wayland | not available here: unit tests + portal spec; mutter documents NotifyKeyboardKeycode | open: needs one manual pass |
+| KDE X11 session | xdotool path, unchanged; the portal is not started (KDE refuses remote control on X11) | covered by existing tests |
+| SteamOS Game Mode | headless gamescope harness with the new build (xdotool): 4 golden clips into a stand-in game, WER 0-0.15, 0.80-0.85 s, cues, no frame hitches; gamescope is detected and the portal skipped | passed; live on the Steam machine pending |
+| Proton game | Path of Exile 2 (Steam) | pending (manual) |
+| Lutris / Wine game | Wine console (wine-ge 8-26, throwaway prefix) in the KWin rig: 'Hello, World! ABC xyz 123 ?:{}~@#$*()_+=-[]"Q" a(b)c' exact; DAoC (Eden) typed via xdotool 2026-09-28 | rig passed; DAoC through the portal pending (manual) |
+| Native Linux game | stand-in Tk game (gamescope harness) | passed |
+| Windowed / borderless / fullscreen | the portal types to whatever has keyboard focus, so window mode does not change the path; DAoC windowed verified | fullscreen pass pending (manual) |
+## Manual pass (Peter)
+
+1. Desktop: approve "Wayfinder Aura … Control input devices" once (leave
+   "Allow restoring on future sessions" on). The log then says
+   "✓ Text injection: desktop portal". Dictate into a native Wayland app
+   (Kate, Dolphin's location bar, a KDE settings search) and into Claude.
+2. Restart Aura: no dialog the second time (restore token).
+3. Dark Age of Camelot: restart the game and launcher (Wine UseTakeFocus=N
+   applies from the next start), Enter, dictate, Alt+Tab away and back,
+   dictate again.
+4. Steam machine: install ~/Downloads/wayfinder-aura-linux-gamers-2026-09-28.flatpak
+   (`flatpak install --user --bundle …`; it installs the "integration" branch
+   next to master), approve once in desktop mode, dictate; then Game Mode.
+5. Proton: Path of Exile 2 chat (windowed and fullscreen).
+6. GNOME: one pass on any GNOME 45+ machine when available.

@@ -226,25 +226,38 @@ def _state_app(pending):
         after=lambda delay, fn: scheduled.append((delay, fn)),
         _flush_pending_model_activations=MagicMock(),
         _pending_model_activations=pending,
-        _cancel_paste_watchdog=lambda: None,  # macOS: leaving PASTING disarms it
+        _cancel_paste_watchdog=MagicMock(),
     )
     return app, scheduled
 
 
-def test_returning_to_idle_applies_queued_downloads():
+@pytest.fixture(params=[(False, False), (True, False), (False, True)], ids=["linux", "macos", "windows"])
+def state_platform(monkeypatch, request):
+    from wayfinder.utils import macos_activity
+
+    macos, windows = request.param
+    monkeypatch.setattr(wm, "IS_MACOS", macos)
+    monkeypatch.setattr(wm, "IS_WINDOWS", windows)
+    monkeypatch.setattr(macos_activity, "end", MagicMock())
+    return macos or windows
+
+
+def test_returning_to_idle_applies_queued_downloads(state_platform):
     app, scheduled = _state_app({"whisper": ("/m/x.bin", None)})
 
     WApp.update_state(app, wm.AppState.IDLE)
 
     assert scheduled == [(0, app._flush_pending_model_activations)]
+    assert app._cancel_paste_watchdog.call_count == int(state_platform)
 
 
-def test_idle_transition_without_queued_downloads_schedules_nothing():
+def test_idle_transition_without_queued_downloads_schedules_nothing(state_platform):
     app, scheduled = _state_app({})
 
     WApp.update_state(app, wm.AppState.IDLE)
 
     assert scheduled == []
+    assert app._cancel_paste_watchdog.call_count == int(state_platform)
 
 
 def test_model_downloader_itself_never_changes_config():

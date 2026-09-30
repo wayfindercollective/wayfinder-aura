@@ -31,10 +31,21 @@ VERSION = re.search(
 # whisper.cpp binaries staged by build.py. Added as data (copied verbatim, no
 # dependency analysis) into their own folder: their ggml*.dll names collide with
 # llama_cpp's, and each exe loads the DLLs beside it.
-whisper_datas = [
-    (str(path), "whisper")
-    for path in sorted((PROJECT_ROOT / "build" / "windows-whisper").glob("*"))
-    if path.suffix in (".exe", ".dll")
+def _whisper_files(folder):
+    """The exes and DLLs whisper-cli/whisper-server load. The release zip also
+    carries SDL2 (the stream example), llama and parakeet: neither exe imports
+    them and ggml only loads ggml-*.dll backends, so they stay out."""
+    unused = {"sdl2.dll", "llama.dll", "parakeet.dll"}
+    return sorted(
+        path for path in (PROJECT_ROOT / "build" / folder).glob("*")
+        if path.suffix in (".exe", ".dll") and path.name.lower() not in unused
+    )
+
+
+whisper_datas = [(str(path), "whisper") for path in _whisper_files("windows-whisper")] + [
+    # The Vulkan (GPU) build of the same whisper.cpp, used only for Ultra's GPU
+    # acceleration; absent from dev builds without the Vulkan SDK.
+    (str(path), "whisper-vulkan") for path in _whisper_files("windows-whisper-vulkan")
 ]
 
 llama_binaries, llama_datas, llama_hiddenimports = [], [], []
@@ -76,9 +87,10 @@ a = Analysis(
         # CustomTkinter UI + imaging
         "customtkinter", "PIL", "PIL._tkinter_finder", "PIL.Image",
         "PIL.ImageDraw", "PIL.ImageFilter",
-        # Audio
+        # Audio. No SciPy (~72 MB): the recorder's resampling and rumble filter run
+        # on core.audio_dsp's NumPy twins, checked against SciPy by the tests.
         "sounddevice", "numpy", "numpy.core._multiarray_umath",
-        "scipy", "scipy.signal", "scipy.io", "scipy.io.wavfile",
+        "wayfinder.core.audio_dsp",
         # Windows hotkeys + tray (the _win32 backends)
         "pynput", "pynput.keyboard", "pynput.keyboard._win32",
         "pynput.mouse", "pynput.mouse._win32",
@@ -101,6 +113,8 @@ a = Analysis(
         # Heavy unused packages
         "matplotlib", "pandas", "sklearn", "tensorflow", "torch",
         "IPython", "notebook", "jupyter",
+        # Replaced by core.audio_dsp on Windows (see hiddenimports).
+        "scipy",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -121,6 +135,40 @@ def _dedupe(entries):
 
 a.binaries = _dedupe(a.binaries)
 a.datas = _dedupe(a.datas)
+
+# Files the Windows app never loads (~55 MB), each checked against its imports.
+# The pill draws with QPainter (no OpenGL: opengl32sw is Qt's software GL), its
+# icons are PNG and icon.ico (qico stays), there is no QTranslator, QtNetwork
+# only served QtPdf and the touch plugin, QtDBus only KWin on Linux.
+_UNUSED_PREFIXES = (
+    'PyQt6/Qt6/bin/opengl32sw.dll', 'PyQt6/Qt6/translations',
+    'PyQt6/Qt6/bin/Qt6Pdf.dll', 'PyQt6/Qt6/bin/Qt6Network.dll', 'PyQt6/Qt6/bin/Qt6Svg.dll',
+    'PyQt6/Qt6/bin/Qt6DBus.dll', 'PyQt6/QtDBus',
+    'PyQt6/Qt6/plugins/generic', 'PyQt6/Qt6/plugins/iconengines',
+    'PyQt6/Qt6/plugins/platforms/qminimal', 'PyQt6/Qt6/plugins/platforms/qoffscreen',
+    *(f'PyQt6/Qt6/plugins/imageformats/q{fmt}'
+      for fmt in ('gif', 'icns', 'jpeg', 'pdf', 'svg', 'tga', 'tiff', 'wbmp', 'webp')),
+    # sounddevice loads libportaudio64bit(-asio).dll in an x64 bundle.
+    '_sounddevice_data/portaudio-binaries/libportaudio.dylib',
+    '_sounddevice_data/portaudio-binaries/libportaudio32bit',
+    '_sounddevice_data/portaudio-binaries/libportaudioarm64',
+    # AVIF is never opened (PIL imports _avif lazily, behind try/except).
+    'PIL/_avif',
+)
+
+
+def _keep(entry):
+    dest = entry[0].replace('\\', '/')
+    if any(dest.startswith(prefix) for prefix in _UNUSED_PREFIXES):
+        return False
+    if '/__pycache__/' in f'/{dest}':  # stale bytecode from the source datas copy
+        return False
+    # MSVC import libraries are link-time only.
+    return not (dest.startswith('llama_cpp/lib/') and dest.endswith('.lib'))
+
+
+a.binaries = [entry for entry in a.binaries if _keep(entry)]
+a.datas = [entry for entry in a.datas if _keep(entry)]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

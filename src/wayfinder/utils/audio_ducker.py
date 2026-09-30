@@ -10,6 +10,10 @@ Every successful mutation is journaled and restoration is identity- and
 value-checked. This prevents a recycled stream index or a user's concurrent
 volume change from being overwritten, and lets the next launch recover after a
 hard crash.
+
+macOS and Windows lower the default output's main volume instead (Core Audio
+there, the MMDevice endpoint volume on Windows: utils/windows_audio.py), with
+the same journal and value-checked restore.
 """
 
 from __future__ import annotations
@@ -101,8 +105,24 @@ def is_macos() -> bool:
     return platform.system() == "Darwin"
 
 
+def is_windows() -> bool:
+    """Check if running on Windows."""
+    return platform.system() == "Windows"
+
+
+# Windows: the output endpoint a duck lowered, so restore (and crash recovery)
+# touch that device even if the default output changes mid-dictation.
+_WINDOWS_ENDPOINT: str | None = None
+
+
+def _system_volume_name() -> str:
+    return "Windows" if is_windows() else "macOS"
+
+
 def _core_audio():
     """The Core Audio volume helpers, or None when they cannot load."""
+    if not is_macos():
+        return None
     try:
         from wayfinder.utils import macos_audio
 
@@ -116,7 +136,13 @@ def _get_macos_volume() -> int | None:
 
     Core Audio answers in well under a millisecond; osascript took ~150 ms per
     call (music stayed loud ~0.3 s into speech) and is only the fallback.
+    Windows reads the default output's endpoint volume.
     """
+    if is_windows():
+        from wayfinder.utils.windows_audio import output_volume
+
+        value = output_volume(_WINDOWS_ENDPOINT)
+        return None if value is None else int(round(value * 100))
     core = _core_audio()
     if core is not None:
         value = core.output_volume()
@@ -137,6 +163,10 @@ def _get_macos_volume() -> int | None:
 
 def _set_macos_volume(volume: int) -> bool:
     """Set macOS output volume (0-100). Returns True on success."""
+    if is_windows():
+        from wayfinder.utils.windows_audio import set_output_volume
+
+        return set_output_volume(max(0, min(100, volume)) / 100.0, _WINDOWS_ENDPOINT)
     core = _core_audio()
     if core is not None:
         return core.set_output_volume(max(0, min(100, volume)) / 100.0)
@@ -379,10 +409,34 @@ def _pid_is_alive(pid: object) -> bool:
         numeric_pid = int(pid)
         if numeric_pid <= 0:
             return False
+        if is_windows():
+            # os.kill(pid, 0) on Windows is TerminateProcess, not a probe: ask
+            # whether the process is still running instead.
+            return _windows_pid_is_alive(numeric_pid)
         os.kill(numeric_pid, 0)
         return True
     except (OSError, TypeError, ValueError):
         return False
+
+
+def _windows_pid_is_alive(pid: int) -> bool:
+    """Windows: True while *pid* names a running process (never signals it)."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+    if not handle:
+        # Access denied still means the process exists.
+        return ctypes.GetLastError() == 5
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 class AudioDucker:
@@ -403,10 +457,15 @@ class AudioDucker:
         self._original_volumes: dict[int, int] = {}
         self._macos_original_volume: int | None = None
         self._macos_ducked_volume: int | None = None
+        # Windows: ducked endpoints whose restore couldn't run yet (the device
+        # was unplugged). Kept in the journal and retried before every duck and
+        # at the next launch, so a later duck never overwrites them.
+        self._windows_pending: list[dict] = []
         self._is_ducked = False
         self._closed = False
         self._lock = threading.RLock()
-        self._use_macos = is_macos() and not is_pactl_available()
+        # Windows uses the same main-volume path as macOS.
+        self._use_macos = (is_macos() or is_windows()) and not is_pactl_available()
         self._available = is_pactl_available() or self._use_macos
         self._recovery_path = (
             _default_recovery_file()
@@ -419,8 +478,11 @@ class AudioDucker:
         if not self._available:
             print("⚠ pactl not available - audio ducking disabled")
         elif self._use_macos:
-            print("ℹ Using macOS " + ("Core Audio" if _core_audio() else "osascript")
-                  + " for audio ducking")
+            if is_windows():
+                print("ℹ Using Windows Core Audio (endpoint volume) for audio ducking")
+            else:
+                print("ℹ Using macOS " + ("Core Audio" if _core_audio() else "osascript")
+                      + " for audio ducking")
             self.recovery_result = self._recover_stale_macos_journal()
         else:
             self.recovery_result = self._recover_stale_journal()
@@ -499,6 +561,9 @@ class AudioDucker:
     def _clear_journal(self) -> None:
         if self._recovery_path is None:
             return
+        if is_windows() and self._windows_pending:
+            self._write_windows_pending_journal()
+            return
         try:
             self._recovery_path.unlink(missing_ok=True)
         except OSError:
@@ -522,6 +587,10 @@ class AudioDucker:
             "pid": os.getpid(),
             "macos": {"original": int(original), "ducked": int(ducked)},
         }
+        if is_windows() and _WINDOWS_ENDPOINT:
+            payload["macos"]["endpoint"] = _WINDOWS_ENDPOINT
+        if is_windows() and self._windows_pending:
+            payload["windows_pending"] = list(self._windows_pending)
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, separators=(",", ":"))
             handle.flush()
@@ -544,6 +613,8 @@ class AudioDucker:
                 payload = json.load(handle)
             if payload.get("pid") != os.getpid() and _pid_is_alive(payload.get("pid")):
                 return DuckingResult(DuckingStatus.NO_CHANGE)
+            if is_windows():
+                return self._recover_windows_records(payload)
             record = payload.get("macos")
             if not isinstance(record, dict):
                 return DuckingResult(DuckingStatus.NO_CHANGE)
@@ -553,6 +624,67 @@ class AudioDucker:
             self._clear_journal()
             return DuckingResult(DuckingStatus.NO_CHANGE)
 
+        if is_windows():
+            global _WINDOWS_ENDPOINT
+            _WINDOWS_ENDPOINT = record.get("endpoint") or None
+        try:
+            return self._recover_macos_volume(original, ducked)
+        finally:
+            if is_windows():
+                _WINDOWS_ENDPOINT = None
+
+    def _write_windows_pending_journal(self) -> None:
+        """Persist only the not-yet-restorable Windows endpoints."""
+        path = self._recovery_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        payload = {"version": 2, "pid": os.getpid(), "windows_pending": list(self._windows_pending)}
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+        os.replace(tmp, path)
+
+    def _recover_windows_records(self, payload: dict) -> DuckingResult:
+        """Windows: restore every journaled endpoint that is present; keep the rest.
+
+        A record whose device can't be read (unplugged headset) stays pending
+        instead of being dropped, so its original volume is restored once it
+        is back - never overwritten by the next dictation's duck.
+        """
+        global _WINDOWS_ENDPOINT
+        records = []
+        main = payload.get("macos")
+        if isinstance(main, dict):
+            records.append(main)
+        records.extend(r for r in (payload.get("windows_pending") or []) if isinstance(r, dict))
+        self._windows_pending = []
+        results = []
+        for record in records[:16]:
+            try:
+                original = max(0, min(100, int(record["original"])))
+                ducked = max(0, min(100, int(record["ducked"])))
+            except (TypeError, ValueError, KeyError):
+                continue
+            endpoint = record.get("endpoint") or None
+            _WINDOWS_ENDPOINT = endpoint
+            try:
+                result = self._recover_macos_volume(original, ducked)
+            finally:
+                _WINDOWS_ENDPOINT = None
+            if result.status == DuckingStatus.ERROR and endpoint and not any(
+                    p.get("endpoint") == endpoint for p in self._windows_pending):
+                self._windows_pending.append(
+                    {"original": original, "ducked": ducked, "endpoint": endpoint})
+            results.append(result)
+        self._clear_journal()  # rewrites pending-only, or deletes when nothing is left
+        for status in (DuckingStatus.RESTORED, DuckingStatus.ERROR):
+            for result in results:
+                if result.status == status:
+                    return result
+        return results[0] if results else DuckingResult(DuckingStatus.NO_CHANGE)
+
+    def _recover_macos_volume(self, original: int, ducked: int) -> DuckingResult:
         current = _get_macos_volume()
         if current is None:
             return DuckingResult(
@@ -566,7 +698,7 @@ class AudioDucker:
             return DuckingResult(DuckingStatus.NO_CHANGE, skipped_count=1)
         if _set_macos_volume(original):
             self._clear_journal()
-            print(f"🔊 Recovered macOS volume to {original}% after an interrupted session")
+            print(f"🔊 Recovered {_system_volume_name()} volume to {original}% after an interrupted session")
             return DuckingResult(DuckingStatus.RESTORED, changed_count=1)
         return DuckingResult(
             DuckingStatus.ERROR,
@@ -643,6 +775,14 @@ class AudioDucker:
                                  "(e.g. HDMI/DisplayPort), so music can't be lowered "
                                  "while you dictate."),
                     ))
+                if is_windows():
+                    global _WINDOWS_ENDPOINT
+                    from wayfinder.utils.windows_audio import default_output_id
+
+                    if self._windows_pending:
+                        # A device ducked before a crash may be back now.
+                        self._recover_stale_macos_journal()
+                    _WINDOWS_ENDPOINT = default_output_id()
                 current = _get_macos_volume()
                 if current is None:
                     return self._remember(DuckingResult(DuckingStatus.ERROR, message="Could not read system volume."))
@@ -658,7 +798,7 @@ class AudioDucker:
                     self._clear_journal()
                     return self._remember(DuckingResult(DuckingStatus.ERROR, message="Could not lower system volume."))
                 self._is_ducked = True
-                print(f"🔉 Ducked macOS volume {current}% → {target}%")
+                print(f"🔉 Ducked {_system_volume_name()} volume {current}% → {target}%")
                 return self._remember(DuckingResult(DuckingStatus.APPLIED, changed_count=1))
 
             streams, query = _query_sink_inputs()
@@ -767,7 +907,7 @@ class AudioDucker:
                     self._macos_ducked_volume = None
                     self._is_ducked = False
                     self._clear_journal()
-                    print(f"🔊 Restored macOS volume to {original}%")
+                    print(f"🔊 Restored {_system_volume_name()} volume to {original}%")
                     return self._remember(DuckingResult(DuckingStatus.RESTORED, changed_count=1))
                 return self._remember(DuckingResult(DuckingStatus.ERROR, failed_count=1, message="Could not restore system volume."))
             return self._remember(self._restore_linux())

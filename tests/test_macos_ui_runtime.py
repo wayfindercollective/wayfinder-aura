@@ -21,11 +21,17 @@ def test_aqua_active_hero_uses_thirty_fps_for_fast_audio_motion():
     assert wayfinder_main._hero_active_interval_ms("darwin") == 33
 
 
-def test_aqua_raw_hero_canvas_tracks_ui_scale_without_changing_linux():
-    assert wayfinder_main._hero_visual_scale(1.25, "darwin") == 1.25
+def test_raw_hero_canvas_tracks_ui_scale(monkeypatch):
     assert wayfinder_main._hero_visual_scale(2.0, "darwin") == 2.0
-    assert wayfinder_main._hero_visual_scale(1.25, "linux") == 1.0
+    assert wayfinder_main._hero_visual_scale(1.25, "darwin") == 1.25
+    # Linux too: CTk's scaler skips raw canvases, so the ribbon stayed 64 px
+    # tall at 200% while everything around it doubled.
+    assert wayfinder_main._hero_visual_scale(1.25, "linux") == 1.25
     assert wayfinder_main._hero_canvas_pady("darwin") == (10, 0)
+    # Linux draws the same shader ribbon, placed like the Mac's...
+    assert wayfinder_main._hero_canvas_pady("linux") == (10, 0)
+    # ...unless the old look is restored.
+    monkeypatch.setenv("WAYFINDER_LINUX_MAC_LOOK", "0")
     assert wayfinder_main._hero_canvas_pady("linux") == (0, 8)
 
 
@@ -198,6 +204,7 @@ def test_settings_wave_animates_on_canvas_while_native_layer_is_hidden(monkeypat
         "state": lambda self: "normal",
         "after": lambda self, ms, fn: scheduled.append(ms) or "job",
         "_animate_idle_breath": lambda self: None,
+        "_hero_idle_backgrounded": lambda self: False,
         "_draw_hero_waveform": lambda self, **kwargs: drawn.append(kwargs),
     })()
 
@@ -314,9 +321,12 @@ def test_tab_switch_raises_persistent_opaque_pages_instead_of_unmapping_them():
     }
 
 
-def test_linux_animation_cadence_is_unchanged():
+def test_linux_animation_cadence():
     assert wayfinder_main._hero_idle_interval_ms("linux") == 33
-    assert wayfinder_main._hero_active_interval_ms("linux") == 66
+    # Recording: 30 fps on desktops like macOS/Windows; Steam hardware keeps
+    # 15 fps so the ribbon doesn't compete with transcription for the CPU.
+    assert wayfinder_main._hero_active_interval_ms("linux", steam_platform=None) == 33
+    assert wayfinder_main._hero_active_interval_ms("linux", steam_platform="deck") == 66
     assert wayfinder_main._tray_pulse_interval_ms("linux") == 50
     assert wayfinder_main._settings_preload_interval_ms("linux") == 25
 
@@ -425,13 +435,16 @@ def test_macos_docs_do_not_claim_python_311_is_supported():
     assert "pinned to the 3.12 line" in text
 
 
-@pytest.mark.parametrize("is_macos, expected", [(True, False), (False, True)])
-def test_gated_developer_model_does_not_count_as_usable_on_macos(monkeypatch, is_macos, expected):
-    """A Free Mac with only small.en (Ultra) on disk must still be offered Base."""
+@pytest.mark.parametrize("is_macos, is_windows, expected", [
+    (True, False, False), (False, True, False), (False, False, True)])
+def test_gated_developer_model_does_not_count_as_usable_on_macos(
+        monkeypatch, is_macos, is_windows, expected):
+    """A Free Mac/PC with only small.en (Ultra) on disk must still be offered Base."""
     from pathlib import Path
     from types import SimpleNamespace
 
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", is_macos)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", is_windows)
     monkeypatch.setattr(
         wayfinder_main,
         "_resolve_whisper_model",
@@ -558,8 +571,9 @@ def test_ctk_dpi_poll_is_idle_on_macos():
 
 def test_settings_footer_names_the_platform():
     assert wayfinder_main._footer_tagline(is_macos=True) == "handcrafted for Mac"
-    # Linux (and every non-Mac build) keeps its original line.
-    assert wayfinder_main._footer_tagline(is_macos=False) == "handcrafted for Linux"
+    # Linux keeps its original line; Windows names itself.
+    assert wayfinder_main._footer_tagline(is_macos=False, is_windows=False) == "handcrafted for Linux"
+    assert wayfinder_main._footer_tagline(is_macos=False, is_windows=True) == "handcrafted for Windows"
 
 
 def test_paste_failure_guidance_is_platform_specific(monkeypatch):
@@ -568,6 +582,10 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     mac = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
     assert "Accessibility" in mac and "ydotool" not in mac
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    windows = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
+    assert "administrator" in windows and "ydotool" not in windows
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
     linux = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
     assert linux == ("Couldn't type the text — check input permissions (Settings) "
                      "or install ydotool.")

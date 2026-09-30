@@ -19,6 +19,7 @@ from wayfinder.utils.platform import (
     get_user_llm_models_dir,
     get_user_whisper_models_dir,
     get_wayfinder_appimage_dir,
+    get_whisper_download_dir,
     is_wayfinder_flatpak_env,
 )
 
@@ -202,6 +203,9 @@ else:
             / "whisper-models"
             / "ggml-base.en.bin"
         )
+    elif sys.platform == "win32":
+        # %LOCALAPPDATA%\wayfinder-aura\whisper-models (platform.get_whisper_download_dir).
+        _default_model_path = str(get_whisper_download_dir() / "ggml-base.en.bin")
     else:
         _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # LLM model for post-processing - best-first from _LLM_PREFERENCE.
@@ -228,6 +232,17 @@ if sys.platform == "darwin":
     _default_style_toggle_key = 28  # Enter
     _default_style_toggle_modifiers = ["fn"]
     _default_overlay_anchor = "bottom-right"
+elif sys.platform == "win32":
+    # Windows records with Right Alt (Alt Gr) alone, the Mac's Right Option
+    # gesture: Ctrl+Alt+Space is also the Claude desktop app's global shortcut
+    # (and Magnifier's preview), so both apps reacted to it. Every keyboard
+    # has Right Alt (many laptops have no Right Ctrl); the listener masks the
+    # lone Alt so the app in front never opens its menu bar.
+    _default_hotkey_key = 100  # Right Alt / Alt Gr
+    _default_hotkey_modifiers = []
+    _default_style_toggle_key = 28  # Enter
+    _default_style_toggle_modifiers = ["ctrl", "alt"]
+    _default_overlay_anchor = "bottom-center"
 else:
     _default_hotkey_key = 57  # Space
     _default_hotkey_modifiers = ["ctrl", "alt"]
@@ -242,14 +257,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
     
-    # Hotkey settings — Fn+Space on macOS; Ctrl+Alt+Space elsewhere.
-    # Chosen 2026-07 over Super+F2: first-run users didn't know what the
+    # Hotkey settings — Right Option on macOS and Right Alt on Windows (tap/hold,
+    # see above); Ctrl+Alt+Space on Linux. Chosen 2026-07 over Super+F2: first-run users didn't know what the
     # "Super" key was (launch feedback), and every keyboard labels Ctrl/Alt/
     # Space. Still game-safe: bare F-keys collide with countless game keybinds
     # (e.g. DAoC qbinds) but Ctrl+Alt chords are as rare in games as Super+F*,
     # and the GameMode pause covers the rest. DE conflicts checked: unassigned
     # by default on KDE and GNOME. Existing user configs keep what they saved.
-    "hotkey_key": _default_hotkey_key,  # Space; Right Option on macOS
+    "hotkey_key": _default_hotkey_key,  # Space; Right Option (macOS) / Right Alt (Windows)
     "hotkey_modifiers": _default_hotkey_modifiers,
 
     # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal).
@@ -257,9 +272,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Non-macOS Ctrl+Alt+letter chords collide with IDE bindings (e.g. Ctrl+Alt+S).
     "style_toggle_key": _default_style_toggle_key,
     "style_toggle_modifiers": _default_style_toggle_modifiers,
+
+    # Cancel dictation: discard the recording and type nothing. Linux desktops
+    # bind it through the GlobalShortcuts portal, which grabs its key in every
+    # app all the time, so it is Shift+Esc rather than a bare Escape (rebind it
+    # in the desktop's shortcut settings). macOS, Windows and X11/evdev
+    # listeners also take a bare Escape while recording, never swallowing it.
+    "cancel_hotkey_key": 1,  # Escape
+    "cancel_hotkey_modifiers": ["shift"],
     "macos_hotkey_defaults_v2": sys.platform == "darwin",
     "macos_hotkey_defaults_v3": sys.platform == "darwin",
     "macos_overlay_anchor_defaults_v1": sys.platform == "darwin",
+    "windows_hotkey_defaults_v2": sys.platform == "win32",
 
     # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
     # fires, so chat inputs submit hands-free. Off by default — implicitly
@@ -305,6 +329,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enable_tray_icon": True,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
     "typing_speed": "instant",  # instant, fast, normal, slow, very_slow
+    # Linux Wayland desktops: type through the RemoteDesktop portal (every app).
+    "linux_portal_typing": True,
     
     # Processing mode: local (100% private, offline) or remote (cloud APIs for speed/quality)
     "processing_mode": "local",  # local | remote
@@ -471,9 +497,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Cloud API settings (keys stored in config, loaded into environment on startup)
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
-    # Claude 3 Haiku was retired 2026-04-20; macOS ships the current Haiku.
+    # Claude 3 Haiku was retired 2026-04-20; macOS and Windows ship the current Haiku.
     "anthropic_model": (
-        "claude-haiku-4-5-20251001" if sys.platform == "darwin" else "claude-3-haiku-20240307"
+        "claude-haiku-4-5-20251001" if sys.platform in ("darwin", "win32")
+        else "claude-3-haiku-20240307"
     ),
     "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
@@ -596,9 +623,9 @@ def _which_runtime_path(name: str) -> str | None:
 def _user_whisper_model_dirs() -> list[Path]:
     """Writable Whisper model dir(s) for this runtime, download dir first.
 
-    Outside the Flatpak this is just ~/whisper.cpp/models (unchanged). In the
-    Flatpak the persistent XDG_DATA_HOME dir leads; ~/whisper.cpp/models stays
-    listed for parity with older builds.
+    Windows leads with LocalAppData and Flatpak with persistent XDG_DATA_HOME.
+    Other host installs use ~/whisper.cpp/models, which also remains a legacy
+    lookup location on Windows and in Flatpak.
     """
     dirs = [get_user_whisper_models_dir(flatpak=IS_FLATPAK)]
     host_dir = Path(os.path.expanduser("~/whisper.cpp/models"))
@@ -1180,6 +1207,19 @@ def load_config() -> dict:
                 config["macos_hotkey_defaults_v3"] = True
                 _save_migrations = True
 
+            # Windows shipped Ctrl+Alt+Space, which the Claude desktop app also
+            # owns. Move only that exact untouched default to Right Alt tap/hold
+            # once; custom shortcuts remain untouched.
+            if sys.platform == "win32" and not user_config.get("windows_hotkey_defaults_v2", False):
+                if (
+                    config.get("hotkey_key") == 57
+                    and config.get("hotkey_modifiers") == ["ctrl", "alt"]
+                ):
+                    config["hotkey_key"] = 100
+                    config["hotkey_modifiers"] = []
+                config["windows_hotkey_defaults_v2"] = True
+                _save_migrations = True
+
             if (
                 sys.platform == "darwin"
                 and not user_config.get("macos_overlay_anchor_defaults_v1", False)
@@ -1227,7 +1267,7 @@ def load_config() -> dict:
             if config.get("audio_device") is not None and not config.get("audio_device_name"):
                 config["audio_device"] = None
 
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 # Retired cloud model IDs fail every request; move them to the
                 # provider's documented replacement.
                 try:
@@ -1241,7 +1281,7 @@ def load_config() -> dict:
                 except Exception:
                     pass
 
-            if sys.platform == "darwin" and _load_macos_secrets(config, user_config):
+            if sys.platform in ("darwin", "win32") and _load_macos_secrets(config, user_config):
                 _save_migrations = True
 
             if _save_migrations:
@@ -1270,21 +1310,35 @@ def load_config() -> dict:
         config = DEFAULT_CONFIG.copy()
         for key in ("whisper_binary", "model_path", "llama_cpp_model_path", "llama_cpp_binary"):
             config[key] = _repair_config_path(key, config.get(key, ""))
-        if sys.platform == "darwin":
-            # A reinstall keeps the Keychain: bring saved keys back.
+        if sys.platform in ("darwin", "win32"):
+            # A reinstall keeps the Keychain / Credential Manager: bring saved
+            # keys back.
             _load_macos_secrets(config, {})
         save_config(config)
         return config.copy()
 
 
-# Cloud API keys. On macOS they live in the login Keychain, not config.json.
+# Cloud API keys. On macOS they live in the login Keychain, on Windows in
+# Credential Manager (utils/windows_credentials.py), not config.json.
 SECRET_CONFIG_KEYS = ("groq_api_key", "openai_api_key", "anthropic_api_key")
 _KEYCHAIN_SYNCED: dict[str, str] = {}
 
 
 def _macos_keychain():
-    """The Keychain module on macOS (None elsewhere, or when disabled/unavailable)."""
-    if sys.platform != "darwin" or os.environ.get("WAYFINDER_DISABLE_KEYCHAIN"):
+    """The OS secret store: the Keychain on macOS, Credential Manager on Windows.
+
+    None on Linux, or when disabled/unavailable. Both modules share the
+    get/set/delete contract.
+    """
+    if os.environ.get("WAYFINDER_DISABLE_KEYCHAIN"):
+        return None
+    if sys.platform == "win32":
+        try:
+            from wayfinder.utils import windows_credentials
+        except Exception:
+            return None
+        return windows_credentials if windows_credentials.available() else None
+    if sys.platform != "darwin":
         return None
     try:
         from wayfinder.utils import macos_keychain
@@ -1326,7 +1380,7 @@ def _scrub_secret_backups() -> None:
 
 
 def _load_macos_secrets(config: dict, user_config: dict) -> bool:
-    """macOS: fill API keys from the Keychain; move any plain-text key into it.
+    """macOS/Windows: fill API keys from the OS secret store; move any plain-text key into it.
 
     Returns True when config.json must be rewritten (a key moved out of it).
     """
@@ -1359,18 +1413,20 @@ def save_config(config: dict) -> None:
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     on_disk = config
-    if sys.platform == "darwin":
-        try:
-            os.chmod(CONFIG_DIR, 0o700)
-        except OSError:
-            pass
+    if sys.platform in ("darwin", "win32"):
+        if sys.platform == "darwin":
+            try:
+                os.chmod(CONFIG_DIR, 0o700)
+            except OSError:
+                pass
         keychain = _macos_keychain()
         if keychain is not None:
             on_disk = dict(config)
             for name in SECRET_CONFIG_KEYS:
                 value = str(config.get(name) or "").strip()
-                # Only a key the Keychain now holds leaves config.json; if the
-                # Keychain refused it, the owner-only file keeps it as before.
+                # Only a key the Keychain (Windows: Credential Manager) now
+                # holds leaves config.json; if it refused it, the file keeps it
+                # as before.
                 if _keychain_sync(keychain, name, value):
                     on_disk[name] = ""
     # Atomic write: dump to a temp file, then os.replace() onto the real path so a
@@ -1421,7 +1477,7 @@ def load_api_keys_to_env(config: dict) -> None:
     
     for config_key, env_var in api_key_mappings.items():
         key_value = config.get(config_key, "")
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             # A pasted/hand-edited key can carry a newline, which breaks the
             # Authorization header and reads as "check your internet".
             key_value = str(key_value or "").strip()

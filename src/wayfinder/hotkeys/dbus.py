@@ -86,7 +86,7 @@ def portal_unavailable_detail() -> str:
 _KEYSYM_BY_CODE = {
     59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
     65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
-    57: "space", 28: "Return", 15: "Tab", 14: "BackSpace",
+    57: "space", 28: "Return", 15: "Tab", 14: "BackSpace", 1: "Escape",
     70: "Scroll_Lock", 119: "Pause",
 }
 
@@ -202,7 +202,7 @@ class ShortcutSpec:
 
 
 def shortcut_specs_from_config(config: dict) -> list[ShortcutSpec]:
-    """The app's two global shortcuts, triggers encoded from the live config."""
+    """The app's global shortcuts, triggers encoded from the live config."""
     return [
         ShortcutSpec(
             shortcut_id="record-toggle",
@@ -220,6 +220,15 @@ def shortcut_specs_from_config(config: dict) -> list[ShortcutSpec]:
                 config.get("style_toggle_modifiers") or [],
             ),
             event=EventType.STYLE_TOGGLE,
+        ),
+        ShortcutSpec(
+            shortcut_id="cancel-dictation",
+            description="Cancel dictation (nothing is typed)",
+            trigger=encode_trigger(
+                config.get("cancel_hotkey_key", 1),
+                config.get("cancel_hotkey_modifiers", ["shift"]),
+            ),
+            event=EventType.CANCEL_RECORDING,
         ),
     ]
 

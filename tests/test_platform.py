@@ -301,6 +301,7 @@ class TestUserModelDirs:
         home = tmp_path / "home"
         home.mkdir()
         self._set_home(monkeypatch, home)
+        monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         monkeypatch.delenv("FLATPAK_ID", raising=False)
         monkeypatch.delenv("WAYFINDER_FLATPAK", raising=False)
@@ -327,7 +328,8 @@ class TestUserModelDirs:
 
     def test_explicit_flatpak_flag_overrides_detection(self, host):
         assert platform_mod.get_user_whisper_models_dir(flatpak=False) == (
-            host / "whisper.cpp" / "models"
+            host / "AppData" / "Local" / "wayfinder-aura" / "whisper-models"
+            if sys.platform == "win32" else host / "whisper.cpp" / "models"
         )
         flatpak_dir = platform_mod.get_user_llm_models_dir(flatpak=True)
         assert flatpak_dir.parts[-2:] == ("wayfinder-aura", "llm-models")
@@ -349,12 +351,14 @@ class TestUserModelDirs:
                 host / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
             )
 
-    def test_windows_dirs_unchanged(self, host):
-        # The in-app downloader has always used these on Windows.
+    def test_windows_dirs(self, host):
+        # Both model types now download into the per-user Windows data directory.
         with patch.object(sys, "platform", "win32"):
-            assert platform_mod.get_user_whisper_models_dir() == host / "whisper.cpp" / "models"
+            assert platform_mod.get_user_whisper_models_dir() == (
+                host / "AppData" / "Local" / "wayfinder-aura" / "whisper-models"
+            )
             assert platform_mod.get_user_llm_models_dir() == (
-                host / ".local" / "share" / "wayfinder-aura" / "llm-models"
+                host / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
             )
 
     @pytest.mark.linux_only
@@ -366,12 +370,17 @@ class TestUserModelDirs:
             home / ".local" / "share" / "wayfinder-aura" / "whisper-models",
         ]
 
-    def test_host_whisper_search_dirs_match_the_historical_list(self, host):
-        assert platform_mod.get_whisper_model_search_dirs() == [
+    @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+    def test_host_whisper_search_dirs_preserve_legacy_models(self, host, platform):
+        expected = [
             host / "whisper.cpp" / "models",
             host / ".local" / "share" / "whisper.cpp",
             Path("/app/share/whisper-models"),
         ]
+        if platform == "win32":
+            expected.insert(0, host / "AppData" / "Local" / "wayfinder-aura" / "whisper-models")
+        with patch.object(sys, "platform", platform):
+            assert platform_mod.get_whisper_model_search_dirs() == expected
 
     @pytest.mark.linux_only
     def test_flatpak_whisper_search_dirs_lead_with_persistent_dir(self, sandbox):

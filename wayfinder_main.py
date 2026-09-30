@@ -81,29 +81,68 @@ except ImportError:
 
 import sys as _sys
 IS_MACOS = _sys.platform == 'darwin'
+IS_WINDOWS = _sys.platform == 'win32'
+_IS_LINUX = _sys.platform.startswith('linux')
+# Windows wears the macOS design (docs/WINDOWS-FROM-MACOS.md): the glass
+# palette and pane rims on a flat deep-ink surface (Tk cannot show real
+# vibrancy), a rounded content pane, no gradient, a dark caption bar.
+# WAYFINDER_WINDOWS_MAC_LOOK=0 restores the previous (Linux) look.
+WINDOWS_MAC_LOOK = IS_WINDOWS and os.environ.get("WAYFINDER_WINDOWS_MAC_LOOK", "1") != "0"
+# Linux wears the same design (the palette, rims, rounded content pane, flat
+# surface and the Mac's shader-drawn hero ribbon; no Windows caption bar).
+# WAYFINDER_LINUX_MAC_LOOK=0 restores the gradient look and polyline ribbon.
+LINUX_MAC_LOOK = (
+    _sys.platform.startswith("linux")
+    and os.environ.get("WAYFINDER_LINUX_MAC_LOOK", "1") != "0"
+)
+# The Mac's design on a platform without vibrancy (Windows or Linux).
+MAC_LOOK = WINDOWS_MAC_LOOK or LINUX_MAC_LOOK
+# What shows between panes where the Mac shows its dark glass.
+WINDOWS_GLASS_SURFACE = "#07090D"
 
 
-def _footer_tagline(is_macos: bool | None = None) -> str:
+def _game_chat_module():
+    """Gamer mode backend: macos_game_chat, or its Windows / Linux twin (same interface)."""
+    if IS_WINDOWS and not IS_MACOS:
+        from wayfinder.core import windows_game_chat
+        return windows_game_chat
+    if _IS_LINUX and not IS_MACOS:
+        from wayfinder.core import linux_game_chat
+        return linux_game_chat
+    from wayfinder.core import macos_game_chat
+    return macos_game_chat
+
+
+def _device_noun() -> str:
+    """How user-facing copy names this computer."""
+    return "PC" if IS_WINDOWS else "Mac"
+
+
+def _footer_tagline(is_macos: bool | None = None, is_windows: bool | None = None) -> str:
     """Settings footer line; names the platform the build was made for."""
     if is_macos is None:
         is_macos = IS_MACOS
-    return "handcrafted for Mac" if is_macos else "handcrafted for Linux"
+    if is_windows is None:
+        is_windows = IS_WINDOWS
+    if is_macos:
+        return "handcrafted for Mac"
+    return "handcrafted for Windows" if is_windows else "handcrafted for Linux"
 
 
-if IS_MACOS:
-    # CustomTkinter polls every window's DPI every 100 ms forever (a Tcl
-    # `after`, winfo_exists and `wm state` per window, 10 wakeups/s), but on
-    # macOS its DPI check is hard-wired to 1.0 - Aqua scales on its own - so
-    # the loop can never find a change. Hourly keeps it alive but idle.
-    try:
-        ctk.ScalingTracker.update_loop_interval = 3_600_000
-    except Exception:
-        pass
+# CustomTkinter polls every window's DPI every 100 ms forever (a Tcl
+# `after`, winfo_exists and `wm state` per window, 10 wakeups/s), but on
+# macOS its DPI check is hard-wired to 1.0 - Aqua scales on its own - so
+# the loop can never find a change. Hourly keeps it alive but idle.
+# Windows too: the app turns CTk's automatic DPI awareness off (ui_scale
+# governs scaling), which makes the same check return a constant 1.
+# Linux: CTk's DPI query is not implemented there and also returns 1.
+try:
+    ctk.ScalingTracker.update_loop_interval = 3_600_000
+except Exception:
+    pass
 # Microphone picker's first option (matched by the "Auto-detect" substring).
-# macOS drops the emoji prefix: no emoji as UI chrome (rule 11).
-AUTO_DETECT_MIC_LABEL = (
-    "Auto-detect (Recommended)" if IS_MACOS else "🎤 Auto-detect (Recommended)"
-)
+# No emoji prefix: no emoji as UI chrome (rule 11).
+AUTO_DETECT_MIC_LABEL = "Auto-detect (Recommended)"
 
 # SOCKET_PATH is the single source of truth in wayfinder.config (Rule #3) — it resolves
 # to $XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock (host<->sandbox shared) or /tmp.
@@ -133,7 +172,11 @@ from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, s
 from wayfinder.utils.audio_ducker import AudioDucker
 from wayfinder.ui.icons import get_icon, STYLE_ICONS, tint_icon
 from wayfinder.ui.hero_render import render_hero_wave, get_hero_caches
-from wayfinder.ui.window_geometry import default_window_geometry, macos_visible_frame
+from wayfinder.ui.window_geometry import (
+    default_window_geometry,
+    macos_visible_frame,
+    windows_work_area,
+)
 from wayfinder.ui.tooltip_geometry import anchor_in_area, tooltip_position, tooltip_wraplength
 from wayfinder.ui.macos_window import (
     TRANSPARENT as MACOS_TRANSPARENT,
@@ -187,8 +230,8 @@ def _get_llm_models_dir() -> Path:
     """Writable GGUF cleanup-model directory for in-app downloads (platform-aware).
 
     Flatpak: the persistent XDG_DATA_HOME. macOS: ~/Library/Application Support.
-    Elsewhere: ~/.local/share/wayfinder-aura/llm-models. See
-    `wayfinder.utils.platform.get_user_llm_models_dir`.
+    Windows: ~/AppData/Local. Elsewhere: ~/.local/share/wayfinder-aura/llm-models.
+    See `wayfinder.utils.platform.get_user_llm_models_dir`.
     """
     return get_user_llm_models_dir(flatpak=IS_FLATPAK)
 
@@ -199,11 +242,11 @@ def _get_whisper_models_dir() -> Path:
     Flatpak: $XDG_DATA_HOME/wayfinder-aura/whisper-models (~/.var/app/<id>/data).
     The sandbox's $HOME/.local/share is NOT persistent — models downloaded there
     vanished on every restart and startup silently fell back to bundled
-    Base.en. macOS uses the application data directory (the Mac app has always
-    downloaded there). Elsewhere the long-standing ~/whisper.cpp/models
-    location is kept (existing installs, docs and from-source builds use it).
+    Base.en. macOS: the application data directory. Elsewhere the long-standing
+    ~/whisper.cpp/models location is kept (existing installs, docs and
+    from-source builds all use it).
     """
-    if sys.platform == "darwin":
+    if sys.platform == "darwin" and not IS_FLATPAK:
         from wayfinder.utils.platform import get_data_dir
 
         return get_data_dir() / "whisper-models"
@@ -317,6 +360,12 @@ def detect_gpu() -> GPUInfo:
     Returns:
         GPUInfo with vendor, name, and driver information.
     """
+    if IS_WINDOWS and not IS_MACOS:
+        # No lspci or /sys: the display adapters Windows lists in the registry.
+        from wayfinder.utils.windows_sysinfo import primary_gpu
+
+        found = primary_gpu()
+        return GPUInfo(found[0], found[1], "windows") if found else GPUInfo("unknown", "Unknown GPU", "")
     # macOS: detect Apple Silicon or Intel GPU
     if sys.platform == "darwin":
         try:
@@ -483,6 +532,14 @@ if IS_MACOS:
 
     # macOS glass: deeper ink panes (both token mirrors). No-op without glass.
     apply_macos_glass_palette(COLORS, _theme.COLORS)
+
+if MAC_LOOK:
+    from wayfinder.ui import theme as _theme
+    from wayfinder.ui.macos_window import GLASS_PALETTE as _GLASS_PALETTE
+
+    # Same deeper ink panes and lifted rim as the Mac glass (both mirrors).
+    for _colors in (COLORS, _theme.COLORS):
+        _colors.update(_GLASS_PALETTE)
 
 
 def _tab_surface_kwargs(platform_name: str | None = None) -> dict:
@@ -670,6 +727,7 @@ class ToolTip:
         anchor = (self.widget.winfo_rootx(), self.widget.winfo_rooty(),
                   self.widget.winfo_width(), self.widget.winfo_height())
         area = (macos_visible_frame(screen_w, screen_h) if IS_MACOS
+                else windows_work_area(screen_w, screen_h, physical=True) if IS_WINDOWS
                 else (0, 0, screen_w, screen_h))
         if anchor_in_area(anchor, area):
             x, y = tooltip_position(anchor, size, area)
@@ -1216,32 +1274,104 @@ def _aqua_wheel_notches(delta: object, seconds_since_last: float) -> float:
     return -numeric / 4.0
 
 
+# Linux idle ribbon while another app has focus: a third of the speed at
+# 8 fps (slow motion stays smooth at a low rate), ~1/4 of the focused cost.
+_HERO_BACKGROUND_SPEED = 0.35
+_HERO_BACKGROUND_INTERVAL_MS = 125
+
+
 def _hero_idle_interval_ms(platform_name: str | None = None) -> int | None:
     """Idle waveform cadence (the approved 30 fps on every desktop)."""
     del platform_name
     return 33
 
 
-def _hero_active_interval_ms(platform_name: str | None = None) -> int:
-    """Recording cadence: 30 fps on Aqua, established 15 fps elsewhere."""
+_UNSET = object()
+
+
+def _hero_active_interval_ms(platform_name: str | None = None, steam_platform=_UNSET) -> int:
+    """Recording cadence: 30 fps on Aqua, Windows and Linux desktops; 15 fps on
+    Steam hardware, where the ribbon shares the CPU with transcription."""
     active_platform = platform_name or sys.platform
-    return 33 if active_platform == "darwin" else 66
+    if active_platform in ("darwin", "win32"):
+        return 33
+    if steam_platform is _UNSET:
+        from wayfinder.utils.platform import get_steam_platform
+        steam_platform = get_steam_platform()
+    return 66 if steam_platform else 33
+
+
+def _windows_dpi_scale() -> float:
+    """Windows' display scale (1.75 at 175%) once the app is DPI aware, else 1.0.
+
+    Windows draws Aura at the display's real resolution (utils/windows_dpi.py),
+    so sizes that reach Tk in real pixels (CTk widget scaling, window geometry,
+    raw canvases) are multiplied by it. Always 1.0 on Linux and macOS.
+    """
+    if not IS_WINDOWS or IS_MACOS:
+        return 1.0
+    from wayfinder.utils import windows_dpi
+
+    return windows_dpi.scale()
+
+
+def _windows_px(value: float) -> int:
+    """App logical pixels to real pixels (unchanged off Windows)."""
+    factor = _windows_dpi_scale()
+    return value if factor == 1.0 else int(round(value * factor))
+
+
+def _windows_logical(value: float) -> int:
+    """Real pixels from Tk back to app logical pixels (unchanged off Windows)."""
+    factor = _windows_dpi_scale()
+    return value if factor == 1.0 else int(round(value / factor))
 
 
 def _hero_visual_scale(
     ui_scale: float, platform_name: str | None = None
 ) -> float:
-    """Scale the raw Tk hero canvas on Aqua alongside CTk widgets."""
+    """Scale the raw Tk hero canvas alongside CTk widgets (CTk's scaler skips
+    raw canvases, so at 200% the ribbon stayed 64 px tall on Linux). Windows
+    also carries its display scale: the canvas is sized in real pixels there."""
     active_platform = platform_name or sys.platform
-    if active_platform != "darwin":
+    if active_platform not in ("darwin", "win32") and not active_platform.startswith("linux"):
         return 1.0
-    return max(0.7, min(2.5, float(ui_scale)))
+    scale = max(0.7, min(2.5, float(ui_scale)))
+    return scale * _windows_dpi_scale() if active_platform == "win32" else scale
+
+
+def _collect_vocabulary_corrections(rows) -> tuple[list[tuple[str, str]], int]:
+    """Vocabulary editor rows [(heard, write), ...] -> (valid pairs, incomplete).
+
+    Blank rows are ignored; a row with only one side filled counts as
+    incomplete. Validation (trim, dedupe by heard, heard != write, caps) is
+    parse_vocabulary_replacements', the same rules the transcriber applies.
+    """
+    from wayfinder.core.transcriber import parse_vocabulary_replacements
+
+    filled = [(str(h or "").strip(), str(w or "").strip()) for h, w in rows]
+    incomplete = sum(1 for h, w in filled if bool(h) != bool(w))
+    pairs = parse_vocabulary_replacements([[h, w] for h, w in filled if h and w])
+    return pairs, incomplete
+
+
+def _mic_canvas_px(ui_scale: float, platform_name: str | None = None) -> int:
+    """The raw mic canvas in real pixels. Linux follows UI zoom (CTk doesn't
+    scale raw canvases, so at 200% the button was half the size of its text);
+    macOS and Windows keep their established 80 (Windows: DPI-scaled) px."""
+    active_platform = platform_name or sys.platform
+    if active_platform.startswith("linux"):
+        return round(80 * max(0.7, min(2.5, float(ui_scale))))
+    return _windows_px(80)
 
 
 def _hero_canvas_pady(platform_name: str | None = None):
-    """Lower the Aqua ribbon without moving the controls or changing Linux."""
+    """Lower the Aqua/shader ribbon (macOS, Windows, Linux Mac look) without moving the controls."""
     active_platform = platform_name or sys.platform
-    return (10, 0) if active_platform == "darwin" else (0, 8)
+    if active_platform in ("darwin", "win32"):
+        return (10, 0)
+    # Linux: the shader ribbon unless WAYFINDER_LINUX_MAC_LOOK=0 (matches hero_render).
+    return (0, 8) if os.environ.get("WAYFINDER_LINUX_MAC_LOOK", "1") == "0" else (10, 0)
 
 
 def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
@@ -1433,6 +1563,12 @@ SETTING_TOOLTIPS = {
         "The language you dictate in. Other languages need a multilingual "
         "model (one without .en in its name)."
     ),
+    "linux_portal_typing": (
+        "Lets Aura type into every app on a Wayland desktop, native Wayland apps "
+        "included, through your desktop's remote-control permission. Your desktop "
+        "asks once; KDE shows a Remote Control icon in the tray while Aura runs.\n"
+        "Off: Aura types with xdotool, which reaches X11 apps and games only."
+    ),
     "press_enter_after_dictation": (
         "Press Enter after the text is typed. Off by default.\n"
         "This sends chat messages, runs terminal commands and submits AI prompts "
@@ -1472,11 +1608,21 @@ SETTING_TOOLTIPS = {
         )
         if IS_MACOS
         else (
+            "Use your graphics card for transcription. Ultra.\n"
+            "Vulkan on AMD, NVIDIA and Intel GPUs; text cleanup stays on the CPU.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+        if IS_WINDOWS
+        else (
             "Use your GPU for transcription and local cleanup. Ultra.\n"
             "whisper.cpp: Vulkan (AMD/Intel), CUDA or Metal. "
             "Faster-Whisper (experimental): NVIDIA CUDA only.\n"
             "Free runs Base on the CPU. Benchmark shows what the GPU would do."
         )
+    ),
+    "gpu_device": (
+        "Which graphics card transcribes. Automatic picks the dedicated GPU;\n"
+        "choose the integrated one if the big card is busy with games or a local AI model."
     ),
 }
 
@@ -1724,6 +1870,13 @@ class BenchmarkRunner:
                     info["ram"] = f"{mem_bytes / (1024**3):.0f} GB"
             except Exception:
                 pass
+        elif sys.platform == "win32":
+            # Windows: registry + kernel32 (there is no /proc or sysctl).
+            try:
+                from wayfinder.utils.windows_sysinfo import system_info
+                info.update(system_info())
+            except Exception:
+                pass
         else:
             # Linux: /proc filesystem
             try:
@@ -1772,7 +1925,14 @@ class BenchmarkRunner:
         """Find whisper-cli in source, Flatpak, or the current AppImage mount."""
         from wayfinder.utils.runtime_assets import find_whisper_binary
 
-        return find_whisper_binary(self.config)
+        found = find_whisper_binary(self.config)
+        if IS_WINDOWS and not IS_MACOS and found:
+            # The GPU side of Compare CPU vs GPU runs the bundled Vulkan build
+            # (a benchmark only times it; dictation stays license-gated).
+            from wayfinder.utils.windows_whisper import gpu_twin
+
+            found = gpu_twin(found) or found
+        return found
 
     def _find_whisper_cpu_binary(self) -> str | None:
         """Prefer the independently linked CPU safety twin when packaged."""
@@ -3152,7 +3312,43 @@ def resolve_audio_device(config: dict) -> int | None:
         # "Auto" means exactly that device, never a keyword score (which, e.g.,
         # vetoed AirPods the user had deliberately chosen).
         return _macos_default_input_index()
+    if IS_WINDOWS:
+        # Same on Windows: "Auto" is the input chosen in Sound settings.
+        found = _windows_default_input_index()
+        if found is not None:
+            return found
     return find_best_input_device()
+
+
+def _windows_default_input_index() -> int | None:
+    """PortAudio index of Windows' current default input, or None.
+
+    Windows lists each mic once per host API (MME names are cut at 31
+    characters); prefer the host API PortAudio uses for its own default input.
+    """
+    try:
+        from wayfinder.utils.windows_audio import default_input_device, names_match
+        import sounddevice as _sd
+
+        current = default_input_device()
+        if current is None:
+            return None
+        devices = list(enumerate(_sd.query_devices()))
+        try:
+            preferred_api = _sd.query_devices(kind="input").get("hostapi")
+        except Exception:
+            preferred_api = None
+        matches = [
+            (index, dev) for index, dev in devices
+            if dev.get("max_input_channels", 0) > 0
+            and names_match(dev.get("name", ""), current["name"])
+        ]
+        for index, dev in matches:
+            if dev.get("hostapi") == preferred_api:
+                return index
+        return matches[0][0] if matches else None
+    except Exception:
+        return None
 
 
 def _macos_default_input_index() -> int | None:
@@ -3434,8 +3630,8 @@ _ACTIVITY_LOG_INIT_LOCK = threading.Lock()
 
 
 def _macos_keep_awake(fn, key: str, reason: str):
-    """macOS: run ``fn`` holding off idle sleep (a slept download restarts from 0)."""
-    if not IS_MACOS:
+    """macOS/Windows: run ``fn`` holding off idle sleep (a slept download restarts from 0)."""
+    if not (IS_MACOS or IS_WINDOWS):
         return fn
 
     def run(*args, **kwargs):
@@ -3457,15 +3653,24 @@ def _macos_cloud_models(provider: str) -> list[str]:
 # macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
 # KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
 MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
+# Windows: Right Alt / Alt Gr (KEY_RIGHTALT, the Mac's Right Option; the
+# Windows default) and Right Ctrl (evdev KEY_RIGHTCTRL). Many laptops have no
+# Right Ctrl. Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
+WINDOWS_SOLO_HOTKEYS = {100: "Right Alt (Alt Gr)", 97: "Right Ctrl"}
+
+
+def _solo_hotkeys(platform_name: str | None = None) -> dict:
+    active = platform_name or sys.platform
+    if active == "darwin":
+        return MACOS_SOLO_HOTKEYS
+    if active == "win32":
+        return WINDOWS_SOLO_HOTKEYS
+    return {}
 
 
 def is_tap_hold_hotkey(code, modifiers, platform_name: str | None = None) -> bool:
     """True when the record hotkey is a bare modifier (tap to toggle, hold to talk)."""
-    return (
-        (platform_name or sys.platform) == "darwin"
-        and code in MACOS_SOLO_HOTKEYS
-        and not modifiers
-    )
+    return code in _solo_hotkeys(platform_name) and not modifiers
 
 
 def _keycode_display(code: int) -> str:
@@ -3474,14 +3679,14 @@ def _keycode_display(code: int) -> str:
     known = {
         59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
         65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
-        70: "ScrollLock", 119: "Pause", 57: "Space", 28: "Enter",
+        70: "ScrollLock", 119: "Pause", 57: "Space", 28: "Enter", 1: "Esc",
         274: "Mouse Middle", 275: "Mouse Side", 276: "Mouse Extra",
         277: "Mouse Forward", 278: "Mouse Back",
     }
     if code in known:
         return known[code]
-    if sys.platform == "darwin" and code in MACOS_SOLO_HOTKEYS:
-        return MACOS_SOLO_HOTKEYS[code]
+    if code in _solo_hotkeys():
+        return _solo_hotkeys()[code]
     if HAS_EVDEV:
         try:
             name = ecodes.KEY.get(code) or ecodes.BTN.get(code)
@@ -3533,6 +3738,12 @@ def hotkey_key_options(
         # Tap/hold modifiers first: they are the recommended Mac choice.
         _hotkey_key_codes = {
             **{name: code for code, name in MACOS_SOLO_HOTKEYS.items()},
+            **_hotkey_key_codes,
+        }
+    elif active_platform == "win32":
+        # Tap/hold keys first: Right Alt is the Windows default, as on the Mac.
+        _hotkey_key_codes = {
+            **{name: code for code, name in WINDOWS_SOLO_HOTKEYS.items()},
             **_hotkey_key_codes,
         }
     if available_pynput_codes is None:
@@ -4203,7 +4414,11 @@ class FloatingIndicator:
         self._visible = False
         self._window_width = 0
         self._window_height = 0
-        
+        # Raw canvases draw in real pixels: Windows' display scale (1.0 elsewhere).
+        self._px = _windows_dpi_scale()
+        if self._px == 1.0:
+            self._px = 1  # integer: Linux/macOS coordinates stay exactly as they were
+
         # Callback to get audio level for voice-reactive waveform
         self._audio_level_callback = audio_level_callback
         self._current_audio_level = 0.0  # Smoothed audio level
@@ -4342,8 +4557,8 @@ class FloatingIndicator:
         # Glowing status indicator dot - bigger for visibility
         self.dot_canvas = ctk.CTkCanvas(
             row,
-            width=28,
-            height=28,
+            width=_windows_px(28),
+            height=_windows_px(28),
             bg=inner_glow_color,  # Match glassmorphism background
             highlightthickness=0,
         )
@@ -4362,8 +4577,8 @@ class FloatingIndicator:
         # Voice-reactive waveform - right next to text, fills remaining space
         self.wave_canvas = ctk.CTkCanvas(
             row,
-            width=200,  # Much wider for dramatic effect
-            height=32,  # Taller for bigger waves
+            width=_windows_px(200),  # Much wider for dramatic effect
+            height=_windows_px(32),  # Taller for bigger waves
             bg=inner_glow_color,  # Match glassmorphism background
             highlightthickness=0,
         )
@@ -4488,6 +4703,11 @@ class FloatingIndicator:
         # Center horizontally, position just above taskbar
         pos_x = (screen_w - self._window_width) // 2
         pos_y = screen_h - self._window_height - 52  # Resting just on top of taskbar (~48px)
+        if IS_WINDOWS and not IS_MACOS:
+            # The real taskbar, in real pixels (its height grows with the scale).
+            area_x, area_y, area_w, area_h = windows_work_area(screen_w, screen_h, physical=True)
+            pos_x = area_x + (area_w - self._window_width) // 2
+            pos_y = area_y + area_h - self._window_height - _windows_px(4)
         
         self.window.geometry(f"+{pos_x}+{pos_y}")
         self._is_centered = True
@@ -4502,9 +4722,10 @@ class FloatingIndicator:
 
         try:
             # Create ring (initially hidden) - larger for dramatic effect
+            k = self._px
             self._dot_ring_id = self.dot_canvas.create_oval(
-                cx - 6, cy - 6, cx + 6, cy + 6,
-                outline=color, width=2, fill="", state="hidden"
+                (cx - 6) * k, (cy - 6) * k, (cx + 6) * k, (cy + 6) * k,
+                outline=color, width=2 * k, fill="", state="hidden"
             )
 
             # Create 3 glow layers - larger radii for bigger dot
@@ -4512,14 +4733,14 @@ class FloatingIndicator:
             self._dot_glow_ids = []
             for radius in glow_radii:
                 item_id = self.dot_canvas.create_oval(
-                    cx - radius, cy - radius, cx + radius, cy + radius,
+                    (cx - radius) * k, (cy - radius) * k, (cx + radius) * k, (cy + radius) * k,
                     fill=color, outline=""
                 )
                 self._dot_glow_ids.append(item_id)
 
             # Create core dot - bigger
             self._dot_core_id = self.dot_canvas.create_oval(
-                cx - 4, cy - 4, cx + 4, cy + 4,
+                (cx - 4) * k, (cy - 4) * k, (cx + 4) * k, (cy + 4) * k,
                 fill=color, outline=""
             )
         except tk.TclError:
@@ -4562,8 +4783,10 @@ class FloatingIndicator:
                 ring_b = int(b * ring_alpha + bg_b * (1 - ring_alpha))
                 ring_color = f"#{ring_r:02x}{ring_g:02x}{ring_b:02x}"
                 
+                k = self._px
                 self.dot_canvas.coords(self._dot_ring_id,
-                    cx - ring_radius, cy - ring_radius, cx + ring_radius, cy + ring_radius)
+                    (cx - ring_radius) * k, (cy - ring_radius) * k,
+                    (cx + ring_radius) * k, (cy + ring_radius) * k)
                 self.dot_canvas.itemconfig(self._dot_ring_id, outline=ring_color, state="normal")
             else:
                 self.dot_canvas.itemconfig(self._dot_ring_id, state="hidden")
@@ -4578,14 +4801,18 @@ class FloatingIndicator:
                     gb = int(b * alpha + bg_b * (1 - alpha))
                     glow_color = f"#{gr:02x}{gg:02x}{gb:02x}"
                     
+                    k = self._px
                     self.dot_canvas.coords(self._dot_glow_ids[i],
-                        cx - glow_radius, cy - glow_radius, cx + glow_radius, cy + glow_radius)
+                        (cx - glow_radius) * k, (cy - glow_radius) * k,
+                        (cx + glow_radius) * k, (cy + glow_radius) * k)
                     self.dot_canvas.itemconfig(self._dot_glow_ids[i], fill=glow_color)
             
             # Update core - bigger for visibility
             core_radius = 4 * scale
+            k = self._px
             self.dot_canvas.coords(self._dot_core_id,
-                cx - core_radius, cy - core_radius, cx + core_radius, cy + core_radius)
+                (cx - core_radius) * k, (cy - core_radius) * k,
+                (cx + core_radius) * k, (cy + core_radius) * k)
             self.dot_canvas.itemconfig(self._dot_core_id, fill=color)
         except Exception:
             pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
@@ -4608,8 +4835,9 @@ class FloatingIndicator:
             for i in range(num_bars):
                 x = i * (bar_width + bar_gap) + bar_gap // 2
                 # Create bar centered vertically (will be updated in _draw_waveform)
+                k = self._px
                 bar_id = self.wave_canvas.create_rectangle(
-                    x, center_y - 1, x + bar_width, center_y + 1,
+                    x * k, (center_y - 1) * k, (x + bar_width) * k, (center_y + 1) * k,
                     fill=color, outline=""
                 )
                 self._wave_bar_ids.append(bar_id)
@@ -4674,8 +4902,10 @@ class FloatingIndicator:
                 bar_color = f"#{br:02x}{bg:02x}{bb:02x}"
                 
                 # Update bar position and color
+                k = self._px
                 self.wave_canvas.coords(bar_id,
-                    x, center_y - bar_height, x + bar_width, center_y + bar_height)
+                    x * k, (center_y - bar_height) * k,
+                    (x + bar_width) * k, (center_y + bar_height) * k)
                 self.wave_canvas.itemconfig(bar_id, fill=bar_color)
         except Exception:
             pass  # Tk 9.0 canvas coord bug - ignore to prevent crash
@@ -5030,6 +5260,11 @@ class OverlayController:
                     # overlay exe is already windowed). No-op (0) elsewhere.
                     creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
                 )
+                if sys.platform == "win32":
+                    # The pill dies with the app even on a crash (job object);
+                    # Linux uses PR_SET_PDEATHSIG, macOS stdin EOF.
+                    from wayfinder.utils.child_supervisor import bind_to_app_lifetime
+                    bind_to_app_lifetime(self._process)
                 try:
                     from wayfinder.utils.overlay_process import write_overlay_pidfile
                     write_overlay_pidfile(self._process.pid)
@@ -5603,6 +5838,12 @@ class WayfinderApp(ctk.CTk):
                 ctk.deactivate_automatic_dpi_awareness()
             except Exception:
                 pass  # older CustomTkinter without the API — harmless
+        if IS_WINDOWS and not IS_MACOS:
+            # Draw at the display's real resolution, like Aqua, instead of being
+            # bitmap-stretched (soft) at 125-175%. Must precede the Tk root.
+            from wayfinder.utils import windows_dpi
+
+            windows_dpi.enable()
         # className sets the WM_CLASS *class* part. Plasma matches StartupWMClass
         # against it to merge the window into the pinned launcher. Source and
         # Flatpak MUST use different classes (see get_wm_class) — both desktops
@@ -5958,6 +6199,50 @@ class WayfinderApp(ctk.CTk):
         if IS_MACOS:
             self.after(1200, self._refresh_macos_permission_banner)
             self._apply_macos_window_chrome()
+        if IS_WINDOWS and not IS_MACOS:
+            # Same sleep/wake/display handling as the Mac, from Windows'
+            # WM_POWERBROADCAST / WM_DISPLAYCHANGE (utils/windows_lifecycle.py);
+            # its thread only queues, Tk runs the handlers.
+            try:
+                from wayfinder.utils.windows_lifecycle import WindowsLifecycleObserver
+
+                self._macos_lifecycle_observer = WindowsLifecycleObserver.start(
+                    on_sleep=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_will_sleep)
+                    ),
+                    on_wake=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_did_wake)
+                    ),
+                    on_screens_changed=lambda: self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._on_macos_screens_changed)
+                    ),
+                    # Sign-out/shutdown or an installer closing Aura: quit for
+                    # real (closing the window only hides it to the tray).
+                    on_end_session=self._on_windows_end_session,
+                )
+            except Exception as exc:
+                self.log(f"⚠ Windows sleep/wake integration unavailable: {exc}")
+            # The Mac's blocked-microphone banner, from Windows' privacy switches.
+            self.after(1200, self._refresh_macos_permission_banner)
+            # Say once at startup if the record hotkey collides with something
+            # (e.g. Magnifier's Ctrl+Alt+Space) - most people never open Settings.
+            self.after(2000, self._log_windows_hotkey_conflict)
+            # Some GPU setups hand parts of the window back black after a focus
+            # change ("little black squares"); repaint once after each.
+            try:
+                from wayfinder.ui.windows_window import repaint_after_activation
+
+                repaint_after_activation(self)
+            except Exception:
+                pass
+        if WINDOWS_MAC_LOOK:
+            # Caption bar in the app's ink, rim-coloured border (the Mac's
+            # unified title bar). After mapping: DWM needs the real HWND.
+            def _windows_chrome():
+                from wayfinder.ui.windows_window import apply_window_chrome
+                apply_window_chrome(self, WINDOWS_GLASS_SURFACE, COLORS["border_rim"],
+                                    COLORS["text_primary"])
+            self.after(50, _windows_chrome)
         self._schedule_settings_preload()
         # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
         self._start_hotkey_supervisor()
@@ -5994,10 +6279,15 @@ class WayfinderApp(ctk.CTk):
         
         # A Mac utility remains available from its Dock/menu-bar item when its
         # last window closes. Command-Q is the explicit full-quit path.
+        # Windows behaves the same: the window's close button hides Aura to
+        # the tray (hotkey keeps working); the tray menu's Quit ends it.
         self.protocol(
             "WM_DELETE_WINDOW",
-            self.hide_to_tray if IS_MACOS else self.quit_app,
+            self.hide_to_tray if (IS_MACOS or IS_WINDOWS) else self.quit_app,
         )
+        if IS_WINDOWS:
+            # The Mac's ⌘, (Settings…) as Ctrl+, while the window has focus.
+            self.bind_all("<Control-comma>", lambda _e: self._macos_show_settings())
         if IS_MACOS:
             try:
                 self.createcommand("::tk::mac::Quit", self.quit_app)
@@ -6137,7 +6427,7 @@ class WayfinderApp(ctk.CTk):
         except Exception as exc:
             self.log(f"⚠ Microphone refresh after wake failed: {exc}")
         self._on_macos_screens_changed()
-        self.log("🌅 macOS wake recovery complete")
+        self.log(f"🌅 {'Windows' if IS_WINDOWS else 'macOS'} wake recovery complete")
 
     def _on_macos_screens_changed(self) -> None:
         controller = getattr(self, "overlay_controller", None)
@@ -6167,10 +6457,11 @@ class WayfinderApp(ctk.CTk):
             self.config["ui_scale"] = self.ui_scale
             save_config(self.config)
         
-        # Get screen dimensions
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
-        
+        # Get screen dimensions (Windows: in the app's logical pixels, which is
+        # also what saved geometry holds)
+        screen_w = _windows_logical(self.winfo_screenwidth())
+        screen_h = _windows_logical(self.winfo_screenheight())
+
         # Account for taskbar and panels
         taskbar_height = 56
         top_panel = 32
@@ -6221,20 +6512,25 @@ class WayfinderApp(ctk.CTk):
             window_y = max(0, min(window_y if window_y is not None else top_panel, screen_h - 80))
 
         # Apply geometry
-        self.geometry(f"{window_w}x{window_h}+{window_x}+{window_y}")
-        
+        self.geometry(
+            f"{_windows_px(window_w)}x{_windows_px(window_h)}"
+            f"+{_windows_px(window_x)}+{_windows_px(window_y)}"
+        )
+
         # Set reasonable minimum size
-        self.minsize(360, 500)
+        self.minsize(_windows_px(360), _windows_px(500))
         if IS_MACOS and macos_glass_enabled():
             # Frosted glass shows through wherever Tk paints nothing.
             prepare_macos_tk_root(self)
             self.configure(fg_color=MACOS_TRANSPARENT)
+        elif MAC_LOOK:
+            self.configure(fg_color=WINDOWS_GLASS_SURFACE)
         else:
             self.configure(fg_color=COLORS["bg_dark"])
         
         # Apply widget scaling only - this controls content size
         # NOT window scaling - that would fight with manual window resizing
-        ctk.set_widget_scaling(self.ui_scale)
+        ctk.set_widget_scaling(self.ui_scale * _windows_dpi_scale())
 
         # CTkCanvas subclasses raw tkinter.Canvas and is not tracked by CTk's
         # widget scaler. Keep the waveform's height/strokes proportional to the
@@ -6264,6 +6560,14 @@ class WayfinderApp(ctk.CTk):
                 from AppKit import NSApplication
 
                 NSApplication.sharedApplication().setApplicationIconImage_(None)
+            except Exception:
+                pass
+        elif IS_WINDOWS and (SCRIPT_DIR / "assets" / "icon.ico").exists():
+            try:
+                # The multi-size app icon the .exe carries (packaging/windows/
+                # make_icon.py): Windows picks the right size per DPI for the
+                # title bar, taskbar and Alt+Tab.
+                self.iconbitmap(default=str(SCRIPT_DIR / "assets" / "icon.ico"))
             except Exception:
                 pass
         elif ICON_PATH.exists():
@@ -6305,10 +6609,10 @@ class WayfinderApp(ctk.CTk):
         
         try:
             geometry = {
-                "width": self.winfo_width(),
-                "height": self.winfo_height(),
-                "x": self.winfo_x(),
-                "y": self.winfo_y(),
+                "width": _windows_logical(self.winfo_width()),
+                "height": _windows_logical(self.winfo_height()),
+                "x": _windows_logical(self.winfo_x()),
+                "y": _windows_logical(self.winfo_y()),
             }
             
             # Only save if values are reasonable (window is visible)
@@ -6783,7 +7087,8 @@ class WayfinderApp(ctk.CTk):
                 pass
 
     def _get_recommended_scale(self) -> float:
-        """Calculate recommended UI scale based on screen resolution for READABILITY.
+        """Recommended UI scale: the desktop's own scale on Linux (Xft.dpi),
+        else one based on screen resolution for READABILITY.
         
         Focus: Make text readable on high-DPI screens out of the box.
         
@@ -6793,8 +7098,22 @@ class WayfinderApp(ctk.CTk):
         - 1080p (1920x1080): 100% - baseline
         - Lower: 100% minimum
         """
-        screen_h = self.winfo_screenheight()
-        
+        # Linux: match the desktop. X11/XWayland apps are told the desktop's
+        # scale through Xft.dpi (192 at 200%; 96 when the compositor scales
+        # legacy apps itself), which also covers fractional scales and 1440p
+        # at 100% that the resolution table below gets wrong.
+        if _IS_LINUX:
+            try:
+                from wayfinder.utils.tk_dpi import read_xft_dpi
+                dpi = read_xft_dpi()
+            except Exception:
+                dpi = None
+            if dpi and dpi > 0:
+                return max(0.7, min(2.5, round(dpi / 96.0 * 20) / 20))
+
+        # Windows: logical height, since the display scale is applied separately
+        screen_h = _windows_logical(self.winfo_screenheight())
+
         # Scale based on vertical resolution (most reliable metric)
         # These are optimized for readability, not for "fitting" 
         if screen_h >= 2160:  # 4K
@@ -6823,16 +7142,19 @@ class WayfinderApp(ctk.CTk):
         self.config["ui_scale"] = optimal_scale
         save_config(self.config)
         
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
+        screen_w = _windows_logical(self.winfo_screenwidth())
+        screen_h = _windows_logical(self.winfo_screenheight())
         new_w, new_h, new_x, new_y = default_window_geometry(screen_w, screen_h)
 
         # Update widget scaling only (not window scaling)
-        ctk.set_widget_scaling(optimal_scale)
-        
+        ctk.set_widget_scaling(optimal_scale * _windows_dpi_scale())
+
         # Apply geometry
-        self.geometry(f"{new_w}x{new_h}+{new_x}+{new_y}")
-        self.minsize(360, 500)
+        self.geometry(
+            f"{_windows_px(new_w)}x{_windows_px(new_h)}"
+            f"+{_windows_px(new_x)}+{_windows_px(new_y)}"
+        )
+        self.minsize(_windows_px(360), _windows_px(500))
         self.update_idletasks()
         
         # Update UI indicators
@@ -6868,8 +7190,27 @@ class WayfinderApp(ctk.CTk):
             self.ui_scale = new_scale
             self.config["ui_scale"] = new_scale
             save_config(self.config)
-            self._apply_scale()
-            self.log(f"⚙ UI Scale: {int(new_scale * 100)}%")
+            if not _IS_LINUX:
+                self._apply_scale()
+                self.log(f"⚙ UI Scale: {int(new_scale * 100)}%")
+                return
+            # Linux: show the new value at once and rebuild once the clicks
+            # stop, so 200% -> 150% by two quick clicks is one rebuild, not two.
+            self._update_scale_labels()
+            job = getattr(self, "_scale_apply_job", None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+            self._scale_apply_job = self.after(250, self._apply_scale_debounced)
+
+    def _apply_scale_debounced(self) -> None:
+        self._scale_apply_job = None
+        t0 = time.perf_counter()
+        self._apply_scale()
+        ms = (time.perf_counter() - t0) * 1000
+        self.log(f"⚙ UI Scale: {int(self.ui_scale * 100)}% (applied in {ms:.0f} ms)")
     
     def reset_scale(self):
         """Reset UI scale to optimal for current display."""
@@ -6893,8 +7234,51 @@ class WayfinderApp(ctk.CTk):
             self._apply_scale_staged_macos()
             return
 
-        ctk.set_widget_scaling(self.ui_scale)
-        self._finish_scale_layout(force_idle_flush=True)
+        # Linux: hold a still of the window over it while every widget
+        # re-lays out, then reveal the finished layout in one frame, instead
+        # of showing each widget resize in turn.
+        cover = self._freeze_window_for_rescale() if _IS_LINUX else None
+        try:
+            ctk.set_widget_scaling(self.ui_scale * _windows_dpi_scale())
+            self._finish_scale_layout(force_idle_flush=True)
+            if cover is not None:
+                self.update_idletasks()
+        finally:
+            if cover is not None:
+                try:
+                    cover.destroy()
+                except Exception:
+                    pass
+
+    def _freeze_window_for_rescale(self):
+        """Cover the window with a still of itself (X11/XWayland). Returns the
+        cover widget to destroy after the re-layout, or None if unavailable."""
+        try:
+            from PIL import ImageTk
+            from Xlib import X, display as xdisplay
+
+            self.update_idletasks()
+            w, h = self.winfo_width(), self.winfo_height()
+            if w < 50 or h < 50:
+                return None
+            conn = xdisplay.Display()
+            try:
+                win = conn.create_resource_object("window", self.winfo_id())
+                raw = win.get_image(0, 0, w, h, X.ZPixmap, 0xFFFFFFFF)
+            finally:
+                conn.close()
+            if len(raw.data) < w * h * 4:
+                return None
+            img = Image.frombytes("RGB", (w, h), raw.data, "raw", "BGRX")
+            photo = ImageTk.PhotoImage(img)
+            cover = tk.Label(self, image=photo, borderwidth=0, highlightthickness=0)
+            cover._wf_photo = photo  # keep a ref - Tk doesn't
+            cover.place(x=0, y=0, width=w, height=h)
+            cover.lift()
+            cover.update_idletasks()
+            return cover
+        except Exception:
+            return None
 
     def _apply_scale_staged_macos(self) -> None:
         """Rescale Aqua widgets in bounded batches so input keeps dispatching."""
@@ -6945,6 +7329,14 @@ class WayfinderApp(ctk.CTk):
             )
         except Exception:
             pass
+        mic_size = _mic_canvas_px(self.ui_scale)
+        try:
+            resized_mic = int(float(self.mic_button_canvas.cget("width"))) != mic_size
+            if resized_mic:
+                self.mic_button_canvas.configure(width=mic_size, height=mic_size)
+                self._mic_photo_cache = {}  # every cached frame is the old size
+        except Exception:
+            resized_mic = False
 
         if force_idle_flush:
             # Preserve Linux's established synchronous behavior. Aqua's staged
@@ -6954,6 +7346,13 @@ class WayfinderApp(ctk.CTk):
         # Form-row measure max is design units × scale → re-pad after scale change.
         self._sync_all_form_measures(force=True)
         self._update_scale_labels()
+        self._refresh_linux_brand_mark()
+        if resized_mic:
+            try:
+                self.mic_button_canvas.update_idletasks()
+                self._draw_mic_button(STATE_COLORS[self.app_state])
+            except Exception:
+                pass
     
     def setup_ui(self) -> None:
         # === Typography ===
@@ -6994,7 +7393,9 @@ class WayfinderApp(ctk.CTk):
         # Main container with gradient background
         # macOS glass: the window surface is transparent over native vibrancy.
         window_surface = (
-            MACOS_TRANSPARENT if IS_MACOS and macos_glass_enabled() else COLORS["bg_base"]
+            MACOS_TRANSPARENT if IS_MACOS and macos_glass_enabled()
+            else WINDOWS_GLASS_SURFACE if MAC_LOOK
+            else COLORS["bg_base"]
         )
         self.main_container = ctk.CTkFrame(self, fg_color=window_surface)
         self.main_container.pack(fill="both", expand=True)
@@ -7039,6 +7440,20 @@ class WayfinderApp(ctk.CTk):
             **self._content_pane_kwargs(),
         )
         self.tab_content_container.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        if MAC_LOOK:
+            # Pages live in an inset host so the pane's rounded corners and rim
+            # stay visible (the Mac insets its placed pages the same way).
+            from wayfinder.ui.macos_window import CONTENT_PANE_INSET
+
+            self._content_pane = self.tab_content_container
+            self.tab_content_container = ctk.CTkFrame(self._content_pane, fg_color="transparent")
+            # Tk cannot clip a scroll view to a rounded shape: at the Mac's 6px
+            # inset, a card scrolled under the top/bottom edge was cut square
+            # inside the pane's rounded corner. Half the pane radius, plus the
+            # scroll frame's own corner inset (6), puts the cut where the arc
+            # is within a pixel of the straight edge.
+            self.tab_content_container.pack(
+                fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=RADIUS["lg"] // 2)
         
         # Create tab frames
         self.tab_frames = {}
@@ -7049,15 +7464,15 @@ class WayfinderApp(ctk.CTk):
         _welcome_done = bool(self.config.get("welcome_completed", False))
         self.active_tab = "dictate" if (_setup_done and _welcome_done) else "settings"
         
-        if IS_MACOS:
-            # Fixed wraplengths sized for the Linux window overflow the Mac's
-            # narrower cards (text clipped on both edges); fit them on map.
-            try:
-                from wayfinder.ui import macos_label_fit
+        # Fixed wraplengths sized for the 800 px window overflow narrower cards
+        # (the Mac's, a 640 px Steam Deck half, UI zoom above 100%), clipping
+        # text on both edges; fit them on map.
+        try:
+            from wayfinder.ui import macos_label_fit
 
-                macos_label_fit.install(self, ctk.CTkLabel)
-            except Exception as exc:
-                self.log(f"⚠ Label fitting unavailable: {exc}")
+            macos_label_fit.install(self, ctk.CTkLabel)
+        except Exception as exc:
+            self.log(f"⚠ Label fitting unavailable: {exc}")
 
         # Dictate is the returning-user landing page and remains eager. The other tabs contain
         # hundreds of widgets and cost seconds on Deck-class CPUs, so create them on first use.
@@ -7232,6 +7647,26 @@ class WayfinderApp(ctk.CTk):
 
         return canvas, (logical_w, logical_h)
 
+    def _linux_brand_mark_image(self, is_ultra: bool):
+        """The header mark rendered at the widget scaling (Linux)."""
+        from wayfinder.ui.macos_brand_mark import MARK_HEIGHT, MARK_WIDTH, render_brand_mark
+
+        scale = max(1.0, float(getattr(self, "ui_scale", 1.0) or 1.0))
+        image = render_brand_mark(ICON_PATH, scale=scale, is_ultra=is_ultra,
+                                  accent=COLORS["accent"], gold=COLORS["accent_yellow"])
+        return image, (MARK_WIDTH, MARK_HEIGHT)
+
+    def _refresh_linux_brand_mark(self) -> None:
+        """Re-render the header mark for a new zoom (CTkImage would only stretch it)."""
+        logo = getattr(self, "_header_logo_img", None)
+        if not _IS_LINUX or logo is None:
+            return
+        try:
+            image, _size = self._linux_brand_mark_image(bool(getattr(self, "_header_logo_ultra", False)))
+            logo.configure(light_image=image, dark_image=image)
+        except Exception:
+            pass
+
     def _create_macos_brand_mark(self, title_frame, is_ultra: bool) -> bool:
         """macOS: reserve the logo slot; a Core Animation layer draws the mark.
 
@@ -7312,11 +7747,24 @@ class WayfinderApp(ctk.CTk):
         # bitmap on an opaque chip below stays as the fallback (and on Linux).
         if not (IS_MACOS and self._create_macos_brand_mark(title_frame, is_ultra)):
             try:
-                # Cosmic signature: the brand arrow "in space" with a baked, static
-                # stardust trail (placement A · visible). Works for BOTH tiers — the
-                # Ultra gold glow composites on top of the trail inside the helper.
-                logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
+                if _IS_LINUX:
+                    # Preserve the Linux mark's sizing at the current zoom.
+                    logo_img, display_size = self._linux_brand_mark_image(is_ultra)
+                elif IS_WINDOWS:
+                    from wayfinder.ui.macos_brand_mark import (
+                        MARK_HEIGHT,
+                        MARK_WIDTH,
+                        render_brand_mark,
+                    )
+                    logo_img = render_brand_mark(
+                        ICON_PATH, scale=4.0, is_ultra=is_ultra,
+                        accent=COLORS["accent"], gold=COLORS["accent_yellow"],
+                    )
+                    display_size = (MARK_WIDTH, MARK_HEIGHT)
+                else:
+                    logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
                 self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
+                self._header_logo_ultra = is_ultra
                 logo_label = ctk.CTkLabel(
                     title_frame,
                     image=self._header_logo_img,
@@ -7375,7 +7823,7 @@ class WayfinderApp(ctk.CTk):
         # Aqua already provides Close and Minimize in the native traffic-light
         # frame. Duplicating them inside the header looked non-native and gave
         # Hide two conflicting meanings. Other desktops keep the custom pair.
-        if not IS_MACOS:
+        if not (IS_MACOS or IS_WINDOWS):
             ctk.CTkButton(
                 right_controls,
                 text="×",
@@ -7581,8 +8029,8 @@ class WayfinderApp(ctk.CTk):
         # Glowing mic button canvas
         self.mic_button_canvas = ctk.CTkCanvas(
             mic_container,
-            width=80,
-            height=80,
+            width=_mic_canvas_px(self.ui_scale),   # raw canvas: real pixels
+            height=_mic_canvas_px(self.ui_scale),
             bg=COLORS["bg_card"],
             highlightthickness=0,
             cursor="hand2",
@@ -7649,26 +8097,22 @@ class WayfinderApp(ctk.CTk):
             phys = max(self.mic_button_canvas.winfo_width(),
                        self.mic_button_canvas.winfo_height())
         except Exception:
-            phys = 80
-        return phys if phys >= 10 else 80
+            phys = _mic_canvas_px(getattr(self, "ui_scale", 1.0))
+        return phys if phys >= 10 else _mic_canvas_px(getattr(self, "ui_scale", 1.0))
 
     def _render_mic_button_photo(self, color: str, pressed: bool = False,
-                                 is_active: bool = False, pulse: float | None = None):
-        """Render the quiet-minimal mic button as a supersampled PIL image (4x,
-        LANCZOS downscale).
+                                 is_active: bool = False, pulse: float | None = None,
+                                 hover: bool = False):
+        """Render the mic button (``wayfinder.ui.mic_button``: a lit glass disc
+        with a state-colour glow, top-lit rim and a filled mic glyph; recording
+        shows a stop square and a breathing glow).
 
-        Reads as a "pro tool", not a glossy button: at rest a thin state-colour
-        outline + a tinted Lucide `mic` glyph; while recording the circle fills
-        with the state colour and shows a rounded bg_base stop-square (with a
-        subtle expanding breath ring); PROCESSING/PASTING follow the is_active
-        fill. Supersampled 4x then LANCZOS-downscaled for crisp HiDPI edges;
-        results are cached per (color, state, quantized pulse) so a state change
-        renders once and the recording pulse is a dict hit + itemconfig.
-        tint_icon runs only on cache misses (no per-frame I/O). Pre-composited
-        over bg_card (the canvas bg).
+        Results are cached per (color, state, quantized pulse, size) so a state
+        change renders once and the recording pulse is a dict hit + itemconfig.
+        Pre-composited over bg_card (the canvas bg).
         """
         phys = self._mic_button_phys()
-        key = (color, bool(pressed), bool(is_active), pulse, phys)
+        key = (color, bool(pressed), bool(is_active), pulse, phys, bool(hover))
         cache = getattr(self, "_mic_photo_cache", None)
         if cache is None:
             cache = self._mic_photo_cache = {}
@@ -7679,71 +8123,12 @@ class WayfinderApp(ctk.CTk):
             cache.clear()
 
         from PIL import ImageTk
-        SS = 4
-        S = phys * SS
-        k = S / 80.0  # the design is authored in 80px units
-        img = Image.new("RGB", (S, S), COLORS["bg_card"])
-        draw = ImageDraw.Draw(img)
-        cx = cy = S / 2.0
+        from wayfinder.ui.mic_button import render_mic_button
 
-        r = int(color[1:3], 16); g = int(color[3:5], 16); b = int(color[5:7], 16)
-        bg_r = int(COLORS["bg_card"][1:3], 16)
-        bg_g = int(COLORS["bg_card"][3:5], 16)
-        bg_b = int(COLORS["bg_card"][5:7], 16)
-
-        def blend(intensity: float) -> tuple:
-            i = min(intensity, 1.0)
-            return (int(bg_r + (r - bg_r) * i),
-                    int(bg_g + (g - bg_g) * i),
-                    int(bg_b + (b - bg_b) * i))
-
-        def circle(radius: float, fill) -> None:
-            draw.ellipse([cx - radius * k, cy - radius * k,
-                          cx + radius * k, cy + radius * k], fill=fill)
-
-        stroke = max(1, round(2 * k))
-        r_units = 24  # button radius in design units (80px canvas)
-        icon_px = max(1, int(30 * k))  # Lucide glyph box in SS px
-
-        def paste_glyph(hex_color: str) -> None:
-            # tint_icon is pure-PIL and only runs on a cache miss (this whole
-            # render is memoized per key) — no per-frame decode.
-            glyph = tint_icon("mic", hex_color, icon_px)
-            img.paste(glyph, (int(cx - icon_px / 2), int(cy - icon_px / 2)), glyph)
-
-        if pulse is not None:
-            # Recording: filled circle + rounded bg_base stop-square, with a
-            # subtle expanding breath ring driven by the (quantized) pulse. The
-            # caller's pulse breathes in [0.8,1.0]; map it to a 0..1 expand.
-            # Ring floor/range tuned at real 80px: the first cut (0.05+0.28)
-            # faded to imperceptible in the wide frames, so the breath didn't
-            # read — 0.10+0.45 with a 3-unit stroke tracks visibly through the
-            # whole cycle while staying low-alpha.
-            expand = min(max((pulse - 0.8) / 0.2, 0.0), 1.0)
-            rr = (r_units + 4 + 8 * expand) * k
-            ring_intensity = 0.10 + 0.45 * (1.0 - expand)  # bright small -> dim wide
-            ring_stroke = max(1, round(3 * k))
-            draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr],
-                         outline=blend(ring_intensity), width=ring_stroke)
-            circle(r_units * (0.98 + 0.02 * expand), color)
-            sq = 9 * k
-            rad = max(1, round(3 * k))
-            draw.rounded_rectangle([cx - sq, cy - sq, cx + sq, cy + sq],
-                                   radius=rad, fill=COLORS["bg_base"])
-        elif is_active:
-            # PROCESSING / PASTING (and the transient first RECORDING frame):
-            # circle fills with the state colour, dark mic glyph on top.
-            circle(r_units, color)
-            paste_glyph(COLORS["bg_base"])
-        else:
-            # Idle / hover: thin state-colour outline + muted mic glyph. Hover
-            # brightening of `color` is applied by _draw_mic_button upstream.
-            draw.ellipse([cx - r_units * k, cy - r_units * k,
-                          cx + r_units * k, cy + r_units * k],
-                         outline=color, width=stroke)
-            paste_glyph(COLORS["text_secondary"])
-
-        img = img.resize((phys, phys), Image.LANCZOS)
+        img = render_mic_button(
+            phys, color, card=COLORS["bg_card"], ink=COLORS["bg_base"],
+            light=COLORS["text_primary"], active=is_active, pulse=pulse, hover=hover,
+        )
         photo = ImageTk.PhotoImage(img)
         cache[key] = photo
         return photo
@@ -7770,7 +8155,8 @@ class WayfinderApp(ctk.CTk):
 
         try:
             phys = self._mic_button_phys()
-            photo = self._render_mic_button_photo(color, pressed=pressed, is_active=is_active)
+            photo = self._render_mic_button_photo(color, pressed=pressed, is_active=is_active,
+                                                  hover=hover)
             canvas.delete("all")
             canvas.create_image(phys // 2, phys // 2, image=photo)
             self._mic_photo = photo  # keep a ref — Tk doesn't
@@ -8010,9 +8396,7 @@ class WayfinderApp(ctk.CTk):
         pen instead of an emoji suffix (rule 11: no emoji as UI chrome)."""
         if unlocked:
             return "pen-line", "Style"
-        if IS_MACOS:
-            return "lock", "Style"
-        return "pen-line", "Style  🔒"
+        return "lock", "Style"
 
     def _create_sidebar(self, parent) -> None:
         """Create the vertical sidebar navigation."""
@@ -8051,7 +8435,7 @@ class WayfinderApp(ctk.CTk):
             ("settings", "settings-2", "Settings"),
             ("style", style_icon, style_label),
         ]
-        if IS_MACOS:
+        if IS_MACOS or IS_WINDOWS or _IS_LINUX:
             tabs.append(("games", "gamepad-2", "Games"))
         tabs.append(("history", "history", "History"))
 
@@ -8265,7 +8649,11 @@ class WayfinderApp(ctk.CTk):
                 from wayfinder.ui.ui_inspect import write_inspection
 
                 self.update_idletasks()
-                path = Path(SOCKET_PATH).parent / f"ui-inspect-{tab_id}.json"
+                if sys.platform == "win32":
+                    from wayfinder.utils.platform import get_cache_dir
+                    path = get_cache_dir() / f"ui-inspect-{tab_id}.json"
+                else:
+                    path = Path(SOCKET_PATH).parent / f"ui-inspect-{tab_id}.json"
                 summary = write_inspection(self.tab_frames[tab_id], self, path)
                 self.log(f"🔎 Inspected {tab_id}: {len(summary['texts'])} texts, "
                          f"{len(summary['clipped'])} clipped → {path.name}")
@@ -8667,6 +9055,21 @@ class WayfinderApp(ctk.CTk):
             anchor="w",
         )
         self.transcription_label.pack(fill="x", padx=16, pady=(0, 8))
+        if IS_WINDOWS and not IS_MACOS:
+            # Wrap to the card, capped at a readable measure: the fixed 380
+            # filled a quarter of the card on a wide window. CTkFrame.bind
+            # lands on its canvas, and CTk scales wraplength itself, so pass
+            # design units.
+            def _rewrap_transcription(event, label=self.transcription_label):
+                if event.width <= 40:
+                    return
+                try:
+                    width = event.width / label._get_widget_scaling() - 32
+                    label.configure(wraplength=int(min(760, max(240, width))))
+                except Exception:
+                    pass
+
+            trans_card.bind("<Configure>", _rewrap_transcription, add="+")
 
         # Compact setup row: model · Local/Remote · hotkey (always useful, no dead void).
         setup_row = ctk.CTkFrame(trans_card, fg_color="transparent")
@@ -9067,7 +9470,7 @@ class WayfinderApp(ctk.CTk):
             checkbox.pack(side="right", padx=(8, 0))
             self._hotkey_mod_checks[mod] = checkbox
 
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             # How the chosen hotkey behaves (tap/hold) or what it collides with.
             self._hotkey_mod_shell = _mod_shell
             self._hotkey_hint_label = ctk.CTkLabel(
@@ -9085,8 +9488,8 @@ class WayfinderApp(ctk.CTk):
         # Access UI via tray icon -> "Open Settings"
         
         # Hotkey devices dropdown (inline)
-        # On macOS, pynput listens globally — no per-device filtering
-        if sys.platform == "darwin":
+        # On macOS and Windows, pynput listens globally — no per-device filtering
+        if sys.platform in ("darwin", "win32"):
             all_devices = []
             device_names = []
             device_options = ["All Devices (Global)"]
@@ -9151,7 +9554,10 @@ class WayfinderApp(ctk.CTk):
             ),
         )
 
-        if IS_MACOS:
+        if _IS_LINUX and not (IS_MACOS or IS_WINDOWS):
+            self._create_portal_typing_row(system_content)
+
+        if IS_MACOS or IS_WINDOWS:
             self._create_login_item_row(system_content)
 
         yield "system"
@@ -9385,8 +9791,9 @@ class WayfinderApp(ctk.CTk):
         self.benchmark_status_label.pack(side="left", padx=(15, 0))
 
         # Thin indeterminate busy bar under the button row — hidden until a run starts.
-        # Driven by our own 100ms (~10fps) tick (_tick_benchmark_bar); NEVER .start()
-        # (its internal loop re-arms every 20ms, banned by rule 1 + the ratchet test).
+        # Driven by our own ~30 fps, wall-clock-placed tick (_tick_benchmark_bar) that
+        # only runs during a benchmark; NEVER .start() (its internal loop re-arms every
+        # 20ms, banned by rule 1 + the ratchet test).
         self.benchmark_progress = ctk.CTkProgressBar(
             benchmark_content,
             height=4,
@@ -9647,8 +10054,13 @@ class WayfinderApp(ctk.CTk):
         self.log("   📊 Updated tooltips with new benchmark data")
     
     def _tick_benchmark_bar(self) -> None:
-        """Advance the indeterminate benchmark bar at 100ms (~10fps, ratchet-safe;
-        NEVER .start() — that re-arms every 20ms). Self-cancels and hides the bar once
+        """Animate the indeterminate benchmark bar at ~30 fps while a benchmark runs.
+
+        At 10 fps (.step() every 100 ms) the sweep looked jittery. The bar is now
+        placed from wall-clock time at CTk's own .step() pace (10 units/s), so a
+        frame delayed by the CPU benchmark lands where the bar should be instead
+        of stuttering; a 4 px bar redraw costs nothing measurable. NEVER .start()
+        (that re-arms every 20ms). Self-cancels and hides the bar once
         _benchmark_running clears (set in the benchmark's completion/error path)."""
         if not getattr(self, "_benchmark_running", False):
             try:
@@ -9656,12 +10068,20 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
             return
+        bar = self.benchmark_progress
         try:
-            self.benchmark_progress.step()
+            t0 = getattr(self, "_benchmark_bar_t0", None)
+            if t0 is None:
+                t0 = self._benchmark_bar_t0 = time.monotonic()
+            bar._indeterminate_value = (time.monotonic() - t0) * 10.0
+            bar._draw()
         except Exception:
-            pass
+            try:
+                bar.step()
+            except Exception:
+                pass
         try:
-            self.after(100, self._tick_benchmark_bar)
+            self.after(33, self._tick_benchmark_bar)
         except Exception:
             pass
 
@@ -9731,7 +10151,7 @@ class WayfinderApp(ctk.CTk):
             timer_state["seconds"] += 1
             phase = timer_state["phase"]
             try:
-                self.benchmark_test_btn.configure(text=f"⏳ {phase} {timer_state['seconds']}s")
+                self.benchmark_test_btn.configure(text=f"{phase} · {timer_state['seconds']}s")
                 timer_state["timer_id"] = self.after(1000, update_timer)
             except Exception:
                 pass
@@ -9745,10 +10165,15 @@ class WayfinderApp(ctk.CTk):
                     pass
         
         # Disable button and start timer
-        self.benchmark_test_btn.configure(state="disabled", text="⏳ Starting 0s", fg_color=COLORS["accent_green"])
+        # Disabled while running: keep the label dark on the mint fill (CTk's
+        # default disabled grey washed out); no emoji as UI chrome (rule 11).
+        self.benchmark_test_btn.configure(state="disabled", text="Starting · 0s",
+                                          fg_color=COLORS["accent_green"],
+                                          text_color_disabled="#000000")
         self.benchmark_status_label.configure(text=f"Preparing {model_name}...")
-        # Show + drive the indeterminate busy bar (our own >=100ms tick, never .start()).
+        # Show + drive the indeterminate busy bar (our own ~30 fps tick, never .start()).
         self._benchmark_running = True
+        self._benchmark_bar_t0 = time.monotonic()
         try:
             self.benchmark_progress.pack(fill="x", pady=(8, 0))
             self._tick_benchmark_bar()
@@ -10486,9 +10911,8 @@ class WayfinderApp(ctk.CTk):
         self.gpu_var = ctk.BooleanVar(value=_want_gpu and _gpu_unlocked)
         _gpu_label = (
             "GPU Acceleration" if _gpu_unlocked
-            # macOS: no emoji chrome (rule 11) — same "(Ultra)" as Chunk Processing.
-            else "GPU Acceleration (Ultra)" if IS_MACOS
-            else "GPU Acceleration  🔒 Ultra"
+            # No emoji chrome (rule 11) — same "(Ultra)" as Chunk Processing.
+            else "GPU Acceleration (Ultra)"
         )
         self.create_toggle_row(
             parent, _gpu_label,
@@ -10496,7 +10920,9 @@ class WayfinderApp(ctk.CTk):
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
             tooltip_key="gpu_acceleration",
         )
-        
+        if IS_WINDOWS and not IS_MACOS and _gpu_unlocked:
+            self._create_windows_gpu_device_row(parent)
+
         # No Accuracy Mode control: beam search never beat greedy decoding in
         # testing (docs/EVAL-2026-09-24.md), so whisper.cpp always runs greedy.
 
@@ -10515,7 +10941,11 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("openai_whisper", "groq_whisper"):
             backend = "whisper_cpp"  # Default to local backend
-        show_fw = bool(get_gpu_info().is_nvidia) or backend == "faster_whisper"
+        # The Windows bundle has no Faster-Whisper/PyTorch: never offer it there,
+        # even now that Windows detects an NVIDIA GPU.
+        show_fw = (
+            bool(get_gpu_info().is_nvidia) and not (IS_WINDOWS and not IS_MACOS)
+        ) or backend == "faster_whisper"
         self._backend_display_map = {
             "Auto (whisper.cpp)": "auto",
             "whisper.cpp": "whisper_cpp",
@@ -10858,7 +11288,7 @@ class WayfinderApp(ctk.CTk):
             self.remote_api_btn.configure(text=status)
     
     def _build_macos_key_help(self, parent, provider: str, key_var, *, on_removed=None) -> None:
-        """macOS: how to get the key, a free Verify check, and where it is stored.
+        """macOS/Windows: how to get the key, a free Verify check, and where it is stored.
 
         ``provider`` is "groq" | "openai" | "anthropic". Verification runs off
         the Tk thread and only ever talks to the provider's own HTTPS host.
@@ -10866,11 +11296,12 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.core.cloud_keys import PROVIDERS, clean_key, format_warning, verify_key
 
         info = PROVIDERS[provider]
+        steps = info.steps.replace("(⌘V)", "(Ctrl+V)") if IS_WINDOWS else info.steps
         box = ctk.CTkFrame(parent, fg_color="transparent")
         box.pack(fill="x", padx=16, pady=(0, 12))
 
         ctk.CTkLabel(
-            box, text=f"Don't have a key yet?\n{info.steps}",
+            box, text=f"Don't have a key yet?\n{steps}",
             font=(self.font_body[0], self.font_sizes["small"]),
             text_color=COLORS["text_secondary"], justify="left", anchor="w",
         ).pack(anchor="w", pady=(0, 4))
@@ -10946,7 +11377,7 @@ class WayfinderApp(ctk.CTk):
                             "anthropic_api_key": "ANTHROPIC_API_KEY"}[info.key], None)
             save_config(self.config)
             self.log(f"⚙ {info.name} API key removed")
-            show(f"{info.name} key removed from this Mac.", COLORS["text_secondary"])
+            show(f"{info.name} key removed from this {_device_noun()}.", COLORS["text_secondary"])
             if on_removed is not None:
                 on_removed()
 
@@ -10960,12 +11391,17 @@ class WayfinderApp(ctk.CTk):
             ).pack(side="left", padx=(8, 0))
 
         try:
-            from wayfinder.utils import macos_keychain
-            stored_where = ("Stored in your Mac's Keychain — never in Aura's settings file."
-                            if macos_keychain.available() and not os.environ.get("WAYFINDER_DISABLE_KEYCHAIN")
-                            else "Stored only in Aura's private settings file on this Mac.")
+            if IS_WINDOWS:
+                from wayfinder.utils import windows_credentials as secret_store
+                in_store = "Stored in Windows Credential Manager — never in Aura's settings file."
+            else:
+                from wayfinder.utils import macos_keychain as secret_store
+                in_store = "Stored in your Mac's Keychain — never in Aura's settings file."
+            stored_where = (in_store
+                            if secret_store.available() and not os.environ.get("WAYFINDER_DISABLE_KEYCHAIN")
+                            else f"Stored only in Aura's private settings file on this {_device_noun()}.")
         except Exception:
-            stored_where = "Stored only on this Mac."
+            stored_where = f"Stored only on this {_device_noun()}."
         ctk.CTkLabel(
             box, text=stored_where,
             font=(self.font_body[0], self.font_sizes["caption"]),
@@ -11044,7 +11480,7 @@ class WayfinderApp(ctk.CTk):
                 hover_color=COLORS["accent_dim"],
             ).pack(anchor="w", padx=16, pady=(0, 16))
 
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 self._build_macos_key_help(
                     form_frame, "groq" if is_groq else "openai", key_var,
                     on_removed=self._update_remote_api_status,
@@ -11072,7 +11508,7 @@ class WayfinderApp(ctk.CTk):
             # Save button
             def save_and_close():
                 key = key_var.get().strip()
-                if sys.platform == "darwin":
+                if sys.platform in ("darwin", "win32"):
                     key = "".join(key.split())
                     if not key and self.config.get(config_key):
                         # Emptied field + Save removes the key (Keychain too).
@@ -12251,6 +12687,102 @@ class WayfinderApp(ctk.CTk):
         state = "on" if self.config["press_enter_after_dictation"] else "off"
         self.log(f"↵ Auto press Enter after dictation: {state}")
 
+    def _start_portal_keyboard(self, ask_again: bool = False) -> None:
+        """Wayland desktops: open the RemoteDesktop portal keyboard so dictation
+        reaches native Wayland apps too (core/portal_keyboard.py). Tk thread."""
+        if not _IS_LINUX or IS_MACOS or IS_WINDOWS:
+            return
+        if not self.config.get("linux_portal_typing", True):
+            return
+        try:
+            from wayfinder.core import portal_keyboard
+            from wayfinder.core.injector import set_portal_clipboard_hooks
+            if not portal_keyboard.host_is_wayland_desktop():
+                return
+        except Exception:
+            return
+        # Characters the keyboard layout lacks are pasted: our Tk window owns
+        # the clipboard (the Flatpak has no clipboard tools).
+        set_portal_clipboard_hooks(self._set_clipboard_from_worker)
+        try:
+            parent = f"x11:{int(self.wm_frame(), 16):x}"
+        except Exception:
+            parent = ""
+        kb = portal_keyboard.keyboard()
+        if not getattr(self, "_portal_listener_added", False):
+            kb.on_change(self._on_portal_keyboard_state)
+            self._portal_listener_added = True
+
+        def _go():
+            if not portal_keyboard.portal_keyboard_offered():
+                self.log("⌨️ This desktop offers no remote-control keyboard: "
+                         "Aura types with xdotool (X11 apps and games only)")
+                return
+            kb.start(parent_window=parent, ask_again=ask_again, log=self.log)
+
+        threading.Thread(target=_go, daemon=True, name="wayfinder-portal-start").start()
+
+    def _on_portal_keyboard_state(self, state: str, detail: str) -> None:
+        """Portal keyboard state changes (session thread; self.log is thread-safe)."""
+        from wayfinder.core.portal_keyboard import PortalKeyboard as _PK
+
+        if state == _PK.READY:
+            self.log("✓ Text injection: desktop portal (types into every app, "
+                     "Wayland and X11)")
+        elif state == _PK.DECLINED:
+            self.log("⌨️ Desktop portal typing not allowed: Aura types into X11 apps "
+                     "and games only. Turn on 'Type into every app' in Settings to ask again.")
+        elif state == _PK.FAILED:
+            self.log(f"⚠️ Desktop portal typing unavailable ({detail}): using xdotool")
+        elif state == _PK.CLOSED:
+            self.log(f"⚠️ Desktop portal typing ended ({detail}): using xdotool until "
+                     "Aura restarts")
+
+    def _on_portal_typing_toggled(self) -> None:
+        """Settings switch: type through the desktop portal (Wayland)."""
+        on = bool(self._portal_typing_var.get())
+        self.config["linux_portal_typing"] = on
+        save_config(self.config)
+        if on:
+            self.log("⌨️ Type into every app: on")
+            self._start_portal_keyboard(ask_again=True)
+        else:
+            try:
+                from wayfinder.core import portal_keyboard
+                portal_keyboard.keyboard().close()
+            except Exception:
+                pass
+            self.log("⌨️ Type into every app: off (xdotool: X11 apps and games only)")
+
+    def _create_portal_typing_row(self, parent) -> None:
+        """Linux on a Wayland desktop: the portal typing switch."""
+        try:
+            from wayfinder.core.portal_keyboard import host_is_wayland_desktop
+            if not host_is_wayland_desktop():
+                return
+        except Exception:
+            return
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            row, text="Type into every app",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+        self._portal_typing_var = ctk.BooleanVar(
+            value=bool(self.config.get("linux_portal_typing", True))
+        )
+        ctk.CTkSwitch(
+            row, text="",
+            variable=self._portal_typing_var,
+            command=self._on_portal_typing_toggled,
+            width=40, height=22, switch_width=36, switch_height=18,
+            corner_radius=RADIUS["sm"] + 1,  # pill: height/2, intentional off-token
+            fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"], button_hover_color=COLORS["text_bright"],
+        ).pack(side="right")
+        ToolTip(row, SETTING_TOOLTIPS["linux_portal_typing"])
+
     def _on_overlay_enabled_toggled(self) -> None:
         """Persist Show Overlay and apply immediately — no app restart required.
 
@@ -12480,14 +13012,16 @@ class WayfinderApp(ctk.CTk):
     @staticmethod
     def _socket_tab_ids() -> tuple[str, ...]:
         """Tabs the control socket may open (tab:/inspect:)."""
-        return ("dictate", "settings", "style", "history") + (("games",) if IS_MACOS else ())
+        return ("dictate", "settings", "style", "history") + (
+            ("games",) if (IS_MACOS or IS_WINDOWS or _IS_LINUX) else ())
 
     def _create_games_tab(self) -> None:
         """Games tab (macOS): Gamer mode switches, how it works, and a searchable
         list of games with Steam Deck-style verdicts (Verified / Playable /
         Untested / Not recommended). Aura never restricts a game; the list
-        explains where it works best and where it's a bad idea."""
-        from wayfinder.core import macos_game_chat as game_chat
+        explains where it works best and where it's a bad idea. Windows shows
+        the same tab from windows_game_chat."""
+        game_chat = _game_chat_module()
 
         frame = ctk.CTkFrame(self.tab_content_container, **_tab_surface_kwargs())
         self.tab_frames["games"] = frame
@@ -12708,8 +13242,8 @@ class WayfinderApp(ctk.CTk):
         # Do NOT overwrite them here!
     
     def _macos_glass_rim_kwargs(self) -> dict:
-        """Lifted edge that defines a pane against the macOS glass."""
-        if IS_MACOS and macos_glass_enabled():
+        """Lifted edge that defines a pane against the macOS glass (and the Windows surface)."""
+        if (IS_MACOS and macos_glass_enabled()) or MAC_LOOK:
             return {"border_width": 1, "border_color": COLORS["border_rim"]}
         return {}
 
@@ -12719,6 +13253,13 @@ class WayfinderApp(ctk.CTk):
             return {
                 "fg_color": COLORS["bg_base"],
                 "bg_color": MACOS_TRANSPARENT,
+                "corner_radius": RADIUS["lg"],
+                **self._macos_glass_rim_kwargs(),
+            }
+        if MAC_LOOK:
+            return {
+                "fg_color": COLORS["bg_base"],
+                "bg_color": WINDOWS_GLASS_SURFACE,
                 "corner_radius": RADIUS["lg"],
                 **self._macos_glass_rim_kwargs(),
             }
@@ -12748,8 +13289,8 @@ class WayfinderApp(ctk.CTk):
 
     def _draw_gradient_bg(self, event=None):
         """Draw ambient gradient - GitHub Dark base with blue warmth."""
-        if IS_MACOS and macos_glass_enabled():
-            return  # native vibrancy is the backdrop
+        if (IS_MACOS and macos_glass_enabled()) or MAC_LOOK:
+            return  # native vibrancy (Windows/Linux: the flat glass surface) is the backdrop
         # Skip when window is not visible
         try:
             if self.state() in ("iconic", "withdrawn"):
@@ -12832,6 +13373,60 @@ class WayfinderApp(ctk.CTk):
             self.preprocess_desc_label.configure(text=self._get_preprocess_desc(value))
         self.log(f"⚙ Audio processing: {value}")
     
+    def _create_windows_gpu_device_row(self, parent) -> None:
+        """Windows + Ultra: which GPU transcribes, when there is a choice.
+
+        Automatic picks the discrete GPU; a PC may prefer its integrated Radeon
+        while the big card is busy with games or a local LLM. Devices come from
+        the bundled Vulkan whisper build (ggml's own ordering, sub-second probe).
+        """
+        try:
+            from wayfinder.utils.gpu_simple import detect_gpu_devices
+
+            devices = detect_gpu_devices(self.config)
+        except Exception:
+            devices = []
+        if len(devices) < 2:
+            return
+        choices = {"Automatic": "auto"}
+        for device in devices:
+            label = device.name.split(" (")[0]  # drop "(AMD proprietary driver)"
+            if label in choices:
+                label = f"{label} #{device.index}"
+            choices[label] = str(device.index)
+        self._gpu_device_map = choices
+        current = str(self.config.get("gpu_device", "auto"))
+        shown = next((k for k, v in choices.items() if v == current), "Automatic")
+        self.gpu_device_var = ctk.StringVar(value=shown)
+        self.create_dropdown_row(
+            parent, "GPU", list(choices), self.gpu_device_var, self._on_gpu_device_changed,
+            tooltip=SETTING_TOOLTIPS["gpu_device"], width=220,
+        )
+
+    def _on_gpu_device_changed(self, shown: str) -> None:
+        """Apply a GPU choice live: the next dictation respawns whisper-server on it."""
+        value = getattr(self, "_gpu_device_map", {}).get(shown, "auto")
+        self.config["gpu_device"] = value
+        save_config(self.config)
+        if value == "auto":
+            os.environ.pop("GGML_VK_VISIBLE_DEVICES", None)
+            try:
+                from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
+                                 daemon=True).start()
+            except Exception:
+                pass
+        else:
+            os.environ["GGML_VK_VISIBLE_DEVICES"] = value
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+
+            WhisperServerBackend.shutdown()
+        except Exception:
+            pass
+        self.log(f"⚙ GPU: {shown} — applied")
+
     def on_language_changed(self, value: str):
         """Handle language change from dropdown."""
         self.config["language"] = value
@@ -13038,6 +13633,16 @@ class WayfinderApp(ctk.CTk):
             return
         self.config["use_gpu"] = want
         save_config(self.config)
+        if want and IS_WINDOWS and not IS_MACOS:
+            # Startup skips the GPU probe in CPU mode: pick the device now (the
+            # configured gpu_device, else the discrete GPU), off the Tk thread.
+            try:
+                from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
+                                 daemon=True).start()
+            except Exception:
+                pass
         # Apply live: drop the resident whisper-server so the next dictation respawns
         # it in the new CPU/GPU mode — no app restart needed.
         try:
@@ -14366,7 +14971,22 @@ class WayfinderApp(ctk.CTk):
             _svc = ("systemctl --user enable --now ydotool.service"
                     if _detect_package_manager() == "pacman"
                     else "sudo systemctl enable --now ydotoold")
-            if not shutil.which("ydotool"):
+            # Report the tool that will actually type (the injector's own choice):
+            # the Flatpak types with xdotool, so a missing ydotool is not a problem
+            # there and warning "text injection won't work" was false.
+            try:
+                from wayfinder.utils.platform import get_text_injector
+                _tool = get_text_injector()
+            except Exception:
+                _tool = None
+            # Wayland desktops: the portal keyboard types into every app; it
+            # takes over from xdotool once the desktop allows it.
+            self._start_portal_keyboard()
+            if _tool == "xdotool":
+                self.log("✓ Text injection: xdotool")
+            elif _tool == "wtype":
+                self.log("✓ Text injection: wtype (Wayland virtual keyboard)")
+            elif not shutil.which("ydotool"):
                 self.log("⚠️ ydotool not found - text injection won't work")
                 self.log(f"💡 Install: {_get_install_hint('ydotool')}")
                 self.log(f"💡 Then enable the daemon: {_svc}")
@@ -14448,10 +15068,15 @@ class WayfinderApp(ctk.CTk):
             latest = info.get("latest_version", "")
             self._app_update_info = dict(info)
             text = f"Update available: {latest} (you have {current_version})."
-            if IS_FLATPAK:
-                text += " Update via your software center, or download from GitHub."
+            if _IS_LINUX and info.get("download_url"):
+                # The GitHub bundle has no update channel (not on Flathub yet):
+                # the new file is downloaded and opened by the user.
+                if IS_FLATPAK:
+                    text += " Get Update downloads it; open the file to install it."
+                else:
+                    text += " Get Update downloads the new AppImage; run it instead of this one."
             label.configure(text=text)
-            if IS_MACOS:
+            if IS_MACOS or IS_WINDOWS:
                 # A manual check may have hidden Get Update for a status line.
                 self._set_app_update_button_visible(True)
             if not banner.winfo_manager():
@@ -14492,9 +15117,10 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.core.app_updates import RELEASES_PAGE
         info = getattr(self, "_app_update_info", {})
         url = info.get("release_url") or RELEASES_PAGE
-        if IS_MACOS:
-            # Mac updates always carry a DMG (core/app_updates): download it
-            # in one click, falling back to the release page.
+        if IS_MACOS or IS_WINDOWS or _IS_LINUX:
+            # Mac/Windows updates always carry a DMG / Setup exe, Linux
+            # packages their Flatpak bundle / AppImage (core/app_updates):
+            # download it in one click, falling back to the release page.
             url = info.get("download_url") or url
         self._open_url(url)
 
@@ -14675,8 +15301,12 @@ class WayfinderApp(ctk.CTk):
                 # The socket listener can die on a transient bind failure, or wedge after
                 # binding/listening so the thread remains alive but the KDE/tray command
                 # socket refuses clients. Verify a real ping response, not just thread liveness.
-                # (Windows has no AF_UNIX command socket — skip, don't log-spam a restart.)
-                if sys.platform != "win32":
+                # (Windows: the loopback control channel; restart it only if its thread died.)
+                if sys.platform == "win32":
+                    if self._socket_thread is None or not self._socket_thread.is_alive():
+                        self.log("🔄 Control channel not running - restarting...")
+                        self._ensure_socket_listener()
+                else:
                     if self._socket_thread is None or not self._socket_thread.is_alive():
                         self.log("🔄 Socket listener not running - restarting...")
                         self._ensure_socket_listener()
@@ -14793,7 +15423,7 @@ class WayfinderApp(ctk.CTk):
                 name = Path(model_path).name
                 return name[:25] + "..." if len(name) > 25 else name
             return "No model selected"
-        elif backend in ("anthropic", "openai") and sys.platform == "darwin":
+        elif backend in ("anthropic", "openai") and sys.platform in ("darwin", "win32"):
             key_name = f"{backend}_api_key"
             model_key = f"{backend}_model"
             model = self.config.get(model_key) or ""
@@ -14976,7 +15606,7 @@ class WayfinderApp(ctk.CTk):
                     variable=form_data["openai_model"],
                     values=(
                         _macos_cloud_models("openai")
-                        if sys.platform == "darwin"
+                        if sys.platform in ("darwin", "win32")
                         else ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
                     ),
                     font=(self.font_body[0], self.font_sizes["body"]),
@@ -15001,7 +15631,7 @@ class WayfinderApp(ctk.CTk):
                     wraplength=460,
                 ).pack(anchor="w", pady=(0, 8))
 
-                if sys.platform == "darwin":
+                if sys.platform in ("darwin", "win32"):
                     self._build_macos_key_help(api_frame, "openai", form_data["openai_key"])
                     return
 
@@ -15071,7 +15701,7 @@ class WayfinderApp(ctk.CTk):
                     variable=form_data["anthropic_model"],
                     values=(
                         _macos_cloud_models("anthropic")
-                        if sys.platform == "darwin"
+                        if sys.platform in ("darwin", "win32")
                         else [
                             "claude-3-haiku-20240307",
                             "claude-3-5-haiku-20241022",
@@ -15097,7 +15727,7 @@ class WayfinderApp(ctk.CTk):
                     settings_container,
                     text=(
                         "Claude Haiku is fast and affordable. Sonnet is higher quality but slower."
-                        if sys.platform == "darwin"
+                        if sys.platform in ("darwin", "win32")
                         else "Claude Haiku is fast and cheap (~$0.25/1M tokens). Sonnet is higher quality but slower."
                     ),
                     font=(self.font_body[0], self.font_sizes["caption"]),
@@ -15105,7 +15735,7 @@ class WayfinderApp(ctk.CTk):
                     wraplength=460,
                 ).pack(anchor="w", pady=(0, 8))
 
-                if sys.platform == "darwin":
+                if sys.platform in ("darwin", "win32"):
                     self._build_macos_key_help(api_frame, "anthropic", form_data["anthropic_key"])
                     return
                 
@@ -15131,7 +15761,7 @@ class WayfinderApp(ctk.CTk):
             
             # Save OpenAI settings (to both env and config for persistence)
             openai_key = form_data["openai_key"].get().strip()
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 # An emptied field removes the key (config, Keychain, env).
                 openai_key = "".join(openai_key.split())
                 if not openai_key:
@@ -15144,7 +15774,7 @@ class WayfinderApp(ctk.CTk):
             
             # Save Anthropic settings (to both env and config for persistence)
             anthropic_key = form_data["anthropic_key"].get().strip()
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 anthropic_key = "".join(anthropic_key.split())
                 if not anthropic_key:
                     self.config["anthropic_api_key"] = ""
@@ -15161,7 +15791,7 @@ class WayfinderApp(ctk.CTk):
                 self.postproc_config_btn.configure(text=self._get_postproc_config_display())
             if hasattr(self, 'postproc_backend_var'):
                 self.postproc_backend_var.set(provider)
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 # The transcription row reflects the TRANSCRIPTION provider's
                 # key, not whichever cleanup key happens to be set.
                 self._update_remote_api_status()
@@ -15759,7 +16389,10 @@ class WayfinderApp(ctk.CTk):
             progress_color=COLORS["accent_bright"] if "accent_bright" in COLORS else COLORS["accent"],
             button_color=COLORS["text_bright"],
             button_hover_color=COLORS["text_primary"],
-            fg_color=COLORS["bg_input"],
+            # Off track: bg_elevated like every other switch. bg_input is nearly
+            # the card colour on the glass palette, so the track vanished and
+            # only the knob showed.
+            fg_color=COLORS["bg_elevated"],
             switch_width=44,
             switch_height=24,
             corner_radius=RADIUS["md"],
@@ -15930,6 +16563,30 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
 
+    def _surface_model_path_notices(self) -> None:
+        """Log load_config()'s model-path notices; show problems on the Dictate tab.
+
+        A selected model that disappeared used to be replaced by bundled Base.en
+        with no word to the user. The fallback stays, but it is now explained in
+        the activity log and in the dismissible Dictate-tab banner.
+        """
+        try:
+            from wayfinder.config import consume_model_path_notices
+            notices = consume_model_path_notices()
+        except Exception:
+            return
+        problems: list[str] = []
+        for notice in notices:
+            message, is_problem = _format_model_path_notice(notice)
+            self.log(message)
+            if is_problem:
+                problems.append(message.lstrip("⚠ ").strip())
+        if problems:
+            try:
+                self._show_error_banner(" ".join(problems))
+            except Exception:
+                pass
+
     def _macos_permission_state(self) -> tuple[bool | None, bool | None]:
         if not IS_MACOS:
             return True, True
@@ -15952,6 +16609,10 @@ class WayfinderApp(ctk.CTk):
         label = getattr(self, "macos_permission_label", None)
         button = getattr(self, "macos_permission_open_btn", None)
         anchor = getattr(self, "_dictate_banner_anchor", None)
+        if (IS_WINDOWS and not IS_MACOS and banner is not None and label is not None
+                and button is not None):
+            self._refresh_windows_microphone_banner(banner, label, button, anchor)
+            return
         if not IS_MACOS or banner is None or label is None or button is None:
             return
         try:
@@ -16027,7 +16688,64 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _on_windows_end_session(self) -> None:
+        """Lifecycle thread: Windows is ending the session, or an installer is
+        closing Aura. Windows may end the process as soon as this returns, so
+        put ducked audio back first, then quit on the Tk thread. close() takes
+        the ducker's lock (waiting out a duck in progress), restores the volume
+        and makes any queued duck a no-op, so nothing can lower it again before
+        the process ends."""
+        try:
+            ducker = getattr(self, "audio_ducker", None)
+            if ducker is not None:
+                ducker.close()
+        except Exception:
+            pass
+        self.event_queue.put((EventType.QUIT_APP, None))
+
+    def _log_windows_hotkey_conflict(self) -> None:
+        try:
+            from wayfinder.utils.windows_hotkey_conflicts import conflict_for
+
+            message = conflict_for(self.config.get("hotkey_key"),
+                                   self.config.get("hotkey_modifiers", []))
+        except Exception:
+            message = None
+        if message:
+            self.log(f"⚠ Hotkey {self.get_hotkey_display()}: {message}")
+
+    def _refresh_windows_microphone_banner(self, banner, label, button, anchor) -> None:
+        """Windows: the Mac's "microphone is blocked" banner, from the privacy switches."""
+        try:
+            from wayfinder.utils.windows_privacy import microphone_block
+
+            block = microphone_block()
+        except Exception:
+            block = None
+        self._missing_macos_permission = "microphone" if block else None
+        try:
+            if block is None:
+                banner.pack_forget()
+                return
+            label.configure(text=(
+                "Wayfinder Aura can't hear you: Windows is blocking the microphone. "
+                "Turn on microphone access for desktop apps, then try a dictation."))
+            button.configure(text="Open Microphone")
+            if not banner.winfo_manager():
+                if anchor is not None:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+                else:
+                    banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
     def _open_missing_macos_permission(self) -> None:
+        if IS_WINDOWS and not IS_MACOS:
+            from wayfinder.utils.windows_privacy import open_microphone_settings
+
+            if not open_microphone_settings():
+                self.log("⚠ Could not open Windows microphone privacy settings")
+            return
         permission = getattr(self, "_missing_macos_permission", None)
         if permission is None:
             self._refresh_macos_permission_banner()
@@ -16125,30 +16843,6 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_restart, daemon=True, name="pynput-restart").start()
 
-    def _surface_model_path_notices(self) -> None:
-        """Log load_config()'s model-path notices; show problems on the Dictate tab.
-
-        A selected model that disappeared used to be replaced by bundled Base.en
-        with no word to the user. The fallback stays, but it is now explained in
-        the activity log and in the dismissible Dictate-tab banner.
-        """
-        try:
-            from wayfinder.config import consume_model_path_notices
-            notices = consume_model_path_notices()
-        except Exception:
-            return
-        problems: list[str] = []
-        for notice in notices:
-            message, is_problem = _format_model_path_notice(notice)
-            self.log(message)
-            if is_problem:
-                problems.append(message.lstrip("⚠ ").strip())
-        if problems:
-            try:
-                self._show_error_banner(" ".join(problems))
-            except Exception:
-                pass
-
     # === Dictate-tab "finish setup — download a model" cue (D) ===
     def _has_usable_whisper_model(self) -> bool:
         """True if dictation can run without a local-model download.
@@ -16159,14 +16853,14 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("groq_whisper", "openai_whisper", "faster_whisper"):
             return True
-        # macOS: only count a model this license may load. A Free Mac with
+        # macOS/Windows: only count a model this license may load. A Free install with
         # developer models (e.g. small.en in ~/whisper.cpp/models) otherwise
         # skipped the Base download, then every dictation failed because the
         # config repair (correctly) never switches Free to a gated model.
         def usable(path) -> bool:
             if path is None:
                 return False
-            if not IS_MACOS:
+            if not (IS_MACOS or IS_WINDOWS):
                 return True
             try:
                 from wayfinder.license import transcription_model_allowed
@@ -16220,7 +16914,7 @@ class WayfinderApp(ctk.CTk):
             self._switch_tab("settings")
             self._finish_settings_build()
             self.open_model_settings()
-            self.log("↓ Download the Base model to finish Mac setup")
+            self.log(f"↓ Download the Base model to finish {_device_noun()} setup")
         except Exception as exc:
             self.log(f"⚠ Could not open first-run model setup: {exc}")
 
@@ -16270,10 +16964,9 @@ class WayfinderApp(ctk.CTk):
         try:
             self._switch_tab("settings")
             self.open_model_settings()
-            if IS_MACOS:
-                # The panel opens mid-page; without this the user lands on the
-                # Audio section at the top and the button seems to do nothing.
-                self._scroll_settings_to(getattr(self, "mode_settings_container", None))
+            # The panel opens mid-page; without this the user lands on the
+            # Audio section at the top and the button seems to do nothing.
+            self._scroll_settings_to(getattr(self, "mode_settings_container", None))
         except Exception as e:
             self.log(f"⚠ Could not open model settings: {e}")
 
@@ -17381,9 +18074,14 @@ class WayfinderApp(ctk.CTk):
         )
 
     def _create_login_item_row(self, parent) -> None:
-        """macOS: "Open at login" (SMAppService). Off until the user turns it on."""
+        """macOS/Windows: "Open at login" (SMAppService / the per-user Run key).
+
+        Off until the user turns it on."""
         try:
-            from wayfinder.utils import macos_login_item as login_item
+            if IS_WINDOWS:
+                from wayfinder.utils import windows_login_item as login_item
+            else:
+                from wayfinder.utils import macos_login_item as login_item
         except Exception:
             return
         if not login_item.available():
@@ -17403,7 +18101,8 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             parent, "Open at login", self.login_item_var, _toggled,
             tooltip="Start Wayfinder Aura when you log in, so the hotkey is always ready. "
-                    "Also listed in System Settings ▸ General ▸ Login Items.",
+                    + ("Also listed in Settings ▸ Apps ▸ Startup." if IS_WINDOWS
+                       else "Also listed in System Settings ▸ General ▸ Login Items."),
         )
 
     def _render_vocabulary_tile(self) -> None:
@@ -17471,12 +18170,92 @@ class WayfinderApp(ctk.CTk):
         if words:
             words_box.insert("1.0", "\n".join(words))
 
-        _label("Corrections — one per line:  heard -> write", muted=False, top=SPACING["md"])
-        fixes_box = _box(72)
+        _label("Corrections — when Aura hears the left, it writes the right",
+               muted=False, top=SPACING["md"])
         from wayfinder.core.transcriber import parse_vocabulary_replacements
         fixes = parse_vocabulary_replacements(self.config.get("vocabulary_replacements") or [])
-        if fixes:
-            fixes_box.insert("1.0", "\n".join(f"{h} -> {w}" for h, w in fixes))
+
+        # Two fields per correction (no "heard -> write" syntax to type).
+        fixes_grid = ctk.CTkFrame(body, fg_color="transparent")
+        fixes_grid.pack(fill="x")
+        fixes_grid.grid_columnconfigure(0, weight=1, uniform="vocab_fix")
+        fixes_grid.grid_columnconfigure(2, weight=1, uniform="vocab_fix")
+        for col, text in ((0, "Heard"), (2, "Write as")):
+            ctk.CTkLabel(
+                fixes_grid, text=text, font=(fam, fs["caption"]),
+                text_color=COLORS["text_muted"], anchor="w",
+            ).grid(row=0, column=col, sticky="w", padx=(SPACING["xs"], 0), pady=(0, SPACING["xs"]))
+        fix_rows: list[dict] = []
+        next_grid_row = [1]
+
+        def _entry(placeholder):
+            return ctk.CTkEntry(
+                fixes_grid, font=(fam, fs["body"]), fg_color=COLORS["bg_input"],
+                text_color=COLORS["text_primary"], border_width=0,
+                corner_radius=RADIUS["sm"], placeholder_text=placeholder,
+                placeholder_text_color=COLORS["text_muted"],
+            )
+
+        def _remove_row(row) -> None:
+            for widget in row["widgets"]:
+                try:
+                    widget.destroy()
+                except Exception:
+                    pass
+            if row in fix_rows:
+                fix_rows.remove(row)
+            if not fix_rows:
+                _add_row()
+
+        def _add_row(heard: str = "", write: str = "", focus: bool = False) -> dict:
+            r = next_grid_row[0]
+            next_grid_row[0] += 1
+            first = not fix_rows and not heard
+            heard_entry = _entry("what Aura hears" if first else "")
+            write_entry = _entry("what to write" if first else "")
+            arrow = ctk.CTkLabel(fixes_grid, text="→", font=(fam, fs["body"]),
+                                 text_color=COLORS["text_muted"])
+            row: dict = {"heard": heard_entry, "write": write_entry}
+            remove = ctk.CTkButton(
+                fixes_grid, text="", image=get_icon("x", 14, COLORS["text_muted"]),
+                width=28, height=28, fg_color="transparent",
+                hover_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"],
+                command=lambda: _remove_row(row),
+            )
+            row["widgets"] = (heard_entry, arrow, write_entry, remove)
+            pad = (0, SPACING["xs"])
+            heard_entry.grid(row=r, column=0, sticky="ew", pady=pad)
+            arrow.grid(row=r, column=1, padx=SPACING["sm"], pady=pad)
+            write_entry.grid(row=r, column=2, sticky="ew", pady=pad)
+            remove.grid(row=r, column=3, padx=(SPACING["xs"], 0), pady=pad)
+            if heard:
+                heard_entry.insert(0, heard)
+            if write:
+                write_entry.insert(0, write)
+            # Enter moves Heard -> Write as -> a new row, so a list types quickly.
+            heard_entry.bind("<Return>", lambda _e: (write_entry.focus_set(), "break")[1])
+
+            def _next_row(_event=None):
+                if fix_rows and fix_rows[-1] is row and heard_entry.get().strip():
+                    _add_row(focus=True)
+                return "break"
+
+            write_entry.bind("<Return>", _next_row)
+            fix_rows.append(row)
+            if focus:
+                heard_entry.focus_set()
+            return row
+
+        for heard, write in fixes:
+            _add_row(heard, write)
+        if not fix_rows:
+            _add_row()
+        ctk.CTkButton(
+            body, text="+ Add correction", font=(fam, fs["small"]), anchor="w",
+            fg_color="transparent", hover_color=COLORS["bg_elevated"],
+            text_color=COLORS["accent"], height=28, corner_radius=RADIUS["sm"],
+            command=lambda: _add_row(focus=True),
+        ).pack(anchor="w", pady=(SPACING["xs"], 0))
 
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=(SPACING["md"], 0))
@@ -17488,15 +18267,15 @@ class WayfinderApp(ctk.CTk):
             # One per line, but "Wayfinder, Aura, Kubernetes" on one line works too.
             new_words = normalize_vocabulary_terms(
                 _re.split(r"[\n,;]+", words_box.get("1.0", "end")))
-            lines = [l for l in fixes_box.get("1.0", "end").splitlines() if l.strip()]
-            pairs = parse_vocabulary_replacements(lines)
+            pairs, incomplete = _collect_vocabulary_corrections(
+                [(row["heard"].get(), row["write"].get()) for row in fix_rows])
             self.config["custom_vocabulary"] = new_words
             self.config["vocabulary_replacements"] = [[h, w] for h, w in pairs]
             save_config(self.config)
-            skipped = len(lines) - len(pairs)
+            skipped = incomplete
             msg = f"Saved · {len(new_words)} words · {len(pairs)} corrections"
             if skipped:
-                msg += f" · {skipped} skipped (use: heard -> write)"
+                msg += f" · {skipped} need both Heard and Write as"
             status.configure(text=msg, text_color=COLORS["error"] if skipped else COLORS["accent"])
             self.log(f"✎ Vocabulary: {len(new_words)} words, {len(pairs)} corrections")
 
@@ -17574,6 +18353,35 @@ class WayfinderApp(ctk.CTk):
         if self._record_hotkey_is_tap_hold():
             return "tap to start/stop  ·  hold to talk  ·  words appear at your cursor"
         return "press to start/stop  ·  words appear at your cursor"
+
+    def _cancel_hotkey_display(self) -> str | None:
+        """The key that discards a recording from any app, or None if unbound.
+
+        Linux portal sessions bind the cancel-dictation shortcut, so the
+        desktop's own trigger is the truth; every other listener (macOS,
+        Windows, X11 pynput, evdev) takes a bare Escape.
+        """
+        if getattr(self, "_hotkey_backend", None) != "portal":
+            return "Esc"
+        triggers = getattr(self, "_portal_triggers", None)
+        if triggers is None:  # bind still in flight: what the app asked for
+            from wayfinder.hotkeys.dbus import encode_trigger
+            if not encode_trigger(self.config.get("cancel_hotkey_key", 1),
+                                  self.config.get("cancel_hotkey_modifiers", ["shift"])):
+                return None
+            key = _keycode_display(self.config.get("cancel_hotkey_key", 1))
+            mods = self.config.get("cancel_hotkey_modifiers", ["shift"]) or []
+            return "+".join([_modifier_display(m) for m in mods] + [key])
+        return triggers.get("cancel-dictation") or None
+
+    def _hero_state_hint_text(self, state) -> str:
+        """Hero hint for ``state``: while recording, how to stop and how to cancel."""
+        if state != AppState.RECORDING:
+            return self._hero_hotkey_hint_text()
+        verb = "tap" if self._record_hotkey_is_tap_hold() else "press"
+        stop = f"{verb} {self.get_hotkey_display()} to stop"
+        cancel = self._cancel_hotkey_display()
+        return f"{stop}  ·  {cancel} cancels, nothing is typed" if cancel else stop
 
     def _refresh_record_hotkey_surfaces(self) -> None:
         """Refresh returning-user surfaces after a live/config hotkey change."""
@@ -18089,13 +18897,21 @@ class WayfinderApp(ctk.CTk):
                 )
         except (OSError, UnicodeDecodeError):
             pass
+        if sys.platform == "win32":
+            # pynput reads the new key live; there is no evdev listener to
+            # restart (it would only log "evdev not installed").
+            self.log("⚙ Hotkey updated (live)")
+            refresh = getattr(self, "_refresh_macos_hotkey_hint", None)
+            if target == "record" and callable(refresh):
+                refresh()
+            return
         try:
             self.restart_evdev_listener("hotkey detected")
         except Exception as e:
             self.log(f"⚠ Hotkey listener restart after Detect failed: {e}")
 
     def _refresh_macos_hotkey_hint(self) -> None:
-        """macOS: explain tap/hold, or warn about a colliding shortcut."""
+        """macOS/Windows: explain tap/hold, or warn about a colliding shortcut."""
         label = getattr(self, "_hotkey_hint_label", None)
         if label is None:
             return
@@ -18104,11 +18920,16 @@ class WayfinderApp(ctk.CTk):
         if is_tap_hold_hotkey(code, modifiers):
             text, color = (
                 f"Tap {_keycode_display(code)} to start and stop, or hold it while you "
-                "talk. Typing with it (like ⌥E) never starts a recording."
+                + ("talk. Shortcuts with it (like Ctrl+C or Alt Gr+E) never start a recording."
+                   if sys.platform == "win32" else
+                   "talk. Typing with it (like ⌥E) never starts a recording.")
             ), COLORS["text_secondary"]
         else:
             try:
-                from wayfinder.utils.macos_hotkey_conflicts import conflict_for
+                if sys.platform == "win32":
+                    from wayfinder.utils.windows_hotkey_conflicts import conflict_for
+                else:
+                    from wayfinder.utils.macos_hotkey_conflicts import conflict_for
                 text = conflict_for(code, modifiers) or ""
             except Exception:
                 text = ""
@@ -18127,11 +18948,11 @@ class WayfinderApp(ctk.CTk):
         """Apply hotkey config change and update the listener."""
         new_hotkey = self.get_hotkey_display()
         self._refresh_record_hotkey_surfaces()
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             self._refresh_macos_hotkey_hint()
         self.log(f"⚙ Hotkey: {new_hotkey}")
-        if sys.platform == "darwin":
-            # macOS: pynput reads config live — nothing to restart.
+        if sys.platform in ("darwin", "win32"):
+            # macOS/Windows: pynput reads config live — nothing to restart.
             self.log("⚙ Hotkey updated (live)")
         else:
             self.restart_evdev_listener("config change")
@@ -18140,9 +18961,9 @@ class WayfinderApp(ctk.CTk):
         """Handle inline hotkey key dropdown change."""
         new_code = self._hotkey_key_codes.get(value, 67)
         self.config["hotkey_key"] = new_code
-        if sys.platform == "darwin" and new_code in MACOS_SOLO_HOTKEYS:
-            # Right Option/Command work alone (tap/hold); a leftover Fn or
-            # Command modifier would turn them back into a chord.
+        if new_code in _solo_hotkeys():
+            # Right Option/Command (Windows: Right Ctrl/Alt) work alone (tap/hold);
+            # a leftover modifier would turn them back into a chord.
             self.config["hotkey_modifiers"] = []
             for var in getattr(self, "_hotkey_mod_vars", {}).values():
                 try:
@@ -18163,8 +18984,8 @@ class WayfinderApp(ctk.CTk):
         """Apply style hotkey config change and update the listener."""
         new_hotkey = self.get_style_hotkey_display()
         self.log(f"⚙ Style toggle hotkey: {new_hotkey}")
-        if sys.platform == "darwin":
-            # macOS: pynput reads config live — nothing to restart.
+        if sys.platform in ("darwin", "win32"):
+            # macOS/Windows: pynput reads config live — nothing to restart.
             self.log("⚙ Hotkey updated (live)")
         else:
             self.restart_evdev_listener("config change")
@@ -18700,6 +19521,12 @@ class WayfinderApp(ctk.CTk):
         # Calculate meter width
         self._mic_meter_bg.update_idletasks()
         bg_width = self._mic_meter_bg.winfo_width()
+        if IS_WINDOWS and not IS_MACOS:
+            # Real pixels back to CTk's units (configure(width=) scales again).
+            try:
+                bg_width = bg_width / float(self._get_widget_scaling())
+            except Exception:
+                pass
         if bg_width < 10:
             bg_width = 200
         meter_width = max(2, int(level * (bg_width - 4)))
@@ -19248,9 +20075,8 @@ class WayfinderApp(ctk.CTk):
                     self._show_premium_prompt("large_models")
                     return
                 self._set_active_whisper_model(selected)
-                # A chosen model also completes setup and resumes a pending
-                # first-run Welcome (which then owns the screen).
-                resumed_welcome = self._on_whisper_model_ready(selected)
+                # Marks setup done and resumes a first-run Welcome waiting on a model.
+                resumed_welcome = self._on_whisper_model_ready()
                 if close and not resumed_welcome:
                     close_panel()
 
@@ -19773,12 +20599,10 @@ class WayfinderApp(ctk.CTk):
                         # model now (queued until IDLE if a dictation is running),
                         # instead of making them hunt for it under Installed.
                         outcome = self._activate_downloaded_model("whisper", path)
-                        # macOS: an active download also completes setup and
-                        # resumes a pending first-run Welcome, which then owns
-                        # the screen.
-                        if IS_MACOS and outcome == "active":
-                            if self._on_whisper_model_ready(path):
-                                return
+                        # macOS/Windows: a first-run Welcome waiting on this download resumes.
+                        if ((IS_MACOS or IS_WINDOWS) and outcome == "active"
+                                and self._on_whisper_model_ready()):
+                            return
                         try:
                             if not content_area.winfo_exists():
                                 return  # panel closed mid-download
@@ -20709,9 +21533,10 @@ class WayfinderApp(ctk.CTk):
         # stuck-overlay report can be correlated against the overlay-debug.log timeline.
         if old_state != new_state:
             print(f"[STATE] {old_state.name} -> {new_state.name}", flush=True)
-            if IS_MACOS:
+            if IS_MACOS or IS_WINDOWS:
                 # Hold off idle sleep / App Nap while a dictation is live: the
-                # will-sleep handler has to cancel a recording.
+                # will-sleep handler has to cancel a recording (Windows: a
+                # power request, utils/windows_power.py).
                 try:
                     from wayfinder.utils import macos_activity
                     if new_state == AppState.IDLE:
@@ -20742,10 +21567,12 @@ class WayfinderApp(ctk.CTk):
             elif old_state == AppState.PROCESSING:
                 self._cancel_processing_watchdog()
 
-            # PASTING watchdog (macOS): a paste is a single Cmd+V, so one that
-            # hasn't finished in seconds is hung. Linux types keystroke by
-            # keystroke (long text legitimately takes a while), so it is not armed there.
-            if IS_MACOS:
+            # PASTING watchdog (macOS/Windows): a paste is a single Cmd/Ctrl+V
+            # (Windows' instant path; its SendInput fallback is one batched
+            # call), so one that hasn't finished in seconds is hung. Linux types
+            # keystroke by keystroke (long text legitimately takes a while), so
+            # it is not armed there.
+            if IS_MACOS or IS_WINDOWS:
                 if new_state == AppState.PASTING:
                     self._start_paste_watchdog()
                 elif old_state == AppState.PASTING:
@@ -20785,6 +21612,9 @@ class WayfinderApp(ctk.CTk):
             # Update status label
             if hasattr(self, 'status_label'):
                 self.status_label.configure(text=STATE_LABELS[new_state], text_color=color)
+            hint = getattr(self, "_hero_hotkey_hint", None)
+            if hint is not None:
+                hint.configure(text=self._hero_state_hint_text(new_state))
             
             # Update hero frame border for subtle glow effect
             if hasattr(self, 'hero_frame'):
@@ -20945,7 +21775,8 @@ class WayfinderApp(ctk.CTk):
                 copied = True
             except Exception:
                 pass
-        where = "on the clipboard: press ⌘V." if copied else "in History."
+        paste_keys = "Ctrl+V" if IS_WINDOWS else "⌘V"
+        where = f"on the clipboard: press {paste_keys}." if copied else "in History."
         self.on_error(f"The paste didn't finish. Your text is {where}", self.session_generation)
 
     # === RECORDING cap (optional; max_recording_duration seconds, 0 = off) ===
@@ -21011,6 +21842,16 @@ class WayfinderApp(ctk.CTk):
             return  # Already running
         self._animate_idle_breath()
     
+    def _hero_idle_backgrounded(self) -> bool:
+        """Linux: True while no Aura window has keyboard focus (the idle ribbon
+        then drifts slowly on a low frame rate instead of full speed)."""
+        if not _IS_LINUX:
+            return False
+        try:
+            return self.focus_displayof() is None
+        except Exception:
+            return False
+
     def _stop_idle_breath(self):
         """Stop the idle breathing animation."""
         if hasattr(self, '_idle_breath_job') and self._idle_breath_job:
@@ -21055,6 +21896,15 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
+        if IS_WINDOWS and not IS_MACOS:
+            # Buried under another window (the Mac's compositor stops drawing an
+            # occluded window by itself): hold the frame, look again in 0.5 s.
+            from wayfinder.ui.windows_window import window_exposure
+
+            if window_exposure(self) == "covered":
+                self._idle_breath_job = self.after(500, self._animate_idle_breath)
+                return
+
         # Also skip if the hero canvas is not visible (e.g. on a different tab)
         try:
             if not self.hero_canvas.winfo_viewable():
@@ -21067,15 +21917,26 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
+        # Linux: while another app has focus (LINUX-FOLLOWUPS 3.1) the calm
+        # ribbon drifts at a third of its speed on a low frame rate: still
+        # alive beside a side-by-side window, at a fraction of the ~10% of a
+        # core the full-rate shader ribbon costs at 4K. Minimized / tray
+        # windows stop entirely (above).
+        background = self._hero_idle_backgrounded()
+
         # Ease the morph toward 0 (calm dim breath) and advance wave time
         # delta-based so phase is continuous across the idle/active cadence
         # switch (no pop). idle_rate/active_rate reproduce today's on-screen
         # speeds (idle ~0.08/33ms, active ~0.6/66ms).
         now = time.monotonic()
-        dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.1)
+        # Background frames are 125 ms apart: allow that gap so the drift
+        # keeps wall-clock pace instead of being clipped to 100 ms.
+        dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.25 if background else 0.1)
         self._hero_last_frame_ts = now
         self._hero_morph += (0.0 - self._hero_morph) * 0.25
         speed = 2.4 + (9.0 - 2.4) * self._hero_morph
+        if background:
+            speed *= _HERO_BACKGROUND_SPEED
         self._hero_wave_time += dt * speed
         self._hero_audio_level = 0.0
 
@@ -21095,15 +21956,24 @@ class WayfinderApp(ctk.CTk):
 
         interval = (
             66 if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate"
+            else _HERO_BACKGROUND_INTERVAL_MS if background
             else _hero_idle_interval_ms()
         )
+        if IS_WINDOWS and not IS_MACOS:
+            from wayfinder.ui.windows_window import animations_enabled
+
+            if not animations_enabled():
+                # "Animation effects" off (Windows' Reduce Motion): keep this
+                # still frame, as the Mac does; look again in 2 s.
+                interval = 2000
         self._idle_breath_job = (
             self.after(interval, self._animate_idle_breath)
             if interval is not None else None
         )
     
     def _animate_hero(self):
-        """Animation frame for hero waveform - STABLE at 15fps."""
+        """Animation frame for the hero waveform while recording/processing
+        (30 fps; 15 fps on Steam hardware, see _hero_active_interval_ms)."""
         # Guard: Stop if in IDLE state (idle breath handles that)
         if self.app_state == AppState.IDLE:
             self._hero_animation_job = None
@@ -21131,7 +22001,6 @@ class WayfinderApp(ctk.CTk):
             pass
         
         import math
-        hero_fps_scale = 4.0  # 60/15
 
         # Ease the morph toward 1 (energetic bright) and advance wave time
         # delta-based (same clock as idle) so the ribbon phase is continuous
@@ -21139,7 +22008,11 @@ class WayfinderApp(ctk.CTk):
         now = time.monotonic()
         dt = min(max(now - self._hero_last_frame_ts, 0.0), 0.1)
         self._hero_last_frame_ts = now
-        self._hero_morph += (1.0 - self._hero_morph) * 0.25
+        # Per-second easing (LINUX-FOLLOWUPS 3.4), calibrated to the 30 fps
+        # cadence macOS and Windows were tuned at: a late or uneven frame lands
+        # on the right value, and 15 fps and 30 fps feel the same.
+        frames = dt * 30.0
+        self._hero_morph += (1.0 - self._hero_morph) * (1.0 - 0.75 ** frames)
         speed = 2.4 + (9.0 - 2.4) * self._hero_morph
         self._hero_wave_time += dt * speed
 
@@ -21154,7 +22027,7 @@ class WayfinderApp(ctk.CTk):
             pass
         
         # Smooth the audio level
-        smooth_factor = 0.7 ** hero_fps_scale
+        smooth_factor = 0.7 ** (4.0 * frames)
         self._hero_audio_level = self._hero_audio_level * smooth_factor + target_level * (1 - smooth_factor)
         
         # Redraw waveform (uses stable pre-created items)
@@ -21165,8 +22038,8 @@ class WayfinderApp(ctk.CTk):
             pulse = 0.9 + 0.1 * math.sin(self._hero_wave_time * 2)
             self._draw_mic_button_with_pulse(STATE_COLORS[self.app_state], pulse)
         
-        # Aqua needs 30 fps so fast audio peaks do not alias into visible jumps.
-        # Linux keeps its established 15 fps active cadence.
+        # 30 fps so fast audio peaks do not alias into visible jumps
+        # (15 fps on Steam hardware, where transcription needs the CPU).
         self._hero_animation_job = self.after(
             _hero_active_interval_ms(), self._animate_hero
         )
@@ -21252,6 +22125,7 @@ class WayfinderApp(ctk.CTk):
             sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
             os.environ.get("XDG_SESSION_TYPE", ""),
         )
+        self._hotkey_backend = backend
         if backend == "portal":
             self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
             self._start_portal_listener()
@@ -21291,9 +22165,10 @@ class WayfinderApp(ctk.CTk):
                 if self.config.get("whisper_server_mode"):
                     self.log("⏳ Warming up transcription model (first dictation will be instant)…")
                 loaded = warm_up_transcription(self.config)
-                if self.config.get("whisper_server_mode") and (loaded or not IS_MACOS):
-                    # macOS only claims "loaded" when a server really started
-                    # (it used to say so with no model installed at all).
+                if self.config.get("whisper_server_mode") and (
+                        loaded or not (IS_MACOS or IS_WINDOWS)):
+                    # macOS/Windows only claim "loaded" when a server really
+                    # started (it used to say so with no model installed at all).
                     self.log("✅ Transcription model loaded — ready for instant dictation")
             except Exception as e:
                 self.log(f"⚠️ Transcription warm-up skipped: {e}")
@@ -21321,7 +22196,9 @@ class WayfinderApp(ctk.CTk):
     def _socket_listener_healthy(self, timeout: float = 0.35) -> bool:
         """Return True only when the command socket accepts and answers a ping."""
         if sys.platform == "win32":
-            return False  # No AF_UNIX command socket on Windows.
+            # Loopback control channel (hotkeys/windows_control.py).
+            from wayfinder.hotkeys.windows_control import send_command
+            return send_command("ping", expect_reply=True, timeout=timeout) == b"pong"
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(timeout)
@@ -21341,10 +22218,20 @@ class WayfinderApp(ctk.CTk):
         Always uses the package listener (import here so a local legacy name cannot shadow it).
         """
         if sys.platform == "win32":
-            # The command socket is AF_UNIX (Linux/macOS external triggers such
-            # as trigger_record.py). Windows has no Unix domain socket here and
-            # the pynput hotkey listener already covers dictation, so skip it
-            # rather than crash-looping on socket.AF_UNIX.
+            # CPython on Windows has no AF_UNIX: the same verbs (tray menu,
+            # second launch, CLI, inspect:) arrive on a token-guarded loopback
+            # channel instead (hotkeys/windows_control.py).
+            existing = self._socket_thread
+            if not force_restart and existing is not None and existing.is_alive():
+                return
+            from wayfinder.hotkeys.windows_control import control_listener
+            self._socket_thread = threading.Thread(
+                target=control_listener,
+                args=(self.event_queue, self.stop_event, self.log),
+                daemon=True,
+                name="wayfinder-control",
+            )
+            self._socket_thread.start()
             return
         existing = self._socket_thread
         if not force_restart and existing is not None and existing.is_alive():
@@ -21743,6 +22630,13 @@ class WayfinderApp(ctk.CTk):
             self.cancel_recording()
         elif event_type == EventType.QUIT_APP:
             self.quit_app()
+        elif event_type == EventType.UI_ZOOM:
+            if data == "in":
+                self.scale_ui_step(0.25)
+            elif data == "out":
+                self.scale_ui_step(-0.25)
+            elif data == "reset":
+                self.reset_scale()
         elif event_type == EventType.SWITCH_TAB:
             if data in self._socket_tab_ids():
                 self._switch_tab(data)
@@ -21776,6 +22670,8 @@ class WayfinderApp(ctk.CTk):
         elif event_type == EventType.UI_CALLBACK:
             if callable(data):
                 data()
+        elif event_type == EventType.CHECK_UPDATES:
+            self._check_app_update_now()
 
     def on_hotkey(self):
         # The welcome pane's first step owns the shared production mic while its
@@ -21790,7 +22686,7 @@ class WayfinderApp(ctk.CTk):
             self.start_recording()
         elif self.app_state == AppState.RECORDING:
             self.stop_recording_and_process()
-        elif IS_MACOS and self._finish_injection_job is not None:
+        elif (IS_MACOS or IS_WINDOWS) and self._finish_injection_job is not None:
             # The text is already inserted; only the minimum PROCESSING
             # display (rule 7) is still running. A new press must not be
             # swallowed by it: finish now and start the next dictation.
@@ -21841,11 +22737,11 @@ class WayfinderApp(ctk.CTk):
         self._set_output_style(next_style)
 
     def _gamer_profile_now(self):
-        """macOS Gamer mode: the supported game in front right now, or None."""
-        if not (IS_MACOS and self.config.get("gamer_mode", True)):
+        """Gamer mode: the supported game in front right now, or None."""
+        if not ((IS_MACOS or IS_WINDOWS or _IS_LINUX) and self.config.get("gamer_mode", True)):
             return None
         try:
-            from wayfinder.core import macos_game_chat as game_chat
+            game_chat = _game_chat_module()
             _pid, bundle_id, app_name = game_chat.frontmost_app()
             return game_chat.match_profile(bundle_id, app_name)
         except Exception:
@@ -21953,12 +22849,16 @@ class WayfinderApp(ctk.CTk):
                     # Adopt the WarmMic's healed device index (see _start_chunked_recording).
                     self._resolved_audio_device = self.warm_mic.device
 
-            if IS_MACOS:
-                self._macos_follow_default_input()
+            if IS_MACOS or IS_WINDOWS:
+                if IS_MACOS:
+                    self._macos_follow_default_input()
+                elif IS_WINDOWS:
+                    self._windows_follow_default_input()
                 # Capture FIRST: the RECORDING overlay waits for the Qt
                 # thread's acknowledgement (~150-300 ms), and every word spoken
                 # in that window used to be lost. The mic is warm, so starting
                 # it costs microseconds and the feedback follows immediately.
+                # Windows' overlay is the same Qt subprocess with the same ack.
                 _begin_capture()
 
             # Update state FIRST for immediate feedback
@@ -21970,7 +22870,7 @@ class WayfinderApp(ctk.CTk):
             except Exception as e:
                 self.log(f"⚠ Indicator error: {e}")
 
-            if not IS_MACOS:
+            if not (IS_MACOS or IS_WINDOWS):
                 _begin_capture()
             
             # Start duration update timer
@@ -22032,6 +22932,55 @@ class WayfinderApp(ctk.CTk):
         warm.set_device(new_index, None)
         self._resolved_audio_device = new_index
         self.log(f"🎤 Following this Mac's input: {current.name}")
+
+    # Windows keeps the 30 s warm window (opening a WASAPI/MME stream costs
+    # 0.25-0.55 s, unlike Core Audio's ~0.1 s) but, like the Mac, lets a
+    # Bluetooth headset leave its call-quality profile right after dictating.
+    _WINDOWS_BLUETOOTH_WARM_MIC_SECS = 1.0
+
+    def _windows_follow_default_input(self) -> None:
+        """Before capture: track the input chosen in Windows Sound settings.
+
+        PortAudio's device table is a startup snapshot on Windows too, so a
+        newly plugged or newly chosen default mic was ignored until a restart.
+        """
+        try:
+            from wayfinder.utils.windows_audio import default_input_device, names_match
+
+            current = default_input_device()
+        except Exception:
+            return
+        warm = getattr(self, "warm_mic", None)
+        if current is None or warm is None:
+            return
+        if current.get("transport") == "bluetooth":
+            try:
+                warm.idle_secs = self._WINDOWS_BLUETOOTH_WARM_MIC_SECS
+            except Exception:
+                pass
+        else:
+            try:
+                warm.idle_secs = float(self.config.get("mic_warm_idle_secs", 30.0) or 30.0)
+            except Exception:
+                pass
+        if self.config.get("audio_device_name") or warm.in_use:
+            return  # an explicitly chosen mic, or mid-recording: leave it
+        try:
+            import sounddevice as _sd
+
+            index = warm.device
+            active = (_sd.query_devices(index) if index is not None
+                      else _sd.query_devices(kind="input"))
+            if names_match(active.get("name", ""), current["name"]):
+                return
+        except Exception:
+            pass
+        if not warm.rescan():
+            return
+        new_index = _windows_default_input_index()
+        warm.set_device(new_index, None)
+        self._resolved_audio_device = new_index
+        self.log(f"🎤 Following this PC's input: {current['name']}")
 
     def _start_chunked_recording(self, gen=None, mode="on"):
         """Start On/Auto chunk capture without switching mic streams mid-session."""
@@ -22266,6 +23215,21 @@ class WayfinderApp(ctk.CTk):
             if status == MIC_RESTRICTED:
                 return ("Microphone access is restricted on this Mac (Screen Time or a device "
                         "profile) — ask the Mac's administrator to allow Wayfinder Aura")
+        if IS_WINDOWS:
+            try:
+                from wayfinder.utils.windows_privacy import blocked_message, microphone_block
+
+                message = blocked_message(microphone_block())
+            except Exception:
+                message = None
+            if message:
+                try:
+                    self.event_queue.put(
+                        (EventType.UI_CALLBACK, self._refresh_macos_permission_banner)
+                    )
+                except Exception:
+                    pass
+                return message
         name = self.config.get("audio_device_name")
         if name:
             return (f"No speech detected from “{name}” — check the mic's mute/gain, "
@@ -22624,7 +23588,8 @@ class WayfinderApp(ctk.CTk):
             # macOS game chat: an MMO (World of Warcraft first) is in front, so
             # open its chat box, paste and send instead of a plain paste.
             game_chat = getattr(self, "_inject_into_game_chat", None)
-            if IS_MACOS and game_chat is not None and self.config.get("gamer_mode", True):
+            if ((IS_MACOS or IS_WINDOWS or _IS_LINUX) and game_chat is not None
+                    and self.config.get("gamer_mode", True)):
                 if game_chat(text, gen):
                     self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
                     return
@@ -22705,13 +23670,49 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
 
+    def _windows_game_paste_only(self, text: str) -> bool:
+        """Windows, a game in front: the normal paste, but never its SendInput
+        typing fallback - in a game, typed letters are keybinds. A paste that
+        fails raises (-> INJECTION_ERROR); the text stays in History."""
+        from wayfinder.core.injector_windows import inject_text_paste_windows
+
+        inject_text_paste_windows(text)
+        return True
+
+    def _set_clipboard_from_worker(self, text: str, timeout: float = 2.0) -> bool:
+        """Set the clipboard on the Tk thread and wait (Linux game paste).
+
+        The Flatpak ships no clipboard CLI; Tk owns the X11 CLIPBOARD selection
+        and serves it to the game (Wine bridges it to the Windows clipboard).
+        """
+        done = threading.Event()
+        ok = [False]
+
+        def _set():
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+                self.update_idletasks()
+                ok[0] = True
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        try:
+            self.after(0, _set)
+        except Exception:
+            return False
+        done.wait(timeout)
+        return ok[0]
+
     def _inject_into_game_chat(self, text: str, gen=None) -> bool:
-        """macOS: dictate into a supported game's chat. False = not a game.
+        """Gamer mode: dictate into a supported game's chat. False = not a game.
 
         Runs on the injection worker. Raises (-> INJECTION_ERROR) if the game
         left the foreground mid-send; the text stays in History.
         """
-        from wayfinder.core import macos_game_chat as game_chat
+        game_chat = _game_chat_module()
         from wayfinder.core.injector import inject_text, press_enter
 
         pid, bundle_id, app_name = game_chat.frontmost_app()
@@ -22723,26 +23724,63 @@ class WayfinderApp(ctk.CTk):
             if reason is not None:
                 self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been tested "
                          "with; pasting normally. See the Games tab.")
+                if IS_WINDOWS and not IS_MACOS:
+                    return self._windows_game_paste_only(text)
             return False
         if profile.caution:
             # Not recommended, but not restricted: the normal paste, with a heads-up.
             self.log(f"🎮 Heads-up: {profile.reason} ({profile.name}). Pasting normally; "
                      "see the Games tab.")
+            if IS_WINDOWS and not IS_MACOS:
+                return self._windows_game_paste_only(text)
             return False
         send = bool(self.config.get("game_chat_send", True)) and profile.auto_send
-        self.log(
-            f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"
-            f"{'' if profile.open_chat else ' (click into chat first)'}"
-        )
-        from wayfinder.core.macos_paste import hold_keys
+        typed = profile.key in getattr(game_chat, "TYPE_PROFILES", ())
+        if typed:
+            self.log(f"🎮 {profile.name} chat: typing into the chat box you opened "
+                     "(press Enter first; you press Enter to send)")
+        else:
+            self.log(
+                f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"
+                f"{'' if profile.open_chat else ' (click into chat first)'}"
+            )
+        press_return = press_enter
+        if _IS_LINUX and not (IS_MACOS or IS_WINDOWS):
+            # Wine may have left keyboard focus on a hidden launcher window.
+            if game_chat.ensure_game_focus(pid):
+                self.log(f"🎮 {profile.name}: keyboard focus was on another Wine window; "
+                         "gave it back to the game")
+            # Clipboard (owned by our Tk window, which Wine reads) + held Ctrl+V;
+            # games whose chat takes no paste get typed text instead.
+            hold_keys = game_chat.hold_keys
+            press_return = game_chat.press_return
+            if typed:
+                paste = game_chat.type_text
+            else:
+                def paste(message):
+                    if not self._set_clipboard_from_worker(message):
+                        raise InjectionError("Could not set the clipboard for the game paste")
+                    game_chat.paste_clipboard()
+        elif IS_WINDOWS and not IS_MACOS:
+            # Ctrl+V only: never the SendInput typing fallback in a game,
+            # where letters are keybinds.
+            from wayfinder.core.injector_windows import hold_keys, inject_text_paste_windows
+
+            def paste(message):
+                inject_text_paste_windows(message)
+        else:
+            from wayfinder.core.macos_paste import hold_keys
+
+            def paste(message):
+                inject_text(message, typing_speed="instant")
         try:
             with hold_keys(game_chat.KEY_HOLD_S):
                 result = game_chat.send_to_chat(
                     text, profile,
                     game_pid=pid,
                     send=send,
-                    paste=lambda message: inject_text(message, typing_speed="instant"),
-                    press_return=press_enter,
+                    paste=paste,
+                    press_return=press_return,
                     frontmost_pid=lambda: game_chat.frontmost_app()[0],
                     still_current=lambda: gen is None or gen == self.session_generation,
                 )
@@ -22841,6 +23879,11 @@ class WayfinderApp(ctk.CTk):
             if IS_MACOS:
                 return ("Couldn't paste the text — make sure Accessibility is on "
                         "for Wayfinder Aura (Privacy & Security).")
+            if IS_WINDOWS:
+                # Windows blocks input into apps running as administrator
+                # unless Aura runs elevated too; the text stays on the clipboard.
+                return ("Couldn't type the text — click into a text box and try again. "
+                        "Apps running as administrator can't receive it; press Ctrl+V there.")
             return "Couldn't type the text — check input permissions (Settings) or install ydotool."
         if has("api key", "401", "unauthorized"):
             return "Cloud API key issue — re-check it in Settings."
@@ -23088,6 +24131,9 @@ def _raise_existing_instance() -> bool:
     /tmp per launch, so ONLY this control-socket probe (xdg-run path, shared
     host<->sandbox) prevents double instances in the store build.
     """
+    if sys.platform == "win32":
+        from wayfinder.hotkeys.windows_control import send_command
+        return send_command("show", expect_reply=True, timeout=1.0) == b"ok"
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(1.0)

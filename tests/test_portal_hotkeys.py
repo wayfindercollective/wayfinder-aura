@@ -88,10 +88,26 @@ def test_specs_from_default_config():
         "style_toggle_key": 28, "style_toggle_modifiers": ["ctrl", "alt"],
     }
     specs = shortcut_specs_from_config(config)
-    assert [s.shortcut_id for s in specs] == ["record-toggle", "style-toggle"]
-    assert [s.event for s in specs] == [EventType.HOTKEY_PRESSED, EventType.STYLE_TOGGLE]
+    assert [s.shortcut_id for s in specs] == [
+        "record-toggle", "style-toggle", "cancel-dictation"]
+    assert [s.event for s in specs] == [
+        EventType.HOTKEY_PRESSED, EventType.STYLE_TOGGLE, EventType.CANCEL_RECORDING]
     assert specs[0].trigger == "CTRL+ALT+space"
     assert specs[1].trigger == "CTRL+ALT+Return"
+    # Never a bare Escape: a portal shortcut grabs its key in every app.
+    assert specs[2].trigger == "SHIFT+Escape"
+
+
+def test_cancel_shortcut_follows_config_and_round_trips():
+    from wayfinder.hotkeys.dbus import parse_trigger_description
+
+    specs = shortcut_specs_from_config({
+        "hotkey_key": 61, "hotkey_modifiers": [],
+        "cancel_hotkey_key": 1, "cancel_hotkey_modifiers": ["ctrl"],
+    })
+    cancel = next(s for s in specs if s.shortcut_id == "cancel-dictation")
+    assert cancel.trigger == "CTRL+Escape"
+    assert parse_trigger_description("Shift+Escape") == (1, ["shift"])
 
 
 def test_specs_with_mouse_hotkey_omit_the_trigger():

@@ -84,13 +84,15 @@ def _app(state, gen=7, text="hello world"):
     return app, errors, clip
 
 
-def test_hung_paste_hands_the_text_over_and_resets():
+@pytest.mark.parametrize("is_windows, keys", [(False, "⌘V"), (True, "Ctrl+V")])
+def test_hung_paste_hands_the_text_over_and_resets(monkeypatch, is_windows, keys):
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", is_windows)
     app, errors, clip = _app(wayfinder_main.AppState.PASTING)
     wayfinder_main.WayfinderApp._on_paste_timeout(app, 7)
     assert clip == ["hello world"]
     assert app.session_generation == 8  # the stuck worker's late result is dropped
     assert app.executor != "stuck-executor"  # later pastes don't queue behind it
-    assert errors == [("The paste didn't finish. Your text is on the clipboard: press ⌘V.", 8)]
+    assert errors == [(f"The paste didn't finish. Your text is on the clipboard: press {keys}.", 8)]
 
 
 @pytest.mark.parametrize("state,gen", [

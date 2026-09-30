@@ -371,6 +371,15 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("WAYFINDER_DISABLE_KEYCHAIN", "1")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_windows_local_appdata(monkeypatch: pytest.MonkeyPatch, tmp_path_factory):
+    """Windows keeps app data (speech models, cache) under %LOCALAPPDATA%: tests
+    must never write the developer's real profile (a mocked model download
+    once left zero-filled "models" there)."""
+    if sys.platform == "win32":
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path_factory.mktemp("localappdata")))
+
+
 @pytest.fixture
 def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
     """Set up environment variables to simulate running from an AppImage."""

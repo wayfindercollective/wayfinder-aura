@@ -2118,13 +2118,16 @@ class TestServerReuseIdentity:
 
     MODEL = "/models/ggml-base.en.bin"
 
-    def _set_state(self, alive=True, model=MODEL, gpu=False):
+    def _set_state(self, alive=True, model=MODEL, gpu=False, threads=4):
         from wayfinder.core.transcriber import WhisperServerBackend
         proc = MagicMock()
         proc.poll.return_value = None if alive else 1
         WhisperServerBackend._server_process = proc
         WhisperServerBackend._server_model_path = model
         WhisperServerBackend._server_use_gpu = gpu
+        # macOS/Windows also match -t (the backend's default is 4); set it
+        # rather than inherit whatever an earlier test left on the class.
+        WhisperServerBackend._server_threads = threads
 
     def _backend(self, gpu=False, model=MODEL):
         from wayfinder.core.transcriber import WhisperServerBackend
@@ -2135,6 +2138,7 @@ class TestServerReuseIdentity:
         WhisperServerBackend._server_process = None
         WhisperServerBackend._server_model_path = ""
         WhisperServerBackend._server_use_gpu = None
+        WhisperServerBackend._server_threads = None
 
     def test_same_model_same_mode_is_reusable(self):
         self._set_state(gpu=False)
@@ -2186,7 +2190,8 @@ class TestServerAdoptionPerPlatform:
     (its supervised child cannot outlive the app, and adopting an unowned
     listener would hand it recorded audio)."""
 
-    @pytest.mark.parametrize("platform_name, expected", [("linux", 8178), ("darwin", 8179)])
+    @pytest.mark.parametrize("platform_name, expected", [
+        ("linux", 8178), ("darwin", 8179), ("win32", 8179)])
     def test_occupied_port_reuse(self, monkeypatch, platform_name, expected):
         import socket as socket_module
 
@@ -2214,7 +2219,8 @@ class TestServerAdoptionPerPlatform:
 class TestServerReuseThreadsOnMacOS:
     """The resident server's -t is fixed at spawn; macOS respawns when it changes."""
 
-    @pytest.mark.parametrize("platform_name, expected", [("darwin", False), ("linux", True)])
+    @pytest.mark.parametrize("platform_name, expected", [
+        ("darwin", False), ("win32", False), ("linux", True)])
     def test_thread_change_breaks_reuse_only_on_macos(self, monkeypatch, platform_name, expected):
         import wayfinder.core.transcriber as transcriber
 
@@ -2262,6 +2268,10 @@ class TestMacServerRequestFields:
 
     def test_macos_disables_timestamps(self, sample_audio_file, monkeypatch):
         body = self._body_for("darwin", sample_audio_file, monkeypatch)
+        assert b'name="no_timestamps"\r\n\r\ntrue' in body
+
+    def test_windows_disables_timestamps(self, sample_audio_file, monkeypatch):
+        body = self._body_for("win32", sample_audio_file, monkeypatch)
         assert b'name="no_timestamps"\r\n\r\ntrue' in body
 
     def test_linux_request_is_unchanged(self, sample_audio_file, monkeypatch):

@@ -448,6 +448,18 @@ from PyQt6.QtWidgets import (
 
 # === State Definitions ===
 
+
+def _windows_reduce_motion() -> bool:
+    """Windows with "Animation effects" off: the idle pill holds still (Mac: Reduce Motion)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        from wayfinder.ui.windows_window import animations_enabled
+        return not animations_enabled()
+    except Exception:
+        return False
+
+
 class OverlayState(Enum):
     HIDDEN = auto()
     READY = auto()
@@ -671,19 +683,23 @@ class LiquidWaveRenderer:
         """
         Render the liquid wave within the given rectangle.
 
-        Linux/Windows keep main's per-segment strokes (the production look).
-        macOS draws each strand as one continuous path with a gradient edge
-        fade: per-segment round caps overlap at every joint on Retina.
+        Each strand is one continuous path with a gradient edge fade (the
+        macOS design, also on Windows and Linux): per-segment round caps
+        overlapped at every joint. Linux keeps the old per-segment strokes
+        behind WAYFINDER_LINUX_MAC_LOOK=0.
 
         Args:
             painter: QPainter to draw with
             rect: Bounding rectangle for the wave
             color: Base color for the wave
         """
-        if sys.platform == "darwin":
-            self._render_paths(painter, rect, color)
-        else:
+        # Linux too (its Mac look): per-segment round caps also pile up at every
+        # joint there. WAYFINDER_LINUX_MAC_LOOK=0 restores the segment renderer.
+        if (sys.platform.startswith("linux")
+                and os.environ.get("WAYFINDER_LINUX_MAC_LOOK", "1") == "0"):
             self._render_segments(painter, rect, color)
+        else:
+            self._render_paths(painter, rect, color)
 
     def _render_segments(self, painter: QPainter, rect: QRectF, color: QColor):
         """
@@ -1234,11 +1250,11 @@ class GlassmorphicOverlay(QWidget):
     def _target_screen():
         """Screen the pill is placed on.
 
-        macOS follows the display under the pointer (the active display). Linux
-        keeps the primary screen: on Wayland QCursor.pos() is unreliable for a
-        window that never has pointer focus.
+        macOS and Windows follow the display under the pointer (the active
+        display). Linux keeps the primary screen: on Wayland QCursor.pos() is
+        unreliable for a window that never has pointer focus.
         """
-        if sys.platform == "darwin":
+        if sys.platform in ("darwin", "win32"):
             screen = QApplication.screenAt(QCursor.pos())
             if screen:
                 return screen
@@ -2104,7 +2120,7 @@ class GlassmorphicOverlay(QWidget):
             # loop — idle CPU falls to ~0. A state change or a quality flip restarts it (see
             # set_state / set_quality). In "high" mode this branch is never taken, so the
             # ambient wave keeps animating exactly as before.
-            if (self._quality == "performance"
+            if ((self._quality == "performance" or _windows_reduce_motion())
                     and self._state == OverlayState.READY
                     and not self._transitions_active()):
                 if not self._idle_frozen:
@@ -2610,6 +2626,11 @@ def run_overlay():
         app.setDesktopFileName(get_portal_app_id())
         try:
             from wayfinder.config import ICON_PATH as _APP_ICON
+            if sys.platform == "win32":
+                # The app icon the .exe carries, not the bare arrow silhouette.
+                _ico = os.path.join(os.path.dirname(str(_APP_ICON)), "icon.ico")
+                if os.path.exists(_ico):
+                    _APP_ICON = _ico
             if _APP_ICON and os.path.exists(str(_APP_ICON)):
                 app.setWindowIcon(_QIcon(str(_APP_ICON)))
         except Exception:
@@ -2933,6 +2954,12 @@ def run_overlay():
                     _tray_icon_path = None
 
                 def _tray_send(verb):
+                    if sys.platform == "win32":
+                        # No AF_UNIX on Windows: the app's loopback control channel.
+                        from wayfinder.hotkeys.windows_control import send_command
+                        if send_command(verb) is None:
+                            _debug_log(f"tray: send '{verb}' failed: app unreachable")
+                        return
                     try:
                         _s = _tray_socket.socket(_tray_socket.AF_UNIX, _tray_socket.SOCK_STREAM)
                         _s.connect(_tray_sock_path)
@@ -2974,6 +3001,10 @@ def run_overlay():
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Open Settings").triggered.connect(lambda: _tray_send("show"))
                 _tray_menu.addAction("Hide to tray").triggered.connect(lambda: _tray_send("hide"))
+                if sys.platform == "win32":
+                    # Mirrors the Mac menu-bar "Check for Updates…" item.
+                    _tray_menu.addAction("Check for Updates…").triggered.connect(
+                        lambda: _tray_send("update"))
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Quit").triggered.connect(lambda: _tray_send("quit"))
                 tray_icon.setContextMenu(_tray_menu)

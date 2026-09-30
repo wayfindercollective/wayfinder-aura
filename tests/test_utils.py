@@ -262,6 +262,13 @@ class TestParseSinkInputs:
 class TestAudioDucker:
     """Tests for AudioDucker class with mocked pactl."""
 
+    @pytest.fixture(autouse=True)
+    def _not_windows(self, monkeypatch):
+        # These simulate Linux (pactl) and macOS (Core Audio); Windows ducking
+        # is covered in tests/test_windows_parity.py.
+        from wayfinder.utils import audio_ducker
+        monkeypatch.setattr(audio_ducker, "is_windows", lambda: False)
+
     @staticmethod
     def stream(
         sink_id=100,

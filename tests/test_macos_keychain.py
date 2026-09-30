@@ -1,7 +1,7 @@
 """API keys in the macOS Keychain: real Keychain round trip + config integration.
 
-Uses a throwaway Keychain service per test run and deletes its items, so the
-developer's real "Wayfinder Aura" items are never touched.
+Uses a private temporary Keychain and a throwaway service per test. The
+developer's credentials, default Keychain and search list are never changed.
 """
 import json
 import os
@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.macos_keychain_fixture import private_keychain
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="macOS Keychain")
@@ -20,16 +22,23 @@ SECRETS = ("groq_api_key", "openai_api_key", "anthropic_api_key")
 
 
 @pytest.fixture
-def keychain(monkeypatch):
+def keychain(monkeypatch, tmp_path):
     from wayfinder.utils import macos_keychain
     monkeypatch.delenv("WAYFINDER_DISABLE_KEYCHAIN", raising=False)
     monkeypatch.setattr(macos_keychain, "SERVICE", f"Wayfinder Aura test {uuid.uuid4().hex[:8]}")
     import wayfinder.config as config_module
     config_module._KEYCHAIN_SYNCED.clear()
-    yield macos_keychain
-    for name in SECRETS:
-        macos_keychain.delete(name)
-    config_module._KEYCHAIN_SYNCED.clear()
+    with private_keychain(macos_keychain, tmp_path) as libs, monkeypatch.context() as patch:
+        patch.setattr(macos_keychain, "_libs", libs)
+        try:
+            yield macos_keychain
+        finally:
+            try:
+                for name in SECRETS:
+                    assert macos_keychain.delete(name)
+                    assert macos_keychain.get(name) == ""
+            finally:
+                config_module._KEYCHAIN_SYNCED.clear()
 
 
 @pytest.fixture
@@ -47,6 +56,34 @@ def test_round_trip(keychain):
     assert keychain.get("groq_api_key") == "gsk_two"
     assert keychain.delete("groq_api_key")
     assert keychain.get("groq_api_key") == ""
+
+
+def test_private_keychains_isolate_identical_service_and_account(monkeypatch, tmp_path):
+    from wayfinder.utils import macos_keychain
+
+    monkeypatch.setattr(macos_keychain, "SERVICE", f"Wayfinder Aura test {uuid.uuid4().hex}")
+    with private_keychain(macos_keychain, tmp_path) as first, \
+            private_keychain(macos_keychain, tmp_path) as second, monkeypatch.context() as patch:
+        patch.setattr(macos_keychain, "_libs", first)
+        assert macos_keychain.set("groq_api_key", "first-fake")
+        patch.setattr(macos_keychain, "_libs", second)
+        assert macos_keychain.get("groq_api_key") == ""
+        assert macos_keychain.set("groq_api_key", "second-fake")
+        assert macos_keychain.delete("groq_api_key")
+        patch.setattr(macos_keychain, "_libs", first)
+        assert macos_keychain.get("groq_api_key") == "first-fake"
+
+
+def test_private_keychain_is_deleted_after_test_failure(monkeypatch, tmp_path):
+    from wayfinder.utils import macos_keychain
+
+    monkeypatch.setattr(macos_keychain, "SERVICE", f"Wayfinder Aura test {uuid.uuid4().hex}")
+    with pytest.raises(RuntimeError, match="simulated test failure"):
+        with private_keychain(macos_keychain, tmp_path) as libs, monkeypatch.context() as patch:
+            patch.setattr(macos_keychain, "_libs", libs)
+            assert macos_keychain.set("groq_api_key", "fake-before-failure")
+            raise RuntimeError("simulated test failure")
+    assert not list(tmp_path.glob("aura-keychain-*/*.keychain*"))
 
 
 def test_saved_keys_never_reach_config_json(keychain, cfg):

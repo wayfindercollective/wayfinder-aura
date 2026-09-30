@@ -3,10 +3,10 @@ Text injection module for Wayfinder Aura.
 
 Platform dispatch:
 - Linux/X11: xdotool (preferred — no daemon, no uinput, present in stock SteamOS image)
-- Linux/Wayland: ydotool when its daemon is live (kernel-level, compositor-proof), else wtype
-  (virtual-keyboard protocol — refused outright by GNOME/Mutter and revocable by KWin); a
-  wtype failure at injection time falls back to ydotool when possible. (A RemoteDesktop-portal
-  backend — the universal path — is planned but NOT yet implemented.)
+- Linux/Wayland desktop: the RemoteDesktop portal once the user has allowed it
+  (core/portal_keyboard.py — the compositor types, so every app receives it, Wayland-native
+  or XWayland); until then or when declined, ydotool when its daemon is live, else wtype
+  (refused outright by GNOME/Mutter and revocable by KWin), and xdotool in the Flatpak.
 - Linux/X11 fallback: ydotool if xdotool unavailable
 - macOS: native pasteboard snapshot + Cmd-V
 """
@@ -176,6 +176,14 @@ XWAYLAND_MIN_KEY_DELAY_MS = 4
 XWAYLAND_WARMUP_KEY = "Shift_L"
 XWAYLAND_WARMUP_GAP_S = 0.020
 
+# --- Dropped Shift release --------------------------------------------------
+# The EI bridge can also drop a *release*: the compositor then keeps Shift held
+# and everything after it is typed shifted (". " becomes "> ", "just" becomes
+# "JUST"), though X itself saw the release. A second release after each shifted
+# run (and after the warm-up tap) repairs it; releasing a key that is already
+# up is a no-op, so it costs nothing when nothing was dropped.
+SHIFT_RELEASE_SWEEP = ("keyup", "Shift_L", "Shift_R")
+
 _TYPOGRAPHY_FOLD = str.maketrans({
     "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'",
     "“": '"', "”": '"', "„": '"', "‟": '"', "″": '"',
@@ -247,6 +255,7 @@ def build_xdotool_type_command(
         argv += [
             "key", "--clearmodifiers", XWAYLAND_WARMUP_KEY,
             "sleep", f"{XWAYLAND_WARMUP_GAP_S:.3f}",
+            *SHIFT_RELEASE_SWEEP,
         ]
     for i, seg in enumerate(split_shift_segments(text)):
         if i:
@@ -255,6 +264,11 @@ def build_xdotool_type_command(
             "type", "--clearmodifiers", "--delay", str(key_delay_ms),
             "--args", "1", "--", seg,
         ]
+        if _char_class(seg[0]) == "shift":
+            # Release Shift again after every shifted run: when the bridge
+            # dropped the real release, the rest of the dictation came out
+            # shifted in the field ("... JUST WORRY ABOUT ... BUGS>").
+            argv += ["sleep", f"{gap_s:.3f}", *SHIFT_RELEASE_SWEEP]
     return argv
 
 
@@ -707,10 +721,16 @@ def get_active_window() -> "str | None":
     permission needed). xdotool does not exist there, so the Auto-Enter focus
     guard could never fire and Return could land in an app the user had just
     switched to.
+
+    Windows: the foreground window handle (same reason).
     """
     if sys.platform == "darwin":
         from .macos_paste import frontmost_window_id
         return frontmost_window_id()
+    if sys.platform == "win32":
+        # The foreground HWND; xdotool does not exist on Windows either.
+        from .injector_windows import foreground_window_id
+        return foreground_window_id()
     try:
         from wayfinder.utils.hostexec import host_env
         result = subprocess.run(
@@ -785,6 +805,30 @@ class _XcbQueryExtensionReply(ctypes.Structure):
     ]
 
 
+class _XcbCookie(ctypes.Structure):
+    _fields_ = [("sequence", ctypes.c_uint)]
+
+
+class _XcbQueryKeymapReply(ctypes.Structure):
+    _fields_ = [
+        ("response_type", ctypes.c_uint8),
+        ("pad0", ctypes.c_uint8),
+        ("sequence", ctypes.c_uint16),
+        ("length", ctypes.c_uint32),
+        ("keys", ctypes.c_uint8 * 32),
+    ]
+
+
+class _XcbGetModifierMappingReply(ctypes.Structure):
+    _fields_ = [
+        ("response_type", ctypes.c_uint8),
+        ("keycodes_per_modifier", ctypes.c_uint8),
+        ("sequence", ctypes.c_uint16),
+        ("length", ctypes.c_uint32),
+        ("pad0", ctypes.c_uint8 * 24),
+    ]
+
+
 # Lazy singleton: (libxcb, libc) or None. Loaded at most once per process —
 # repeated CDLL() would leak dlopen refs and find_library() shells out to
 # ldconfig (~2ms) on every call (Codex review).
@@ -835,6 +879,26 @@ def _load_xcb():
         ]
         libc.free.restype = None
         libc.free.argtypes = [ctypes.c_void_p]
+        # Keys actually down + which keycodes are modifiers (see
+        # _ModifierProbe.query); optional, the mask alone is the fallback.
+        try:
+            lib.xcb_query_keymap.restype = _XcbCookie
+            lib.xcb_query_keymap.argtypes = [ctypes.c_void_p]
+            lib.xcb_query_keymap_reply.restype = ctypes.POINTER(_XcbQueryKeymapReply)
+            lib.xcb_query_keymap_reply.argtypes = [ctypes.c_void_p, _XcbCookie, ctypes.c_void_p]
+            lib.xcb_get_modifier_mapping.restype = _XcbCookie
+            lib.xcb_get_modifier_mapping.argtypes = [ctypes.c_void_p]
+            lib.xcb_get_modifier_mapping_reply.restype = ctypes.POINTER(_XcbGetModifierMappingReply)
+            lib.xcb_get_modifier_mapping_reply.argtypes = [
+                ctypes.c_void_p, _XcbCookie, ctypes.c_void_p,
+            ]
+            lib.xcb_get_modifier_mapping_keycodes.restype = ctypes.POINTER(ctypes.c_uint8)
+            lib.xcb_get_modifier_mapping_keycodes.argtypes = [
+                ctypes.POINTER(_XcbGetModifierMappingReply),
+            ]
+            lib._wf_keymap = True
+        except AttributeError:
+            lib._wf_keymap = False
         _XCB_HANDLES = (lib, libc)
     except Exception:
         _XCB_HANDLES = None
@@ -851,16 +915,60 @@ class _ModifierProbe:
         self._root = root
 
     def query(self) -> "int | None":
-        """Held-modifier bits right now, or None when the query fails."""
+        """Held-modifier bits right now, or None when the query fails.
+
+        The pointer mask is XKB's modifier state, which under XWayland can keep
+        a bit with no key down: after Alt+Tab to a Wayland window the Mod1 bit
+        stayed set indefinitely (measured 2026-09-28, keys up, mask Mod1), and
+        every dictation was refused as "Alt still held". A mask bit only counts
+        when one of that modifier's keys is actually down (QueryKeymap).
+        """
         try:
             cookie = self._lib.xcb_query_pointer(self._conn, self._root)
             reply = self._lib.xcb_query_pointer_reply(self._conn, cookie, None)
             if not reply:
                 return None
             try:
-                return reply.contents.mask & _X_HELD_MODIFIER_BITS
+                mask = reply.contents.mask & _X_HELD_MODIFIER_BITS
             finally:
                 self._libc.free(reply)
+        except Exception:
+            return None
+        if not mask:
+            return mask
+        down = self._modifier_bits_with_a_key_down()
+        return mask if down is None else mask & down
+
+    def _modifier_bits_with_a_key_down(self) -> "int | None":
+        """Modifier bits (Shift=0x01 ... Mod5=0x80) with a key physically down, or None."""
+        lib = self._lib
+        if not getattr(lib, "_wf_keymap", False):
+            return None
+        try:
+            keymap = lib.xcb_query_keymap_reply(self._conn, lib.xcb_query_keymap(self._conn), None)
+            if not keymap:
+                return None
+            try:
+                keys = bytes(keymap.contents.keys)
+            finally:
+                self._libc.free(keymap)
+            mapping = lib.xcb_get_modifier_mapping_reply(
+                self._conn, lib.xcb_get_modifier_mapping(self._conn), None)
+            if not mapping:
+                return None
+            try:
+                per = mapping.contents.keycodes_per_modifier
+                codes = lib.xcb_get_modifier_mapping_keycodes(mapping)
+                bits = 0
+                for index in range(8):
+                    for j in range(per):
+                        kc = codes[index * per + j]
+                        if kc and keys[kc // 8] & (1 << (kc % 8)):
+                            bits |= 1 << index
+                            break
+                return bits
+            finally:
+                self._libc.free(mapping)
         except Exception:
             return None
 
@@ -1173,6 +1281,90 @@ def prime_wayland_injection() -> "tuple[bool, str]":
         return False, "wtype not found — can't pre-arm Wayland injection approval"
 
 
+# --- RemoteDesktop portal (Wayland desktops) --------------------------------
+# Characters the layout has no plain or Shift key for cannot be typed as keys,
+# so such text is pasted instead: the app's Tk window owns the X11
+# CLIPBOARD (the Flatpak has no clipboard tools) and KWin hands it to Wayland
+# apps; then the portal presses Ctrl+V. The app registers the clipboard hooks.
+_PORTAL_CLIPBOARD_WRITE = None   # Callable[[str], bool], set by the app
+_PORTAL_CLIPBOARD_READ = None    # Callable[[], "str | None"], set by the app
+_PORTAL_PASTE_SETTLE_S = 0.05
+_PORTAL_RESTORE_AFTER_S = 0.4
+
+
+def set_portal_clipboard_hooks(write, read=None) -> None:
+    """The app's clipboard writer/reader for the portal paste fallback."""
+    global _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ
+    _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ = write, read
+
+
+def _portal_fallback_tool() -> str:
+    from ..utils.platform import is_xdotool_available
+    return "xdotool" if is_xdotool_available() else "none"
+
+
+def _portal_press(combo: str, hold_s: float = 0.0) -> None:
+    from . import portal_keyboard
+    layout = portal_keyboard.X11Layout()
+    try:
+        portal_keyboard.keyboard().press_keys(combo, hold_s, layout)
+    except portal_keyboard.PortalKeyboardError as e:
+        raise InjectionError(str(e)) from e
+    finally:
+        layout.close()
+
+
+def _portal_paste(text: str) -> None:
+    """Clipboard + Ctrl+V through the portal, restoring the old clipboard."""
+    previous = None
+    if _PORTAL_CLIPBOARD_READ is not None:
+        try:
+            previous = _PORTAL_CLIPBOARD_READ()
+        except Exception:
+            previous = None
+    if _PORTAL_CLIPBOARD_WRITE is None or not _PORTAL_CLIPBOARD_WRITE(text):
+        raise InjectionError("Could not set the clipboard for the paste")
+    time.sleep(_PORTAL_PASTE_SETTLE_S)
+    _portal_press("ctrl+v", 0.02)
+    if previous is not None and previous != text:
+        time.sleep(_PORTAL_RESTORE_AFTER_S)
+        try:
+            _PORTAL_CLIPBOARD_WRITE(previous)
+        except Exception:
+            pass
+
+
+def _inject_text_portal(text: str, typing_speed: str = "instant") -> None:
+    """Type through the RemoteDesktop portal (see core/portal_keyboard.py)."""
+    from . import portal_keyboard
+
+    key_delay = TYPING_SPEEDS.get(typing_speed, (2, 2))[0]
+    text = fold_typography_for_typing(text)
+    _require_modifier_release()
+    layout = portal_keyboard.X11Layout()
+    try:
+        missing = portal_keyboard.untypeable_chars(text, layout) if layout.available else set()
+        if missing:
+            if _PORTAL_CLIPBOARD_WRITE is not None:
+                layout.close()
+                _portal_paste(text)
+                return
+            # Nothing can paste: keep the letters rather than drop them.
+            text = portal_keyboard.ascii_fold(text)
+            if portal_keyboard.untypeable_chars(text, layout):
+                text = "".join(ch for ch in text if layout.key_for(
+                    portal_keyboard.keysym_for_char(ch)) is not None)
+        try:
+            portal_keyboard.keyboard().type_text(text, key_delay, layout)
+        except portal_keyboard.PortalKeyboardError as e:
+            err = InjectionError(str(e))
+            # Part of the text already landed: a fallback would type it twice.
+            err.uncertain_delivery = bool(getattr(e, "typed", 0))
+            raise err from e
+    finally:
+        layout.close()
+
+
 def _clipboard_write_linux(text: str) -> None:
     """Write *text* to the session clipboard. Raises InjectionError on failure."""
     # Prefer Wayland tools when available; fall back to X11 clipboard utilities.
@@ -1222,6 +1414,9 @@ def _send_ctrl_v_linux(tool: str) -> None:
     # A physically-held Shift would turn this into Ctrl+Shift+V (app-dependent
     # behavior) — same XWayland --clearmodifiers gap as the type path.
     _require_modifier_release()
+    if tool == "portal":
+        _portal_press("ctrl+v")
+        return
     if tool == "xdotool":
         result = subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
@@ -1295,6 +1490,12 @@ def press_enter() -> None:
     # chat inputs, silently breaking the auto-Enter promise.
     _require_modifier_release()
     tool = get_text_injector()
+    if tool == "portal":
+        try:
+            _portal_press("Return")
+            return
+        except InjectionError:
+            tool = _portal_fallback_tool()
     if tool == "xdotool":
         result = subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "Return"],
@@ -1367,7 +1568,7 @@ def inject_text_clipboard_paste(text: str) -> None:
     _clipboard_write_linux(text)
     time.sleep(0.05)
     try:
-        _send_ctrl_v_linux(tool if tool in ("xdotool", "wtype", "ydotool") else "ydotool")
+        _send_ctrl_v_linux(tool if tool in ("portal", "xdotool", "wtype", "ydotool") else "ydotool")
     finally:
         # Best-effort restore: only if clipboard still holds our text.
         if old_clipboard is not None:
@@ -1389,6 +1590,16 @@ def _inject_text_type_linux(
     from ..utils.platform import get_text_injector
 
     tool = get_text_injector()
+    if tool == "portal":
+        try:
+            _inject_text_portal(text, typing_speed)
+            return
+        except InjectionError as e:
+            # The session ended between the check and the keys (revoked,
+            # portal restart): fall back, unless part of the text landed.
+            if getattr(e, "uncertain_delivery", False):
+                raise
+            tool = _portal_fallback_tool()
     if tool == "xdotool":
         _inject_text_xdotool(text, typing_speed, target_window)
         return

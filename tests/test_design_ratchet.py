@@ -200,6 +200,7 @@ GRANDFATHERED_SUB100_SELF_REARM = {
     "_animate_idle_breath",  # helper: 33ms Linux, static on Aqua
     "_tray_pulse_step",     # tray recording pulse, 50ms (deliberate, CPU-validated)
     "_update_mic_test",     # calibration level meter, 50ms
+    "_tick_benchmark_bar",  # benchmark busy bar, 33ms, only while a benchmark runs
 }
 
 

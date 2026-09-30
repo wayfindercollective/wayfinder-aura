@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import random
+import os
 import sys
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -87,7 +88,7 @@ def get_hero_caches(w, h, color_rgb, bg_rgb=BG_CARD, *, aqua=None):
         ``highlight_alphas`` and ``bg_rgba`` for the Aqua render path.
     """
     if aqua is None:
-        aqua = sys.platform == "darwin"
+        aqua = sys.platform in ("darwin", "win32")
     key = (w, h, color_rgb, bg_rgb, bool(aqua))
     cache = _HERO_CACHE.get(key)
     if cache is not None:
@@ -142,12 +143,25 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
                      caches=None, stardust=False, stroke_scale=1.0):
     """Liquid-ribbon waveform onto a w x h RGB strip (``PIL.Image`` mode RGB).
 
-    Linux/Windows render the USER-APPROVED reference (pre-blended opaque strokes
-    plus the 1px top highlight) exactly as on main. macOS renders the Aqua
-    variant (RGBA strokes, blurred glow, ``stroke_scale`` for the unscaled raw
-    Tk canvas); it is also the non-Metal fallback behind the native hero layer.
+    Linux renders the USER-APPROVED reference (pre-blended opaque strokes plus
+    the 1px top highlight) exactly as on main. macOS renders the Aqua variant
+    (RGBA strokes, blurred glow, ``stroke_scale`` for the unscaled raw Tk
+    canvas); it is also the non-Metal fallback behind the native hero layer.
+    Windows renders the Mac's Metal hero shader, ported to NumPy
+    (``windows_hero_render``), so its ribbon matches the Mac; the reference
+    strokes don't render correctly there. Aqua is its fallback.
     """
-    if sys.platform == "darwin":
+    if (sys.platform == "win32" or _linux_mac_look()) and not stardust:
+        try:
+            from wayfinder.ui.windows_hero_render import render_hero_wave_windows
+
+            return render_hero_wave_windows(
+                w, h, t, level, morph, state_color_rgb, bg_rgb,
+                stroke_scale=stroke_scale,
+            )
+        except Exception:
+            pass
+    if sys.platform in ("darwin", "win32"):
         return _render_hero_wave_aqua(
             w, h, t, level, morph, state_color_rgb, bg_rgb,
             caches=caches, stardust=stardust, stroke_scale=stroke_scale,
@@ -156,6 +170,12 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
         w, h, t, level, morph, state_color_rgb, bg_rgb,
         caches=caches, stardust=stardust,
     )
+
+
+def _linux_mac_look() -> bool:
+    """Linux draws the Mac's shader ribbon too (WAYFINDER_LINUX_MAC_LOOK=0: polylines)."""
+    return (sys.platform.startswith("linux")
+            and os.environ.get("WAYFINDER_LINUX_MAC_LOOK", "1") != "0")
 
 
 def _render_hero_wave_reference(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,

@@ -498,11 +498,13 @@ def get_user_whisper_models_dir(flatpak: bool | None = None) -> Path:
     """Writable directory for user-downloaded Whisper (GGML) models.
 
     - Flatpak: $XDG_DATA_HOME/wayfinder-aura/whisper-models (persistent)
-    - Everywhere else: ~/whisper.cpp/models (existing installs, docs and
-      from-source builds all use it — unchanged on Linux, macOS and Windows)
+    - Windows: %LOCALAPPDATA%/wayfinder-aura/whisper-models
+    - Linux/macOS outside Flatpak: ~/whisper.cpp/models (existing installs)
     """
     if _in_wayfinder_flatpak(flatpak):
         return _flatpak_data_home() / "wayfinder-aura" / "whisper-models"
+    if is_windows():
+        return get_data_dir() / "whisper-models"
     return Path.home() / "whisper.cpp" / "models"
 
 
@@ -511,13 +513,16 @@ def get_user_llm_models_dir(flatpak: bool | None = None) -> Path:
 
     - Flatpak: $XDG_DATA_HOME/wayfinder-aura/llm-models (persistent)
     - macOS: ~/Library/Application Support/wayfinder-aura/llm-models
-    - Linux (source/AppImage) and Windows: ~/.local/share/wayfinder-aura/llm-models
-      (the in-app download location those platforms have always used)
+    - Windows: ~/AppData/Local/wayfinder-aura/llm-models, where config.py's
+      Windows default points (downloads used to land in ~/.local/share beside it)
+    - Linux (source/AppImage): ~/.local/share/wayfinder-aura/llm-models
     """
     if _in_wayfinder_flatpak(flatpak):
         return _flatpak_data_home() / "wayfinder-aura" / "llm-models"
     if is_macos():
         return Path.home() / "Library" / "Application Support" / "wayfinder-aura" / "llm-models"
+    if is_windows():
+        return Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
     return Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
 
 
@@ -616,13 +621,20 @@ def get_text_injector() -> str:
     Determine the best text injection method for the current platform.
     
     Returns:
-        - Linux/Wayland: "wtype" (preferred) or "ydotool"
+        - Linux, Wayland desktop with the portal allowed: "portal" (RemoteDesktop portal)
+        - Linux/Wayland: "ydotool" (daemon live) or "wtype"
         - Linux/X11: "xdotool" or "ydotool"
         - macOS: "pyautogui"
         - Windows: "windows" (native Win32 SendInput Unicode injection)
         - If unavailable: "none"
     """
     if is_linux():
+        try:
+            from ..core import portal_keyboard
+            if portal_keyboard.ready():
+                return "portal"
+        except Exception:
+            pass
         if is_wayland():
             # Prefer ydotool when its daemon is reachable: KDE Plasma's KWin shows a per-use
             # "allow input control" security prompt for wtype's Wayland virtual-keyboard
@@ -671,7 +683,8 @@ def subprocess_no_window_kwargs() -> dict:
     dict on Linux/macOS, so callers can splat it unconditionally: ``**kwargs``.
     """
     if sys.platform == "win32":
-        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+        # The constant only exists in Windows' subprocess module (tests fake win32).
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
     return {}
 
 
@@ -753,6 +766,29 @@ def get_default_llama_binary() -> str:
     if is_windows():
         return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli.exe")
     return str(Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli")
+
+
+def get_whisper_download_dir() -> Path:
+    """Where the app downloads speech (Whisper GGML) models.
+
+    Windows: <data dir>/whisper-models (%LOCALAPPDATA%\\wayfinder-aura), beside
+    its cleanup models. Elsewhere the long-standing ~/whisper.cpp/models, which
+    existing installs, docs and from-source builds use.
+    """
+    return get_user_whisper_models_dir(flatpak=False)
+
+
+def get_whisper_host_model_dirs() -> list[Path]:
+    """Host folders that may hold speech models, the download folder first.
+
+    Always includes ~/whisper.cpp/models: Windows downloaded there before 2026-09,
+    and from-source users keep models there.
+    """
+    dirs = [get_whisper_download_dir()]
+    legacy = Path.home() / "whisper.cpp" / "models"
+    if legacy not in dirs:
+        dirs.append(legacy)
+    return dirs
 
 
 def get_default_model_dir() -> Path:

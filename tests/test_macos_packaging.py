@@ -210,7 +210,7 @@ def test_release_workflow_macos_job_never_gates_the_linux_release():
 
     # Same toolchain as the manual candidate workflow.
     assert "runs-on: [self-hosted, macOS, ARM64, aura-macos]" in mac
-    assert 'MACOS_PYTHON_VERSION: "3.12.10"' in mac
+    assert 'PYTHON_VERSION: "3.12.10"' in mac
     assert "-c packaging/macos/constraints.txt -e '.[dev]'" in mac
     assert "python packaging/macos/build.py" in mac
     # Signed DMGs are verified before they get the publishable artifact name;

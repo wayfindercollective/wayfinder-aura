@@ -569,9 +569,16 @@ def check_whisper_model(config: dict) -> DependencyStatus:
         size_mb = Path(model_path).stat().st_size / 1_000_000
         return DependencyStatus(True, detail=f"{Path(model_path).name} ({size_mb:.0f} MB)")
 
-    # Check the writable model directory for any usable models
-    model_dir = get_user_whisper_models_dir(flatpak=IS_FLATPAK)
-    if model_dir.exists():
+    # Search the persistent download directory first, then legacy host
+    # locations outside Flatpak (including Windows' pre-AppData downloads).
+    from wayfinder.utils.platform import get_whisper_host_model_dirs
+
+    model_dirs = [get_user_whisper_models_dir(flatpak=IS_FLATPAK)]
+    if not IS_FLATPAK:
+        model_dirs.extend(d for d in get_whisper_host_model_dirs() if d not in model_dirs)
+    for model_dir in model_dirs:
+        if not model_dir.exists():
+            continue
         models = [p for p in model_dir.glob("ggml-*.bin") if _usable(str(p))]
         if models:
             best = max(models, key=lambda p: p.stat().st_size)
@@ -962,8 +969,8 @@ def download_whisper_model(
 
 
 def _download_model_file(*args, **kwargs) -> None:
-    """Keep the Mac awake for the download (no-op elsewhere); see _impl."""
-    if sys.platform != "darwin":
+    """Keep the Mac/PC awake for the download (no-op on Linux); see _impl."""
+    if sys.platform not in ("darwin", "win32"):
         return _download_model_file_impl(*args, **kwargs)
     from wayfinder.utils import macos_activity
 
@@ -1114,10 +1121,13 @@ def download_llm_model(
 
     url = model_info["url"]
     filename = model_info["filename"]
-    # Flatpak: persistent XDG_DATA_HOME. Everywhere else (macOS included) the
-    # wizard keeps the dir it has always used.
+    # Flatpak: persistent XDG_DATA_HOME. Windows: the folder config.py's Windows
+    # default and the in-app downloader use. Everywhere else (macOS included)
+    # the wizard keeps the dir it has always used.
     if IS_FLATPAK:
         model_dir = get_user_llm_models_dir(flatpak=True)
+    elif sys.platform == "win32":
+        model_dir = Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
     else:
         model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
     target = model_dir / filename

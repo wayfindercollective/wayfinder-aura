@@ -38,7 +38,7 @@ does not regress the Linux app.
 
 | | |
 |---|---|
-| 🎙️ **Hotkey dictation** | Fn+Space on macOS, Ctrl+Alt+Space elsewhere (configurable); text lands at your cursor |
+| 🎙️ **Hotkey dictation** | Right Option on macOS, Right Alt on Windows, Ctrl+Alt+Space on Linux (configurable); text lands at your cursor |
 | 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
 | 🎨 **Tone presets (Ultra)** | Normal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
@@ -203,7 +203,7 @@ Settings live in the app. Linux stores them at
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `hotkey_key` + `hotkey_modifiers` | Fn+Space on macOS; Ctrl+Alt+Space elsewhere | Recording toggle |
+| `hotkey_key` + `hotkey_modifiers` | Right Option on macOS; Right Alt on Windows; Ctrl+Alt+Space on Linux | Recording toggle |
 | `style_toggle_key` + `style_toggle_modifiers` | Fn+Enter on macOS; Ctrl+Alt+Enter elsewhere | Style cycle |
 | `audio_device` / `audio_device_name` | auto | Microphone (saved by name — index-proof) |
 | `typing_speed` | instant | instant, fast, normal, slow, very_slow |

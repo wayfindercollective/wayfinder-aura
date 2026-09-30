@@ -23,7 +23,7 @@ from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
-from wayfinder.utils.child_supervisor import wrap_macos_child_command
+from wayfinder.utils.child_supervisor import bind_to_app_lifetime, wrap_macos_child_command
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
 # subprocess kwargs that hide the child console window on Windows (empty on
@@ -249,6 +249,13 @@ def _cpu_fallback_binary(binary: str) -> Optional[str]:
     """
     if not binary or binary.endswith("-cpu"):
         return None
+    if sys.platform == "win32":
+        # whisper-vulkan\whisper-cli.exe -> whisper\whisper-cli.exe (utils/windows_whisper.py)
+        from wayfinder.utils.windows_whisper import cpu_twin
+
+        twin = cpu_twin(binary)
+        if twin:
+            return twin
     p = Path(binary)
     candidate = p.with_name(p.name + "-cpu")
     return str(candidate) if candidate.is_file() else None
@@ -590,10 +597,17 @@ class WhisperCppBackend(TranscriptionBackend):
                 raise TranscriptionError(f"Could not execute whisper.cpp: {binary}")
 
             if not is_last:
-                died_by_signal = result.returncode < 0
+                from wayfinder.utils.windows_whisper import crashed
+
+                # A crash, not an error exit: a POSIX signal, or on Windows an
+                # NTSTATUS code such as 0xC0000005 (a positive returncode).
+                died_by_signal = crashed(result.returncode)
                 vulkan_error = result.returncode != 0 and "vulkan" in (result.stderr or "").lower()
                 if died_by_signal:
-                    _activate_fallback(f"died with signal {-result.returncode}")
+                    _activate_fallback(
+                        f"died with signal {-result.returncode}" if result.returncode < 0
+                        else f"crashed ({result.returncode & 0xFFFFFFFF:#010x})"
+                    )
                     continue
                 if vulkan_error:
                     _activate_fallback("failed with a Vulkan error")
@@ -722,7 +736,7 @@ class WhisperServerBackend(TranscriptionBackend):
     # and respawn. Previously only toggle_gpu()'s explicit shutdown enforced
     # this — a single-write-site invariant nothing here guaranteed.
     _server_use_gpu: Optional[bool] = None
-    _server_threads: Optional[int] = None  # -t at spawn (macOS reuse check)
+    _server_threads: Optional[int] = None  # -t at spawn (macOS/Windows reuse check)
     # whisper-server is intentionally verbose (several KB per request). Its stdout
     # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
     # fills the kernel pipe and blocks the server in write(), which looks exactly like
@@ -844,8 +858,10 @@ class WhisperServerBackend(TranscriptionBackend):
                 # ownership proof and cannot outlive the app. Linux keeps
                 # main's reuse of our own server (no supervisor yet, so a
                 # crash would otherwise stack a second server per launch).
+                # Windows: the server is bound to the app by a job object
+                # (bind_to_app_lifetime), so it never outlives us either.
                 if (
-                    sys.platform != "darwin"
+                    sys.platform not in ("darwin", "win32")
                     and reuse_ok
                     and self._is_our_server(port, timeout=probe_timeout)
                 ):
@@ -866,9 +882,17 @@ class WhisperServerBackend(TranscriptionBackend):
         full modern flags -> v1.7.2-safe flags -> v1.7.2-safe + no-GPU (the same
         degradation whisper-cli's binary auto-fallback provides).
         """
-        cpu_server = self.whisper_server_binary.replace(
-            "whisper-server", "whisper-server-cpu"
-        )
+        # The CPU twin: on Windows the same exe in the sibling CPU-build folder
+        # (utils/windows_whisper.py), else a whisper-server-cpu beside it.
+        cpu_server = None
+        if sys.platform == "win32":
+            from wayfinder.utils.windows_whisper import cpu_twin
+
+            cpu_server = cpu_twin(self.whisper_server_binary)
+        if not cpu_server:
+            cpu_server = self.whisper_server_binary.replace(
+                "whisper-server", "whisper-server-cpu"
+            )
         cpu_server_exists = (
             cpu_server != self.whisper_server_binary and _existing_file(cpu_server)
         )
@@ -973,11 +997,12 @@ class WhisperServerBackend(TranscriptionBackend):
             # Unknown mode (None: adopted server / reset state) never matches.
             and WhisperServerBackend._server_use_gpu is not None
             and WhisperServerBackend._server_use_gpu == bool(self.use_gpu)
-            # macOS: -t is also fixed at spawn. The warm-up server starts before
-            # first-run thread auto-tuning, so without this the first session
-            # kept the 4-thread default (0.90s vs 0.64s at 8 on a CPU request).
+            # macOS/Windows: -t is also fixed at spawn. The warm-up server starts
+            # before first-run thread auto-tuning, so without this the first
+            # session kept the 4-thread default (0.90s vs 0.64s at 8 on a CPU
+            # request).
             and (
-                sys.platform != "darwin"
+                sys.platform not in ("darwin", "win32")
                 or WhisperServerBackend._server_threads == self.threads
             )
         )
@@ -1042,7 +1067,7 @@ class WhisperServerBackend(TranscriptionBackend):
             port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
 
             if (
-                sys.platform != "darwin"
+                sys.platform not in ("darwin", "win32")
                 and not force
                 and self._is_our_server(port, timeout=_probe_budget())
             ):
@@ -1081,6 +1106,9 @@ class WhisperServerBackend(TranscriptionBackend):
                     env=spawn_env,
                     **_NO_WINDOW,
                 )
+                # Windows: the server dies with the app even on a crash (job
+                # object); no-op elsewhere.
+                bind_to_app_lifetime(proc)
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
@@ -1095,10 +1123,11 @@ class WhisperServerBackend(TranscriptionBackend):
                 atexit.register(WhisperServerBackend.shutdown)
 
                 # Wait for server to be ready (model loading takes a few seconds).
-                # macOS polls every 0.1s: with a warm Metal cache the server is
-                # up in ~0.2s, so the 0.5s first sleep was pure latency on every
-                # (re)start. Same ~30s ceiling either way.
-                poll = 0.1 if sys.platform == "darwin" else 0.5
+                # macOS/Windows poll every 0.1s: with a warm Metal cache (or the
+                # OS file cache on Windows) the server is up in ~0.2s, so the
+                # 0.5s first sleep was pure latency on every (re)start. Same ~30s
+                # ceiling either way.
+                poll = 0.1 if sys.platform in ("darwin", "win32") else 0.5
                 started = time.monotonic()
                 died = False
                 for i in range(int(30 / poll)):  # up to ~30s (None) — or until the deadline
@@ -1221,6 +1250,10 @@ class WhisperServerBackend(TranscriptionBackend):
             derived,
             derived.replace("whisper-cli", "whisper-cli-cpu"),  # CPU twin, same dir
         ]
+        if sys.platform == "win32":
+            from wayfinder.utils.windows_whisper import cpu_twin
+
+            candidates.insert(1, cpu_twin(derived) or derived)  # CPU twin, sibling dir
         if IS_FLATPAK:
             candidates.extend([
                 "/app/bin/whisper-cli",       # Flatpak bundle (Vulkan)
@@ -1334,9 +1367,10 @@ class WhisperServerBackend(TranscriptionBackend):
                 body += f"--{boundary}\r\n".encode()
                 body += f'Content-Disposition: form-data; name="{_field}"\r\n\r\n'.encode()
                 body += f"{int(_value)}\r\n".encode()
-            if sys.platform == "darwin":
+            if sys.platform in ("darwin", "win32"):
                 # Only the text is read. The server otherwise computes per-token
-                # timestamps: MEASURED 3-14% slower (base.en, M3 Ultra), same WER.
+                # timestamps: MEASURED 3-14% slower (base.en, M3 Ultra), same WER;
+                # ~5% on Windows (pinned b4938 CPU build, base.en), one line of text.
                 body += f"--{boundary}\r\n".encode()
                 body += b'Content-Disposition: form-data; name="no_timestamps"\r\n\r\n'
                 body += b"true\r\n"
@@ -2331,6 +2365,12 @@ def get_backend(config: dict) -> TranscriptionBackend:
         cli_binary = _resolve_whisper_cli_binary(
             config.get("whisper_binary", "~/whisper.cpp/build/bin/whisper-cli")
         )
+        if sys.platform == "win32" and use_gpu_effective:
+            # Windows bundles the Vulkan build beside the CPU one; GPU mode (already
+            # license-gated above) runs it, and its CPU twin stays the fallback.
+            from wayfinder.utils.windows_whisper import gpu_twin
+
+            cli_binary = gpu_twin(cli_binary) or cli_binary
         _wc_beam, _wc_best_of = whisper_decoding(config)
         if config.get("whisper_server_mode", True):
             server_binary = _derive_whisper_server_binary(cli_binary)
@@ -2355,7 +2395,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             )
             if server_backend.is_available():
                 return server_backend
-            if sys.platform == "darwin" and not Path(
+            if sys.platform in ("darwin", "win32") and not Path(
                     os.path.expanduser(str(server_backend.model_path or ""))).is_file():
                 # is_available() also needs the model; say which one is missing.
                 print("[Transcription] no speech model installed yet "

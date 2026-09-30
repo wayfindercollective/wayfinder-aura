@@ -54,19 +54,22 @@ reviewer Ultra keys, human PR only).
 - See `docs/GO-LIVE-INPUTS.md`.
 
 ### 2. Public repo + tag
-- Repo is public. **`v1.1.8-beta.10`** is published; stable **`v1.1.8`** is
-  prepared after hands-on signoff and must not be moved once tagged.
+- Repo is public. Stable **`v1.1.8`** was published on 2026-08-27.
+  The integrated Linux/macOS/Windows changes need a new version after exact
+  candidate checks and hands-on signoff; never move an existing release tag.
 - The fast Quality job on `main` and
   `scripts/ci/build-flatpak-on-mini-inf.sh` must both be green before tagging.
-  Heavy artifacts no longer rebuild on every push, and mini-inf is not exposed
-  as a self-hosted runner on this public repository.
+  Heavy Linux artifacts no longer rebuild on every push. All execution uses
+  the owner's self-hosted runners, with host-installed guards rejecting fork
+  jobs before checkout. Native Windows/macOS checks must also pass for the
+  integrated application. See `docs/CI.md` for runner admission and availability.
 
 ### 3. Git source for the app module (tag-time blocker)
 The `wayfinder-aura` module uses `type: dir, path: ..` (local builds only).
 After the release commit is tagged:
 
 ```bash
-python3 flatpak/prepare-release-manifest.py --tag v1.1.8
+python3 flatpak/prepare-release-manifest.py --tag vX.Y.Z
 ```
 
 ### 4. Clean Flatpak build on the target manifest
@@ -107,9 +110,10 @@ the verified checkmark.
 - Global hotkeys inside the sandbox use the XDG GlobalShortcuts portal
   (PyGObject is bundled for this; record and style-cycle are both registered).
   The user approves the binding once when prompted, or sets it in System
-  Settings → Shortcuts. Note the portal only makes the hotkeys *fire* on
-  Wayland — text injection into native Wayland windows remains a separate,
-  open limitation (the bundled xdotool injects into X11/XWayland windows).
+  Settings → Shortcuts. Native Wayland typing uses a separate keyboard-only
+  RemoteDesktop portal session with remembered consent. KDE native Wayland
+  and XWayland injection have automated acceptance evidence; GNOME and the
+  remaining real-desktop/game checks are tracked in `docs/LINUX-SHIPPING-PLAN.md`.
   AppImage and from-source installs do not use the portal; they read
   /dev/input directly via evdev.
 
@@ -126,9 +130,9 @@ the verified checkmark.
   the native binaries print help on the Bazzite build host (`glibc 2.43`). The
   AppImage builder now copies the same desktop and screenshot-bearing AppStream
   metadata used by the Flatpak package.
-  The GitHub AppImage job is pinned to `ubuntu-22.04` for an older-glibc
-  baseline, installs Vulkan development packages, builds pinned Shaderc `glslc`
-  from source if the runner does not provide it, and extraction-smokes bundled
-  binaries/metadata before upload. Broad AppImage distribution still needs a
-  tag or workflow-dispatch run proving that CI artifact.
+  The AppImage job uses an Ubuntu 22.04 container on the owner's `aura-build`
+  runner for an older-glibc baseline. Dependency installation stays inside
+  that bounded container. It builds pinned Shaderc `glslc` when needed and
+  extraction-smokes bundled binaries/metadata. Broad AppImage distribution
+  still needs a tag or workflow-dispatch run proving that CI artifact.
 - Distro packages (AUR/COPR/PPA): out of scope until Flathub is live.
