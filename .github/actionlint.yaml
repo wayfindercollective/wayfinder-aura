@@ -1,0 +1,6 @@
+self-hosted-runner:
+  labels:
+    - aura-linux
+    - aura-build
+    - aura-windows
+    - aura-macos
