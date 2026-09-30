@@ -59,6 +59,15 @@ macOS constraints. Windows also runs the suite and contract smoke, followed by
 the separate installer candidate workflow on pull requests. Passing Linux
 alone is insufficient to merge shared application changes to Main.
 
+Native Keychain tests create private temporary databases and bind every native
+query to its test database. They do not require the runner's default Keychain
+to be writable or unlocked. The fixture checks that the default Keychain and
+search list stay unchanged, exercises real add/read/update/delete operations,
+and deletes the test database on normal teardown, including test failures.
+If the process is forcibly killed, the runner owner may remove only that
+attempt's recorded temporary test files after all its processes have exited.
+Do not unlock or reconfigure a developer's login Keychain to make CI pass.
+
 New pushes cancel older in-progress runs on the same ref. Model-pin drift is a
 separate weekly/manual metadata check that also runs only when its four pin
 surfaces or workflow change; it does not run on ordinary source edits.
