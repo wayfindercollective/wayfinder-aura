@@ -554,15 +554,12 @@ class TestCheckSettingsCompatibility:
 # =============================================================================
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestGetBackend:
     """Tests for the get_backend() factory function."""
 
-    def test_returns_llama_cpp_backend_by_default(self, monkeypatch):
+    def test_returns_llama_cpp_backend_by_default(self):
         """When CLI binary doesn't exist, falls back to Python bindings."""
-        # macOS also searches bundled/Homebrew llama binaries; the host's must
-        # not decide this test.
-        import wayfinder.utils.runtime_assets as runtime_assets
-        monkeypatch.setattr(runtime_assets, "find_llama_binary", lambda *_a, **_k: None)
         config = {
             "post_processing_backend": "llama_cpp",
             "llama_cpp_use_cli": True,

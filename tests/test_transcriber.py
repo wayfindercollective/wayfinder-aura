@@ -1890,6 +1890,7 @@ class TestWhisperServerTranscribeParsing:
         assert text == "hello world"
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestServerModeDefaultAndFallback:
     """Server mode is the default, but falls back to CLI when the binary is absent."""
 
@@ -1909,16 +1910,15 @@ class TestServerModeDefaultAndFallback:
                "model_path": str(model)}
         assert isinstance(get_backend(cfg), WhisperServerBackend)
 
-    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path, monkeypatch):
+    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path):
         from wayfinder.core.transcriber import get_backend, WhisperCppBackend
-        # Host isolation: discovery must not find a developer's ~/whisper.cpp
-        # build (which has a whisper-server beside it).
-        import wayfinder.utils.runtime_assets as runtime_assets
-        monkeypatch.setattr(runtime_assets, "find_whisper_binary", lambda *_a, **_k: None)
         # Only whisper-cli exists, no whisper-server next to it.
         cli = tmp_path / "whisper-cli"
         cli.write_text("#!/bin/sh\n")
-        model = tmp_path / "m.bin"
+        # A Free-tier model name, so the result doesn't hinge on whatever
+        # license gate an earlier test left cached: a gated name gets swapped
+        # for a missing Base path, which disables server mode for the wrong reason.
+        model = tmp_path / "ggml-base.en.bin"
         model.write_bytes(b"\x00")
         cfg = {"whisper_server_mode": True, "whisper_binary": str(cli),
                "model_path": str(model)}
@@ -2007,9 +2007,6 @@ class TestServerModeDefaultAndFallback:
 
         monkeypatch.setattr(transcriber, "IS_FLATPAK", True)
         monkeypatch.setattr(transcriber, "_existing_file", lambda path: path == "/app/bin/whisper-cli")
-        # Host isolation: a developer's ~/whisper.cpp build must not win discovery.
-        import wayfinder.utils.runtime_assets as runtime_assets
-        monkeypatch.setattr(runtime_assets, "find_whisper_binary", lambda *_a, **_k: None)
 
         assert transcriber._resolve_whisper_cli_binary("") == "/app/bin/whisper-cli"
 
