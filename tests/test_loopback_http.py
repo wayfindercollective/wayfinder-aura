@@ -4,6 +4,7 @@ import sys
 import threading
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,22 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from wayfinder.utils import loopback_http  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_opener(monkeypatch):
+    """Each test builds its own no-proxy opener, not one an earlier test cached."""
+    monkeypatch.setattr(loopback_http, "_NO_PROXY_OPENER", None)
+
+
+def _platform(name: str):
+    """Simulate ``name`` for loopback_http's platform check only.
+
+    Patching the real ``sys.platform`` flips the stdlib too: building the
+    opener under "win32" makes ssl read the Windows cert store, which raises
+    NameError on macOS/Linux.
+    """
+    return patch.object(loopback_http, "sys", SimpleNamespace(platform=name))
 
 
 def _serve(body: bytes, hits: list):
@@ -55,7 +72,7 @@ def test_macos_bypasses_a_configured_proxy(servers, monkeypatch):
     # urlopen caches its opener, and so its proxy settings, on first use.)
     assert urllib.request.build_opener().open(url, timeout=5).read() == b"PROXY"
     proxy_hits.clear()
-    with patch.object(loopback_http.sys, "platform", "darwin"):
+    with _platform("darwin"):
         assert loopback_http.urlopen_loopback(url, timeout=5).read() == b"origin"
     assert proxy_hits == [] and origin_hits == ["/inference"]
 
@@ -65,7 +82,7 @@ def test_no_proxy_configured_uses_plain_urlopen(monkeypatch):
     monkeypatch.setattr(loopback_http.urllib.request, "getproxies", lambda: {})
     monkeypatch.setattr(loopback_http.urllib.request, "urlopen",
                         lambda req, timeout=None: calls.append((req, timeout)) or "ok")
-    with patch.object(loopback_http.sys, "platform", "darwin"):
+    with _platform("darwin"):
         assert loopback_http.urlopen_loopback("http://127.0.0.1:1/", timeout=2) == "ok"
     assert calls == [("http://127.0.0.1:1/", 2)]
 
@@ -75,7 +92,7 @@ def test_windows_bypasses_a_configured_proxy(servers, monkeypatch):
     monkeypatch.setattr(loopback_http.urllib.request, "getproxies",
                         lambda: {"http": f"http://127.0.0.1:{proxy.server_port}"})
     url = f"http://127.0.0.1:{origin.server_port}/inference"
-    with patch.object(loopback_http.sys, "platform", "win32"):
+    with _platform("win32"):
         assert loopback_http.urlopen_loopback(url, timeout=5).read() == b"origin"
     assert proxy_hits == [] and origin_hits == ["/inference"]
 
@@ -86,6 +103,6 @@ def test_linux_is_unchanged(monkeypatch):
                         lambda: {"http": "http://proxy:3128"})
     monkeypatch.setattr(loopback_http.urllib.request, "urlopen",
                         lambda req, timeout=None: calls.append(req) or "ok")
-    with patch.object(loopback_http.sys, "platform", "linux"):
+    with _platform("linux"):
         assert loopback_http.urlopen_loopback("http://127.0.0.1:1/") == "ok"
     assert calls == ["http://127.0.0.1:1/"]

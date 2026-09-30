@@ -518,9 +518,8 @@ class TestFeatureGate:
         import wayfinder.license as lic
         from wayfinder.license import get_feature_gate, store_license
 
-        # Establish a clean non-premium baseline against the (empty) temp config dir. The module
-        # -level _feature_gate singleton persists across tests, so without force_refresh here a
-        # prior test that stored a license could leave gate1 premium (test-ordering flake).
+        # Non-premium baseline against the (empty) temp config dir; conftest's
+        # reset_feature_gate keeps an earlier test's gate out of the singleton.
         gate1 = get_feature_gate(force_refresh=True)
         assert not gate1.is_premium
 
@@ -535,6 +534,16 @@ class TestFeatureGate:
         gate3 = get_feature_gate(force_refresh=True)
         assert gate3 is not gate1
         assert gate3.is_premium
+
+    def test_default_gate_starts_free_and_isolated(self):
+        """conftest's reset_feature_gate: every test starts with no cached gate, and
+        the default gate never reads the real CONFIG_DIR/license.json."""
+        import wayfinder.config as cfg
+        import wayfinder.license as lic
+
+        assert lic._feature_gate is None
+        assert lic.get_license_path().parent != cfg.CONFIG_DIR
+        assert not lic.get_feature_gate().is_premium
 
 
 class TestMachineIdDerivation:

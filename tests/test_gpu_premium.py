@@ -15,10 +15,9 @@ BASE_CFG = {
 @pytest.fixture(autouse=True)
 def _free_license(monkeypatch):
     # Real license = non-premium unless a test overrides load_stored_license.
+    # conftest's reset_feature_gate clears the gate singleton around each test.
     monkeypatch.setattr("wayfinder.license.load_stored_license",
                         lambda: LicenseInfo(is_valid=False, is_premium=False))
-    import wayfinder.license as L
-    L._feature_gate = None  # force gate rebuild per test
 
 def _reset_gate():
     import wayfinder.license as L
