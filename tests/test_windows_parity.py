@@ -518,6 +518,18 @@ def test_windows_hotkey_clear_chords(monkeypatch):
 
 # --- Audio: ducking the main volume, "Auto" mic follows the Windows default ----
 
+@pytest.mark.parametrize("system,loads_core_audio", [("Windows", False), ("Linux", False), ("Darwin", True)])
+def test_core_audio_probe_is_macos_only(monkeypatch, system, loads_core_audio):
+    from unittest.mock import Mock
+    from wayfinder.utils import audio_ducker, macos_audio
+
+    load = Mock(return_value=object())
+    monkeypatch.setattr(audio_ducker.platform, "system", lambda: system)
+    monkeypatch.setattr(macos_audio, "_load", load)
+    assert audio_ducker._core_audio() is (macos_audio if loads_core_audio else None)
+    assert load.call_count == int(loads_core_audio)
+
+
 def test_windows_ducking_lowers_and_restores_main_volume(monkeypatch, tmp_path):
     from wayfinder.utils import audio_ducker, windows_audio
 

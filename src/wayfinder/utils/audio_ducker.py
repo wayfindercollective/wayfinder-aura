@@ -121,6 +121,8 @@ def _system_volume_name() -> str:
 
 def _core_audio():
     """The Core Audio volume helpers, or None when they cannot load."""
+    if not is_macos():
+        return None
     try:
         from wayfinder.utils import macos_audio
 
