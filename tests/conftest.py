@@ -72,6 +72,13 @@ if str(src_dir) not in sys.path:
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+# Child Pythons (subprocess tests) must import this checkout too. A shared
+# venv's editable install can point at another checkout (the main checkout
+# while this runs from a git worktree) and would otherwise win silently.
+_pythonpath = os.environ.get("PYTHONPATH", "")
+if str(src_dir) not in _pythonpath.split(os.pathsep):
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [str(src_dir), _pythonpath]))
+
 
 # =============================================================================
 # Directory Fixtures
