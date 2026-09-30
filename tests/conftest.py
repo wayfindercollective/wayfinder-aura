@@ -4,6 +4,7 @@ Pytest configuration and fixtures for Wayfinder Aura tests.
 
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -426,6 +427,76 @@ def x11_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
     monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+
+
+# =============================================================================
+# Host binary isolation
+# =============================================================================
+
+# Executables that binary discovery searches for (runtime_assets.find_*_binary,
+# config._repair_config_path, transcriber/postprocessor get_backend).
+_DISCOVERABLE_BINARIES = frozenset({
+    "whisper-cli", "whisper-cli-cpu", "whisper-server", "whisper-server-cpu",
+    "llama", "llama-cli", "llama-simple", "llama-server",
+})
+
+
+@pytest.fixture
+def no_host_binaries(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
+    """Hide host-installed whisper.cpp / llama.cpp binaries from discovery.
+
+    Discovery probes ~/whisper.cpp, ~/llama.cpp, /usr/bin, /usr/local/bin,
+    /opt/homebrew/bin and PATH. A clean CI runner has none of them, but on a
+    developer machine a Homebrew llama.cpp or a from-source whisper.cpp build
+    outranks the test's own fakes — so backend/config assertions pass on CI and
+    fail locally, or pass locally against the wrong binary.
+
+    Only files named like a discoverable binary are hidden, and only outside
+    the temp dirs where tests create their fakes; every other path is
+    untouched. Wraps the probes discovery uses: Path.exists / Path.is_file,
+    os.path.exists and shutil.which.
+    """
+    # Both spellings: on macOS tempfile hands out /var/folders/... while
+    # pytest's tmp_path is the resolved /private/var/folders/....
+    roots = {
+        os.path.normcase(form(root))
+        for root in (tmp_path_factory.getbasetemp(), tempfile.gettempdir())
+        for form in (os.path.abspath, os.path.realpath)
+    }
+
+    def hidden(path) -> bool:
+        try:
+            path = os.path.normcase(os.path.abspath(os.fspath(path)))
+        except TypeError:  # os.path.exists(fd)
+            return False
+        name = os.path.basename(path)
+        if name.endswith(".exe"):
+            name = name[:-4]
+        if name not in _DISCOVERABLE_BINARIES:
+            return False
+        return not any(path.startswith(root + os.sep) for root in roots)
+
+    real_path_exists = Path.exists
+    real_path_is_file = Path.is_file
+    real_os_path_exists = os.path.exists
+    real_which = shutil.which
+
+    def which(cmd, mode=os.F_OK | os.X_OK, path=None):
+        found = real_which(cmd, mode, path)
+        return None if found and hidden(found) else found
+
+    monkeypatch.setattr(
+        Path, "exists",
+        lambda self, *a, **kw: not hidden(self) and real_path_exists(self, *a, **kw),
+    )
+    monkeypatch.setattr(
+        Path, "is_file",
+        lambda self, *a, **kw: not hidden(self) and real_path_is_file(self, *a, **kw),
+    )
+    monkeypatch.setattr(
+        os.path, "exists", lambda p: not hidden(p) and real_os_path_exists(p)
+    )
+    monkeypatch.setattr(shutil, "which", which)
 
 
 # =============================================================================
