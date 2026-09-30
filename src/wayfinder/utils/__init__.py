@@ -47,6 +47,9 @@ from .platform import (
     get_data_dir,
     get_cache_dir,
     ensure_directories,
+    get_user_whisper_models_dir,
+    get_user_llm_models_dir,
+    get_whisper_model_search_dirs,
     # Text injection detection
     is_ydotool_available,
     is_xdotool_available,
@@ -132,6 +135,9 @@ __all__ = [
     "get_data_dir",
     "get_cache_dir",
     "ensure_directories",
+    "get_user_whisper_models_dir",
+    "get_user_llm_models_dir",
+    "get_whisper_model_search_dirs",
     # Platform - Text injection
     "is_ydotool_available",
     "is_xdotool_available",

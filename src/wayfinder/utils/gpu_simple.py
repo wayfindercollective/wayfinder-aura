@@ -67,11 +67,8 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
         return devices
     
     # Find smallest model for quick probe
-    model_dirs = [
-        Path.home() / "whisper.cpp" / "models",
-        Path.home() / ".local" / "share" / "whisper.cpp",
-        Path("/app/share/whisper-models"),
-    ]
+    from wayfinder.utils.platform import get_whisper_model_search_dirs
+    model_dirs = get_whisper_model_search_dirs()
     model_patterns = ["ggml-tiny.en.bin", "ggml-tiny.bin", "ggml-base.en.bin"]
     
     model_path = None

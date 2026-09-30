@@ -209,7 +209,10 @@ trigger works regardless.
 
 ### Whisper model not found
 Bundled models live under `/app/share/whisper-models`; user-downloaded models
-live under `~/.local/share/wayfinder-aura/whisper-models/`.
+live under `~/.var/app/io.wayfindercollective.WayfinderAura/data/wayfinder-aura/`
+(`whisper-models/` and `llm-models/`, i.e. `$XDG_DATA_HOME` inside the sandbox).
+The sandbox's `~/.local/share` is not persisted; models older builds left
+there are moved on startup.
 
 ### Build fails on Python packages
 Regenerate the Python source manifests from the checked-in exact requirements:

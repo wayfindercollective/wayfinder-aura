@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from wayfinder.config import IS_FLATPAK
+from wayfinder.utils.platform import get_whisper_model_search_dirs
 
 # Prefer Base first (the Free/default model); Ultra can still explicitly select
 # Tiny for a lighter Game Mode profile.
@@ -55,10 +56,15 @@ def _pick_light_model_path(user_model_path: str, explicit: str) -> str | None:
         search_dirs.append("/app/share/whisper-models")
     # Common download locations (best-effort)
     home = os.path.expanduser("~")
-    for extra in (
+    extras = [
         os.path.join(home, ".local", "share", "wayfinder-aura", "models"),
         os.path.join(home, "whisper.cpp", "models"),
-    ):
+    ]
+    # Flatpak downloads live in the persistent XDG_DATA_HOME dir (plus the
+    # pre-fix dirs); the sandbox's ~/.local/share and ~/whisper.cpp do not persist.
+    if IS_FLATPAK:
+        extras.extend(str(d) for d in get_whisper_model_search_dirs(flatpak=True))
+    for extra in extras:
         if extra not in search_dirs:
             search_dirs.append(extra)
 
