@@ -849,9 +849,13 @@ class TestProcessWithConfig:
         result = process_with_config("um hello world", config)
         assert result[0].isupper()
 
-    def test_minimal_tone_uses_neutral_llm_cleanup_when_opted_in(self):
+    def test_minimal_tone_uses_neutral_llm_cleanup_when_opted_in(self, monkeypatch):
         # Default Normal is instant filler removal (tests/test_normal_style.py);
-        # normal_llm_cleanup keeps the model path for users who want it.
+        # normal_llm_cleanup keeps the model path for Ultra users who want it.
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
         backend = SimpleNamespace(
             is_available=lambda: True,
             process=MagicMock(return_value="This is neutral cleaned text."),
@@ -872,6 +876,31 @@ class TestProcessWithConfig:
 
         assert result == "This is neutral cleaned text."
         backend.process.assert_called_once()
+
+    def test_free_normal_never_runs_a_cleanup_model(self, monkeypatch):
+        # Free cleanup is um/uh removal only, even with the hidden opt-in set.
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: False)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        backend = SimpleNamespace(is_available=lambda: True, process=MagicMock())
+        config = {
+            "output_tone": "minimal",
+            "post_processing_enabled": True,
+            "normal_llm_cleanup": True,
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_model_path": "/tmp/model.gguf",
+        }
+
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+            result = process_with_config("um so this is uh my note", config)
+
+        backend.process.assert_not_called()
+        assert "um" not in result.lower().split()
+        assert "uh" not in result.lower().split()
+        from wayfinder.core.postprocessor import cleanup_model_needed
+
+        assert cleanup_model_needed(config) is False
 
     @pytest.mark.parametrize(
         "tone", ["minimal", "professional", "casual", "dev", "personal"]
@@ -905,7 +934,8 @@ class TestProcessWithConfig:
     def test_unlicensed_vocabulary_is_removed_before_cleanup_prompt(self, monkeypatch):
         import wayfinder.license as license_module
 
-        gate = SimpleNamespace(has_feature=lambda _feature: False)
+        # Styles licensed, custom vocabulary not: the prompt must drop the terms.
+        gate = SimpleNamespace(has_feature=lambda feature: feature != "custom_vocabulary")
         monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
         backend = SimpleNamespace(
             is_available=lambda: True,
@@ -917,7 +947,7 @@ class TestProcessWithConfig:
             "post_processing_backend": "llama_cpp",
             "llama_cpp_model_path": "/tmp/model.gguf",
             "custom_vocabulary": ["PaidTerm"],
-            "normal_llm_cleanup": True,  # Free -> Normal; exercise the model prompt
+            "normal_llm_cleanup": True,  # no model on disk -> Normal; exercise the prompt
         }
 
         with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
@@ -1110,8 +1140,13 @@ class TestResidentLlamaFastPath:
         with patch.object(b, "_resident_model", return_value=None):
             b.warm_up()  # must not raise
 
-    def test_module_warm_up_routes_to_local_backend(self, tmp_path):
+    def test_module_warm_up_routes_to_local_backend(self, tmp_path, monkeypatch):
+        import wayfinder.license as license_module
         from wayfinder.core import postprocessor
+
+        # Cleanup models run for Ultra only.
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda *a, **k: gate)
         binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
         model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
         cfg = {"post_processing_backend": "llama_cpp", "post_processing_enabled": True,

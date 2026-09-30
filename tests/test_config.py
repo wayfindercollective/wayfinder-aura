@@ -59,7 +59,8 @@ class TestConfigLoading:
         assert DEFAULT_CONFIG["caricature_mode"] is False
         assert DEFAULT_CONFIG["chunked_mode"] == "auto"
         assert DEFAULT_CONFIG["chunk_auto_threshold"] == 30
-        assert DEFAULT_CONFIG["post_processing_enabled"] is False
+        # Normal cleanup (um/uh removal, no model) is on for everyone.
+        assert DEFAULT_CONFIG["post_processing_enabled"] is True
 
     def test_welcome_completed_default(self):
         """The first-run welcome tour gate is present and defaults to False."""

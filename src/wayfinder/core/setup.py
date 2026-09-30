@@ -106,7 +106,7 @@ LLM_MODELS: dict[str, dict] = {
         "bytes": 2_497_280_736,
         "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
-        "note": "Best local model for Strong & Caricature intensity; sharpest instruction follower at 4B",
+        "note": "Best local model for every style, including Strong and Caricature (Ultra)",
     },
 }
 
@@ -481,7 +481,11 @@ def check_cuda_toolkit() -> DependencyStatus:
         if Path(p).exists():
             return DependencyStatus(True, detail=f"CUDA found at {p}", warning="nvcc not in PATH")
 
-    return DependencyStatus(False, error="CUDA toolkit not installed (needed for GPU acceleration)")
+    return DependencyStatus(
+        False,
+        error="CUDA toolkit not found (only the optional Faster-Whisper engine needs it; "
+        "the default engine uses Vulkan)",
+    )
 
 
 def check_build_tools() -> DependencyStatus:
@@ -1190,7 +1194,7 @@ def get_dependencies(config: dict) -> list[Dependency]:
         deps.append(Dependency(
             id="cuda",
             name="CUDA Toolkit",
-            description="NVIDIA GPU compute libraries for fast transcription",
+            description="NVIDIA CUDA libraries for the optional Faster-Whisper engine",
             required=False,
             _check=check_cuda_toolkit,
             # install handled by install_system_packages
@@ -1215,7 +1219,7 @@ def get_dependencies(config: dict) -> list[Dependency]:
         Dependency(
             id="whisper_cpp",
             name="Speech Engine (whisper.cpp)",
-            description="Local speech-to-text engine with GPU acceleration",
+            description="Local speech-to-text engine (GPU acceleration is an Ultra setting)",
             required=True,
             _check=lambda: check_whisper_cpp(config),
         ),

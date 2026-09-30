@@ -1,21 +1,23 @@
 """
 Ultra under-utilization detection for the launch nudge.
 
-An activated Ultra install starts exactly like Free (GPU off, Base speech
-model, free cleanup model, chunking off) because upgrades are opt-in. These
-helpers spot an Ultra user who hasn't switched anything on yet so the app can
-show one light, dismissible cue instead of leaving the upgrade feeling
-identical to Free. Pure functions — no Tk, no I/O — so they stay headlessly
-testable.
+The first switch to Ultra turns GPU acceleration and chunking on
+(core/ultra_defaults.py), but it cannot download the bigger models, and users
+can switch things off again. These helpers spot an Ultra user who isn't using
+an upgrade so the app can show one light, dismissible cue instead of leaving
+the upgrade feeling identical to Free. Pure functions — no Tk, no I/O — so
+they stay headlessly testable.
 """
 
-import os
 
 # Signal keys are stable identifiers (tests/logging); order = display priority.
 SIGNAL_PHRASES = {
     # Measured (scripts/eval_matrix.py, M3 Ultra): Large v3 Turbo Q5 on GPU makes
     # 43% fewer word errors than Base on CPU at the same ~0.27 s per dictation.
-    "model": "switch to the Large v3 Turbo Q5 speech model (about 40% fewer mistakes, same speed)",
+    "model": "switch to the Large v3 Turbo Q5 speech model (about 40% fewer mistakes, same speed on the GPU)",
+    # No GPU: Turbo Q5 takes ~9x as long as Base on CPU (2.27 s vs 0.26 s);
+    # Small makes 25-30% fewer errors than Base (Small EN 8.6% vs 11.5% WER) in 0.76 s.
+    "model_cpu": "switch to the Small speech model (about 25% fewer mistakes; about 3x as long on CPU)",
     "gpu": "switch on GPU acceleration",
     "cleanup": "grab a premium cleanup model",
     "chunking": "enable chunk processing for long dictations",
@@ -34,9 +36,15 @@ def underutilization_signals(config, gate, has_gpu: bool) -> "list[str]":
     signals = []
 
     try:
-        model_name = os.path.basename(str(config.get("model_path", "") or "")).lower()
-        if gate.has_feature("large_models") and "base" in model_name:
-            signals.append("model")
+        from wayfinder.license import is_free_transcription_model
+
+        # The Free Base/Base.en files only: a custom file with "base" in its
+        # name is the user's own pick.
+        on_free_model = is_free_transcription_model(str(config.get("model_path", "") or ""))
+        if gate.has_feature("large_models") and on_free_model:
+            # Turbo Q5 is only as fast as Base on a GPU.
+            gpu_usable = has_gpu and gate.has_feature("gpu_acceleration")
+            signals.append("model" if gpu_usable else "model_cpu")
     except Exception:
         pass
 
