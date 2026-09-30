@@ -78,7 +78,7 @@ def test_mac_admission_reserves_future_model_growth_before_ci():
     assert capacity.spare_after_reserves(64 * gb, 218 * gb, 218 * gb) >= capacity.CI_BUDGET
 
 
-@pytest.mark.parametrize("used,maximum", [(219, 218), (-1, 218), (0, float("nan")), (None, 218)])
+@pytest.mark.parametrize("used,maximum", [(219, 218), (-1, 218), (0, 0), (0, float("nan")), (None, 218)])
 def test_mac_admission_refuses_invalid_model_telemetry(used, maximum):
     with pytest.raises(ValueError):
         load("mac-runner-supervisor").spare_after_reserves(133, used, maximum)

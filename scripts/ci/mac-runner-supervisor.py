@@ -42,7 +42,7 @@ def group_rss(group: int) -> int:
 
 def spare_after_reserves(available: int, model_used: int, model_max: int) -> int:
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-           for v in (available, model_used, model_max)) or not 0 <= model_used <= model_max:
+           for v in (available, model_used, model_max)) or not 0 <= model_used <= model_max or model_max <= 0:
         raise ValueError("Invalid model capacity telemetry")
     return available - (model_max - model_used) - PROTECTED_HEADROOM
 
@@ -71,6 +71,8 @@ def main() -> int:
         try:
             os.killpg(runner.pid, signal.SIGTERM)
             runner.wait(timeout=10)
+        except ProcessLookupError:
+            pass
         except subprocess.TimeoutExpired:
             pass
         finally:
