@@ -126,7 +126,7 @@ def test_macos_microphone_recovery_schedules_only_one_relaunch():
             "log": lambda self, message: messages.append(message),
             "_show_error_banner": lambda self, message: messages.append(message),
             "after": lambda self, delay, callback: scheduled.append((delay, callback)),
-            "relaunch_app": lambda self: relaunched.append(True) or True,
+            "relaunch_app": lambda self, **kwargs: relaunched.append(kwargs) or True,
         },
     )()
 
@@ -137,7 +137,7 @@ def test_macos_microphone_recovery_schedules_only_one_relaunch():
     assert scheduled[0][0] == 150
     assert "restarting Aura" in messages[-1]
     scheduled[0][1]()
-    assert relaunched == [True]
+    assert relaunched == [{"background": True}]
 
 
 def test_macos_lifecycle_notifications_are_marshaled_out_of_appkit_callbacks():
