@@ -20,7 +20,8 @@
     <p>
       Wayfinder Aura is a local-first voice dictation and speech recognition application for
       Linux. Press a hotkey, speak, and your words are typed wherever your cursor is — voice
-      typing for any app, no cloud required. By default, speech-to-text transcription runs
+      typing in X11 and XWayland apps, and in native Wayland apps via ydotool. No cloud
+      required: by default, speech-to-text transcription runs
       offline on your device with whisper.cpp — in local mode your voice never leaves your
       computer.
       Optional cloud transcription backends are available if you choose to enable them, and the
@@ -29,7 +30,7 @@
     <p>
       Free tier includes Base/Base.en transcription on CPU, local minimal cleanup, hotkeys,
       text injection, the status overlay, and audio-processing controls. Wayfinder Aura Ultra
-      is an optional one-time purchase (launch price $29.99; regular price $60) that unlocks
+      is an optional one-time purchase ($29.99 until 31 December 2026, then $60) that unlocks
       GPU acceleration, additional speech and cleanup models, styles and voice profiles,
       custom vocabulary, chunked long-form recording, and optional cloud backends. Ultra is
       sold on wayfindercollective.io (not through Flathub billing); enter a license key in
@@ -39,7 +40,7 @@
     <ul>
       <li>Local-first &amp; Private — transcribed on your device by default; optional cloud backends if you choose them</li>
       <li>Hotkey Triggered — Press a key to start/stop recording</li>
-      <li>Wayland &amp; X11 Support — Works on modern Linux desktops</li>
+      <li>Wayland &amp; X11 Support — X11 and XWayland apps directly; native Wayland apps via ydotool</li>
       <li>System Tray Integration — Runs quietly in the background</li>
       <li>Base Dictation — Free local CPU transcription with optional minimal cleanup</li>
       <li>Ultra Acceleration — GPU inference, additional models, styles, and long-form chunking</li>
