@@ -181,6 +181,19 @@ def audio_has_speech_activity(audio_data: np.ndarray, sample_rate: int = 16000) 
     return dynamic_ratio >= 1.8
 
 
+def audio_is_digital_silence(audio_data: np.ndarray) -> bool:
+    """Whether captured audio is non-empty and every sample is exactly zero.
+
+    A live microphone always carries some analogue noise, so even a quiet room
+    leaves non-zero samples. Exact zeros mean the device sent no signal at all:
+    a hardware-muted USB headset, a wireless headset switched off while its
+    dongle stays plugged in, or a dead virtual device. Callers use this to tell
+    the user the mic is muted or off instead of asking them to speak closer.
+    """
+    samples = np.asarray(audio_data)
+    return samples.size > 0 and not np.any(samples)
+
+
 def get_wav_peak_amplitude(audio_path: str | Path) -> float | None:
     """Return a mono/stereo PCM WAV's normalized peak, or ``None`` if unreadable.
 
@@ -1384,6 +1397,11 @@ class AudioRecorder:
             return False
         return audio_has_speech_activity(np.concatenate(self.frames, axis=0), self.sample_rate)
 
+    def is_digital_silence(self) -> bool:
+        """Whether the device delivered audio but every sample was exactly zero."""
+        frames = self.frames
+        return bool(frames) and all(audio_is_digital_silence(f) for f in frames)
+
     def start(self) -> None:
         """Start recording audio.
 
@@ -1691,6 +1709,12 @@ class ChunkedRecorder:
                 return False
             audio = np.concatenate(self._buffer, axis=0)
         return audio_has_speech_activity(audio, self.sample_rate)
+
+    def is_digital_silence(self) -> bool:
+        """Whether the device delivered audio but every sample was exactly zero."""
+        with self._buffer_lock:
+            frames = list(self._buffer)
+        return bool(frames) and all(audio_is_digital_silence(f) for f in frames)
 
     def _get_total_samples(self) -> int:
         """Get total number of samples in buffer."""
