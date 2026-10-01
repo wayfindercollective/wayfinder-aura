@@ -28,9 +28,11 @@ Linux: dictation for gamers on every desktop.
   "Aeron" and "Arrhawn" for "Arawn"), so a word that sounds like one of your
   vocabulary words and looks close is written your way, after transcription
   and again after cleanup. Real English words (the 60,000 most common) are
-  never changed: a name heard as one ("Iran") still needs a correction. The
-  Dev and Casual styles do the same for their built-in lists, and Dev now
-  knows AI model and tool names (Qwen, Claude, Ollama, kubectl, …).
+  never changed: a name heard as one ("Iran") still needs a correction, and
+  two of your words that sound alike are never swapped. A lowercased name
+  gets its spelling back ("pytorch" → PyTorch). The Dev and Casual styles do
+  the same for their built-in lists, and Dev now knows AI model and tool
+  names (Qwen, Ollama, DeepSeek, Grok and Groq, kubectl, …).
 - **Ultra switches on its recommended setup once.** The first time an install
   becomes Ultra, GPU acceleration turns on (Apple silicon, NVIDIA, AMD),
   Chunk Processing goes to Auto, text cleanup turns on, and with the GPU on

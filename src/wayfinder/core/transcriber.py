@@ -40,27 +40,31 @@ DEV_VOCABULARY = [
     "push", "pull", "fetch", "rebase", "checkout", "stash", "cherry-pick",
     "upstream", "origin", "remote", "clone", "fork", "diff", "HEAD", "staging",
     "repo", "repository", "git", "GitHub", "GitLab", "Bitbucket",
-    # AI models and tools: names Whisper has no spelling for (Turbo Q5 wrote
-    # "Quen" for Qwen, "Alima" for Ollama). Early so they fit the prompt;
-    # near-misses snap to them too. Grok and Groq sound alike: both listed, so
+    # AI models and tools: names Whisper has no spelling for. In Minimal, Turbo
+    # Q5 wrote "Quen" for Qwen and "Alima" for Ollama; with them in the Dev
+    # prompt it wrote both right. Grok and Groq sound alike: both listed, so
     # neither is ever respelled as the other.
-    "Claude", "Anthropic", "OpenAI", "ChatGPT", "Gemini", "Gemma", "Qwen",
-    "Llama", "Ollama", "Mistral", "DeepSeek", "Grok", "Groq", "Copilot", "PyTorch",
-    "CUDA", "llama.cpp", "whisper.cpp", "kubectl", "Postgres", "Neovim",
+    "Qwen", "Ollama", "Gemma", "DeepSeek", "Grok", "Groq", "kubectl",
     # Common commands
     "npm", "npx", "yarn", "pnpm", "pip", "cargo", "brew", "apt", "sudo",
     "cd", "ls", "mkdir", "rm", "mv", "cp", "grep", "sed", "awk", "curl", "wget",
-    # Programming terms
+    # Languages, formats and jargon
     "API", "REST", "GraphQL", "JSON", "YAML", "TOML", "XML", "HTML", "CSS",
     "TypeScript", "JavaScript", "Python", "Rust", "Go", "Java", "C++",
-    "function", "class", "method", "variable", "const", "let", "var",
-    "async", "await", "import", "export", "module", "package",
-    "frontend", "backend", "fullstack", "server", "client", "localhost",
-    "Docker", "Kubernetes", "CI", "CD", "deploy", "production", "staging",
-    "debug", "console", "log", "error", "exception", "stack trace",
+    "async", "await", "const", "var", "localhost", "fullstack", "frontend", "backend",
+    "Docker", "Kubernetes", "CI", "CD",
     # File paths / extensions
     ".js", ".ts", ".py", ".rs", ".go", ".json", ".yaml", ".yml", ".md",
     "src", "lib", "bin", "node_modules", "package.json", "requirements.txt",
+    # Plain-English programming words Whisper already spells right: last, so
+    # they are the first to fall out of the prompt budget.
+    "function", "class", "method", "variable", "let", "import", "export",
+    "module", "package", "server", "client", "deploy", "production", "debug",
+    "console", "log", "error", "exception", "stack trace",
+    # More names Whisper mostly knows, here so a lowercased one gets its
+    # spelling back ("pytorch" -> "PyTorch"); in the prompt when there is room.
+    "Claude", "Anthropic", "OpenAI", "ChatGPT", "Gemini", "Llama", "Mistral",
+    "Copilot", "PyTorch", "CUDA", "llama.cpp", "whisper.cpp", "Postgres", "Neovim",
 ]
 
 # Casual vocabulary - informal terms that Whisper tends to formalize
@@ -2853,11 +2857,17 @@ def snap_near_vocabulary(text: str, terms, style_terms=()) -> str:
     """Respell near-misses of single-word vocabulary with its exact spelling.
 
     ``terms`` are the user's (any word of 4+ letters). ``style_terms`` are the
-    active style's built-in list; only its uncommon words count, and only for a
-    word no user term claims. A word is respelled only when it has 4+ letters,
-    is lowercase or Capitalised (no acronyms, CamelCase or contractions), is
-    not real English and is not already a term. The sound keys must match and
-    the length and spelling be close; a tie leaves the word alone.
+    active style's built-in list; only its uncommon words count (Qwen, kubectl,
+    not "merge" or "Claude", whose near-misses are mostly real words such as
+    "clawed"), and only for a word no user term claims. A word is respelled
+    only when it has 4+ letters, is lowercase or Capitalised (no acronyms,
+    CamelCase or contractions), stands alone (not part of a path, file name,
+    URL or address), is not real English and is not already a term. The
+    sound keys must match, the length and spelling be close, and no other
+    term may share the sound (Grok and Groq): then the word is left alone.
+
+    A term that is not English also gets its own casing back ("pytorch" ->
+    "PyTorch"; normalize_whisper_caps lowercases inner capitals).
     """
     import re
     from difflib import SequenceMatcher
@@ -2865,11 +2875,11 @@ def snap_near_vocabulary(text: str, terms, style_terms=()) -> str:
     if not text or not (terms or style_terms):
         return text
 
-    def _index(words, uncommon_only):
+    def _index(words, style):
         by_key: dict[str, list[str]] = {}
         for term in normalize_vocabulary_terms(list(words or ())):
             if (len(term) >= VOCAB_SNAP_MIN_CHARS and re.fullmatch(r"[A-Za-z]+", term)
-                    and not (uncommon_only and _is_english(term))):
+                    and not (style and _is_english(term))):
                 by_key.setdefault(vocabulary_sound_key(term), []).append(term)
         return by_key
 
@@ -2877,29 +2887,34 @@ def snap_near_vocabulary(text: str, terms, style_terms=()) -> str:
     if not indexes:
         return text
     known = {t.lower() for t in list(terms or ()) + list(style_terms or ())}
+    spelling: dict[str, str] = {}
+    for by_key in reversed(indexes):  # the user's casing wins
+        for group in by_key.values():
+            spelling.update({t.lower(): t for t in group if not _is_english(t)})
 
     def _pick(word, low, key, by_key):
-        candidates = [t for t in by_key.get(key, ())
-                      if abs(len(t) - len(word)) <= max(2, len(t) // 3)]
+        group = by_key.get(key, ())
+        if len(group) > 1:
+            return word  # two terms sound alike: don't guess
+        candidates = [t for t in group if abs(len(t) - len(word)) <= max(2, len(t) // 3)]
         floor = VOCAB_SNAP_MIN_SIMILARITY
         if len(key) <= 3:
             # "Aira" -> "Aura" but not "Oura" -> "Aura".
             floor = VOCAB_SNAP_SHORT_KEY_SIMILARITY
             candidates = [t for t in candidates if t[0].lower() == low[0]]
-        scored = sorted(((SequenceMatcher(None, low, t.lower()).ratio(), t) for t in candidates),
-                        reverse=True)
-        if not scored or scored[0][0] < floor:
+        if not candidates:
             return None
-        if len(scored) > 1 and scored[1][0] == scored[0][0]:
-            return word  # two terms fit equally: don't guess
-        return scored[0][1]
+        term = candidates[0]
+        return term if SequenceMatcher(None, low, term.lower()).ratio() >= floor else None
 
     def _snap(match):
         word = match.group(0)
         low = word.lower()
-        if (len(word) < VOCAB_SNAP_MIN_CHARS or low in known
-                or word[1:] != word[1:].lower() or _is_english(word)):
-            return word
+        if low in known:
+            return spelling.get(low, word)
+        if (len(word) < VOCAB_SNAP_MIN_CHARS or word[1:] != word[1:].lower()
+                or _is_english(word)):
+            return word  # also acronyms and identifiers (AURA, KWin, WayfinderAura)
         key = vocabulary_sound_key(word)
         for by_key in indexes:
             picked = _pick(word, low, key, by_key)
@@ -2907,8 +2922,9 @@ def snap_near_vocabulary(text: str, terms, style_terms=()) -> str:
                 return picked
         return word
 
-    # Whole words, possessive 's allowed; never part of a contraction (aren't).
-    return re.sub(r"(?<![\w'’-])[A-Za-z]+(?=(?:['’]s)?(?![\w'’-]))", _snap, text)
+    # Whole words, possessive 's allowed; never part of a contraction (aren't),
+    # a path, file name, URL or address (src/wayfinder, package.json, a@b).
+    return re.sub(r"(?<![\w'’./\\@-])[A-Za-z]+(?=(?:['’]s)?(?![\w'’/\\@-]|\.\w))", _snap, text)
 
 
 def builtin_style_vocabulary(tone: str) -> list[str]:

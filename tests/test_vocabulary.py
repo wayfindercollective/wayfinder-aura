@@ -289,7 +289,32 @@ def test_dev_style_names_snap():
 
 
 def test_sound_alike_names_in_one_list_never_replace_each_other():
+    """Grok and Groq share a sound: a k-spelling could be either (review of #19)."""
     assert T.snap_near_vocabulary("Groq and Grok", [], T.DEV_VOCABULARY) == "Groq and Grok"
+    assert T.snap_near_vocabulary("Grock and Grokk", [], T.DEV_VOCABULARY) == "Grock and Grokk"
+
+
+def test_lowercased_terms_get_their_spelling_back():
+    """normalize_whisper_caps lowercases inner capitals ("PyTorch" -> "pytorch")."""
+    text = T.normalize_whisper_caps("Check PyTorch and ChatGPT and OpenAI with GitHub.")
+    assert T.snap_near_vocabulary(text, [], T.DEV_VOCABULARY) == (
+        "Check PyTorch and ChatGPT and OpenAI with GitHub.")
+    assert T.snap_near_vocabulary("ask arawn", TERMS) == "ask Arawn"
+
+
+def test_common_word_terms_keep_the_texts_casing():
+    assert T.snap_near_vocabulary("the main thing", TERMS) == "the main thing"
+
+
+def test_paths_files_and_addresses_are_left_alone():
+    text = "edit package.json in src/aeron/core, mail aeron@example.com"
+    assert T.snap_near_vocabulary(text, TERMS, T.DEV_VOCABULARY) == text
+    assert T.snap_near_vocabulary("Ask Aeron. Then stop.", TERMS) == "Ask Arawn. Then stop."
+
+
+def test_names_whisper_knows_are_not_snap_targets():
+    """Their near-misses are mostly real words ("clawed" for Claude)."""
+    assert T.snap_near_vocabulary("the cat clawed", [], T.DEV_VOCABULARY) == "the cat clawed"
 
 
 def test_common_style_words_are_not_snap_targets_but_user_terms_are():
@@ -320,7 +345,9 @@ def test_dev_ai_names_fit_the_prompt_next_to_user_terms(ultra, tmp_path):
            "whisper_server_mode": False, "output_tone": "dev",
            "custom_vocabulary": ["Daan", "Arawn", "Aura", "Wayfinder", "Cyrus"]}
     vocab = T.get_backend(cfg).custom_vocabulary
-    assert {"Qwen", "Claude", "Ollama", "kubectl"} <= set(vocab)
+    assert {"Qwen", "Ollama", "Gemma", "kubectl", "Grok", "Groq"} <= set(vocab)
+    # Only plain-English words Whisper spells anyway made room for them.
+    assert {"TypeScript", "C++", "async", "await", "const", "var"} <= set(vocab)
     assert vocab[-5:] == ["Daan", "Arawn", "Aura", "Wayfinder", "Cyrus"]
 
 
