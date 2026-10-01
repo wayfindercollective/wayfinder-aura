@@ -1172,7 +1172,13 @@ class WarmMic:
             # native teardown outside _lock.  A concurrent idle close may have
             # detached it already; either way the recursive acquire is bounded
             # by _close_done and cannot freeze the UI.
-            if self._close_stream() is False and _IS_WINDOWS:
+            closed = self._close_stream()
+            if closed is False and _IS_WINDOWS:
+                with self._lock:
+                    stuck = self._abandoned_close
+            else:
+                stuck = False
+            if stuck:
                 # Just waited the full budget for it; fail now rather than
                 # freezing the window a second time in the retry.
                 raise MicrophoneRestartRequired(
