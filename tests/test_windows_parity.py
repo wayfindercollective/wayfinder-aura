@@ -1577,3 +1577,73 @@ def test_windows_never_offers_faster_whisper():
 
     src = inspect.getsource(wayfinder_main.WayfinderApp)
     assert "and not (IS_WINDOWS and not IS_MACOS)" in src.split("show_fw = (", 1)[1][:200]
+
+
+# --- Paste diagnostics (core/injector_windows.py, observation only) ---------
+
+def _diag(monkeypatch, target="Code.exe/Chrome_WidgetWin_1"):
+    from wayfinder.core import injector_windows as iw
+
+    monkeypatch.setattr(iw, "_window_app", lambda hwnd: target)
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1))
+    return iw._PasteDiagnostics("hello world")
+
+
+def test_paste_line_flags_the_target_reading_after_the_old_clipboard_is_back(monkeypatch):
+    d = _diag(monkeypatch)
+    d.previous("old text")
+    d._marks.update(mods=0, mods_free=1, set=2, ctrl_v=40, restored=120)
+    d._reads = [(30.0, "DefenderSessionHelper.exe/WDClip"), (300.0, "Code.exe/Chrome_MessageWindow")]
+    line = d._line("Code.exe/Chrome_WidgetWin_1")
+    assert line.startswith("🔎 Paste ⚠ 11 chars → Code.exe/")
+    assert "old clipboard 8 chars" in line and "old clipboard back at 120ms" in line
+    assert "DefenderSessionHelper.exe/WDClip at 30ms (background)" in line
+    assert "Code.exe/Chrome_MessageWindow at 300ms LATE READ" in line
+    assert "hello" not in line and "old text" not in line   # never the text itself
+
+
+def test_paste_line_is_quiet_when_the_target_reads_in_time(monkeypatch):
+    d = _diag(monkeypatch)
+    d.previous(None)
+    d._marks.update(ctrl_v=40)
+    d._reads = [(60.0, "Code.exe/Chrome_MessageWindow")]
+    line = d._line("Aura/TkTopLevel")
+    assert "⚠" not in line and "LATE" not in line
+    assert "old clipboard none" in line and "front after: Aura/TkTopLevel" in line
+
+
+def test_paste_still_runs_the_same_steps_and_reports_failures(monkeypatch):
+    from wayfinder.core import injector_windows as iw
+    from wayfinder.core.injector import InjectionError
+
+    lines, steps = [], []
+    monkeypatch.setattr(iw, "_paste_reporter", lines.append)
+    monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
+                                                       GetOpenClipboardWindow=lambda: None))
+    monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
+    monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
+    clip = {"v": "old"}
+    monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
+    monkeypatch.setattr(iw, "_clipboard_set_windows",
+                        lambda t, transient=False: steps.append(("set", t)) or clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
+    monkeypatch.setattr(iw, "_WATCH_SECONDS", 0.05)
+    monkeypatch.setattr(iw.time, "sleep", lambda s: None)
+
+    iw.inject_text_paste_windows("hi")
+    assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]
+    deadline = time.time() + 2
+    while not lines and time.time() < deadline:
+        time.sleep(0.01)
+    assert lines and "2 chars → app.exe/Cls" in lines[0]
+
+    lines.clear()
+    monkeypatch.setattr(iw, "_clipboard_set_windows", lambda t, transient=False: False)
+    with pytest.raises(InjectionError):
+        iw.inject_text_paste_windows("hi")
+    deadline = time.time() + 2
+    while not lines and time.time() < deadline:
+        time.sleep(0.01)
+    assert lines and "FAILED InjectionError" in lines[0]

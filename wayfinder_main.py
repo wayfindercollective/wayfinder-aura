@@ -6234,6 +6234,15 @@ class WayfinderApp(ctk.CTk):
             self.after(1200, self._refresh_macos_permission_banner)
             self._apply_macos_window_chrome()
         if IS_WINDOWS and not IS_MACOS:
+            # One "🔎 Paste" activity-log line per paste (target app, clipboard
+            # timings, who read it and when) so a bad paste can be diagnosed.
+            try:
+                from wayfinder.core.injector_windows import set_paste_reporter
+
+                set_paste_reporter(self.log)
+            except Exception:
+                pass
+        if IS_WINDOWS and not IS_MACOS:
             # Same sleep/wake/display handling as the Mac, from Windows'
             # WM_POWERBROADCAST / WM_DISPLAYCHANGE (utils/windows_lifecycle.py);
             # its thread only queues, Tk runs the handlers.

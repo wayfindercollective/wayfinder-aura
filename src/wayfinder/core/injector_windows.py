@@ -498,23 +498,204 @@ def inject_text_paste_windows(text: str) -> None:
     """
     if not text:
         return
-    _require_foreground_window()
-    _refuse_own_window(text)
-    require_modifier_release_windows()
-
-    previous = _clipboard_get_windows()
-    if not _clipboard_set_windows(text, transient=True):
-        raise InjectionError("Could not write to the Windows clipboard for paste.")
+    diag = _PasteDiagnostics(text)
     try:
-        time.sleep(0.03)
-        _press_keys([VK_CONTROL, VK_V])
+        _require_foreground_window()
+        _refuse_own_window(text)
+        diag.mark("mods")
+        require_modifier_release_windows()
+        diag.mark("mods_free")
+
+        previous = _clipboard_get_windows()
+        diag.previous(previous)
+        if not _clipboard_set_windows(text, transient=True):
+            raise InjectionError("Could not write to the Windows clipboard for paste.")
+        diag.mark("set")
+        try:
+            time.sleep(0.03)
+            diag.start_watch()
+            _press_keys([VK_CONTROL, VK_V])
+            diag.mark("ctrl_v")
+        finally:
+            # Best-effort restore, only if the clipboard still holds our text
+            # (the user may have copied something new in the meantime).
+            if previous is not None:
+                try:
+                    time.sleep(0.08)
+                    current = _clipboard_get_windows()
+                    diag.at_restore(current == text)
+                    if current == text:
+                        _clipboard_set_windows(previous, transient=True)
+                        diag.mark("restored")
+                except Exception:
+                    pass
+    except Exception as exc:
+        diag.failed(exc)
+        raise
     finally:
-        # Best-effort restore, only if the clipboard still holds our text
-        # (the user may have copied something new in the meantime).
-        if previous is not None:
+        diag.finish()
+
+
+# ---------------------------------------------------------------------------
+# Paste diagnostics (observation only: never changes what is pasted or when)
+# ---------------------------------------------------------------------------
+#
+# One "🔎 Paste" line per clipboard paste, for chasing reports like "it pasted
+# my old clipboard" or "nothing pasted". A watcher thread notes which app opens
+# the clipboard after Ctrl+V and when: a target that reads only after the old
+# clipboard was put back pastes the old text (LATE READ). Logs lengths, app
+# names and timings, never the dictated or clipboard text.
+
+_paste_reporter = None
+_WATCH_SECONDS = 1.5
+
+if _user32 is not None:
+    _user32.GetOpenClipboardWindow.restype = wintypes.HWND
+    _user32.GetOpenClipboardWindow.argtypes = ()
+    _user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    _user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    _user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+    _kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+
+def set_paste_reporter(reporter) -> None:
+    """Route paste diagnostics to *reporter(line)* (the app's activity log)."""
+    global _paste_reporter
+    _paste_reporter = reporter
+
+
+def _window_app(hwnd) -> str:
+    """'exe/WindowClass' for *hwnd* (or '-')."""
+    if _user32 is None or not hwnd:
+        return "-"
+    try:
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        exe = "?"
+        handle = _kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+        if handle:
             try:
-                time.sleep(0.08)
-                if _clipboard_get_windows() == text:
-                    _clipboard_set_windows(previous, transient=True)
+                buf = ctypes.create_unicode_buffer(520)
+                size = wintypes.DWORD(len(buf))
+                if _kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    exe = buf.value.replace("/", "\\").rsplit("\\", 1)[-1]
+            finally:
+                _kernel32.CloseHandle(handle)
+        if pid.value == os.getpid():
+            exe = "Aura"
+        cls = ctypes.create_unicode_buffer(128)
+        _user32.GetClassNameW(hwnd, cls, 128)
+        return f"{exe}/{cls.value}"
+    except Exception:
+        return "?"
+
+
+class _PasteDiagnostics:
+    def __init__(self, text: str):
+        self._t0 = time.perf_counter()
+        self._marks: dict[str, float] = {}
+        self._chars = len(text)
+        self._prev = "?"
+        self._held_at_restore: bool | None = None
+        self._error: str | None = None
+        self._reads: list[tuple[float, str]] = []
+        self._watch: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._target = _window_app(_user32.GetForegroundWindow()) if _user32 else "-"
+
+    def _ms(self) -> float:
+        return (time.perf_counter() - self._t0) * 1000
+
+    def mark(self, name: str) -> None:
+        self._marks[name] = self._ms()
+
+    def previous(self, value) -> None:
+        self._prev = "none" if value is None else f"{len(value)} chars"
+
+    def at_restore(self, still_ours: bool) -> None:
+        self.mark("restore_check")
+        self._held_at_restore = still_ours
+
+    def failed(self, exc: Exception) -> None:
+        self._error = f"{type(exc).__name__}: {exc}"[:160]
+
+    def start_watch(self) -> None:
+        if _user32 is None:
+            return
+
+        def watch():
+            last = None
+            end = time.perf_counter() + _WATCH_SECONDS
+            while time.perf_counter() < end and not self._stop.is_set():
+                try:
+                    hwnd = _user32.GetOpenClipboardWindow()
+                except Exception:
+                    break
+                if hwnd and hwnd != last:
+                    app = _window_app(hwnd)
+                    if not app.startswith("Aura/"):
+                        self._reads.append((self._ms(), app))
+                last = hwnd
+                time.sleep(0.0005)
+
+        self._watch = threading.Thread(target=watch, name="paste-diag", daemon=True)
+        self._watch.start()
+
+    def finish(self) -> None:
+        reporter = _paste_reporter
+        if reporter is None:
+            self._stop.set()
+            return
+        fg_after = _window_app(_user32.GetForegroundWindow()) if _user32 else "-"
+
+        def emit():
+            if self._watch is not None:
+                self._watch.join(_WATCH_SECONDS + 0.5)
+            try:
+                reporter(self._line(fg_after))
             except Exception:
                 pass
+
+        threading.Thread(target=emit, name="paste-diag-report", daemon=True).start()
+
+    def _line(self, fg_after: str) -> str:
+        m = self._marks
+        ctrl_v = m.get("ctrl_v")
+        restored = m.get("restored")
+        parts = [f"{self._chars} chars → {self._target}"]
+        if fg_after != self._target:
+            parts.append(f"front after: {fg_after}")
+        parts.append(f"old clipboard {self._prev}")
+        if "mods_free" in m and "mods" in m:
+            wait = m["mods_free"] - m["mods"]
+            if wait >= 50:
+                parts.append(f"waited {wait:.0f}ms for keys up")
+        if ctrl_v is not None:
+            parts.append(f"Ctrl+V at {ctrl_v:.0f}ms")
+        if self._held_at_restore is False:
+            parts.append("clipboard changed by another app before restore (not restored)")
+        elif restored is not None:
+            parts.append(f"old clipboard back at {restored:.0f}ms")
+        target_exe = self._target.split("/", 1)[0]
+        late = False
+        if self._reads:
+            reads = []
+            for t, app in self._reads[:5]:
+                own = app.split("/", 1)[0] == target_exe
+                after = restored is not None and t > restored
+                late = late or (own and after)
+                tag = " LATE READ" if own and after else ("" if own else " (background)")
+                reads.append(f"{app} at {t:.0f}ms{tag}")
+            parts.append("clipboard opened by " + ", ".join(reads))
+        elif ctrl_v is not None:
+            parts.append("no clipboard read seen")
+        if self._error:
+            parts.append(f"FAILED {self._error}")
+        verdict = "⚠ " if (self._error or late) else ""
+        return f"🔎 Paste {verdict}" + " · ".join(parts)
