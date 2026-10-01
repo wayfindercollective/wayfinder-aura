@@ -14,9 +14,14 @@ import numpy as np
 import pytest
 
 
-def _make_warm(device=None, idle_secs=30.0):
+def _make_warm(device=None, idle_secs=30.0, **kwargs):
     from wayfinder.core.recorder import WarmMic
-    return WarmMic(device=device, sample_rate=16000, idle_secs=idle_secs)
+    return WarmMic(
+        device=device,
+        sample_rate=16000,
+        idle_secs=idle_secs,
+        **kwargs,
+    )
 
 
 class TestWarmMicLifecycle:
@@ -245,16 +250,21 @@ class TestWarmMicIdleClose:
     @patch("wayfinder.core.recorder.sd")
     def test_timed_out_close_quarantines_portaudio(self, mock_sd, _rate):
         blocker = threading.Event()
+        notices = []
         stream = MagicMock()
         stream.active = True
         stream.abort.side_effect = lambda: blocker.wait(timeout=5)
         mock_sd.InputStream.return_value = stream
-        warm = _make_warm(device=7)
+        warm = _make_warm(device=7, on_restart_required=notices.append)
         warm.acquire(MagicMock())
         warm.release()
 
         assert warm._close_stream() is False
         assert warm._abandoned_close is True
+        assert notices == ["Microphone backend got stuck releasing the previous stream"]
+        # Any later close/acquire path must not request multiple relaunches.
+        warm._notify_restart_required("duplicate")
+        assert len(notices) == 1
         with pytest.raises(RuntimeError, match="stuck releasing"):
             warm.acquire(MagicMock())
         assert mock_sd.InputStream.call_count == 1

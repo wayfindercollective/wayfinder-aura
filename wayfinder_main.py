@@ -6034,6 +6034,9 @@ class WayfinderApp(ctk.CTk):
             # boot-while-mic-off case (USB-hub mic powered on after the app started) —
             # without this, dictation fails with PaErrorCode -9999 until an app restart.
             resolve_device=lambda: resolve_audio_device(self.config),
+            on_restart_required=(
+                self._queue_macos_microphone_relaunch if IS_MACOS else None
+            ),
         )
 
         # Standard recorder for short recordings
@@ -21544,6 +21547,37 @@ class WayfinderApp(ctk.CTk):
     def tray_reset(self, icon=None, item=None):
         """Tray 'Reset' action — abandon any stuck/in-flight dictation and return to idle."""
         self._dispatch_tray_action(self.force_reset)
+
+    def _queue_macos_microphone_relaunch(self, reason: str) -> None:
+        """Marshal a native-audio recovery request onto Tk's main thread."""
+        self.event_queue.put((
+            EventType.UI_CALLBACK,
+            lambda reason=reason: self._recover_macos_microphone(reason),
+        ))
+
+    def _recover_macos_microphone(self, reason: str) -> None:
+        """Relaunch a packaged Mac app after an unrecoverable CoreAudio close.
+
+        PortAudio is process-global.  Once its close call has timed out, trying
+        another stream or rescan beside that native worker risks the callback
+        crash seen in the field.  A fresh process is the only safe recovery.
+        """
+        if getattr(self, "_microphone_relaunch_pending", False):
+            return
+        self._microphone_relaunch_pending = True
+        self.log(f"⚠ {reason} — restarting Wayfinder Aura")
+        try:
+            self._show_error_banner("Microphone stopped responding — restarting Aura…")
+        except Exception:
+            pass
+
+        def relaunch() -> None:
+            if self.relaunch_app():
+                return
+            self._microphone_relaunch_pending = False
+            self.on_error(f"{reason}. Restart Wayfinder Aura to continue.")
+
+        self.after(150, relaunch)
 
     def relaunch_app(self) -> bool:
         """macOS: quit, then reopen the bundle through LaunchServices.
