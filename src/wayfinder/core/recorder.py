@@ -702,6 +702,14 @@ _MIC_OPEN_TIMEOUT = 4.0
 # device is reconfigured while the warm stream is being released.  Teardown
 # must never own WarmMic's shared lock or block Tk indefinitely.
 _MIC_CLOSE_TIMEOUT = 1.0
+# Windows: closing a stream takes ~0.35 s even when healthy (MME, a USB mic,
+# measured 2026-10-01), so a 1 s budget tripped the restart-required quarantine
+# on a single slow moment (memory pressure). A genuinely wedged close still
+# fails within 5 s, and one that overruns but finishes is recovered from (see
+# WarmMic._close_stream); the Mac keeps 1 s and its restart for the CoreAudio
+# deadlock this guards against.
+if sys.platform == "win32":
+    _MIC_CLOSE_TIMEOUT = 5.0
 
 
 class MicrophoneRestartRequired(RuntimeError):
@@ -1118,7 +1126,13 @@ class WarmMic:
         # stream beside a native teardown that may still be running.
         if not self._close_done.wait(_MIC_CLOSE_TIMEOUT):
             with self._lock:
-                self._abandoned_close = True
+                if sys.platform == "win32" and self._close_done.is_set():
+                    finished_late = True     # Windows: it did finish; retry
+                else:
+                    finished_late = False
+                    self._abandoned_close = True
+            if finished_late:
+                return self.acquire(sink)
             raise MicrophoneRestartRequired(
                 "Microphone backend got stuck releasing the previous stream; "
                 "restart Wayfinder Aura before recording again"
@@ -1226,6 +1240,8 @@ class WarmMic:
             self._closing_stream = True
             self._close_done.clear()
 
+        finished = threading.Event()
+
         def teardown() -> None:
             try:
                 try:
@@ -1244,14 +1260,27 @@ class WarmMic:
                 except Exception:
                     pass
             finally:
+                recovered = False
                 with self._lock:
                     self._closing_stream = False
+                    finished.set()
+                    if sys.platform == "win32" and self._abandoned_close:
+                        # Windows: the close overran the watchdog but returned,
+                        # so PortAudio is out of this stream and the mic can be
+                        # used again without restarting the app.
+                        self._abandoned_close = False
+                        self._restart_required_notified = False
+                        recovered = True
                 self._close_done.set()
+                if recovered:
+                    print("WarmMic: the slow stream close finished; microphone available again")
 
         try:
             _run_with_timeout(teardown, _MIC_CLOSE_TIMEOUT)
         except TimeoutError:
             with self._lock:
+                if sys.platform == "win32" and finished.is_set():
+                    return True    # finished between the timeout and here
                 self._abandoned_close = True
             reason = (
                 "Microphone backend got stuck releasing the previous stream"

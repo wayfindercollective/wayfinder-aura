@@ -438,3 +438,52 @@ class TestRecordersUseWarmMic:
         rec.stop()
         warm.release.assert_called_once()
         assert rec.is_recording() is False
+
+
+class TestWindowsSlowCloseRecovery:
+    """Windows: a healthy stream close takes ~0.35 s (MME, USB mic), so one slow
+    moment overran the 1 s watchdog and blocked recording until a restart
+    (owner, 2026-10-01). Windows allows 5 s, and a close that overruns but
+    finishes lifts the quarantine. The Mac keeps its restart."""
+
+    def _slow_close(self, monkeypatch, mock_sd, platform):
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder.sys, "platform", platform)
+        monkeypatch.setattr(recorder, "_MIC_CLOSE_TIMEOUT", 0.1)
+        blocker = threading.Event()
+        stream = MagicMock()
+        stream.active = True
+        stream.abort.side_effect = lambda: blocker.wait(timeout=5)
+        mock_sd.InputStream.return_value = stream
+        warm = _make_warm(device=7)
+        warm.acquire(MagicMock())
+        warm.release()
+        assert warm._close_stream() is False          # overran the watchdog
+        assert warm._abandoned_close is True
+        blocker.set()                                  # ...but then finishes
+        assert warm._close_done.wait(timeout=2)
+        return warm
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_windows_recovers_when_the_slow_close_finishes(self, mock_sd, _rate, monkeypatch):
+        warm = self._slow_close(monkeypatch, mock_sd, "win32")
+        assert warm._abandoned_close is False
+        warm.acquire(MagicMock())                      # records again, no restart
+        assert mock_sd.InputStream.call_count == 2
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_mac_still_requires_a_restart(self, mock_sd, _rate, monkeypatch):
+        warm = self._slow_close(monkeypatch, mock_sd, "darwin")
+        assert warm._abandoned_close is True
+        with pytest.raises(RuntimeError, match="stuck releasing"):
+            warm.acquire(MagicMock())
+
+    def test_close_budget_is_five_seconds_only_on_windows(self):
+        import sys as real_sys
+
+        from wayfinder.core import recorder
+
+        assert recorder._MIC_CLOSE_TIMEOUT == (5.0 if real_sys.platform == "win32" else 1.0)
