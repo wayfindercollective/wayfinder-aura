@@ -97,15 +97,44 @@ def test_mac_admission_refuses_invalid_model_telemetry(used, maximum):
         load("mac-runner-supervisor").spare_after_reserves(133, used, maximum)
 
 
-@pytest.mark.parametrize("head,expected", [("wayfindercollective/wayfinder-aura", 0), ("stranger/fork", 1)])
-def test_installed_hook_entrypoint_accepts_owned_pr_and_blocks_fork(tmp_path, head, expected):
+def _run_installed_hook(tmp_path, head, headroom_gib):
+    """Run the hook entrypoint as installed: trusted-runner.py beside a
+    mac-runner-supervisor.py. The supervisor is a stand-in reporting
+    ``headroom_gib``, so the result never depends on this machine's live model
+    budget (on a busy Mac, CI's own job used to fail the trust test)."""
+    hook_dir = tmp_path / "hooks"
+    hook_dir.mkdir()
+    (hook_dir / "trusted-runner.py").write_text(
+        (ROOT / "scripts/ci/trusted-runner.py").read_text(encoding="utf-8"), encoding="utf-8")
+    (hook_dir / "mac-runner-supervisor.py").write_text(
+        f"GIB = 1024**3\nCI_BUDGET = 4 * GIB\n"
+        f"def ci_headroom():\n    return int({headroom_gib} * GIB)\n", encoding="utf-8")
     event = tmp_path / "event.json"
     event.write_text(json.dumps({"repository": {"full_name": "wayfindercollective/wayfinder-aura"},
         "pull_request": {"head": {"repo": {"full_name": head}}}}))
-    result = subprocess.run([sys.executable, str(ROOT / "scripts/ci/trusted-runner.py")],
+    return subprocess.run([sys.executable, str(hook_dir / "trusted-runner.py")],
         env={**os.environ, "GITHUB_REPOSITORY": "wayfindercollective/wayfinder-aura",
              "GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": str(event),
              "RUNNER_TEMP": str(tmp_path), "AURA_MIN_FREE_GB": "0"},
         capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("head,expected", [("wayfindercollective/wayfinder-aura", 0), ("stranger/fork", 1)])
+def test_installed_hook_entrypoint_accepts_owned_pr_and_blocks_fork(tmp_path, head, expected):
+    result = _run_installed_hook(tmp_path, head, headroom_gib=64)
     assert result.returncode == expected, result.stdout + result.stderr
     assert ("AURA_TRUSTED_RUNNER_OK" in result.stdout) == (expected == 0)
+
+
+def test_the_real_supervisor_still_sits_beside_the_hook():
+    """The stand-in above must keep the real module's interface."""
+    real = load("mac-runner-supervisor")
+    assert callable(real.ci_headroom) and real.CI_BUDGET == 4 * real.GIB
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the model-budget check runs on the Mac runner only")
+def test_installed_hook_refuses_a_trusted_job_without_mac_headroom(tmp_path):
+    result = _run_installed_hook(tmp_path, "wayfindercollective/wayfinder-aura", headroom_gib=1)
+    assert result.returncode == 1
+    assert "cannot borrow the model's peak budget" in result.stdout
+    assert "AURA_TRUSTED_RUNNER_OK" not in result.stdout
