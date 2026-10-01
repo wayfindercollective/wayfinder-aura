@@ -39,6 +39,10 @@ Linux: dictation for gamers on every desktop.
   Large v3 Turbo Q5 becomes the speech model (downloaded if needed, then
   switched to). It never runs again, so later choices stick; installs that
   were Ultra before keep their settings.
+- **Setup recommends Large v3 Turbo Q5 for Ultra on a GPU** (574 MB, the
+  same accuracy as the 1.6 GB Turbo), matching the app's Ultra setup. Setup
+  now fetches every Ultra speech model like the in-app model manager: from
+  the Models CDN with your licence, never from a public mirror.
 - **Free removes um/uh out of the box.** Text cleanup is on for new installs;
   with the Normal style it removes filler sounds instantly and runs no model.
   Cleanup models are for the Ultra writing styles, so Free no longer shows a
