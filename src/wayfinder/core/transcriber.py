@@ -40,20 +40,31 @@ DEV_VOCABULARY = [
     "push", "pull", "fetch", "rebase", "checkout", "stash", "cherry-pick",
     "upstream", "origin", "remote", "clone", "fork", "diff", "HEAD", "staging",
     "repo", "repository", "git", "GitHub", "GitLab", "Bitbucket",
+    # AI models and tools: names Whisper has no spelling for. In Minimal, Turbo
+    # Q5 wrote "Quen" for Qwen and "Alima" for Ollama; with them in the Dev
+    # prompt it wrote both right. Grok and Groq sound alike: both listed, so
+    # neither is ever respelled as the other.
+    "Qwen", "Ollama", "Gemma", "DeepSeek", "Grok", "Groq", "kubectl",
     # Common commands
     "npm", "npx", "yarn", "pnpm", "pip", "cargo", "brew", "apt", "sudo",
     "cd", "ls", "mkdir", "rm", "mv", "cp", "grep", "sed", "awk", "curl", "wget",
-    # Programming terms
+    # Languages, formats and jargon
     "API", "REST", "GraphQL", "JSON", "YAML", "TOML", "XML", "HTML", "CSS",
     "TypeScript", "JavaScript", "Python", "Rust", "Go", "Java", "C++",
-    "function", "class", "method", "variable", "const", "let", "var",
-    "async", "await", "import", "export", "module", "package",
-    "frontend", "backend", "fullstack", "server", "client", "localhost",
-    "Docker", "Kubernetes", "CI", "CD", "deploy", "production", "staging",
-    "debug", "console", "log", "error", "exception", "stack trace",
+    "async", "await", "const", "var", "localhost", "fullstack", "frontend", "backend",
+    "Docker", "Kubernetes", "CI", "CD",
     # File paths / extensions
     ".js", ".ts", ".py", ".rs", ".go", ".json", ".yaml", ".yml", ".md",
     "src", "lib", "bin", "node_modules", "package.json", "requirements.txt",
+    # Plain-English programming words Whisper already spells right: last, so
+    # they are the first to fall out of the prompt budget.
+    "function", "class", "method", "variable", "let", "import", "export",
+    "module", "package", "server", "client", "deploy", "production", "debug",
+    "console", "log", "error", "exception", "stack trace",
+    # More names Whisper mostly knows, here so a lowercased one gets its
+    # spelling back ("pytorch" -> "PyTorch"); in the prompt when there is room.
+    "Claude", "Anthropic", "OpenAI", "ChatGPT", "Gemini", "Llama", "Mistral",
+    "Copilot", "PyTorch", "CUDA", "llama.cpp", "whisper.cpp", "Postgres", "Neovim",
 ]
 
 # Casual vocabulary - informal terms that Whisper tends to formalize
@@ -2262,16 +2273,12 @@ def get_backend(config: dict) -> TranscriptionBackend:
     _user_vocabulary: list[str] = []
     if _has_feature("custom_vocabulary"):
         # The spellings a user asked for in corrections are terms too.
-        _user_vocabulary = normalize_vocabulary_terms(
-            list(config.get("custom_vocabulary", []) or [])
-            + [write for _heard, write in parse_vocabulary_replacements(
-                config.get("vocabulary_replacements", []))]
-        )
+        _user_vocabulary = user_vocabulary_terms(config)
 
     _effective_tone = str(config.get("output_tone", "minimal") or "minimal")
     _builtin_vocabulary: list[str] = []
-    if _has_feature("tone_system") and _effective_tone in ("dev", "casual"):
-        _builtin_vocabulary = DEV_VOCABULARY if _effective_tone == "dev" else CASUAL_VOCABULARY
+    if _has_feature("tone_system"):
+        _builtin_vocabulary = builtin_style_vocabulary(_effective_tone)
     # Gamer mode (macOS game chat): the game in front primes Whisper with its
     # chat slang. Free, like game chat itself; set per dictation by the app.
     _gamer_vocabulary = [str(w) for w in (config.get("gamer_vocabulary") or []) if str(w).strip()]
@@ -2762,9 +2769,10 @@ def parse_vocabulary_replacements(raw) -> list[tuple[str, str]]:
     return pairs
 
 
-def apply_vocabulary_replacements(text: str, replacements) -> str:
+def apply_vocabulary_replacements(text: str, replacements, terms=(), style_terms=()) -> str:
     """Replace each "heard" phrase (whole words, any case, any spacing) with its
-    exact "write" spelling, in ONE pass.
+    exact "write" spelling, in ONE pass, then respell near-misses of ``terms``
+    and ``style_terms`` (snap_near_vocabulary).
 
     Idempotent - it runs after transcription and again after cleanup: text
     already in a "write" spelling is matched first and kept (casing
@@ -2774,30 +2782,194 @@ def apply_vocabulary_replacements(text: str, replacements) -> str:
     import re
 
     pairs = parse_vocabulary_replacements(replacements)
-    if not text or not pairs:
+    if text and pairs:
+        target = {}
+        for heard, write in pairs:
+            target.setdefault(" ".join(write.lower().split()), write)
+            target.setdefault(" ".join(heard.lower().split()), write)
+        phrases = sorted(target, key=len, reverse=True)
+        pattern = re.compile(
+            "|".join(r"(?<!\w)" + r"\s+".join(re.escape(w) for w in phrase.split()) + r"(?!\w)"
+                     for phrase in phrases),
+            re.IGNORECASE)
+        text = pattern.sub(lambda m: target[" ".join(m.group(0).lower().split())], text)
+    return snap_near_vocabulary(text, terms, style_terms)
+
+
+# Whisper rarely misspells a rare name the same way twice (Turbo Q5 wrote
+# "Aeron" and "Arrhawn" for "Arawn"), so an exact "heard -> write" pair can't
+# keep up. A word is respelled as one of the user's terms when it sounds the
+# same (vocabulary_sound_key), is about as long, looks close, and is not real
+# English (core.wordlist, the top 60,000 words): "Aaron", "Iran" and "niece"
+# are left alone and still need a correction. The Dev and Casual styles add
+# their built-in lists' uncommon words (Qwen, kubectl, Ollama) the same way.
+VOCAB_SNAP_MIN_CHARS = 4
+VOCAB_SNAP_MIN_SIMILARITY = 0.55
+VOCAB_SNAP_SHORT_KEY_SIMILARITY = 0.75  # keys of 3 or fewer ("Aura" -> "*R*") collide more
+
+
+def vocabulary_sound_key(word: str) -> str:
+    """A rough sound skeleton: "Arawn", "Aeron" and "Arrhawn" all give "*R*N".
+
+    Spellings that sound alike map together (ph/f, c/k/s, doubled letters, a
+    silent h or final e, w and y used as vowels). Each run of vowels becomes
+    one "*", so "collide" (K*L*D) and "Claude" (KL*D) stay apart.
+    """
+    import re
+
+    vowels = "aeiou"
+    w = re.sub(r"[^a-z]", "", str(word or "").lower())
+    for a, b in (("sch", "sk"), ("sh", "X"), ("ch", "X"), ("th", "0"), ("ph", "f"),
+                 ("wh", "w"), ("ck", "k"), ("gh", "g"), ("dg", "j"), ("qu", "kw"),
+                 ("q", "k"), ("x", "ks"), ("z", "s")):
+        w = w.replace(a, b)
+    w = re.sub(r"c(?=[eiy])", "s", w).replace("c", "k")
+    w = re.sub(r"(?<=.)h", "", w)
+    if len(w) > 3 and w[-1] == "e" and w[-2] not in vowels + "y":
+        w = w[:-1]
+    out = []
+    for i, ch in enumerate(w):
+        prev, nxt = w[i - 1:i], w[i + 1:i + 2]
+        if ch == "y":
+            ch = "y" if i == 0 and nxt and nxt in vowels else "a"
+        elif ch == "w":
+            if prev and prev in vowels:
+                ch = "a"  # aw, ew, ow: part of the vowel
+            elif not nxt or nxt not in vowels + "y":
+                continue  # before a consonant: silent
+        out.append(ch)
+    key = re.sub(r"(.)\1+", r"\1", "".join(out))
+    return re.sub(r"[aeiou]+", "*", key).upper()
+
+
+def _english_words():
+    from .wordlist import COMMON_WORDS, MID_WORDS, STOP_WORDS
+
+    return STOP_WORDS, MID_WORDS, COMMON_WORDS
+
+
+def _is_english(word: str) -> bool:
+    low = word.lower()
+    return any(low in tier for tier in _english_words())
+
+
+def snap_near_vocabulary(text: str, terms, style_terms=()) -> str:
+    """Respell near-misses of single-word vocabulary with its exact spelling.
+
+    ``terms`` are the user's (any word of 4+ letters). ``style_terms`` are the
+    active style's built-in list; only its uncommon words count (Qwen, kubectl,
+    not "merge" or "Claude", whose near-misses are mostly real words such as
+    "clawed"), and only for a word no user term claims. A word is respelled
+    only when it has 4+ letters, is lowercase or Capitalised (no acronyms,
+    CamelCase or contractions), stands alone (not part of a path, file name,
+    URL or address), is not real English and is not already a term. The
+    sound keys must match, the length and spelling be close, and no other
+    term may share the sound (Grok and Groq): then the word is left alone.
+
+    A term that is not English also gets its own casing back ("pytorch" ->
+    "PyTorch"; normalize_whisper_caps lowercases inner capitals).
+    """
+    import re
+    from difflib import SequenceMatcher
+
+    if not text or not (terms or style_terms):
         return text
-    target = {}
-    for heard, write in pairs:
-        target.setdefault(" ".join(write.lower().split()), write)
-        target.setdefault(" ".join(heard.lower().split()), write)
-    phrases = sorted(target, key=len, reverse=True)
-    pattern = re.compile(
-        "|".join(r"(?<!\w)" + r"\s+".join(re.escape(w) for w in phrase.split()) + r"(?!\w)"
-                 for phrase in phrases),
-        re.IGNORECASE)
-    return pattern.sub(lambda m: target[" ".join(m.group(0).lower().split())], text)
+
+    def _index(words, style):
+        by_key: dict[str, list[str]] = {}
+        for term in normalize_vocabulary_terms(list(words or ())):
+            if (len(term) >= VOCAB_SNAP_MIN_CHARS and re.fullmatch(r"[A-Za-z]+", term)
+                    and not (style and _is_english(term))):
+                by_key.setdefault(vocabulary_sound_key(term), []).append(term)
+        return by_key
+
+    indexes = [i for i in (_index(terms, False), _index(style_terms, True)) if i]
+    if not indexes:
+        return text
+    known = {t.lower() for t in list(terms or ()) + list(style_terms or ())}
+    spelling: dict[str, str] = {}
+    for by_key in reversed(indexes):  # the user's casing wins
+        for group in by_key.values():
+            spelling.update({t.lower(): t for t in group if not _is_english(t)})
+
+    def _pick(word, low, key, by_key):
+        group = by_key.get(key, ())
+        if len(group) > 1:
+            return word  # two terms sound alike: don't guess
+        candidates = [t for t in group if abs(len(t) - len(word)) <= max(2, len(t) // 3)]
+        floor = VOCAB_SNAP_MIN_SIMILARITY
+        if len(key) <= 3:
+            # "Aira" -> "Aura" but not "Oura" -> "Aura".
+            floor = VOCAB_SNAP_SHORT_KEY_SIMILARITY
+            candidates = [t for t in candidates if t[0].lower() == low[0]]
+        if not candidates:
+            return None
+        term = candidates[0]
+        return term if SequenceMatcher(None, low, term.lower()).ratio() >= floor else None
+
+    def _snap(match):
+        word = match.group(0)
+        low = word.lower()
+        if low in known:
+            return spelling.get(low, word)
+        if (len(word) < VOCAB_SNAP_MIN_CHARS or word[1:] != word[1:].lower()
+                or _is_english(word)):
+            return word  # also acronyms and identifiers (AURA, KWin, WayfinderAura)
+        key = vocabulary_sound_key(word)
+        for by_key in indexes:
+            picked = _pick(word, low, key, by_key)
+            if picked is not None:
+                return picked
+        return word
+
+    # Whole words, possessive 's allowed; never part of a contraction (aren't),
+    # a path, file name, URL or address (src/wayfinder, package.json, a@b).
+    return re.sub(r"(?<![\w'’./\\@-])[A-Za-z]+(?=(?:['’]s)?(?![\w'’/\\@-]|\.\w))", _snap, text)
+
+
+def builtin_style_vocabulary(tone: str) -> list[str]:
+    """The built-in list a style primes Whisper with (Dev and Casual only)."""
+    return {"dev": DEV_VOCABULARY, "casual": CASUAL_VOCABULARY}.get(str(tone or ""), [])
+
+
+def _licensed(feature: str) -> bool:
+    try:
+        from wayfinder.license import get_feature_gate
+
+        return bool(get_feature_gate().has_feature(feature))
+    except Exception:
+        return False
+
+
+def user_vocabulary_terms(config: dict) -> list[str]:
+    """The user's terms plus the spellings their corrections write. No gate:
+    callers check Custom Vocabulary (licensed_vocabulary_terms, get_backend)."""
+    return normalize_vocabulary_terms(
+        list(config.get("custom_vocabulary", []) or [])
+        + [write for _heard, write in parse_vocabulary_replacements(
+            config.get("vocabulary_replacements", []))]
+    )
 
 
 def licensed_vocabulary_replacements(config: dict) -> list[tuple[str, str]]:
     """The user's corrections, only when Custom Vocabulary is licensed."""
-    try:
-        from wayfinder.license import get_feature_gate
-
-        if not get_feature_gate().has_feature("custom_vocabulary"):
-            return []
-    except Exception:
+    if not _licensed("custom_vocabulary"):
         return []
     return parse_vocabulary_replacements(config.get("vocabulary_replacements", []))
+
+
+def licensed_vocabulary_terms(config: dict) -> list[str]:
+    """The user's terms near-misses snap to, only when Custom Vocabulary is licensed."""
+    if not _licensed("custom_vocabulary"):
+        return []
+    return user_vocabulary_terms(config)
+
+
+def licensed_style_vocabulary(config: dict) -> list[str]:
+    """The active style's built-in list, only when styles are licensed."""
+    if not _licensed("tone_system"):
+        return []
+    return builtin_style_vocabulary(config.get("output_tone", "minimal"))
 
 
 def drop_whisper_prompt_leak(text: str, custom_vocabulary: list | None = None) -> str:
@@ -2995,9 +3167,12 @@ def transcribe_with_config(
     if text:
         text = clean_whisper_artifacts(text)
         text = normalize_whisper_caps(text)
-        # Ultra "heard -> write" corrections run LAST, after caps normalisation,
-        # so the user's exact spelling (GitHub, iOS, McKenna) is what lands.
-        text = apply_vocabulary_replacements(text, licensed_vocabulary_replacements(config))
+        # Ultra "heard -> write" corrections and near-miss snapping run LAST,
+        # after caps normalisation, so the user's exact spelling (GitHub, iOS,
+        # McKenna) is what lands.
+        text = apply_vocabulary_replacements(
+            text, licensed_vocabulary_replacements(config), licensed_vocabulary_terms(config),
+            licensed_style_vocabulary(config))
 
     # Apply basic post-processing if punctuation is enabled
     if ensure_punct and text:

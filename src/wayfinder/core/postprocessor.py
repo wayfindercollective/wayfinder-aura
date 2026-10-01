@@ -4037,13 +4037,21 @@ def process_with_config(text: str, config: dict) -> str:
     """Post-process, then re-apply the user's vocabulary corrections (Ultra).
 
     The cleanup model can re-spell a corrected term ("Wayfinder" -> "Way
-    finder"); applying the corrections to its output keeps them authoritative.
+    finder"); applying the corrections (and near-miss snapping) to its output
+    keeps them authoritative.
     """
     result = _process_with_config(text, config)
     try:
-        from .transcriber import apply_vocabulary_replacements, licensed_vocabulary_replacements
+        from .transcriber import (
+            apply_vocabulary_replacements,
+            licensed_style_vocabulary,
+            licensed_vocabulary_replacements,
+            licensed_vocabulary_terms,
+        )
 
-        return apply_vocabulary_replacements(result, licensed_vocabulary_replacements(config))
+        return apply_vocabulary_replacements(
+            result, licensed_vocabulary_replacements(config), licensed_vocabulary_terms(config),
+            licensed_style_vocabulary(config))
     except Exception:
         return result
 

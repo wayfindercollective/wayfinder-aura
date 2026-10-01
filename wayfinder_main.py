@@ -18344,7 +18344,9 @@ class WayfinderApp(ctk.CTk):
             return lbl
 
         intro = _label("Names, brands and jargon Aura should always get right — "
-                       "they steer the speech model and are never \"cleaned\" away.")
+                       "they steer the speech model, close misspellings of them are "
+                       "respelled your way, and they are never \"cleaned\" away. For a "
+                       "word Aura keeps hearing as a real one (Iran), add a correction.")
         body.bind("<Configure>", lambda e, l=intro: l.configure(wraplength=max(200, e.width - 8)), add="+")
 
         if not unlocked:
