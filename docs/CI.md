@@ -157,16 +157,20 @@ the job workspace; a workflow must never install or update it.
 | mini-inf-aura | `aura-linux` | 2 CPU cores, 6 GiB RAM |
 | mini-infinity-aura-linux (old WSL; disabled) | pending shared-capacity integration | stopped |
 | mini-infinity-aura-windows (native) | `aura-windows` | one job at a time: 4 GiB, 12.5% CPU, 60 min (Job Object) |
-| mac-studio-aura | `aura-macos` | one job at a time through the host run queue, after the peak-model budget check |
+| mac-studio-aura | `aura-macos` | one job at a time through the host run queue (every 3 min), after the peak-model budget check |
 
 **Windows jobs are admitted automatically** (since 2026-10-01). A poller on the
-Mac (every 2 minutes; it only reads GitHub, with the Mac's existing login) looks for queued
-`aura-windows` jobs from trusted events of this repository, judged by the
-installed `trusted-runner.py`: pushes and tags, `workflow_dispatch`, `schedule`
-and same-repository pull requests; never forks, `release` or `workflow_run`. It
-writes an exact reservation on mini-infinity naming each queued run and head
-sha. The host then runs one bounded one-shot job and closes the reservation when
-the runner is idle; the job-start hook rechecks trust and the reservation. The
+Mac (every 2 minutes; it only reads GitHub, with the Mac's existing login) looks
+for queued `aura-windows` jobs from trusted events of this repository, judged by
+the same rules as the installed `trusted-runner.py` (a reference copy beside the
+poller): pushes and tags, `workflow_dispatch`, `schedule` and same-repository
+pull requests; never forks, `release` or `workflow_run`. It writes an exact
+reservation on mini-infinity naming each queued run and head sha; an unused
+reservation expires after 90 minutes. The host then runs one bounded one-shot
+job and closes the reservation when the runner is idle. Its job-start hook
+rechecks trust with the installed copy, and the reservation, before checkout.
+The job runner refuses to start unless 8 GiB is free (the 4 GiB job plus 4 GiB
+headroom); the poller then backs off 10 minutes and the job waits queued. The
 Windows model keeps running beside the job. The first auto-admitted job was the
 installer candidate (run 36831537380, 2026-10-01).
 
@@ -186,8 +190,11 @@ membership in the privileged Docker group. AppImage containers cap CPU at 2 and 
 at 12 GiB. Host package installation is an administrator task; workflows do not
 change host swap or overcommit. Python environments are recreated for every job.
 
-The Mac runner takes one job at a time through the host's run queue, and only
-when the budget check below leaves room for CI. The
+The Mac runner takes one queued job every 3 minutes through the host's run
+queue (a claim ledger plus the budget check below; a budget refusal just defers
+the job to the next tick). Before a DMG build, or anything else that needs the
+Mac quiet, pause the queue with `touch ~/.cache/foxgrid/aura-mac-ci.hold` and
+resume it with `rm ~/.cache/foxgrid/aura-mac-ci.hold`. The
 owner requires the local model at full context, existing server processes and
 at least one cloud coding agent to take precedence. On 2026-09-30, the owner
 approved testing a smaller, model-specific budget on the 256 GiB Mac Studio.
