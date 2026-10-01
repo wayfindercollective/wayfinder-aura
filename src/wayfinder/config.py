@@ -585,6 +585,9 @@ KEY_CODES: dict[str, int] = {
 if sys.platform == "darwin":
     # Bare right-hand modifiers: the macOS tap/hold record hotkey.
     KEY_CODES.update({"right_option": 100, "right_command": 126})
+elif sys.platform == "win32":
+    # The Windows tap/hold record hotkey (Right Alt is the default).
+    KEY_CODES.update({"right_alt": 100, "right_ctrl": 97})
 
 # Modifier key codes (left and right variants)
 MODIFIER_CODES: dict[str, list[int]] = {

@@ -873,7 +873,11 @@ class TestModelDigestVerification:
         mock_get.return_value = mock_response
 
         done_result, done_event = {}, threading.Event()
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        # The app's own model folder (Windows keeps it under %LOCALAPPDATA%),
+        # so the test never writes into the real profile.
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir",
+                      return_value=temp_dir / "whisper.cpp" / "models"):
             download_whisper_model(
                 "tiny.en",
                 lambda m: None,
@@ -910,7 +914,11 @@ class TestModelDigestVerification:
         mock_get.return_value = mock_response
 
         done_result, done_event = {}, threading.Event()
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        # The app's own model folder (Windows keeps it under %LOCALAPPDATA%),
+        # so the test never writes into the real profile.
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir",
+                      return_value=temp_dir / "whisper.cpp" / "models"):
             download_whisper_model(
                 "tiny.en",
                 lambda m: None,
@@ -937,7 +945,11 @@ class TestModelDigestVerification:
         mock_get.side_effect = [_requests.ConnectionError("reset by peer"), good]
 
         done_result, done_event = {}, threading.Event()
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        # The app's own model folder (Windows keeps it under %LOCALAPPDATA%),
+        # so the test never writes into the real profile.
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir",
+                      return_value=temp_dir / "whisper.cpp" / "models"):
             download_whisper_model(
                 "tiny.en",
                 lambda m: None,
@@ -969,7 +981,11 @@ class TestModelDigestVerification:
         mock_get.return_value = resp
 
         done_result, done_event = {}, threading.Event()
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        # The app's own model folder (Windows keeps it under %LOCALAPPDATA%),
+        # so the test never writes into the real profile.
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir",
+                      return_value=temp_dir / "whisper.cpp" / "models"):
             download_whisper_model(
                 "tiny.en",
                 lambda m: None,

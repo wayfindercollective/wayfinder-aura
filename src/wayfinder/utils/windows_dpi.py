@@ -16,6 +16,10 @@ sharpness improves.
 System-aware (not per-monitor): a second monitor with a different scale is
 stretched by Windows exactly as today. ``WAYFINDER_WINDOWS_DPI_AWARE=0``
 restores the old behaviour. No-op everywhere but Windows.
+
+Awareness can be set only once per process. If something declared it first
+(the executable's manifest, the host Python), Windows refuses ours, but Tk
+still draws at real resolution, so the scale factor is applied all the same.
 """
 
 from __future__ import annotations
@@ -50,6 +54,22 @@ def _system_dpi() -> int:
         user32.ReleaseDC(None, hdc)
 
 
+def _already_aware() -> bool:
+    """Whether the process is DPI aware without us (system or per-monitor)."""
+    import ctypes
+
+    try:
+        value = ctypes.c_int(0)
+        if ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(value)) == 0:
+            return value.value > 0
+    except Exception:
+        pass
+    try:
+        return bool(ctypes.windll.user32.IsProcessDPIAware())
+    except Exception:
+        return False
+
+
 def enable() -> float:
     """Declare system DPI awareness (call before the Tk root exists) and return
     the scale factor. Returns 1.0, changing nothing, off Windows, when disabled,
@@ -62,7 +82,7 @@ def enable() -> float:
 
         try:
             hr = ctypes.windll.shcore.SetProcessDpiAwareness(_PROCESS_SYSTEM_DPI_AWARE)
-            ok = hr == 0
+            ok = hr == 0 or _already_aware()
         except Exception:
             ok = bool(ctypes.windll.user32.SetProcessDPIAware())   # Vista+ fallback
         if not ok:

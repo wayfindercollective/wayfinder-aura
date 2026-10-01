@@ -6,6 +6,7 @@ The live path was verified on KWin 6.7.5 in an isolated nested session
 restore token skipped the dialog, Escape on the dialog read as declined, and
 characters without a key in the layout were pasted instead.
 """
+import os
 import threading
 import time
 import types
@@ -85,7 +86,8 @@ def test_state_round_trip_is_private(tmp_path):
     pk.save_state({"restore_token": "abc", "declined": False}, path)
     pk.save_state({"declined": True}, path)
     assert pk.load_state(path) == {"restore_token": "abc", "declined": True}
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if os.name == "posix":  # Windows has no owner-only mode bits
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
     assert pk.load_state(tmp_path / "missing.json") == {}
 
 
