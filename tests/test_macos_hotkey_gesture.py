@@ -323,3 +323,14 @@ def test_keypad_enter_counts_as_enter():
 
 def test_secure_input_probe_is_safe():
     assert pl._darwin_secure_input_enabled() in (True, False)
+
+
+def test_supervisor_loop_idles_slowly_until_a_hotkey_is_held():
+    # Nothing held: the Secure Input / event-tap checks run twice a second.
+    assert pl._DARWIN_IDLE_TICK_S >= 0.5  # CLAUDE.md rule 1 idle floor
+    assert pl._listener_tick_s(False, "darwin") == pl._DARWIN_IDLE_TICK_S
+    # A held hotkey keeps the 100 ms lost-key-up reconcile.
+    assert pl._listener_tick_s(True, "darwin") == 0.1
+    # Windows counts 0.1 s ticks for its once-a-second elevated-window check.
+    assert pl._listener_tick_s(False, "win32") == 0.1
+    assert pl._listener_tick_s(True, "win32") == 0.1

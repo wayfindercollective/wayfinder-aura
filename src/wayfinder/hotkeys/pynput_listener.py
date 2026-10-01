@@ -295,6 +295,20 @@ def _darwin_normalize_key(key):
 
 _SECURE_INPUT_FN = None
 
+# macOS supervisor-loop cadence. While a hotkey is held, lost key-ups are
+# reconciled against Quartz every 100 ms. With nothing held no latch can be
+# lost, so only the Secure Input notice and the event-tap check run, and they
+# can wait half a second: 2 wakeups/s instead of 10 (CLAUDE.md rule 1).
+_DARWIN_IDLE_TICK_S = 0.5
+
+
+def _listener_tick_s(busy: bool, platform_name: Optional[str] = None) -> float:
+    """Sleep between supervisor-loop passes (Windows keeps 0.1 s: it counts
+    ticks for its once-a-second elevated-window check)."""
+    if (platform_name or sys.platform) == "darwin" and not busy:
+        return _DARWIN_IDLE_TICK_S
+    return 0.1
+
 
 def _darwin_secure_input_enabled() -> bool:
     """True while some app holds macOS Secure Input (password fields, Terminal's
@@ -1052,7 +1066,7 @@ def pynput_hotkey_listener(
                     solo_gesture.release_target()
                 if "style" in active_actions and _win32_key_pressed(current_style_code) is False:
                     active_actions.discard("style")
-            time.sleep(0.1)
+            time.sleep(_listener_tick_s(bool(active_actions) or solo_gesture.is_down))
     finally:
         # DELIBERATELY no liveness monitoring here. Watching the inner listener
         # and reporting its death upward was implemented and then reverted:

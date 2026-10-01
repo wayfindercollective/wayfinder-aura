@@ -140,6 +140,22 @@ try:
     ctk.ScalingTracker.update_loop_interval = 3_600_000
 except Exception:
     pass
+# CustomTkinter's appearance tracker re-arms a 30 ms `after` forever to
+# follow the system light/dark setting: ~33 wakeups/s, measured as 32 of the
+# 36 Tcl wakeups/s an idle Mac app made (most of its ~2% idle CPU). The app
+# pins dark mode (setup_window), so every tick is a no-op. Hourly, as above.
+try:
+    ctk.AppearanceModeTracker.update_loop_interval = 3_600_000
+except Exception:
+    pass
+# Each CTkTextbox re-arms its own 200 ms "are scrollbars needed?" check for as
+# long as it exists (History log, Ultra vocabulary boxes): 5 wakeups/s apiece,
+# window hidden or not. A scrollbar appearing within a second of the text
+# overflowing is still prompt.
+try:
+    ctk.CTkTextbox._scrollbar_update_time = 1000
+except Exception:
+    pass
 # Microphone picker's first option (matched by the "Auto-detect" substring).
 # No emoji prefix: no emoji as UI chrome (rule 11).
 AUTO_DETECT_MIC_LABEL = "Auto-detect (Recommended)"
@@ -1378,6 +1394,11 @@ def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
     """Recording-state animation cadence for tray and menu-bar glyphs."""
     del platform_name
     return 50
+
+
+# Idle poll_events cadence once the macOS event pipe is attached
+# (WakingQueue): every producer wakes Tk itself, so the poll is only a backstop.
+_MACOS_IDLE_SAFETY_POLL_MS = 1000
 
 
 def _settings_preload_interval_ms(platform_name: str | None = None) -> int:
@@ -5941,8 +5962,9 @@ class WayfinderApp(ctk.CTk):
         else:
             self.event_queue = queue.Queue()
         # Menu delegates (especially PyObjC's NSMenu callback) must never call
-        # Tk/AppKit window code inline. poll_events drains this only after the
-        # native menu tracking callback has returned to Tk's main loop.
+        # Tk/AppKit window code inline. Tk drains this only after the native
+        # menu tracking callback has returned to Tk's main loop (see
+        # _dispatch_tray_action).
         self._tray_action_queue = queue.Queue()
         # UI → GlobalShortcuts worker commands. The portal connection and its
         # session live on a private GLib thread, so the Settings button asks
@@ -17040,7 +17062,7 @@ class WayfinderApp(ctk.CTk):
             if restart_event is not None:
                 restart_event.set()
             if old_thread is not None and old_thread.is_alive():
-                old_thread.join(timeout=2.0)  # loop wakes every 0.1 s
+                old_thread.join(timeout=2.0)  # loop wakes at least every 0.5 s
             if self.stop_event.is_set():
                 return
             self._pynput_listener_started = False
@@ -21399,6 +21421,10 @@ class WayfinderApp(ctk.CTk):
         # NSMenu delegate and can abort in PyEval_RestoreThread. queue.Queue.put
         # is native-thread-safe and poll_events owns all later UI work.
         self._tray_action_queue.put(callback)
+        if IS_MACOS:
+            # The event queue's put() only writes a byte to its wake-up pipe
+            # (no Tcl), so the idle poll no longer bounds menu latency.
+            self.event_queue.put((EventType.UI_CALLBACK, self._schedule_tray_actions))
 
     def _refresh_tray_menu(self) -> None:
         try:
@@ -22761,6 +22787,23 @@ class WayfinderApp(ctk.CTk):
                     self.handle_event(event_type, data)
             except queue.Empty:
                 pass
+        self._drain_tray_actions()
+        # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
+        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
+        # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
+        # capture is applied promptly without a sub-100ms self-rearming poll.
+        if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
+            interval = 100
+        elif getattr(self, "_event_wakeup_attached", False):
+            # macOS: worker events and menu actions wake Tk through the event
+            # pipe as they are queued, so idle polling is only a safety net.
+            interval = _MACOS_IDLE_SAFETY_POLL_MS
+        else:
+            interval = 250
+        self.after(interval, self.poll_events)
+
+    def _drain_tray_actions(self) -> None:
+        """Run queued status-menu actions on the Tk thread."""
         try:
             while True:
                 callback = self._tray_action_queue.get_nowait()
@@ -22773,15 +22816,12 @@ class WayfinderApp(ctk.CTk):
                 self.after(100, self._refresh_tray_menu)
         except queue.Empty:
             pass
-        # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
-        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
-        # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
-        # capture is applied promptly without a sub-100ms self-rearming poll.
-        if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
-            interval = 100
-        else:
-            interval = 250
-        self.after(interval, self.poll_events)
+
+    def _schedule_tray_actions(self) -> None:
+        """Pipe wake-up for a menu action: run it on a 100 ms one-shot, the
+        cadence the 250 ms idle poll used to give it, so the native menu has
+        long closed before Tk/AppKit window code runs."""
+        self.after(100, self._drain_tray_actions)
 
     @staticmethod
     def _split_gen(data):

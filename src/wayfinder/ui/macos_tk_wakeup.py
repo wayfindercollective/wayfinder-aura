@@ -4,7 +4,8 @@ Workers (hotkey listener, transcription, injection) talk to the Tk thread
 through ``event_queue``, which Tk polled every 250 ms when idle — so a hotkey
 press waited up to a quarter second before recording even began. A self-pipe
 registered with ``createfilehandler`` wakes Tk as soon as ``put()`` runs
-(measured: 0.1 ms median on Aqua Tk). The 250 ms poll stays as a safety net.
+(measured: 0.1 ms median on Aqua Tk). Status-menu actions wake it the same
+way, so the idle poll is only a 1 s safety net (_MACOS_IDLE_SAFETY_POLL_MS).
 
 There is no timer involved: the pipe only becomes readable when an event
 arrives, so idle CPU is unchanged (CLAUDE.md rule 1).

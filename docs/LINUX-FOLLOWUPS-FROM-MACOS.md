@@ -194,6 +194,24 @@ pre-empts it (`on_hotkey`). All darwin-gated.
   The Linux analogue: compute wave time from `time.monotonic()` and make the
   easing dt-based, so a late frame shows the right phase instead of lagging.
 
+### 3.5 CustomTkinter's theme poll and per-textbox scrollbar polls
+- **Evidence (macOS, 2026-10-01):** an idle app woke Tk 36 times a second:
+  32 from `AppearanceModeTracker.update`, a 30 ms `after` that follows the
+  system light/dark theme (a no-op: the app pins dark), and 4 from
+  `poll_events`. Every `CTkTextbox` adds its own 200 ms scrollbar check (5/s)
+  for as long as it exists. Each Aqua Tk wakeup costs ~0.35 ms of main-thread
+  time plus libdispatch work; the main process idled at ~2.7%.
+- **Status: applied on every OS** (module level in `wayfinder_main.py`): the
+  theme poll is hourly, textboxes check once a second. A bare Tk window on
+  the same Mac wakes ~5 times a second by itself; Aura now adds ~1.
+- **macOS only:** status-menu actions wake Tk through the event pipe, so the
+  idle `poll_events` is a 1 s backstop; the pynput supervisor loop ticks every
+  0.5 s while no hotkey is held. Main process ~0.5% idle, window shown or
+  hidden.
+- **Linux check:** measure idle CPU before/after with `top` (rule 1). Linux
+  still polls `poll_events` every 250 ms; adopting `WakingQueue` (§2.3)
+  would let it slow down the same way.
+
 ## 4. Reliability
 
 ### 4.1 Orphaned whisper-server after a crash (Linux has no supervisor)
