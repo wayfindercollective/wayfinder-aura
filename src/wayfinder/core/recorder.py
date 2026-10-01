@@ -704,6 +704,10 @@ _MIC_OPEN_TIMEOUT = 4.0
 _MIC_CLOSE_TIMEOUT = 1.0
 
 
+class MicrophoneRestartRequired(RuntimeError):
+    """The native audio backend is unsafe to reuse until the process restarts."""
+
+
 def _run_with_timeout(fn: Callable, timeout_s: float):
     """Run ``fn()`` on a daemon thread; return its result, or raise
     ``TimeoutError`` if it doesn't finish within ``timeout_s``.
@@ -917,7 +921,8 @@ class WarmMic:
     def __init__(self, device: int | None = None, sample_rate: int = 16000,
                  channels: int = 1, idle_secs: float = 30.0,
                  resolve_device: Callable[[], int | None] | None = None,
-                 preferred_name: str | None = None):
+                 preferred_name: str | None = None,
+                 on_restart_required: Callable[[str], None] | None = None):
         self.device = device
         self.target_sample_rate = sample_rate
         self.channels = channels
@@ -929,6 +934,8 @@ class WarmMic:
         # a mic on a USB hub powered on after the app booted.
         self._resolve_device = resolve_device
         self.preferred_name = preferred_name
+        self._on_restart_required = on_restart_required
+        self._restart_required_notified = False
         self._stream: object | None = None
         self._recording_sample_rate: int | None = None
         self._sink: Callable | None = None
@@ -988,7 +995,7 @@ class WarmMic:
                 "restart Wayfinder Aura before recording again"
             )
         if self._abandoned_close:
-            raise RuntimeError(
+            raise MicrophoneRestartRequired(
                 "Microphone backend got stuck releasing the previous stream; "
                 "restart Wayfinder Aura before recording again"
             )
@@ -1112,7 +1119,7 @@ class WarmMic:
         if not self._close_done.wait(_MIC_CLOSE_TIMEOUT):
             with self._lock:
                 self._abandoned_close = True
-            raise RuntimeError(
+            raise MicrophoneRestartRequired(
                 "Microphone backend got stuck releasing the previous stream; "
                 "restart Wayfinder Aura before recording again"
             )
@@ -1121,7 +1128,7 @@ class WarmMic:
         with self._lock:
             self._cancel_idle_timer()
             if self._abandoned_close:
-                raise RuntimeError(
+                raise MicrophoneRestartRequired(
                     "Microphone backend got stuck releasing the previous stream; "
                     "restart Wayfinder Aura before recording again"
                 )
@@ -1181,6 +1188,19 @@ class WarmMic:
         with self._lock:
             self._idle_timer = None
 
+    def _notify_restart_required(self, reason: str) -> None:
+        """Notify the app once, outside native audio and UI callback threads."""
+        with self._lock:
+            if self._restart_required_notified:
+                return
+            self._restart_required_notified = True
+            callback = self._on_restart_required
+        if callback is not None:
+            try:
+                callback(reason)
+            except Exception:
+                pass
+
     def _close_stream(self, *, only_if_idle: bool = False) -> bool:
         """Stop/close the PortAudio stream without double-close races.
 
@@ -1233,10 +1253,14 @@ class WarmMic:
         except TimeoutError:
             with self._lock:
                 self._abandoned_close = True
+            reason = (
+                "Microphone backend got stuck releasing the previous stream"
+            )
             print(
                 "WarmMic: stream close timed out "
                 f"(>{_MIC_CLOSE_TIMEOUT:.0f}s) — quarantining PortAudio until restart"
             )
+            self._notify_restart_required(reason)
             return False
         return True
 

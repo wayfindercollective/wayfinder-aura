@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import importlib.util
+from queue import Queue
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,52 @@ def test_macos_status_menu_defers_until_native_menu_unwinds(monkeypatch):
     assert ran == []
     action_queue.get_nowait()()
     assert ran == [True]
+
+
+def test_macos_stuck_microphone_relaunch_is_marshaled_to_tk():
+    events = Queue()
+    recovered = []
+    app = type(
+        "App",
+        (),
+        {
+            "event_queue": events,
+            "_recover_macos_microphone": lambda self, reason: recovered.append(reason),
+        },
+    )()
+
+    wayfinder_main.WayfinderApp._queue_macos_microphone_relaunch(
+        app, "CoreAudio close timed out"
+    )
+    event_type, callback = events.get_nowait()
+    assert event_type == wayfinder_main.EventType.UI_CALLBACK
+    callback()
+    assert recovered == ["CoreAudio close timed out"]
+
+
+def test_macos_microphone_recovery_schedules_only_one_relaunch():
+    scheduled = []
+    relaunched = []
+    messages = []
+    app = type(
+        "App",
+        (),
+        {
+            "log": lambda self, message: messages.append(message),
+            "_show_error_banner": lambda self, message: messages.append(message),
+            "after": lambda self, delay, callback: scheduled.append((delay, callback)),
+            "relaunch_app": lambda self: relaunched.append(True) or True,
+        },
+    )()
+
+    wayfinder_main.WayfinderApp._recover_macos_microphone(app, "CoreAudio close timed out")
+    wayfinder_main.WayfinderApp._recover_macos_microphone(app, "duplicate")
+
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 150
+    assert "restarting Aura" in messages[-1]
+    scheduled[0][1]()
+    assert relaunched == [True]
 
 
 def test_macos_lifecycle_notifications_are_marshaled_out_of_appkit_callbacks():
@@ -373,6 +420,8 @@ def test_self_focus_injection_error_keeps_its_actionable_guidance(monkeypatch):
 
 
 def test_missing_input_monitoring_stays_visible_with_manual_add_guidance(monkeypatch):
+    from wayfinder.utils import macos_permissions as mp
+
     class Widget:
         def __init__(self, managed=""):
             self.managed = managed
@@ -404,6 +453,9 @@ def test_missing_input_monitoring_stays_visible_with_manual_add_guidance(monkeyp
         },
     )()
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    # This test isolates Input Monitoring.  Do not let the developer Mac's
+    # real microphone TCC state take precedence over the state under test.
+    monkeypatch.setattr(mp, "microphone_authorization", lambda: mp.MIC_AUTHORIZED)
 
     wayfinder_main.WayfinderApp._refresh_macos_permission_banner(app)
 
