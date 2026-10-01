@@ -6332,8 +6332,12 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
         
-        # Only start minimized to tray if the user has enabled this option
-        if self.config.get("start_minimized", False):
+        # LaunchServices' -j hides the app initially, but Tk maps its root during
+        # startup and can make it visible again. Recovery launches pass this
+        # one-shot flag so the native Hide is reapplied after Tk enters its loop.
+        if IS_MACOS and "--minimized" in sys.argv:
+            self.after(0, self.hide_to_tray)
+        elif self.config.get("start_minimized", False):
             self.after(100, self.hide_to_tray)
         
         # Run startup dependency checks
@@ -21572,19 +21576,21 @@ class WayfinderApp(ctk.CTk):
             pass
 
         def relaunch() -> None:
-            if self.relaunch_app():
+            if self.relaunch_app(background=True):
                 return
             self._microphone_relaunch_pending = False
             self.on_error(f"{reason}. Restart Wayfinder Aura to continue.")
 
         self.after(150, relaunch)
 
-    def relaunch_app(self) -> bool:
+    def relaunch_app(self, *, background: bool = False) -> bool:
         """macOS: quit, then reopen the bundle through LaunchServices.
 
         Input Monitoring grants reach a *new* process only (macOS itself offers
         "Quit & Reopen"). A helper shell waits for this PID to exit before
-        ``open`` so the old instance can't just be re-activated.
+        ``open`` so the old instance can't just be re-activated. Audio recovery
+        launches hidden in the background: a new process cannot restore its
+        window to the previous macOS Space, and must not steal the active one.
         """
         if not IS_MACOS:
             return False
@@ -21597,9 +21603,14 @@ class WayfinderApp(ctk.CTk):
         if not bundle.endswith(".app"):
             return False  # a source run has no bundle to reopen
         try:
+            open_command = (
+                'exec /usr/bin/open -gj "$2" --args --minimized'
+                if background else 'exec /usr/bin/open "$2"'
+            )
             subprocess.Popen(
                 ["/bin/sh", "-c",
-                 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2"',
+                 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
+                 + open_command,
                  "wayfinder-relaunch", str(os.getpid()), bundle],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, start_new_session=True,
