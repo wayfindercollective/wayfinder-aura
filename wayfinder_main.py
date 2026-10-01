@@ -18099,13 +18099,41 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def _deactivate_license(self) -> None:
-        """Remove the locally stored license after the inline confirmation."""
-        from wayfinder.license import remove_license, get_feature_gate
-        remove_license()
+        """Remove the license after the inline confirmation.
+
+        Freeing the activation slot is a call to the licensing service, so it
+        runs off the Tk thread; _finish_license_removal updates the UI.
+        """
+        feedback = getattr(self, "_license_feedback", None)
+        if feedback is not None:
+            try:
+                feedback.configure(text="Removing the license…",
+                                   text_color=COLORS["text_muted"])
+            except Exception:
+                pass
+
+        def _release() -> None:
+            from wayfinder.license import LicenseRelease, release_license, remove_license
+
+            try:
+                result = release_license()
+            except Exception:
+                remove_license()
+                result = LicenseRelease(False, "error", "License removed from this device.")
+            self.event_queue.put(
+                (EventType.UI_CALLBACK, lambda: self._finish_license_removal(result)))
+
+        threading.Thread(target=_release, daemon=True, name="license-release").start()
+
+    def _finish_license_removal(self, result) -> None:
+        """Tk thread: the license is gone; show Free and say whether the slot was freed."""
+        from wayfinder.license import get_feature_gate
         self.feature_gate = get_feature_gate(force_refresh=True)
         # Entitlements changed — republish so locked_tabs is not stale.
         self._write_status_breadcrumb()
-        self.log("License removed from this device")
+        self.log("License removed from this device"
+                 + ("; activation slot freed" if result.released
+                    else f"; activation slot not freed ({result.status})"))
         from wayfinder.config import enforce_license_config
         repaired = enforce_license_config(self.config, self.feature_gate)
         if repaired:
@@ -18135,7 +18163,7 @@ class WayfinderApp(ctk.CTk):
         feedback = getattr(self, "_license_feedback", None)
         if feedback is not None:
             feedback.configure(
-                text="License removed from this device.",
+                text=result.message,
                 text_color=COLORS["text_muted"],
             )
 
