@@ -449,7 +449,7 @@ class TestWindowsSlowCloseRecovery:
     def _slow_close(self, monkeypatch, mock_sd, platform):
         from wayfinder.core import recorder
 
-        monkeypatch.setattr(recorder.sys, "platform", platform)
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", platform == "win32")
         monkeypatch.setattr(recorder, "_MIC_CLOSE_TIMEOUT", 0.1)
         blocker = threading.Event()
         stream = MagicMock()
@@ -487,3 +487,38 @@ class TestWindowsSlowCloseRecovery:
         from wayfinder.core import recorder
 
         assert recorder._MIC_CLOSE_TIMEOUT == (5.0 if real_sys.platform == "win32" else 1.0)
+
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_windows_acquire_retries_when_the_close_finished_during_the_wait(
+        self, mock_sd, _rate, monkeypatch
+    ):
+        """The close returned (its flags cleared under the lock) but _close_done
+        was not set yet when acquire's wait gave up: retry, never quarantine."""
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", True)
+        monkeypatch.setattr(recorder, "_MIC_CLOSE_TIMEOUT", 0.05)
+        mock_sd.InputStream.return_value = MagicMock(active=True)
+        warm = _make_warm(device=7)
+        warm._close_done.clear()          # the gap: close done, Event not yet set
+        warm._closing_stream = False
+        threading.Timer(0.2, warm._close_done.set).start()
+        warm.acquire(MagicMock())
+        assert warm._abandoned_close is False and mock_sd.InputStream.call_count == 1
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_windows_no_stale_restart_notice_after_recovery(self, mock_sd, _rate, monkeypatch):
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", True)
+        notices = []
+        warm = _make_warm(device=7, on_restart_required=notices.append)
+        warm._abandoned_close = False      # recovered before the notice went out
+        warm._notify_restart_required("stale")
+        assert notices == []
+        warm._abandoned_close = True       # genuinely stuck: still reported
+        warm._notify_restart_required("stuck")
+        assert notices == ["stuck"]

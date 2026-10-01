@@ -708,7 +708,8 @@ _MIC_CLOSE_TIMEOUT = 1.0
 # fails within 5 s, and one that overruns but finishes is recovered from (see
 # WarmMic._close_stream); the Mac keeps 1 s and its restart for the CoreAudio
 # deadlock this guards against.
-if sys.platform == "win32":
+_IS_WINDOWS = sys.platform == "win32"
+if _IS_WINDOWS:
     _MIC_CLOSE_TIMEOUT = 5.0
 
 
@@ -1126,7 +1127,7 @@ class WarmMic:
         # stream beside a native teardown that may still be running.
         if not self._close_done.wait(_MIC_CLOSE_TIMEOUT):
             with self._lock:
-                if sys.platform == "win32" and self._close_done.is_set():
+                if _IS_WINDOWS and not self._closing_stream:
                     finished_late = True     # Windows: it did finish; retry
                 else:
                     finished_late = False
@@ -1171,7 +1172,13 @@ class WarmMic:
             # native teardown outside _lock.  A concurrent idle close may have
             # detached it already; either way the recursive acquire is bounded
             # by _close_done and cannot freeze the UI.
-            self._close_stream()
+            if self._close_stream() is False and _IS_WINDOWS:
+                # Just waited the full budget for it; fail now rather than
+                # freezing the window a second time in the retry.
+                raise MicrophoneRestartRequired(
+                    "Microphone backend got stuck releasing the previous stream; "
+                    "restart Wayfinder Aura before recording again"
+                )
             return self.acquire(sink)
 
         # Kept for type checkers; every branch above returns or raises.
@@ -1205,6 +1212,8 @@ class WarmMic:
     def _notify_restart_required(self, reason: str) -> None:
         """Notify the app once, outside native audio and UI callback threads."""
         with self._lock:
+            if _IS_WINDOWS and not self._abandoned_close:
+                return  # the slow close already finished and recovered
             if self._restart_required_notified:
                 return
             self._restart_required_notified = True
@@ -1264,7 +1273,7 @@ class WarmMic:
                 with self._lock:
                     self._closing_stream = False
                     finished.set()
-                    if sys.platform == "win32" and self._abandoned_close:
+                    if _IS_WINDOWS and self._abandoned_close:
                         # Windows: the close overran the watchdog but returned,
                         # so PortAudio is out of this stream and the mic can be
                         # used again without restarting the app.
@@ -1279,7 +1288,7 @@ class WarmMic:
             _run_with_timeout(teardown, _MIC_CLOSE_TIMEOUT)
         except TimeoutError:
             with self._lock:
-                if sys.platform == "win32" and finished.is_set():
+                if _IS_WINDOWS and finished.is_set():
                     return True    # finished between the timeout and here
                 self._abandoned_close = True
             reason = (
