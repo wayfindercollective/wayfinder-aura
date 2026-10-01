@@ -1401,6 +1401,42 @@ def test_dpi_awareness_is_a_no_op_off_windows_or_when_disabled(monkeypatch):
     assert windows_dpi.to_px(80) == 80 and windows_dpi.to_logical(80) == 80
 
 
+def _fake_windll(set_hr, awareness, dpi=168):
+    """shcore/user32 stand-ins: SetProcessDpiAwareness returns ``set_hr``."""
+    import ctypes
+
+    def get_awareness(_proc, out):
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_int)).contents.value = awareness
+        return 0
+
+    return SimpleNamespace(
+        shcore=SimpleNamespace(SetProcessDpiAwareness=lambda level: set_hr,
+                               GetProcessDpiAwareness=get_awareness),
+        user32=SimpleNamespace(GetDpiForSystem=lambda: dpi, IsProcessDPIAware=lambda: awareness > 0),
+    )
+
+
+@pytest.mark.parametrize("set_hr, awareness, expected", [
+    (0, 1, 1.75),            # we declared it
+    (-2147024891, 2, 1.75),  # E_ACCESSDENIED: declared first (manifest, host Python)
+    (-2147024891, 0, 1.0),   # refused and not aware: Windows stretches, keep 1.0
+])
+def test_dpi_scale_follows_the_display_even_if_awareness_was_declared_first(
+        monkeypatch, set_hr, awareness, expected):
+    """The first Windows CI run's Python was already per-monitor aware, so our
+    call was refused and the scale stayed 1.0: Tk drew at real resolution with
+    unscaled geometry (a small window at 175%)."""
+    import ctypes
+
+    from wayfinder.utils import windows_dpi
+
+    monkeypatch.setattr(windows_dpi, "_scale", 1.0)
+    monkeypatch.setattr(windows_dpi.sys, "platform", "win32")
+    monkeypatch.delenv("WAYFINDER_WINDOWS_DPI_AWARE", raising=False)
+    monkeypatch.setattr(ctypes, "windll", _fake_windll(set_hr, awareness), raising=False)
+    assert windows_dpi.enable() == pytest.approx(expected)
+
+
 @windows_only
 def test_dpi_awareness_really_declared_on_windows():
     import os
@@ -1409,16 +1445,26 @@ def test_dpi_awareness_really_declared_on_windows():
     code = textwrap.dedent("""
         import ctypes, sys
         sys.path.insert(0, "src")
+        before = ctypes.c_int(-1)
+        ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(before))
         from wayfinder.utils import windows_dpi
         s = windows_dpi.enable()
         v = ctypes.c_int(-1)
         ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(v))
-        print(s, v.value)
+        dpi = windows_dpi._system_dpi()
+        print(before.value, s, v.value, dpi)
     """)
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          timeout=60, env={**os.environ, "WAYFINDER_WINDOWS_DPI_AWARE": "1"})
-    scale, awareness = out.stdout.split()
-    assert float(scale) >= 1.0 and awareness == "1"   # PROCESS_SYSTEM_DPI_AWARE
+    before, scale, awareness, dpi = out.stdout.split()
+    if before == "0":
+        assert awareness == "1"   # we declared PROCESS_SYSTEM_DPI_AWARE
+    else:
+        # Declared before us (the CI runner's Python came up per-monitor
+        # aware, 2): Windows refuses ours, Tk still draws at real resolution,
+        # so the scale must still follow the display.
+        assert awareness == before
+    assert float(scale) == pytest.approx(int(dpi) / 96.0 if 96 <= int(dpi) <= 480 else 1.0)
 
 
 def test_window_maths_stays_logical_and_converts_at_the_edges(monkeypatch):

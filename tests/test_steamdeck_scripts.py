@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -137,6 +138,8 @@ def test_installer_version_parse_actually_extracts_the_version():
     Asserting the string "Version:" appears somewhere in the script is
     satisfied by a comment, so it cannot catch a broken expression.
     """
+    if shutil.which("awk") is None:
+        pytest.skip("awk is not installed (the installer only runs on SteamOS)")
     result = subprocess.run(
         ["awk", _installed_version_awk_program()],
         input=_SAMPLE_FLATPAK_INFO,

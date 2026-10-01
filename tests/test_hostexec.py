@@ -68,7 +68,10 @@ def test_bundle_only_vars_dropped(bundle, monkeypatch):
 
 def test_symlinked_bundle_path_still_stripped(bundle, tmp_path, monkeypatch):
     alias = tmp_path / "alias"
-    alias.symlink_to(bundle["mei"])
+    try:
+        alias.symlink_to(bundle["mei"])
+    except OSError as exc:  # Windows without Developer Mode: WinError 1314
+        pytest.skip(f"cannot create symlinks here: {exc}")
     monkeypatch.setenv("LD_LIBRARY_PATH", f"{alias}/lib{os.pathsep}/usr/lib64")
     env = host_env()
     assert env["LD_LIBRARY_PATH"] == "/usr/lib64"
