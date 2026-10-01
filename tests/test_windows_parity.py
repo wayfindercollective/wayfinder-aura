@@ -1647,3 +1647,34 @@ def test_paste_still_runs_the_same_steps_and_reports_failures(monkeypatch):
     while not lines and time.time() < deadline:
         time.sleep(0.01)
     assert lines and "FAILED InjectionError" in lines[0]
+
+
+def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
+    from wayfinder.core import injector_windows as iw
+
+    steps = []
+    monkeypatch.setattr(iw, "_paste_reporter", lambda line: None)
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
+                                                       GetOpenClipboardWindow=lambda: None))
+    monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
+    monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
+    monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
+    clip = {"v": "old"}
+    monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
+    monkeypatch.setattr(iw, "_clipboard_set_windows",
+                        lambda t, transient=False: steps.append(("set", t)) or clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
+    monkeypatch.setattr(iw.time, "sleep", lambda s: None)
+
+    def no_threads(*a, **k):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(iw.threading, "Thread", no_threads)
+    iw.inject_text_paste_windows("hi")
+    assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]
+
+    steps.clear()
+    monkeypatch.setattr(iw, "_PasteDiagnostics", no_threads)   # even construction failing
+    iw.inject_text_paste_windows("hi")
+    assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]

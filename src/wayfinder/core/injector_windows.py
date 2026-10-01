@@ -498,7 +498,7 @@ def inject_text_paste_windows(text: str) -> None:
     """
     if not text:
         return
-    diag = _PasteDiagnostics(text)
+    diag = _new_paste_diagnostics(text)
     try:
         _require_foreground_window()
         _refuse_own_window(text)
@@ -596,6 +596,30 @@ def _window_app(hwnd) -> str:
         return "?"
 
 
+def _best_effort(method):
+    """Diagnostics never raise into the paste (a failed thread start, a ctypes
+    error...): the paste's own steps and exceptions are all that count."""
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except Exception:
+            return None
+    wrapper.__name__ = method.__name__
+    return wrapper
+
+
+class _NullDiagnostics:
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+def _new_paste_diagnostics(text: str):
+    try:
+        return _PasteDiagnostics(text)
+    except Exception:
+        return _NullDiagnostics()
+
+
 class _PasteDiagnostics:
     def __init__(self, text: str):
         self._t0 = time.perf_counter()
@@ -612,19 +636,24 @@ class _PasteDiagnostics:
     def _ms(self) -> float:
         return (time.perf_counter() - self._t0) * 1000
 
+    @_best_effort
     def mark(self, name: str) -> None:
         self._marks[name] = self._ms()
 
+    @_best_effort
     def previous(self, value) -> None:
         self._prev = "none" if value is None else f"{len(value)} chars"
 
+    @_best_effort
     def at_restore(self, still_ours: bool) -> None:
         self.mark("restore_check")
         self._held_at_restore = still_ours
 
+    @_best_effort
     def failed(self, exc: Exception) -> None:
         self._error = f"{type(exc).__name__}: {exc}"[:160]
 
+    @_best_effort
     def start_watch(self) -> None:
         if _user32 is None:
             return
@@ -647,6 +676,7 @@ class _PasteDiagnostics:
         self._watch = threading.Thread(target=watch, name="paste-diag", daemon=True)
         self._watch.start()
 
+    @_best_effort
     def finish(self) -> None:
         reporter = _paste_reporter
         if reporter is None:
