@@ -23,6 +23,14 @@ Linux: dictation for gamers on every desktop.
 - **Cancel a dictation from any app** (default Shift+Esc; Esc where Aura sees
   keys) without anything being typed.
 - **Vocabulary corrections as Heard / Write-as pairs.**
+- **Vocabulary fixes near-misses of your words (Ultra).** The speech model
+  rarely misspells a rare name the same way twice (Large v3 Turbo Q5 wrote
+  "Aeron" and "Arrhawn" for "Arawn"), so a word that sounds like one of your
+  vocabulary words and looks close is written your way, after transcription
+  and again after cleanup. Real English words (the 60,000 most common) are
+  never changed: a name heard as one ("Iran") still needs a correction. The
+  Dev and Casual styles do the same for their built-in lists, and Dev now
+  knows AI model and tool names (Qwen, Claude, Ollama, kubectl, …).
 - **Ultra switches on its recommended setup once.** The first time an install
   becomes Ultra, GPU acceleration turns on (Apple silicon, NVIDIA, AMD),
   Chunk Processing goes to Auto, text cleanup turns on, and with the GPU on
