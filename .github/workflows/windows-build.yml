@@ -3,8 +3,22 @@ name: Windows Candidate
 on:
   workflow_call:
   workflow_dispatch:
+  # Every change on main builds the installer (shared code can break the
+  # bundle too); a newer push cancels an older build (job concurrency below).
+  push:
+    branches: [main]
+  # Pull requests build it only when Windows packaging changes: Windows tests
+  # already gate every PR, and the installer build is the heavy part (~17 min
+  # inside the Windows runner's bounds), so one Windows job per PR otherwise.
   pull_request:
     branches: [main]
+    paths:
+      - "packaging/windows/**"
+      - "requirements-windows.txt"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - "scripts/verify_windows.py"
+      - ".github/workflows/windows-build.yml"
 
 permissions:
   contents: read
@@ -22,9 +36,13 @@ env:
 jobs:
   build:
     name: Build unsigned Windows candidate
-    # PR candidates wait for the Windows runner's admission (AURA_WINDOWS_CI,
-    # docs/CI.md); manual runs and release calls always build.
-    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && vars.AURA_WINDOWS_CI == 'true')
+    # Release calls (tags) and manual runs always build. Pushes to main and
+    # same-repository PRs build while the Windows runner takes jobs
+    # (AURA_WINDOWS_CI, docs/CI.md); forks never reach the Windows runner.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || (vars.AURA_WINDOWS_CI == 'true' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository))
+    concurrency:
+      group: windows-candidate-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
     runs-on: [self-hosted, Windows, X64, aura-windows]
     timeout-minutes: 45
     steps:

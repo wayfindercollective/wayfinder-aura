@@ -174,8 +174,12 @@ headroom); the poller then backs off 10 minutes and the job waits queued. The
 Windows model keeps running beside the job. The first auto-admitted job was the
 installer candidate (run 36831537380, 2026-10-01).
 
-The repo variable `AURA_WINDOWS_CI=true` runs `Windows tests` (CI) and the PR
-`Windows Candidate` build on pushes and pull requests. If the Windows runner is
+The repo variable `AURA_WINDOWS_CI=true` runs `Windows tests` (CI) on pushes and
+pull requests, and the `Windows Candidate` installer build on every push to
+`main` (a newer push cancels an older build). A pull request builds the
+installer only when it touches Windows packaging (`packaging/windows/`,
+requirements, `pyproject.toml`, or the workflow itself), so an ordinary PR
+queues one Windows job. If the Windows runner is
 down for a while, set it to `false`
 (`gh variable set AURA_WINDOWS_CI --body false`) and drop `Windows tests` from
 `main`'s required checks until it is back: a queued Windows job keeps its run
