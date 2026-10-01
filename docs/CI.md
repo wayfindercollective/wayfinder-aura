@@ -66,9 +66,8 @@ the separate installer candidate workflow on pull requests. Passing Linux
 alone is insufficient to merge shared application changes to Main.
 
 `main` is protected, for admins too: changes arrive only by pull request, and
-`Quality` plus `Platform smoke (macOS)` must pass first. `Windows tests` becomes
-required once the Windows runner is admitted; until then it runs but does not
-block. Do not put `[skip ci]` in a pull request's head commit: the required
+`Quality`, `Platform smoke (macOS)` and `Windows tests` must pass first. Do not
+put `[skip ci]` in a pull request's head commit: the required
 checks never report and the pull request cannot merge. Branch rules are in
 [PLATFORM-DEVELOPMENT.md](PLATFORM-DEVELOPMENT.md#branches-and-merges).
 
@@ -157,17 +156,28 @@ the job workspace; a workflow must never install or update it.
 | --- | --- | --- |
 | mini-inf-aura | `aura-linux` | 2 CPU cores, 6 GiB RAM |
 | mini-infinity-aura-linux (old WSL; disabled) | pending shared-capacity integration | stopped |
-| Native Windows | `aura-windows` after admission | one bounded native job at a time |
-| mac-studio-aura (offline) | `aura-macos` | peak-model admission required |
+| mini-infinity-aura-windows (native) | `aura-windows` | one job at a time: 4 GiB, 12.5% CPU, 60 min (Job Object) |
+| mac-studio-aura | `aura-macos` | one job at a time through the host run queue, after the peak-model budget check |
 
-**Windows jobs wait for admission.** Until the Windows runner takes jobs, the
-`Windows tests` job (CI) and the PR `Windows Candidate` build are skipped on
-pushes and pull requests. A queued Windows job used to keep every run open, and
-GitHub refuses to rerun a failed job in a run that is still open. Set the repo
-variable `AURA_WINDOWS_CI` to `true` once the runner is admitted:
-`gh variable set AURA_WINDOWS_CI --body true`. At that point also add
-`Windows tests` to `main`'s required checks. Tag releases (`refs/tags/v*`) and
-manual `workflow_dispatch` runs always include Windows.
+**Windows jobs are admitted automatically** (since 2026-10-01). A poller on the
+Mac (every 2 minutes; it only reads GitHub, with the Mac's existing login) looks for queued
+`aura-windows` jobs from trusted events of this repository, judged by the
+installed `trusted-runner.py`: pushes and tags, `workflow_dispatch`, `schedule`
+and same-repository pull requests; never forks, `release` or `workflow_run`. It
+writes an exact reservation on mini-infinity naming each queued run and head
+sha. The host then runs one bounded one-shot job and closes the reservation when
+the runner is idle; the job-start hook rechecks trust and the reservation. The
+Windows model keeps running beside the job. The first auto-admitted job was the
+installer candidate (run 36831537380, 2026-10-01).
+
+The repo variable `AURA_WINDOWS_CI=true` runs `Windows tests` (CI) and the PR
+`Windows Candidate` build on pushes and pull requests. If the Windows runner is
+down for a while, set it to `false`
+(`gh variable set AURA_WINDOWS_CI --body false`) and drop `Windows tests` from
+`main`'s required checks until it is back: a queued Windows job keeps its run
+open, and GitHub refuses to rerun a failed job in a run that is still open. Tag
+releases (`refs/tags/v*`) and manual `workflow_dispatch` runs always include
+Windows.
 
 Linux runners use a dedicated `aurarunner` account and systemd service caps.
 The prepared WSL builder's private **rootless** Docker daemon is also disabled;
@@ -176,7 +186,8 @@ membership in the privileged Docker group. AppImage containers cap CPU at 2 and 
 at 12 GiB. Host package installation is an administrator task; workflows do not
 change host swap or overcommit. Python environments are recreated for every job.
 
-The Mac runner is currently **offline**, pending shared-capacity acceptance. The
+The Mac runner takes one job at a time through the host's run queue, and only
+when the budget check below leaves room for CI. The
 owner requires the local model at full context, existing server processes and
 at least one cloud coding agent to take precedence. On 2026-09-30, the owner
 approved testing a smaller, model-specific budget on the 256 GiB Mac Studio.
