@@ -4551,14 +4551,24 @@ class FloatingIndicator:
         glow_b = int(34 + b * 0.05)
         inner_glow_color = f"#{glow_r:02x}{glow_g:02x}{glow_b:02x}"
         
-        self.window.configure(fg_color=shadow_color)
+        # Tk's toplevel and CTk's outer frame each have rectangular backing
+        # pixels outside the rounded pill. Key out their shared backdrop on
+        # Windows so only the rounded border and pill remain.
+        window_bg = "#010203" if IS_WINDOWS else shadow_color
+        self.window.configure(fg_color=window_bg)
+        if IS_WINDOWS:
+            try:
+                self.window.attributes("-transparentcolor", window_bg)
+            except tk.TclError:
+                window_bg = shadow_color
+                self.window.configure(fg_color=window_bg)
         
         # Outer frame with blue rim light (pre-blended, no alpha)
         self.glow_frame = ctk.CTkFrame(
             self.window,
-            fg_color=shadow_color,
+            fg_color=window_bg if IS_WINDOWS else shadow_color,
             corner_radius=RADIUS["lg"],  # Squircle feel
-            border_width=1,
+            border_width=0 if IS_WINDOWS else 1,
             border_color=COLORS["border_rim"],  # Pre-blended 10% blue
         )
         self.glow_frame.pack(padx=0, pady=0)
