@@ -21,7 +21,10 @@ Linux: dictation for gamers on every desktop.
   `steam_app_<id>`, SteamOS Game Mode). Dark Age of Camelot (Eden) is typed
   into the chat box you opened and sent with Enter.
 - **Cancel a dictation from any app** (default Shift+Esc; Esc where Aura sees
-  keys) without anything being typed.
+  keys) without anything being typed. While you're recording, a subtle
+  "✕ Shift+Esc" sits just above the pill (below it when the pill is on the top
+  edge), and the first-run guide says so too: Shift+Esc works on Mac, Windows
+  and Linux alike.
 - **Vocabulary corrections as Heard / Write-as pairs.**
 - **Vocabulary fixes near-misses of your words (Ultra).** The speech model
   rarely misspells a rare name the same way twice (Large v3 Turbo Q5 wrote

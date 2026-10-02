@@ -941,6 +941,14 @@ class WelcomePane:
             if tap_hold
             else "press it once to start a dictation — press it again to stop.",
         )
+        cancel = None
+        try:
+            cancel = self.app._cancel_hotkey_display()
+        except Exception:
+            pass
+        if cancel:
+            # People didn't know a dictation can be discarded (the pill shows it too).
+            self._body_label(body, f"Changed your mind? Press {cancel} to cancel — nothing is typed.")
         if sys.platform == "darwin":
             try:
                 from wayfinder.utils.macos_permissions import macos_install_location_ready
