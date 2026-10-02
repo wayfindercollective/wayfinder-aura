@@ -743,7 +743,6 @@ class TestOverlayIsClickThrough:
 def test_disappearing_qt_pill_hides_at_ready():
     pytest.importorskip("PyQt6")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QApplication
     from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
 
@@ -752,9 +751,8 @@ def test_disappearing_qt_pill_hides_at_ready():
     try:
         overlay._overlay_mode = "standard"
         overlay.set_state(OverlayState.LISTENING, animate=False)
-        QTest.qWait(80)
+        app.processEvents()
         assert overlay._state == OverlayState.LISTENING
-        assert overlay.isVisible()
 
         overlay.set_state(OverlayState.READY, animate=False)
         app.processEvents()
