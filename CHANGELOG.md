@@ -60,6 +60,12 @@ Linux: dictation for gamers on every desktop.
 
 ### Fixed
 
+- **A muted or switched-off mic is named as the problem.** When the mic sends
+  pure digital silence (a muted USB headset, a wireless headset turned off
+  with its dongle still plugged in), Aura now says "Your mic … sent no sound
+  at all — it may be muted or switched off" instead of asking you to speak
+  closer. Quiet audio from a live mic keeps the no-speech message, and a mic
+  name containing words like "Type-C" no longer reads as a paste failure.
 - **Long chunked dictations keep their words at the chunk boundaries.** The
   prompt for each piece no longer ends on the half-heard word at the cut, the
   join matches the overlap even when that word came out wrong, and a piece
