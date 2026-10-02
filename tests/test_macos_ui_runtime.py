@@ -20,10 +20,14 @@ def test_disappearing_uses_separate_qt_process_only_on_macos():
     assert wayfinder_main.visual_overlay_mode("win32", "disappearing") is None
 
 
-def test_macos_enabling_disappearing_uses_qt_instead_of_hidden_tk(monkeypatch):
+@pytest.mark.parametrize("tray_required", [False, True])
+def test_macos_enabling_disappearing_uses_qt_instead_of_hidden_tk(monkeypatch, tray_required):
     started = []
     monkeypatch.setattr(wayfinder_main.sys, "platform", "darwin")
     monkeypatch.setattr(wayfinder_main, "save_config", lambda config: None)
+    monkeypatch.setattr(
+        wayfinder_main, "should_host_qt_tray", lambda *args: tray_required
+    )
     monkeypatch.setattr(
         wayfinder_main, "FloatingIndicator",
         lambda *args, **kwargs: pytest.fail("Tk indicator cannot survive native Hide"),
@@ -38,7 +42,7 @@ def test_macos_enabling_disappearing_uses_qt_instead_of_hidden_tk(monkeypatch):
 
     wayfinder_main.WayfinderApp._on_overlay_enabled_toggled(app)
 
-    assert started == [{"tray_only": False, "want_tray": False}]
+    assert started == [{"tray_only": False, "want_tray": tray_required}]
 
 
 def test_live_disappearing_controller_starts_in_standard_mode(monkeypatch):
