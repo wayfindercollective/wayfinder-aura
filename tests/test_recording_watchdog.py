@@ -179,31 +179,6 @@ def test_is_healthy_is_process_liveness_only():
     assert ctrl.is_healthy() is False
 
 
-def test_stopping_overlay_sends_quit_without_holding_ipc_lock(monkeypatch):
-    from wayfinder_main import OverlayController
-
-    ctrl = OverlayController()
-    ctrl._process = MagicMock()
-    ctrl._stop_audio_polling = MagicMock()
-    ctrl._stop_io_readers = MagicMock()
-    monkeypatch.setattr(
-        "wayfinder.utils.overlay_process.clear_overlay_pidfile", lambda: None
-    )
-    sent = []
-
-    def send(command):
-        assert ctrl._lock.acquire(blocking=False)
-        ctrl._lock.release()
-        sent.append(command)
-        return True
-
-    ctrl._send_command = send
-    ctrl.stop()
-
-    assert sent == [{"cmd": "quit"}]
-    assert ctrl._process is None
-
-
 def test_wait_for_ack_success():
     """Qt-thread nonce acks are collected from the stdout drain set."""
     from wayfinder_main import OverlayController

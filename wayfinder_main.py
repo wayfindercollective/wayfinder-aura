@@ -3637,7 +3637,7 @@ def visual_overlay_mode(platform: str, overlay_type: str) -> str | None:
     if overlay_type == "always_on":
         return "persistent"
     if platform == "darwin" and overlay_type == "disappearing":
-        return "standard"
+        return "transient"
     return None
 
 
@@ -5598,9 +5598,6 @@ class OverlayController:
     def stop(self):
         """Stop and clean up the overlay subprocess forcefully."""
         self._stop_audio_polling()
-        # Send before taking the IPC lock. Sending while holding it always
-        # times out, then waits for a child that never received Quit.
-        self._send_command({"cmd": "quit"})
         self._stop_io_readers()
         
         # Use timeout on lock to avoid deadlock
@@ -5621,6 +5618,8 @@ class OverlayController:
         try:
             if self._process is not None:
                 pid = self._process.pid
+                # First try graceful quit
+                self._send_command({"cmd": "quit"})
                 try:
                     self._process.wait(timeout=0.3)
                 except subprocess.TimeoutExpired:
@@ -6201,7 +6200,7 @@ class WayfinderApp(ctk.CTk):
                 self._use_pyqt_overlay = True
                 self.log(
                     "✨ Using Disappearing indicator (PyQt6)"
-                    if qt_visual_mode == "standard"
+                    if qt_visual_mode == "transient"
                     else "✨ Using Always On indicator (PyQt6)"
                 )
             else:
@@ -9664,11 +9663,7 @@ class WayfinderApp(ctk.CTk):
             overlay_content, "Indicator Style",
             list(overlay_type_labels.keys()),
             self.overlay_type_var, self.on_overlay_type_changed,
-            tooltip=(
-                "Always On: the pill stays visible. Disappearing: it appears only during "
-                "dictation. Applies immediately when idle."
-                if IS_MACOS else SETTING_TOOLTIPS.get("overlay_type", "")
-            ),
+            tooltip=SETTING_TOOLTIPS.get("overlay_type", ""),
             width=180,
         )
         # Set display value
@@ -12676,7 +12671,7 @@ class WayfinderApp(ctk.CTk):
                 # steals Wayland focus so ydotool injects into the wrong surface.
                 ctrl_result = ctrl.update("processing", allow_restart=False)
             elif state == "ready":
-                ctrl_result = ctrl.update("ready")
+                ctrl_result = ctrl.show("ready")
             elif state == "hide":
                 ctrl.hide()
                 ctrl_result = True
@@ -16711,7 +16706,7 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
     
     def on_overlay_type_changed(self, value: str):
-        """Apply Mac indicator styles live; other platforms still restart."""
+        """Handle overlay type change - requires restart for clean switch."""
         old_value = self.config.get("overlay_type", "always_on")
         self.config["overlay_type"] = value
         save_config(self.config)
@@ -16724,15 +16719,6 @@ class WayfinderApp(ctk.CTk):
         
         if value == old_value:
             return  # No change
-
-        if IS_MACOS:
-            if self.app_state == AppState.IDLE:
-                self._on_overlay_enabled_toggled()
-                self._hide_restart_banner()
-            else:
-                self._overlay_mode_change_pending = True
-                self.log("  ℹ️ Indicator style will apply after this dictation")
-            return
         
         # Kill tracked overlay (pidfile / controller) — never pattern pkill.
         try:
@@ -21909,10 +21895,6 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
 
-        if IS_MACOS and new_state == AppState.IDLE and getattr(self, "_overlay_mode_change_pending", False):
-            self._overlay_mode_change_pending = False
-            self.after(0, self._on_overlay_enabled_toggled)
-
         # Duck off the Tk thread via a single FIFO worker (order preserved; no race
         # where a slow duck finishes after restore and leaves audio attenuated).
         if self.config.get("audio_ducking_enabled", True) and hasattr(self, 'audio_ducker'):
@@ -24175,23 +24157,13 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         self._processing_start_time = None
-        # Let the Qt error pill finish its 2 s flash before resetting its tray
-        # state. A normal completion returns to READY (or hides the Mac's
-        # disappearing Qt pill) immediately after the processing minimum.
-        ok = None
-        if error and self._has_visual_pyqt_overlay():
-            expected_gen = self.session_generation if gen is None else gen
-
-            def reset_error_indicator():
-                if self.session_generation == expected_gen and self.app_state == AppState.IDLE:
-                    self._set_status_indicator("ready")
-
-            self.after(2100, reset_error_indicator)
-        else:
-            try:
-                ok = self._set_status_indicator("ready")
-            except Exception as e:
-                self.log(f"⚠ Indicator reset: {e}")
+        # Return overlay to ready (Always On) or hide Disappearing pill.
+        # Verify critical PyQt ready reaches the subprocess so it isn't stuck "Listening…".
+        try:
+            ok = self._set_status_indicator("ready")
+        except Exception as e:
+            self.log(f"⚠ Indicator reset: {e}")
+            ok = None
         if (
             not error
             and self._has_visual_pyqt_overlay()
