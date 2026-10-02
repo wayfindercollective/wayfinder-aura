@@ -5089,8 +5089,12 @@ class OverlayController:
         log_callback=None,
         want_tray: bool = False,
         tray_only: bool = False,
+        cancel_hint: str = "",
     ):
         self._process: subprocess.Popen | None = None
+        # "✕ Shift+Esc" above the pill while recording; kept here so a restarted
+        # overlay process gets it again (passed as --cancel-hint).
+        self._cancel_hint = cancel_hint or ""
         # When True, the overlay subprocess hosts a QSystemTrayIcon (used when the main
         # process has no in-process pystray tray — the Flatpak). tray_available is re-set
         # live from the overlay's ready handshake on each (re)start, so it never goes stale.
@@ -5273,6 +5277,8 @@ class OverlayController:
                     cmd_args.append(f"--offset={offset}")
                     cmd_args.append(f"--anchor={anchor}")
                     cmd_args.append(f"--quality={quality}")
+                    if self._cancel_hint:
+                        cmd_args.append(f"--cancel-hint={self._cancel_hint}")
                 def _overlay_preexec() -> None:
                     # If the main process is hard-killed, the overlay (tray) must not
                     # outlive it. Linux PR_SET_PDEATHSIG delivers SIGTERM to the child
@@ -5544,6 +5550,14 @@ class OverlayController:
     def set_quality(self, quality: str):
         """Set the overlay render quality live ('high' | 'performance')."""
         self._send_command({"cmd": "quality", "value": quality})
+
+    def set_cancel_hint(self, hint: str):
+        """The key that discards a recording, shown above the pill while recording."""
+        hint = hint or ""
+        if hint == self._cancel_hint:
+            return
+        self._cancel_hint = hint
+        self._send_command({"cmd": "cancel_hint", "value": hint})
 
     def quit(self):
         """Shut down the overlay subprocess."""
@@ -6170,6 +6184,7 @@ class WayfinderApp(ctk.CTk):
                 log_callback=self.log,
                 want_tray=want_tray or tray_only,
                 tray_only=tray_only,
+                cancel_hint=self._cancel_hotkey_display() or "",
             )
             self.overlay_controller._start_process()
             if not tray_only:
@@ -18606,11 +18621,13 @@ class WayfinderApp(ctk.CTk):
         """The key that discards a recording from any app, or None if unbound.
 
         Linux portal sessions bind the cancel-dictation shortcut, so the
-        desktop's own trigger is the truth; every other listener (macOS,
-        Windows, X11 pynput, evdev) takes a bare Escape.
+        desktop's own trigger is the truth. Every other listener (macOS,
+        Windows, X11 pynput, evdev) cancels on Escape with or without Shift,
+        so Shift+Esc is the one key taught everywhere (overlay hint, hero,
+        welcome guide).
         """
         if getattr(self, "_hotkey_backend", None) != "portal":
-            return "Esc"
+            return "Shift+Esc"
         triggers = getattr(self, "_portal_triggers", None)
         if triggers is None:  # bind still in flight: what the app asked for
             from wayfinder.hotkeys.dbus import encode_trigger
@@ -18807,6 +18824,12 @@ class WayfinderApp(ctk.CTk):
             return
         from wayfinder.hotkeys.dbus import parse_trigger_description
         self._portal_triggers = dict(triggers)
+        controller = getattr(self, "overlay_controller", None)
+        if controller is not None:
+            try:
+                controller.set_cancel_hint(self._cancel_hotkey_display() or "")
+            except Exception:
+                pass
         changed = []
         for shortcut_id, key_field, mods_field, target in (
             ("record-toggle", "hotkey_key", "hotkey_modifiers", "record"),
