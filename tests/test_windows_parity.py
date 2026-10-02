@@ -1773,3 +1773,24 @@ def test_next_paste_waits_for_a_restore_the_timer_is_already_running(monkeypatch
     iw._pending_restore.flush()
     assert pasted == ["part1", "part2"]                # never the user's text
     assert clip["v"] == "USER"                         # and it comes back
+
+
+def test_quitting_flushes_a_pending_clipboard_restore(monkeypatch):
+    """Quit ends with os._exit (no atexit), so quit paths flush explicitly."""
+    import inspect
+    import sys as _sys
+
+    import wayfinder_main
+
+    calls = []
+    fake = SimpleNamespace(_pending_restore=SimpleNamespace(flush=lambda: calls.append(1)))
+    monkeypatch.setitem(_sys.modules, "wayfinder.core.injector_windows", fake)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    wayfinder_main._flush_windows_clipboard_restore()
+    assert calls == [1]
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)       # Linux/macOS: no-op
+    wayfinder_main._flush_windows_clipboard_restore()
+    assert calls == [1]
+    quit_src = inspect.getsource(wayfinder_main.WayfinderApp.quit_app)
+    assert quit_src.index("_flush_windows_clipboard_restore()") < quit_src.index("os._exit(0)")

@@ -1301,6 +1301,21 @@ def _hero_active_interval_ms(platform_name: str | None = None, steam_platform=_U
     return 66 if steam_platform else 33
 
 
+def _flush_windows_clipboard_restore() -> None:
+    """Windows: give the user their clipboard back now if a paste's delayed
+    restore (injector_windows, 0.8 s) is still pending. Quit ends with
+    os._exit, which skips atexit and kills the timer thread."""
+    if not IS_WINDOWS or IS_MACOS:
+        return
+    module = sys.modules.get("wayfinder.core.injector_windows")
+    if module is None:
+        return
+    try:
+        module._pending_restore.flush()
+    except Exception:
+        pass
+
+
 def _windows_dpi_scale() -> float:
     """Windows' display scale (1.75 at 175%) once the app is DPI aware, else 1.0.
 
@@ -21640,6 +21655,7 @@ class WayfinderApp(ctk.CTk):
 
         # Restore ducked streams before os._exit bypasses normal destructors.
         self._close_audio_ducking()
+        _flush_windows_clipboard_restore()
 
         # Shutdown thread pool executors gracefully
         try:
@@ -24512,6 +24528,7 @@ def main():
                 # Restore any stream volumes Aura still owns. The recovery
                 # journal remains if the audio server rejects a final retry.
                 app._close_audio_ducking()
+                _flush_windows_clipboard_restore()
                 
                 # Shutdown thread pool executors gracefully
                 if hasattr(app, 'executor'):
