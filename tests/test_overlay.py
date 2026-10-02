@@ -740,6 +740,30 @@ class TestOverlayIsClickThrough:
             ov.deleteLater()
 
 
+def test_disappearing_qt_pill_hides_at_ready():
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "standard"
+        overlay.set_state(OverlayState.LISTENING, animate=False)
+        QTest.qWait(80)
+        assert overlay._state == OverlayState.LISTENING
+        assert overlay.isVisible()
+
+        overlay.set_state(OverlayState.READY, animate=False)
+        app.processEvents()
+        assert overlay._state == OverlayState.HIDDEN
+        assert not overlay.isVisible()
+    finally:
+        overlay.deleteLater()
+
+
 @pytest.mark.parametrize("platform_name, expected", [("linux", "primary"), ("darwin", "pointer")])
 def test_overlay_screen_follows_pointer_on_macos_only(
     monkeypatch, overlay_module, platform_name, expected

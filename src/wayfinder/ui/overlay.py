@@ -1781,6 +1781,11 @@ class GlassmorphicOverlay(QWidget):
             state: Target state
             animate: Whether to animate the transition
         """
+        # A disappearing pill has no READY frame. Its process stays alive, but
+        # the window leaves the active Space until dictation starts again.
+        if getattr(self, "_overlay_mode", "persistent") == "standard" and state == OverlayState.READY:
+            state = OverlayState.HIDDEN
+
         # Import the debug logger from the run_overlay scope
         import time
         def _log(msg):
@@ -2763,6 +2768,7 @@ def run_overlay():
                 if elapsed > _COMMAND_TIMEOUT:
                     _debug_log(f"WATCHDOG: no commands for {elapsed:.0f}s, returning to READY")
                     overlay.set_state(OverlayState.READY)
+                    _update_tray(OverlayState.READY)
 
         except Exception as e:
             _debug_log(f"process_commands error: {e}")

@@ -779,6 +779,16 @@ class TestHappyPath:
 # ===========================================================================
 
 class TestFailurePaths:
+    def test_qt_error_indicator_stays_visible_then_resets(self, app):
+        app.on_error("No speech detected", app.session_generation)
+
+        assert ("show", "error") in app.overlay_controller.commands
+        assert ("update", "ready") not in app.overlay_controller.commands
+        assert app.app_state == AppState.IDLE
+
+        app.run_after()
+        assert ("update", "ready") in app.overlay_controller.commands
+
     def test_welcome_receives_errors_that_its_covering_pane_would_hide(self, app):
         received = []
         app._welcome_active = True

@@ -3632,6 +3632,15 @@ def resolve_status_indicator_target(
     return "none"
 
 
+def visual_overlay_mode(platform: str, overlay_type: str) -> str | None:
+    """Use a separate Qt process when a hidden Mac app needs a visible pill."""
+    if overlay_type == "always_on":
+        return "persistent"
+    if platform == "darwin" and overlay_type == "disappearing":
+        return "standard"
+    return None
+
+
 def normalize_indicator_audio_level(value) -> float:
     """Convert recorder scalar types (including NumPy float32) to finite 0..1."""
     try:
@@ -5579,6 +5588,9 @@ class OverlayController:
     def stop(self):
         """Stop and clean up the overlay subprocess forcefully."""
         self._stop_audio_polling()
+        # Send before taking the IPC lock. Sending while holding it always
+        # times out, then waits for a child that never received Quit.
+        self._send_command({"cmd": "quit"})
         self._stop_io_readers()
         
         # Use timeout on lock to avoid deadlock
@@ -5599,8 +5611,6 @@ class OverlayController:
         try:
             if self._process is not None:
                 pid = self._process.pid
-                # First try graceful quit
-                self._send_command({"cmd": "quit"})
                 try:
                     self._process.wait(timeout=0.3)
                 except subprocess.TimeoutExpired:
@@ -6144,6 +6154,7 @@ class WayfinderApp(ctk.CTk):
             self.config.get("enable_tray_icon", True),
         )
         want_visual = overlay_enabled and not getattr(self, "_game_mode", False)
+        qt_visual_mode = visual_overlay_mode(sys.platform, overlay_type) if want_visual else None
         initial_style = self.config.get("output_tone", "minimal")
 
         def _start_overlay_controller(*, tray_only: bool) -> bool:
@@ -6154,7 +6165,7 @@ class WayfinderApp(ctk.CTk):
                 return False
             self.overlay_controller = OverlayController(
                 audio_level_callback=get_audio_level,
-                mode="persistent",
+                mode=qt_visual_mode if not tray_only else "persistent",
                 initial_style=initial_style,
                 config=self.config,
                 log_callback=self.log,
@@ -6175,10 +6186,14 @@ class WayfinderApp(ctk.CTk):
             # Game Mode: neither the PyQt overlay nor the CTk indicator can render over a
             # fullscreen gamescope game — feedback is audio cues only (feedback/audio.py).
             self.log("🎮 Game Mode: visual overlay disabled (audio cues only)")
-        elif want_visual and overlay_type == "always_on":
+        elif qt_visual_mode is not None:
             if _start_overlay_controller(tray_only=False):
                 self._use_pyqt_overlay = True
-                self.log("✨ Using Always On indicator (PyQt6)")
+                self.log(
+                    "✨ Using Disappearing indicator (PyQt6)"
+                    if qt_visual_mode == "standard"
+                    else "✨ Using Always On indicator (PyQt6)"
+                )
             else:
                 self.log("⚠ PyQt6 not available, using Disappearing indicator")
         elif want_visual:
@@ -9633,13 +9648,17 @@ class WayfinderApp(ctk.CTk):
         self.overlay_type_var = ctk.StringVar(value=overlay_type)
         overlay_type_labels = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
         }
         self.overlay_type_dropdown = self.create_dropdown_row(
             overlay_content, "Indicator Style",
             list(overlay_type_labels.keys()),
             self.overlay_type_var, self.on_overlay_type_changed,
-            tooltip=SETTING_TOOLTIPS.get("overlay_type", ""),
+            tooltip=(
+                "Always On: the pill stays visible. Disappearing: it appears only during "
+                "dictation. Applies immediately when idle."
+                if IS_MACOS else SETTING_TOOLTIPS.get("overlay_type", "")
+            ),
             width=180,
         )
         # Set display value
@@ -12616,7 +12635,7 @@ class WayfinderApp(ctk.CTk):
         return 0.0
 
     def _has_visual_pyqt_overlay(self) -> bool:
-        """True when the Always On PyQt pill is the on-screen status surface.
+        """True when the PyQt pill owns the on-screen status surface.
 
         tray_only controllers host the system tray only — they must NOT steal
         show/hide from FloatingIndicator (Disappearing mode).
@@ -12634,7 +12653,7 @@ class WayfinderApp(ctk.CTk):
 
         state: ``listening`` | ``processing`` | ``ready`` | ``hide``
 
-        Returns the controller show/update result when using PyQt Always On
+        Returns the controller show/update result when using a PyQt pill
         (so callers can retry critical ready transitions); otherwise None.
         """
         ctrl = getattr(self, "overlay_controller", None)
@@ -12647,7 +12666,7 @@ class WayfinderApp(ctk.CTk):
                 # steals Wayland focus so ydotool injects into the wrong surface.
                 ctrl_result = ctrl.update("processing", allow_restart=False)
             elif state == "ready":
-                ctrl_result = ctrl.show("ready")
+                ctrl_result = ctrl.update("ready")
             elif state == "hide":
                 ctrl.hide()
                 ctrl_result = True
@@ -12688,7 +12707,7 @@ class WayfinderApp(ctk.CTk):
         return want_tray
 
     def _start_live_overlay_controller(self, *, tray_only: bool, want_tray: bool) -> bool:
-        """Start Always On / tray-only subprocess mid-session. Returns True on success."""
+        """Start visual / tray-only subprocess mid-session. Returns True on success."""
         try:
             import PyQt6  # noqa: F401
         except ImportError:
@@ -12696,7 +12715,9 @@ class WayfinderApp(ctk.CTk):
         try:
             self.overlay_controller = OverlayController(
                 audio_level_callback=None if tray_only else self._audio_level_for_overlay,
-                mode="persistent",
+                mode=("persistent" if tray_only else
+                      visual_overlay_mode(sys.platform, self.config.get("overlay_type", "always_on"))
+                      or "persistent"),
                 initial_style=self.config.get("output_tone", "minimal"),
                 config=self.config,
                 log_callback=self.log,
@@ -12870,8 +12891,8 @@ class WayfinderApp(ctk.CTk):
                 self.log("🙈 Status overlay off")
             return
 
-        # Visual on — Always On (PyQt) preferred; CTk disappearing otherwise.
-        if overlay_type == "always_on":
+        # Mac's disappearing pill must live outside the hidden Tk application.
+        if visual_overlay_mode(sys.platform, overlay_type) is not None:
             if self._start_live_overlay_controller(tray_only=False, want_tray=want_tray):
                 self.log("✨ Status overlay on")
                 return
@@ -16680,19 +16701,28 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
     
     def on_overlay_type_changed(self, value: str):
-        """Handle overlay type change - requires restart for clean switch."""
+        """Apply Mac indicator styles live; other platforms still restart."""
         old_value = self.config.get("overlay_type", "always_on")
         self.config["overlay_type"] = value
         save_config(self.config)
         
         type_names = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
         }
         self.log(f"⚙ Status indicator: {type_names.get(value, value)}")
         
         if value == old_value:
             return  # No change
+
+        if IS_MACOS:
+            if self.app_state == AppState.IDLE:
+                self._on_overlay_enabled_toggled()
+                self._hide_restart_banner()
+            else:
+                self._overlay_mode_change_pending = True
+                self.log("  ℹ️ Indicator style will apply after this dictation")
+            return
         
         # Kill tracked overlay (pidfile / controller) — never pattern pkill.
         try:
@@ -21869,6 +21899,10 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
 
+        if IS_MACOS and new_state == AppState.IDLE and getattr(self, "_overlay_mode_change_pending", False):
+            self._overlay_mode_change_pending = False
+            self.after(0, self._on_overlay_enabled_toggled)
+
         # Duck off the Tk thread via a single FIFO worker (order preserved; no race
         # where a slow duck finishes after restore and leaves audio attenuated).
         if self.config.get("audio_ducking_enabled", True) and hasattr(self, 'audio_ducker'):
@@ -24131,13 +24165,23 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         self._processing_start_time = None
-        # Return overlay to ready (Always On) or hide Disappearing CTk pill.
-        # Verify critical PyQt ready reaches the subprocess so it isn't stuck "Listening…".
-        try:
-            ok = self._set_status_indicator("ready")
-        except Exception as e:
-            self.log(f"⚠ Indicator reset: {e}")
-            ok = None
+        # Let the Qt error pill finish its 2 s flash before resetting its tray
+        # state. A normal completion returns to READY (or hides the Mac's
+        # disappearing Qt pill) immediately after the processing minimum.
+        ok = None
+        if error and self._has_visual_pyqt_overlay():
+            expected_gen = self.session_generation if gen is None else gen
+
+            def reset_error_indicator():
+                if self.session_generation == expected_gen and self.app_state == AppState.IDLE:
+                    self._set_status_indicator("ready")
+
+            self.after(2100, reset_error_indicator)
+        else:
+            try:
+                ok = self._set_status_indicator("ready")
+            except Exception as e:
+                self.log(f"⚠ Indicator reset: {e}")
         if (
             not error
             and self._has_visual_pyqt_overlay()
