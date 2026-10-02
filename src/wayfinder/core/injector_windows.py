@@ -21,6 +21,7 @@ Safety, per the contract's Windows checklist:
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import os
 import threading
@@ -391,6 +392,8 @@ if _user32 is not None:
     _kernel32.GlobalUnlock.restype = wintypes.BOOL
     _user32.RegisterClipboardFormatW.argtypes = (wintypes.LPCWSTR,)
     _user32.RegisterClipboardFormatW.restype = wintypes.UINT
+    _user32.GetClipboardSequenceNumber.argtypes = ()
+    _user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
 
 # Registered formats Windows' clipboard history (Win+V), Cloud Clipboard sync
 # and well-behaved clipboard managers honour. Dictations and the restored
@@ -430,6 +433,15 @@ def _mark_transient() -> None:
                 _user32.SetClipboardData(fmt, h_global)
         except Exception:
             pass  # best effort: the paste itself must not fail over a hint
+
+
+def _clipboard_sequence() -> int | None:
+    """Windows' clipboard change counter (reads don't change it), or None."""
+    try:
+        value = int(_user32.GetClipboardSequenceNumber())
+        return value or None
+    except Exception:
+        return None
 
 
 def _open_clipboard(retries: int = 5) -> bool:
@@ -499,6 +511,10 @@ class _DeferredRestore:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Held while a restore runs, by the timer and by flush(): a paste that
+        # starts while the timer is mid-restore waits for it to finish, instead
+        # of racing it on the clipboard (game chat pastes parts ~0.85 s apart).
+        self._run = threading.Lock()
         self._timer: threading.Timer | None = None
         self._job = None
 
@@ -521,30 +537,35 @@ class _DeferredRestore:
                 pass
 
     def flush(self) -> None:
-        """Run the pending restore now (before a new paste snapshots the clipboard)."""
-        with self._lock:
-            timer, job = self._timer, self._job
-            self._timer = self._job = None
-        if timer is not None:
-            timer.cancel()
-        if job is not None:
-            try:
-                job()
-            except Exception:
-                pass
+        """Run the pending restore now (before a new paste snapshots the
+        clipboard), or wait for one the timer is already running."""
+        with self._run:
+            with self._lock:
+                timer, job = self._timer, self._job
+                self._timer = self._job = None
+            if timer is not None:
+                timer.cancel()
+            if job is not None:
+                try:
+                    job()
+                except Exception:
+                    pass
 
     def _fire(self) -> None:
-        with self._lock:
-            job = self._job
-            self._timer = self._job = None
-        if job is not None:
-            try:
-                job()
-            except Exception:
-                pass
+        with self._run:
+            with self._lock:
+                job = self._job
+                self._timer = self._job = None
+            if job is not None:
+                try:
+                    job()
+                except Exception:
+                    pass
 
 
 _pending_restore = _DeferredRestore()
+# Quitting within the delay must still give the user their clipboard back.
+atexit.register(_pending_restore.flush)
 
 
 def inject_text_paste_windows(text: str) -> None:
@@ -555,6 +576,10 @@ def inject_text_paste_windows(text: str) -> None:
     """
     if not text:
         return
+    # A restore still pending from the last paste runs first (before even the
+    # own-window refusal, which leaves the text on the clipboard), so nothing
+    # here races it and the snapshot below is the user's clipboard.
+    _pending_restore.flush()
     diag = _new_paste_diagnostics(text)
     try:
         _require_foreground_window()
@@ -563,13 +588,11 @@ def inject_text_paste_windows(text: str) -> None:
         require_modifier_release_windows()
         diag.mark("mods_free")
 
-        # A restore still pending from the last paste runs first, so this
-        # snapshot is the user's clipboard, never Aura's previous dictation.
-        _pending_restore.flush()
         previous = _clipboard_get_windows()
         diag.previous(previous)
         if not _clipboard_set_windows(text, transient=True):
             raise InjectionError("Could not write to the Windows clipboard for paste.")
+        ours = _clipboard_sequence()
         diag.mark("set")
         try:
             time.sleep(0.03)
@@ -584,10 +607,15 @@ def inject_text_paste_windows(text: str) -> None:
             # Oct 2026). Only if the clipboard still holds our text: the user
             # may have copied something new in the meantime.
             if previous is not None:
-                def restore(previous=previous, text=text, diag=diag):
-                    current = _clipboard_get_windows()
-                    diag.at_restore(current == text)
-                    if current == text:
+                def restore(previous=previous, text=text, diag=diag, ours=ours):
+                    # Untouched since Aura wrote it: same change counter (a
+                    # "Copy" of the same words bumps it) and still our text.
+                    untouched = (
+                        (ours is None or _clipboard_sequence() == ours)
+                        and _clipboard_get_windows() == text
+                    )
+                    diag.at_restore(untouched)
+                    if untouched:
                         _clipboard_set_windows(previous, transient=True)
                         diag.mark("restored")
 

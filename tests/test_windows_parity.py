@@ -227,6 +227,7 @@ def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
     monkeypatch.setattr(w, "_send", lambda inputs: None)
     monkeypatch.setattr(w.time, "sleep", lambda s: None)
     monkeypatch.setattr(w, "_clipboard_get_windows", lambda: clipboard["text"])
+    monkeypatch.setattr(w, "_clipboard_sequence", lambda: None)
 
     def fake_set(text, transient=False):
         sets.append((text, transient))
@@ -1629,6 +1630,7 @@ def test_paste_still_runs_the_same_steps_and_reports_failures(monkeypatch):
     monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
     monkeypatch.setattr(iw, "_clipboard_set_windows",
                         lambda t, transient=False: steps.append(("set", t)) or clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
     monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
     monkeypatch.setattr(iw, "_WATCH_SECONDS", 0.05)
     monkeypatch.setattr(iw.time, "sleep", lambda s: None)
@@ -1666,6 +1668,7 @@ def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
     monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
     monkeypatch.setattr(iw, "_clipboard_set_windows",
                         lambda t, transient=False: steps.append(("set", t)) or clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
     monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
     monkeypatch.setattr(iw.time, "sleep", lambda s: None)
 
@@ -1690,15 +1693,20 @@ def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
 def _clipboard_fakes(monkeypatch, start):
     from wayfinder.core import injector_windows as iw
 
-    clip = {"v": start}
+    clip = {"v": start, "seq": 1}
+
+    def fake_set(t, transient=False):
+        clip.update(v=t, seq=clip["seq"] + 1)
+        return True
+
+    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: clip["seq"])
     monkeypatch.setattr(iw, "_paste_reporter", None)
     monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
     monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
     monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
     monkeypatch.setattr(iw, "_press_keys", lambda vks: None)
     monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
-    monkeypatch.setattr(iw, "_clipboard_set_windows",
-                        lambda t, transient=False: clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_clipboard_set_windows", fake_set)
     monkeypatch.setattr(iw, "_pending_restore", iw._DeferredRestore())
     return iw, clip
 
@@ -1725,6 +1733,43 @@ def test_back_to_back_dictations_never_capture_auras_own_text(monkeypatch):
 def test_a_new_copy_before_the_restore_is_kept(monkeypatch):
     iw, clip = _clipboard_fakes(monkeypatch, "user text")
     iw.inject_text_paste_windows("dictation")
-    clip["v"] = "something the user just copied"
+    clip.update(v="something the user just copied", seq=clip["seq"] + 1)
     iw._pending_restore.flush()
     assert clip["v"] == "something the user just copied"
+
+
+
+def test_copying_the_same_words_before_the_restore_is_kept(monkeypatch):
+    """"Copy last transcription" (or Ctrl+C on the pasted text) puts the same
+    words back: the change counter, not the text, shows it is the user's."""
+    iw, clip = _clipboard_fakes(monkeypatch, "user text")
+    iw.inject_text_paste_windows("dictation")
+    clip.update(v="dictation", seq=clip["seq"] + 1)    # the user's own copy
+    iw._pending_restore.flush()
+    assert clip["v"] == "dictation"
+
+
+def test_next_paste_waits_for_a_restore_the_timer_is_already_running(monkeypatch):
+    """Game chat pastes part 2 ~0.85 s after part 1, right as part 1's timer
+    restore runs. The second paste must wait for it, not race it."""
+    import threading
+
+    iw, clip = _clipboard_fakes(monkeypatch, "USER")
+    pasted = []
+    monkeypatch.setattr(iw, "_press_keys", lambda vks: pasted.append(clip["v"]))
+    real_get = iw._clipboard_get_windows
+    started = threading.Event()
+
+    def slow_get():
+        if threading.current_thread() is not threading.main_thread():
+            started.set()
+            time.sleep(0.15)                # a slow restore, mid-flight
+        return real_get()
+
+    monkeypatch.setattr(iw, "_clipboard_get_windows", slow_get)
+    iw.inject_text_paste_windows("part1")
+    assert started.wait(iw.RESTORE_DELAY_S + 1)        # the timer restore began
+    iw.inject_text_paste_windows("part2")              # lands mid-restore
+    iw._pending_restore.flush()
+    assert pasted == ["part1", "part2"]                # never the user's text
+    assert clip["v"] == "USER"                         # and it comes back
