@@ -235,6 +235,7 @@ def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
 
     monkeypatch.setattr(w, "_clipboard_set_windows", fake_set)
     w.inject_text_paste_windows("dictated words")
+    w._pending_restore.flush()           # the deferred restore, run now
     assert sets == [("dictated words", True), ("user's own clipboard", True)]
 
 
@@ -1633,6 +1634,7 @@ def test_paste_still_runs_the_same_steps_and_reports_failures(monkeypatch):
     monkeypatch.setattr(iw.time, "sleep", lambda s: None)
 
     iw.inject_text_paste_windows("hi")
+    iw._pending_restore.flush()
     assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]
     deadline = time.time() + 2
     while not lines and time.time() < deadline:
@@ -1672,9 +1674,57 @@ def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
 
     monkeypatch.setattr(iw.threading, "Thread", no_threads)
     iw.inject_text_paste_windows("hi")
+    iw._pending_restore.flush()
     assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]
 
     steps.clear()
     monkeypatch.setattr(iw, "_PasteDiagnostics", no_threads)   # even construction failing
     iw.inject_text_paste_windows("hi")
+    iw._pending_restore.flush()
     assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]
+
+
+
+# --- Deferred clipboard restore (the Mac's DeferredRestore) -----------------
+
+def _clipboard_fakes(monkeypatch, start):
+    from wayfinder.core import injector_windows as iw
+
+    clip = {"v": start}
+    monkeypatch.setattr(iw, "_paste_reporter", None)
+    monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
+    monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
+    monkeypatch.setattr(iw, "_press_keys", lambda vks: None)
+    monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
+    monkeypatch.setattr(iw, "_clipboard_set_windows",
+                        lambda t, transient=False: clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_pending_restore", iw._DeferredRestore())
+    return iw, clip
+
+
+def test_old_clipboard_comes_back_after_the_app_had_time_to_read(monkeypatch):
+    """VS Code read the clipboard 30-90 ms after Ctrl+V; a restore at 80 ms
+    made it paste the old clipboard. The restore now waits ~0.8 s."""
+    iw, clip = _clipboard_fakes(monkeypatch, "user text")
+    assert iw.RESTORE_DELAY_S >= 0.5
+    iw.inject_text_paste_windows("dictation")
+    assert clip["v"] == "dictation"        # still there for a slow reader
+    time.sleep(iw.RESTORE_DELAY_S + 0.4)
+    assert clip["v"] == "user text"        # then put back on its own
+
+
+def test_back_to_back_dictations_never_capture_auras_own_text(monkeypatch):
+    iw, clip = _clipboard_fakes(monkeypatch, "user text")
+    iw.inject_text_paste_windows("first")
+    iw.inject_text_paste_windows("second")  # flushes the first restore first
+    iw._pending_restore.flush()
+    assert clip["v"] == "user text"
+
+
+def test_a_new_copy_before_the_restore_is_kept(monkeypatch):
+    iw, clip = _clipboard_fakes(monkeypatch, "user text")
+    iw.inject_text_paste_windows("dictation")
+    clip["v"] = "something the user just copied"
+    iw._pending_restore.flush()
+    assert clip["v"] == "something the user just copied"

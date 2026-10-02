@@ -490,6 +490,63 @@ def _clipboard_set_windows(text: str, transient: bool = False) -> bool:
         _user32.CloseClipboard()
 
 
+RESTORE_DELAY_S = 0.8   # as macos_paste.RESTORE_DELAY_S
+
+
+class _DeferredRestore:
+    """One pending clipboard restore, run on a timer or flushed early
+    (Windows twin of macos_paste.DeferredRestore)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+        self._job = None
+
+    def schedule(self, restore, delay: float = RESTORE_DELAY_S) -> None:
+        self.flush()
+        try:
+            with self._lock:
+                self._job = restore
+                self._timer = threading.Timer(delay, self._fire)
+                self._timer.daemon = True
+                self._timer.start()
+        except Exception:
+            # No thread (resource pressure): restore now rather than never,
+            # so the user's clipboard is not left holding the dictation.
+            with self._lock:
+                self._timer = self._job = None
+            try:
+                restore()
+            except Exception:
+                pass
+
+    def flush(self) -> None:
+        """Run the pending restore now (before a new paste snapshots the clipboard)."""
+        with self._lock:
+            timer, job = self._timer, self._job
+            self._timer = self._job = None
+        if timer is not None:
+            timer.cancel()
+        if job is not None:
+            try:
+                job()
+            except Exception:
+                pass
+
+    def _fire(self) -> None:
+        with self._lock:
+            job = self._job
+            self._timer = self._job = None
+        if job is not None:
+            try:
+                job()
+            except Exception:
+                pass
+
+
+_pending_restore = _DeferredRestore()
+
+
 def inject_text_paste_windows(text: str) -> None:
     """Inject *text* via clipboard + Ctrl+V, restoring the prior clipboard.
 
@@ -506,6 +563,9 @@ def inject_text_paste_windows(text: str) -> None:
         require_modifier_release_windows()
         diag.mark("mods_free")
 
+        # A restore still pending from the last paste runs first, so this
+        # snapshot is the user's clipboard, never Aura's previous dictation.
+        _pending_restore.flush()
         previous = _clipboard_get_windows()
         diag.previous(previous)
         if not _clipboard_set_windows(text, transient=True):
@@ -517,18 +577,21 @@ def inject_text_paste_windows(text: str) -> None:
             _press_keys([VK_CONTROL, VK_V])
             diag.mark("ctrl_v")
         finally:
-            # Best-effort restore, only if the clipboard still holds our text
-            # (the user may have copied something new in the meantime).
+            # Put the old clipboard back later, on a timer (the Mac's
+            # DeferredRestore): VS Code and other Electron apps read the
+            # clipboard 30-90 ms after Ctrl+V, more when busy, and a restore
+            # at 80 ms made them paste the OLD clipboard or nothing (owner,
+            # Oct 2026). Only if the clipboard still holds our text: the user
+            # may have copied something new in the meantime.
             if previous is not None:
-                try:
-                    time.sleep(0.08)
+                def restore(previous=previous, text=text, diag=diag):
                     current = _clipboard_get_windows()
                     diag.at_restore(current == text)
                     if current == text:
                         _clipboard_set_windows(previous, transient=True)
                         diag.mark("restored")
-                except Exception:
-                    pass
+
+                _pending_restore.schedule(restore)
     except Exception as exc:
         diag.failed(exc)
         raise
