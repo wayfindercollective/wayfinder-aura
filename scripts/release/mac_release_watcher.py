@@ -12,6 +12,12 @@ signing secret is uploaded anywhere. Each run:
 3. gives up on a release after 3 failed builds (the state file records them),
    so a broken tag can't keep the Mac busy every hour.
 
+Bounded by design: one instance (non-blocking flock, released by the OS on
+any exit), one build per run, a 2-hour wall clock for the build (its process
+group is terminated, then killed), notarytool's wait capped at 60 minutes
+(packaging/macos/build.py), and the Mac CI hold this run takes is lifted on
+every exit path.
+
 Nothing happens while another copy runs (lock file), while the Mac CI queue
 is held by someone else (a DMG build or Infra Mac's own work), or while less
 than MIN_FREE_GIB of memory is free: the Mac's protected 24 GiB headroom for
@@ -26,6 +32,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -41,6 +48,7 @@ AURA_REPO = Path(os.environ.get("AURA_REPO", Path.home() / "wayfinder-aura"))
 MAX_TRIES = 3
 WINDOW_DAYS = 7
 MIN_FREE_GIB = 32  # 24 GiB protected headroom (docs/CI.md) + the build
+BUILD_TIMEOUT_S = 2 * 3600  # whole build; notarytool's own wait is capped at 60 min
 TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+(?:-beta\.\d+)?)$")
 
 
@@ -101,6 +109,36 @@ def save_state(state: dict) -> None:
     STATE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def run_build(tag: str, env: dict) -> int:
+    """attach_mac_dmg.sh under the Mac CI hold, background QoS and a wall clock."""
+    HOLD.parent.mkdir(parents=True, exist_ok=True)
+    HOLD.touch()  # main() saw no hold: this run owns it and always lifts it
+    try:
+        # Background QoS keeps the build on the efficiency cores; /usr/bin/time -l
+        # logs its peak memory ("maximum resident set size") for the budget.
+        proc = subprocess.Popen(
+            ["/usr/sbin/taskpolicy", "-b", "/usr/bin/time", "-l",
+             "/bin/bash", str(HERE / "attach_mac_dmg.sh"), tag],
+            env={**env, "AURA_REPO": str(AURA_REPO), "AURA_HOLD_HELD": "1"},
+            start_new_session=True)
+        try:
+            return proc.wait(timeout=BUILD_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            log(f"Mac DMG for {tag} passed {BUILD_TIMEOUT_S // 60} minutes: stopping it.")
+            for sig, grace in ((signal.SIGTERM, 60), (signal.SIGKILL, 10)):
+                try:
+                    os.killpg(proc.pid, sig)
+                    return proc.wait(timeout=grace)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    continue
+            return -1
+    finally:
+        try:
+            HOLD.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def main() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOCK, "w") as lock:
@@ -134,19 +172,14 @@ def main() -> int:
         tries[tag] = tries.get(tag, 0) + 1
         save_state(state)
         log(f"Building the Mac DMG for {tag} (try {tries[tag]} of {MAX_TRIES}).")
-        # Background QoS keeps the build on the efficiency cores; /usr/bin/time -l
-        # logs its peak memory ("maximum resident set size") for the budget.
-        result = subprocess.run(
-            ["/usr/sbin/taskpolicy", "-b", "/usr/bin/time", "-l",
-             "/bin/bash", str(HERE / "attach_mac_dmg.sh"), tag],
-            env={**env, "AURA_REPO": str(AURA_REPO)})
-        if result.returncode == 0:
+        returncode = run_build(tag, env)
+        if returncode == 0:
             tries.pop(tag, None)
             state.setdefault("attached", []).append(tag)
             state["attached"] = state["attached"][-20:]
             log(f"Attached the Mac DMG to {tag}.")
         else:
-            log(f"Mac DMG for {tag} failed (exit {result.returncode}).")
+            log(f"Mac DMG for {tag} failed (exit {returncode}).")
         save_state(state)
     return 0
 

@@ -30,13 +30,15 @@ git -C "$ROOT" fetch -q origin "refs/tags/$TAG:refs/tags/$TAG"
 WORK="$(mktemp -d -t aura-dmg)"
 OWN_HOLD=0  # never lift a hold someone else (Infra Mac, a DMG build) put there
 cleanup() {
-  [ "$OWN_HOLD" = 1 ] && rm -f "$HOLD"
+  if [ "$OWN_HOLD" = 1 ]; then rm -f "$HOLD"; fi
   git -C "$ROOT" worktree remove --force "$WORK/src" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM INT HUP   # a timeout's SIGTERM still runs cleanup
 mkdir -p "$(dirname "$HOLD")"
-if [ ! -e "$HOLD" ]; then touch "$HOLD"; OWN_HOLD=1; fi
+# The watcher takes (and always lifts) the hold itself and says so.
+if [ -z "${AURA_HOLD_HELD:-}" ] && [ ! -e "$HOLD" ]; then touch "$HOLD"; OWN_HOLD=1; fi
 
 git -C "$ROOT" worktree add -q --detach "$WORK/src" "$TAG"
 cd "$WORK/src"

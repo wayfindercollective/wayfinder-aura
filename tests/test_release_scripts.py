@@ -238,3 +238,21 @@ class TestMacReleaseWatcher:
         source = (REPO / "scripts" / "release" / "mac_release_watcher.py").read_text(encoding="utf-8")
         assert '"/usr/sbin/taskpolicy", "-b"' in source
         assert watcher.MIN_FREE_GIB >= 24 + 4  # protected headroom + a build
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS taskpolicy and time -l")
+    def test_a_hung_build_is_stopped_and_the_ci_hold_lifted(self, tmp_path, monkeypatch):
+        import subprocess as sp
+        hold = tmp_path / "aura-mac-ci.hold"
+        pids = tmp_path / "pids"
+        (tmp_path / "attach_mac_dmg.sh").write_text(
+            f'sleep 300 &\necho $! >> "{pids}"\necho $$ >> "{pids}"\nwait\n')
+        monkeypatch.setattr(watcher, "HERE", tmp_path)
+        monkeypatch.setattr(watcher, "HOLD", hold)
+        monkeypatch.setattr(watcher, "BUILD_TIMEOUT_S", 2)
+        monkeypatch.setattr(watcher, "log", lambda message: None)
+        returncode = watcher.run_build("v9.9.9-beta.1", {})
+        assert returncode != 0
+        assert not hold.exists()
+        for pid in pids.read_text().split():
+            alive = sp.run(["kill", "-0", pid], capture_output=True).returncode == 0
+            assert not alive, f"process {pid} survived the timeout"
