@@ -35,9 +35,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
 
 DOWNLOAD_PREFIX = "https://github.com/wayfindercollective/wayfinder-aura/releases/download/"
 MAX_DOWNLOAD_BYTES = 1_500_000_000
@@ -57,10 +57,10 @@ class Outcome:
     ready: bool = False
     message: str = ""
     fallback_path: str = ""
-    finish: Optional[Callable[[], None]] = field(default=None, repr=False)
+    finish: Callable[[], None] | None = field(default=None, repr=False)
 
 
-Progress = Optional[Callable[[float], None]]
+Progress = Callable[[float], None] | None
 
 
 # --- what this install can do ---------------------------------------------------
@@ -69,7 +69,7 @@ def _frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def mac_bundle_path() -> Optional[Path]:
+def mac_bundle_path() -> Path | None:
     """The running .app bundle, or None for a source run."""
     if sys.platform != "darwin" or not _frozen():
         return None
@@ -79,7 +79,7 @@ def mac_bundle_path() -> Optional[Path]:
     return None
 
 
-def appimage_path() -> Optional[Path]:
+def appimage_path() -> Path | None:
     from ..utils.platform import is_appimage
 
     if not sys.platform.startswith("linux") or not is_appimage():
@@ -88,7 +88,7 @@ def appimage_path() -> Optional[Path]:
     return Path(path) if path and os.path.isfile(path) else None
 
 
-def install_mode() -> Optional[str]:
+def install_mode() -> str | None:
     """"mac", "windows" or "appimage" when an in-place install is possible."""
     if sys.platform == "darwin":
         bundle = mac_bundle_path()
@@ -144,7 +144,7 @@ def download(url: str, dest_dir: Path, progress: Progress = None) -> Path:
                 if progress and total:
                     progress(min(received / total, 1.0))
     if total and received != total:
-        raise IOError(f"download incomplete ({received} of {total} bytes)")
+        raise OSError(f"download incomplete ({received} of {total} bytes)")
     final = dest_dir / name
     os.replace(partial, final)
     return final
@@ -152,7 +152,7 @@ def download(url: str, dest_dir: Path, progress: Progress = None) -> Path:
 
 # --- macOS ---------------------------------------------------------------------------
 
-def _run(args: List[str], timeout: int = 120) -> subprocess.CompletedProcess:
+def _run(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
 
 
@@ -167,7 +167,7 @@ def signing_identity(app: Path) -> tuple:
             "" if team_id == "not set" else team_id)
 
 
-def verify_mac_app(candidate: Path, running: Path) -> Optional[str]:
+def verify_mac_app(candidate: Path, running: Path) -> str | None:
     """None when ``candidate`` may replace ``running``, else the reason."""
     want_id, want_team = signing_identity(running)
     if not want_team:

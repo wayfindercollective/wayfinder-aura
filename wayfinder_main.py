@@ -1570,6 +1570,12 @@ SETTING_TOOLTIPS = {
         "and sometimes new bugs.\n"
         "Going back to Stable keeps your version until the next stable release."
     ),
+    "crash_reports": (
+        "When Aura crashes or hits an error, send the error details, app and "
+        "system versions to Wayfinder so it gets fixed. Never audio, dictated "
+        "text or your settings.\n"
+        "On by default for Beta, off for Stable."
+    ),
     "gamer_mode": (
         "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
         "M+...), keeps your words as said, and sends them to chat: don't press "
@@ -6423,6 +6429,7 @@ class WayfinderApp(ctk.CTk):
         self.after(2000, self._check_model_updates_background)
         # Check for a newer app release (non-blocking, once per day)
         self.after(2600, self._check_app_update_background)
+        self.after(8000, self._start_crash_report_pass)
 
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay and not IS_MACOS:
@@ -15312,6 +15319,27 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_check, daemon=True).start()
 
+    def _start_crash_report_pass(self) -> None:
+        """Read consent from the live config; send earlier crashes in the background."""
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.set_config_getter(lambda: self.config)
+            threading.Thread(target=crash_reports.collect_and_send, daemon=True,
+                             name="crash-report-startup").start()
+        except Exception:
+            pass
+
+    def report_callback_exception(self, exc, val, tb):
+        """An error in a Tk callback: print it as Tk does, and report it."""
+        super().report_callback_exception(exc, val, tb)
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.record_exception(exc, val, tb, where="tk-callback")
+        except Exception:
+            pass
+
     def _check_app_update_background(self, force: bool = False) -> None:
         """Check GitHub for a newer app release in a background thread.
 
@@ -15356,6 +15384,28 @@ class WayfinderApp(ctk.CTk):
             self._update_channel_var, self._on_update_channel_changed,
             tooltip=SETTING_TOOLTIPS["update_channel"], width=160,
         )
+        from wayfinder.core.crash_reports import reports_enabled
+
+        self._crash_reports_var = ctk.BooleanVar(
+            value=reports_enabled(self.config, current_version))
+        self.create_toggle_row(
+            parent, "Send crash reports", self._crash_reports_var,
+            self._on_crash_reports_toggled, tooltip=SETTING_TOOLTIPS["crash_reports"],
+        )
+
+    def _on_crash_reports_toggled(self) -> None:
+        """An explicit choice; turning reports off also deletes unsent ones."""
+        enabled = bool(self._crash_reports_var.get())
+        self.config["crash_reports"] = "on" if enabled else "off"
+        save_config(self.config)
+        self.log(f"Crash reports: {'on' if enabled else 'off'}")
+        if not enabled:
+            try:
+                from wayfinder.core import crash_reports
+
+                crash_reports.clear_queue()
+            except Exception:
+                pass
 
     def _on_update_channel_changed(self, choice: str) -> None:
         """Persist the update channel and look for that channel's newest
@@ -15366,6 +15416,16 @@ class WayfinderApp(ctk.CTk):
         self.config["update_channel"] = channel
         save_config(self.config)
         self.log(f"⟳ Updates: {choice}")
+        var = getattr(self, "_crash_reports_var", None)
+        if var is not None and not self.config.get("crash_reports"):
+            # Reports follow the channel until the user picks: show the new default.
+            try:
+                from wayfinder import __version__ as current_version
+                from wayfinder.core.crash_reports import reports_enabled
+
+                var.set(reports_enabled(self.config, current_version))
+            except Exception:
+                pass
         self._hide_app_update_banner()
         self._check_app_update_background(force=True)
 
@@ -21855,6 +21915,13 @@ class WayfinderApp(ctk.CTk):
 
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
+        # A deliberate quit is not a crash: drop this launch's native crash file.
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.mark_clean_exit()
+        except Exception:
+            pass
         # Signal all background threads to stop
         self.stop_event.set()
         if hasattr(self, '_evdev_stop_event'):

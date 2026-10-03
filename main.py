@@ -839,6 +839,16 @@ def main():
     if _signal_existing_instance():
         sys.exit(0)
 
+    # Crash reports for this (GUI) process: Beta sends by default, Stable only
+    # when turned on (Settings > System). Installed early to catch startup crashes.
+    try:
+        from wayfinder import __version__ as _aura_version
+        from wayfinder.core import crash_reports
+
+        crash_reports.install(_aura_version)
+    except Exception:
+        pass
+
     # The bundle starts every process without a Dock icon (LSUIElement), so
     # the overlay helper never shows a second one; the app asks for its own.
     if sys.platform == "darwin":
