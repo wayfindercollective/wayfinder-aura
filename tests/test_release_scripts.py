@@ -335,6 +335,9 @@ class TestWatcherAdmission:
     def test_pressure_or_a_running_ci_job_refuses(self, override, reason):
         assert reason in watcher.admission_refusal(_reading(**override), 125 * GIB)
 
+    # The watcher runs only on the Mac; grant ownership checks use POSIX uids.
+    posix = pytest.mark.skipif(sys.platform == "win32", reason="POSIX owner and mode checks")
+
     def _grant(self, tmp_path, pid=56016, mode=0o600, age=0, reserve=125 * GIB):
         path = tmp_path / "grant.json"
         path.write_text(json.dumps({"modelPid": pid, "modelReserveBytes": reserve}))
@@ -344,15 +347,18 @@ class TestWatcherAdmission:
             os.utime(path, (stamp, stamp))
         return path
 
+    @posix
     def test_a_fresh_grant_for_the_loaded_model_applies(self, tmp_path):
         assert watcher.model_reserve(_reading(), self._grant(tmp_path)) == 125 * GIB
 
+    @posix
     @pytest.mark.parametrize("kwargs", [
         {"pid": 1}, {"mode": 0o666}, {"age": 2 * 86400}, {"reserve": 500 * GIB}])
     def test_any_doubtful_grant_falls_back_to_the_ceiling(self, tmp_path, kwargs):
         assert watcher.model_reserve(_reading(), self._grant(tmp_path, **kwargs)) == watcher.MODEL_CEILING
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the watcher runs on the Mac (ps, process groups)")
 class TestWatcherHold:
     @pytest.fixture(autouse=True)
     def _hold(self, tmp_path, monkeypatch):
