@@ -34,9 +34,8 @@ otherwise it does nothing and tries again the next night
   `main` is never written.
 - The Release workflow then builds the AppImage and Flatpak (and the Windows
   installer, unpublished) and publishes a GitHub **prerelease**.
-- The Mac DMG is signed, notarized and attached by the same run once the Mac
-  signing secrets exist (below). Until then, attach it from the Mac:
-  `scripts/release/attach_mac_dmg.sh vX.Y.Z-beta.N`.
+- The Mac DMG is built, notarized and attached by the **Mac release watcher**
+  on the Mac Studio (below), within about an hour of the release.
 - Only the newest 5 automated betas are kept; older ones (release and tag)
   are deleted. Stable releases and older hand-made tags are never touched.
 - The release is announced in Slack like any other.
@@ -84,9 +83,8 @@ It ships **exactly the code the beta was built from**, not today's `main`:
    the beta stay Unreleased) — merge it once its checks pass;
 3. pushes `vX.Y.Z`, which builds and publishes the stable release.
 
-Then, if the Mac signing secrets are not set yet, attach the DMG with
-`scripts/release/attach_mac_dmg.sh vX.Y.Z`. The website's download links and
-every installed app pick the new release up by themselves.
+The Mac release watcher attaches its DMG within the hour. The website's
+download links and every installed app pick the new release up by themselves.
 
 Before the first stable release on a platform, also run its manual checklist
 in [PLATFORM-DEVELOPMENT.md](PLATFORM-DEVELOPMENT.md). Linux keeps its hands-on
@@ -106,10 +104,30 @@ hand, check the beta, and promote it with `--yes` (skips the 5-day soak). If
 `main` holds unfinished work, cut `release/X.Y` from the stable tag, fix it
 there, and tag `vX.Y.(Z+1)` from that branch.
 
-## Mac signing secrets (one time)
+## The Mac DMG: the Mac release watcher
+
+The Developer ID certificate and the `wayfinder-aura` notary profile live in
+the Mac Studio's login Keychain and never leave it. A LaunchAgent
+(`io.wayfindercollective.aura-mac-release`, installed with
+`scripts/release/install_mac_release_watcher.sh`, log
+`~/Library/Logs/aura-mac-release.log`) checks GitHub hourly. When a release
+from the last 7 days has no Mac DMG, it runs
+`scripts/release/attach_mac_dmg.sh` for it: build from the tag, notarize,
+staple, attach. It builds one release per run and gives a release 3 tries.
+
+It shares the Mac with the local model and the Fox Grid VM, so it only builds
+with at least 32 GiB free (the 24 GiB protected headroom plus the build) and
+the Mac CI queue not held by someone else; it holds the queue while it builds.
+The build runs as a background task (efficiency cores, throttled disk I/O) and
+reuses the checkout's native whisper/llama binaries, so it is a single
+PyInstaller pass plus Apple's notarization wait. Its peak memory is in the log.
+
+Run `attach_mac_dmg.sh vX.Y.Z` by hand to (re)attach a DMG at any time.
+
+## Mac signing secrets (optional alternative)
 
 With these six repository secrets the Release workflow signs, notarizes and
-attaches the Mac DMG for every release, betas included, with no Mac-side step.
+attaches the Mac DMG itself, with no Mac-side step.
 Export the Developer ID certificate as `.p12` and create an App Store Connect
 API key ([packaging/macos/README.md](../packaging/macos/README.md#releasing-a-signed-dmg)),
 then run, yourself, in a terminal:
@@ -120,4 +138,6 @@ scripts/release/set_macos_signing_secrets.sh DeveloperID.p12 AuthKey_XXXXXXXXXX.
 
 It prompts for the `.p12` password and the key IDs and stores all six
 secrets without printing them. Until they exist, tag builds skip the Mac job
-(a DMG built without them could never be published).
+(a DMG built without them could never be published) and the watcher attaches
+it; with both in place, whichever finishes first attaches it and the watcher
+skips releases that already have their DMG.

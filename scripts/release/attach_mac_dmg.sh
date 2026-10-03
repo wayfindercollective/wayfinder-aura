@@ -3,9 +3,10 @@
 #
 #   scripts/release/attach_mac_dmg.sh v1.2.0-beta.1
 #
-# The Release workflow does this itself once the six Mac signing secrets are
-# set (docs/RELEASING.md). Until then, run this on the Mac that holds the
-# Developer ID certificate and the "wayfinder-aura" notarytool profile.
+# On the Mac that holds the Developer ID certificate and the "wayfinder-aura"
+# notarytool profile, mac_release_watcher.py runs this for every new release
+# (docs/RELEASING.md); it also works by hand. The Release workflow does it
+# instead if the six Mac signing secrets are ever set.
 #
 # It builds in a throwaway worktree at the tag, reuses this checkout's native
 # whisper/llama binaries (build/macos-native/bin) when present, pauses the Mac
@@ -17,7 +18,8 @@ TAG="${1:?usage: $0 vX.Y.Z[-beta.N]}"
 REPO="wayfindercollective/wayfinder-aura"
 IDENTITY="${MACOS_CODESIGN_IDENTITY:-Developer ID Application: Wayfinder Collective LLC (5JJQ8L5HHD)}"
 PROFILE="${MACOS_NOTARY_PROFILE:-wayfinder-aura}"
-ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+# AURA_REPO: the checkout to build from (the installed watcher sets it).
+ROOT="${AURA_REPO:-$(git -C "$(dirname "$0")" rev-parse --show-toplevel)}"
 PYTHON="${AURA_MAC_PYTHON:-$ROOT/venv-mac/bin/python}"
 [ -x "$PYTHON" ] || PYTHON="$HOME/wayfinder-aura/venv-mac/bin/python"
 HOLD="$HOME/.cache/foxgrid/aura-mac-ci.hold"
@@ -26,13 +28,15 @@ gh release view "$TAG" --repo "$REPO" >/dev/null   # the release must exist firs
 git -C "$ROOT" fetch -q origin "refs/tags/$TAG:refs/tags/$TAG"
 
 WORK="$(mktemp -d -t aura-dmg)"
+OWN_HOLD=0  # never lift a hold someone else (Infra Mac, a DMG build) put there
 cleanup() {
-  rm -f "$HOLD"
+  [ "$OWN_HOLD" = 1 ] && rm -f "$HOLD"
   git -C "$ROOT" worktree remove --force "$WORK/src" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
-mkdir -p "$(dirname "$HOLD")" && touch "$HOLD"
+mkdir -p "$(dirname "$HOLD")"
+if [ ! -e "$HOLD" ]; then touch "$HOLD"; OWN_HOLD=1; fi
 
 git -C "$ROOT" worktree add -q --detach "$WORK/src" "$TAG"
 cd "$WORK/src"

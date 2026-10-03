@@ -16,6 +16,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts" / "release"))
 
 import cut_beta  # noqa: E402
+import mac_release_watcher as watcher  # noqa: E402
 import versioning  # noqa: E402
 
 
@@ -200,3 +201,40 @@ class TestWorkflows:
         job = text.split("  build-macos:", 1)[1].split("\n  release:", 1)[0]
         assert "needs.macos-signing.outputs.configured == 'true'" in job
         assert "scripts/release/attach_mac_dmg.sh" in text
+
+
+class TestMacReleaseWatcher:
+    NOW = __import__("datetime").datetime(2026, 10, 10, tzinfo=__import__("datetime").timezone.utc)
+
+    def _release(self, tag, days_ago=1, assets=(), draft=False):
+        when = (self.NOW - __import__("datetime").timedelta(days=days_ago)).isoformat()
+        return {"tag_name": tag, "draft": draft, "published_at": when,
+                "assets": [{"name": name, "state": "uploaded"} for name in assets]}
+
+    def test_builds_recent_betas_and_stables_without_a_dmg_newest_first(self):
+        releases = [
+            self._release("v1.2.0-beta.3", days_ago=3),
+            self._release("v1.2.0", days_ago=1),
+            self._release("v1.2.0-beta.4", days_ago=2,
+                          assets=["Wayfinder_Aura-1.2.0-beta.4-macOS-arm64.dmg"]),
+        ]
+        assert watcher.releases_missing_a_dmg(releases, self.NOW) == ["v1.2.0", "v1.2.0-beta.3"]
+
+    def test_ignores_old_drafts_previews_and_partial_uploads_count_as_missing(self):
+        partial = self._release("v1.2.1-beta.1")
+        partial["assets"] = [{"name": "Wayfinder_Aura-1.2.1-beta.1-macOS-arm64.dmg", "state": "starter"}]
+        releases = [
+            self._release("v1.1.8", days_ago=40),
+            self._release("macos-preview-3"),
+            self._release("v1.2.0-beta.9", draft=True),
+            partial,
+        ]
+        assert watcher.releases_missing_a_dmg(releases, self.NOW) == ["v1.2.1-beta.1"]
+
+    def test_installer_runs_it_in_the_background_lane(self):
+        text = (REPO / "scripts" / "release" / "install_mac_release_watcher.sh").read_text(encoding="utf-8")
+        assert "<key>ProcessType</key><string>Background</string>" in text
+        assert "<key>LowPriorityIO</key><true/>" in text
+        source = (REPO / "scripts" / "release" / "mac_release_watcher.py").read_text(encoding="utf-8")
+        assert '"/usr/sbin/taskpolicy", "-b"' in source
+        assert watcher.MIN_FREE_GIB >= 24 + 4  # protected headroom + a build
