@@ -405,9 +405,11 @@ def notary_submit(path: Path, auth: list[str]) -> None:
     The status is read from notarytool's JSON rather than trusting its exit
     code, and a rejection prints Apple's log so CI shows the reason.
     """
+    # Bounded wait: a stuck notary queue must not hold a shared Mac forever.
     rendered = [
         "xcrun", "notarytool", "submit", str(path), *auth,
-        "--wait", "--output-format", "json",
+        "--wait", "--timeout", os.environ.get("MACOS_NOTARY_TIMEOUT", "60m"),
+        "--output-format", "json",
     ]
     print("+", " ".join(rendered), flush=True)
     result = subprocess.run(rendered, capture_output=True, text=True)

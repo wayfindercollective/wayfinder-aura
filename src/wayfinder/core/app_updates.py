@@ -8,7 +8,10 @@ the Flatpak has no automatic update channel until it is on Flathub.
 
 Stable installs follow stable releases. Prerelease installs follow both newer
 prereleases and stable releases, so beta testers are not stranded by GitHub's
-``/releases/latest`` endpoint (which deliberately excludes prereleases).
+``/releases/latest`` endpoint (which deliberately excludes prereleases). The
+user can pick the channel instead (Settings > System > Updates, config
+``update_channel``): "beta" makes a stable install follow betas too, "stable"
+moves a beta install back to the next stable release. Unset follows the build.
 
 Results are cached for 24 hours. Every failure mode (no network, API change,
 unparseable tag) resolves to "no update" — a wrong nag is worse than a late one.
@@ -51,7 +54,9 @@ CHECK_INTERVAL = 86400
 
 # Query the release list rather than /releases/latest. GitHub excludes releases
 # marked as prereleases from /latest, which made beta.10 invisible to beta.9.
-RELEASES_API = "https://api.github.com/repos/wayfindercollective/wayfinder-aura/releases?per_page=30"
+# 100 (GitHub's maximum) so a run of automated betas can never push the newest
+# stable release off the page; the Beta workflow also prunes old betas.
+RELEASES_API = "https://api.github.com/repos/wayfindercollective/wayfinder-aura/releases?per_page=100"
 RELEASES_PAGE = "https://github.com/wayfindercollective/wayfinder-aura/releases/latest"
 
 # End-anchored, and the prerelease is a dot-list of NON-EMPTY identifiers:
@@ -153,6 +158,28 @@ def _release_channel(version: str) -> Optional[str]:
     if parsed is None:
         return None
     return "stable" if parsed[1] is None else "prerelease"
+
+
+# User-facing channel names (config ``update_channel``) -> internal channel.
+UPDATE_CHANNELS = {"stable": "stable", "beta": "prerelease"}
+
+
+def effective_channel(current_version: str, preference: Optional[str] = None) -> Optional[str]:
+    """Internal channel to follow: the user's choice, else the running build's.
+
+    None (no update checks) when the running version cannot be read at all,
+    whatever the preference: a source checkout must never be told to update.
+    """
+    build_channel = _release_channel(current_version)
+    if build_channel is None:
+        return None
+    return UPDATE_CHANNELS.get((preference or "").strip().lower(), build_channel)
+
+
+def channel_label(current_version: str, preference: Optional[str] = None) -> str:
+    """"Beta" or "Stable", for the Settings dropdown."""
+    channel = effective_channel(current_version, preference)
+    return "Beta" if channel == "prerelease" else "Stable"
 
 
 def _is_macos() -> bool:
@@ -298,14 +325,18 @@ def _linux_download_url(release: Dict[str, Any], tag: str, package: str) -> Opti
     return None
 
 
-def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
-    """Select the newest release allowed by the running version's channel.
+def _select_release(
+    payload: Any, current_version: str, channel: Optional[str] = None
+) -> Dict[str, str]:
+    """Select the newest release allowed by the channel (default: the running
+    version's channel).
 
     On macOS, releases without a DMG for this Mac are skipped (the newest
     release that HAS one wins) and the DMG's URL is returned as download_url.
     Windows does the same with the Setup exe.
     """
-    channel = _release_channel(current_version)
+    if channel is None:
+        channel = _release_channel(current_version)
     if channel is None:
         return {}
     if not isinstance(payload, list):
@@ -353,9 +384,14 @@ def _select_release(payload: Any, current_version: str) -> Dict[str, str]:
     return selected
 
 
-def check_for_app_update(current_version: str, force: bool = False) -> Dict[str, Any]:
+def check_for_app_update(
+    current_version: str, force: bool = False, channel: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Check GitHub for a release newer than current_version.
+
+    ``channel`` is the user's choice ("stable" / "beta", config
+    ``update_channel``); None or "" follows the running build.
 
     Uses cached results unless force=True or the cache is older than
     CHECK_INTERVAL. The comparison against current_version is always
@@ -370,7 +406,7 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
         - last_checked: ISO timestamp
         - error: optional error message
     """
-    channel = _release_channel(current_version)
+    channel = effective_channel(current_version, channel)
     platform_key = _platform_cache_key()  # None on Linux
     if not force:
         cached = _load_cache()
@@ -401,7 +437,7 @@ def check_for_app_update(current_version: str, force: bool = False) -> Dict[str,
             headers={"Accept": "application/vnd.github+json"},
         )
         response.raise_for_status()
-        release = _select_release(response.json(), current_version)
+        release = _select_release(response.json(), current_version, channel)
         results["latest_version"] = release.get("tag_name", "")
         results["release_url"] = release.get("html_url", RELEASES_PAGE)
         if platform_key is not None:

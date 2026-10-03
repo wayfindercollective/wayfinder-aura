@@ -8,6 +8,7 @@ it. Source-parse pyproject with tomllib (host python is 3.11+); no Tk imports.
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -41,12 +42,25 @@ def test_version_matches_pyproject():
 
 
 def test_metainfo_release_matches_pyproject():
-    """The metainfo <release> version is a THIRD hand-maintained mirror (and the
-    user-facing one). It drifts silently — this guards it. Bump it at tag time."""
-    assert _metainfo_version() == _pyproject_version(), (
-        f"version drift: metainfo <release> ({_metainfo_version()}) != pyproject "
-        f"[project] version ({_pyproject_version()}). Bump the metainfo release."
-    )
+    """The metainfo <release> version is a THIRD mirror (and the user-facing one).
+
+    A release commit (scripts/release/: every beta and stable tag) stamps both
+    to the tag's version, so on a tag build they must be equal. On main,
+    pyproject names the NEXT planned release (docs/RELEASING.md) while the
+    metainfo's newest entry is the last one shipped: it may lag, never lead.
+    """
+    from wayfinder.core.app_updates import is_newer
+
+    metainfo, pyproject = _metainfo_version(), _pyproject_version()
+    if os.environ.get("GITHUB_REF", "").startswith("refs/tags/v"):
+        assert metainfo == pyproject, (
+            f"version drift on a release tag: metainfo <release> ({metainfo}) != "
+            f"pyproject ({pyproject}). Cut releases with scripts/release/."
+        )
+    else:
+        assert not is_newer(metainfo, pyproject), (
+            f"metainfo <release> ({metainfo}) is newer than pyproject ({pyproject})."
+        )
 
 
 def test_pyproject_urls_point_to_real_repo():

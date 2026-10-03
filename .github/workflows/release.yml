@@ -322,11 +322,34 @@ jobs:
   # Deliberately NOT a dependency of `release`: a slow or failing Mac build can
   # never delay or block the Linux assets. `publish-macos` attaches the signed
   # DMG afterwards. Setup: packaging/macos/README.md ("Releasing a signed DMG").
+  # A tag's unsigned DMG is never published, so on tags the long Mac build only
+  # runs once the signing secrets exist; until then the release's DMG is built
+  # on the Mac with scripts/release/attach_mac_dmg.sh (docs/RELEASING.md).
+  # Nightly betas would otherwise spend the shared Mac on a DMG nobody gets.
+  # Any secret present counts, so a half-configured set still fails loudly below.
+  macos-signing:
+    name: macOS signing
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 5
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'macos' || inputs.artifacts == 'all'))
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Look for signing secrets
+        id: check
+        env:
+          SECRETS_SEEN: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' || secrets.MACOS_CERTIFICATE_PASSWORD != '' || secrets.MACOS_KEYCHAIN_PASSWORD != '' || secrets.APPLE_API_KEY_P8_BASE64 != '' || secrets.APPLE_API_KEY_ID != '' || secrets.APPLE_API_ISSUER_ID != '' }}
+        run: |
+          echo "configured=$SECRETS_SEEN" >> "$GITHUB_OUTPUT"
+          if [ "$SECRETS_SEEN" != "true" ]; then
+            echo "::notice title=Mac DMG built on the Mac::No Mac signing secrets, so this run builds no DMG. Attach it with scripts/release/attach_mac_dmg.sh ${GITHUB_REF_NAME} (docs/RELEASING.md)."
+          fi
+
   build-macos:
     name: Build (macOS)
     runs-on: [self-hosted, macOS, ARM64, aura-macos]
-    needs: [quality, release-readiness]
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'macos' || inputs.artifacts == 'all'))
+    needs: [quality, release-readiness, macos-signing]
+    if: (startsWith(github.ref, 'refs/tags/v') && needs.macos-signing.outputs.configured == 'true') || (!startsWith(github.ref, 'refs/tags/v') && github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'macos' || inputs.artifacts == 'all'))
     # Bound the time spent waiting for notarization on shared hardware.
     timeout-minutes: 150
     outputs:

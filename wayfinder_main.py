@@ -1396,6 +1396,15 @@ def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
     return 50
 
 
+def _update_installs_in_place() -> bool:
+    """True when Install Update can swap this install itself (core/app_installer)."""
+    try:
+        from wayfinder.core.app_installer import install_mode
+        return install_mode() is not None
+    except Exception:
+        return False
+
+
 # Idle poll_events cadence once the macOS event pipe is attached
 # (WakingQueue): every producer wakes Tk itself, so the poll is only a backstop.
 _MACOS_IDLE_SAFETY_POLL_MS = 1000
@@ -1555,6 +1564,19 @@ SETTING_TOOLTIPS = {
         "Turn it off if your menu bar is crowded."
     ),
     "ui_scale": "Size of Aura's window and text.",
+    "update_channel": (
+        "Stable: tested releases, every few weeks.\n"
+        "Beta: the newest build, as often as daily. New features sooner, "
+        "and sometimes new bugs.\n"
+        "Going back to Stable keeps your version until the next stable release."
+    ),
+    "crash_reports": (
+        "When Aura crashes or hits an error, send Wayfinder the kind of error, "
+        "where in Aura's code it happened and the app and system versions, so "
+        "it gets fixed. Never the error message, audio, dictated text or your "
+        "settings.\n"
+        "On by default for Beta, off for Stable."
+    ),
     "gamer_mode": (
         "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
         "M+...), keeps your words as said, and sends them to chat: don't press "
@@ -6408,6 +6430,7 @@ class WayfinderApp(ctk.CTk):
         self.after(2000, self._check_model_updates_background)
         # Check for a newer app release (non-blocking, once per day)
         self.after(2600, self._check_app_update_background)
+        self.after(8000, self._start_crash_report_pass)
 
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay and not IS_MACOS:
@@ -9659,6 +9682,8 @@ class WayfinderApp(ctk.CTk):
 
         if IS_MACOS or IS_WINDOWS:
             self._create_login_item_row(system_content)
+
+        self._create_update_channel_row(system_content)
 
         yield "system"
 
@@ -15295,7 +15320,39 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_check, daemon=True).start()
 
-    def _check_app_update_background(self) -> None:
+    def _start_crash_report_pass(self) -> None:
+        """Read consent from the live config; send earlier crashes and clear
+        unused update staging in the background."""
+        try:
+            from wayfinder.core import app_installer, crash_reports
+
+            crash_reports.set_config_getter(lambda: self.config)
+
+            def startup_pass() -> None:
+                # The UI is up: an update helper waiting on this launch may
+                # now drop the previous copy.
+                app_installer.confirm_launch()
+                if app_installer.cleanup_stale_staging():
+                    self.event_queue.put((EventType.UI_CALLBACK, lambda: self.log(
+                        "⚠ The last update couldn't install itself; Get Update downloads it instead.")))
+                crash_reports.collect_and_send()
+
+            threading.Thread(target=startup_pass, daemon=True,
+                             name="crash-report-startup").start()
+        except Exception:
+            pass
+
+    def report_callback_exception(self, exc, val, tb):
+        """An error in a Tk callback: print it as Tk does, and report it."""
+        super().report_callback_exception(exc, val, tb)
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.record_exception(exc, val, tb, where="tk-callback")
+        except Exception:
+            pass
+
+    def _check_app_update_background(self, force: bool = False) -> None:
         """Check GitHub for a newer app release in a background thread.
 
         Network and parsing live in core/app_updates (cached, once/day); only
@@ -15304,23 +15361,97 @@ class WayfinderApp(ctk.CTk):
         update nag must never become a startup error."""
         if not self.config.get("check_for_app_updates", True):
             return
+        channel = self.config.get("update_channel") or None
+        generation = self._next_app_update_generation()
 
         def _check():
             try:
                 from wayfinder import __version__ as current_version
                 from wayfinder.core.app_updates import check_for_app_update
 
-                info = check_for_app_update(current_version)
+                info = check_for_app_update(
+                    current_version, force=force, channel=channel)
                 if not info.get("update_available"):
                     return
                 if info.get("latest_version") == self.config.get(
                         "app_update_dismissed_version", ""):
                     return
-                self.after(0, lambda: self._show_app_update_banner(info))
+                self.after(0, lambda: self._show_app_update_banner_if_current(info, generation))
             except Exception:
                 pass  # Silent failure - don't annoy user
 
         threading.Thread(target=_check, daemon=True).start()
+
+    _UPDATE_CHANNEL_CHOICES = {"Stable": "stable", "Beta": "beta"}
+
+    def _create_update_channel_row(self, parent) -> None:
+        """Settings ▸ System: which releases this install is offered."""
+        from wayfinder import __version__ as current_version
+        from wayfinder.core.app_updates import channel_label
+
+        self._update_channel_var = ctk.StringVar(
+            value=channel_label(current_version, self.config.get("update_channel"))
+        )
+        self.create_dropdown_row(
+            parent, "Updates", list(self._UPDATE_CHANNEL_CHOICES),
+            self._update_channel_var, self._on_update_channel_changed,
+            tooltip=SETTING_TOOLTIPS["update_channel"], width=160,
+        )
+        from wayfinder.core.crash_reports import reports_enabled
+
+        self._crash_reports_var = ctk.BooleanVar(
+            value=reports_enabled(self.config, current_version))
+        self.create_toggle_row(
+            parent, "Send crash reports", self._crash_reports_var,
+            self._on_crash_reports_toggled, tooltip=SETTING_TOOLTIPS["crash_reports"],
+        )
+
+    def _on_crash_reports_toggled(self) -> None:
+        """An explicit choice; turning reports off also deletes unsent ones."""
+        enabled = bool(self._crash_reports_var.get())
+        self.config["crash_reports"] = "on" if enabled else "off"
+        save_config(self.config)
+        self.log(f"Crash reports: {'on' if enabled else 'off'}")
+        if not enabled:
+            try:
+                from wayfinder.core import crash_reports
+
+                crash_reports.clear_queue()
+            except Exception:
+                pass
+
+    def _on_update_channel_changed(self, choice: str) -> None:
+        """Persist the update channel and look for that channel's newest
+        release right away (the daily check would otherwise wait a day)."""
+        channel = self._UPDATE_CHANNEL_CHOICES.get(choice)
+        if channel is None or channel == self.config.get("update_channel"):
+            return
+        self.config["update_channel"] = channel
+        save_config(self.config)
+        self.log(f"⟳ Updates: {choice}")
+        var = getattr(self, "_crash_reports_var", None)
+        if var is not None and not self.config.get("crash_reports"):
+            # Reports follow the channel until the user picks: show the new default.
+            try:
+                from wayfinder import __version__ as current_version
+                from wayfinder.core.crash_reports import reports_enabled
+
+                var.set(reports_enabled(self.config, current_version))
+            except Exception:
+                pass
+        self._next_app_update_generation()  # answers for the old channel are void
+        self._hide_app_update_banner()
+        self._check_app_update_background(force=True)
+
+    def _next_app_update_generation(self) -> int:
+        """Each check (and a channel change) starts a new generation; only the
+        newest check's answer may change the banner."""
+        self._app_update_generation = getattr(self, "_app_update_generation", 0) + 1
+        return self._app_update_generation
+
+    def _show_app_update_banner_if_current(self, info: dict, generation: int) -> None:
+        if generation == getattr(self, "_app_update_generation", 0):
+            self._show_app_update_banner(info)
 
     def _show_app_update_banner(self, info: dict) -> None:
         """Show the app-update banner on the Dictate tab (Tk thread only).
@@ -15336,7 +15467,13 @@ class WayfinderApp(ctk.CTk):
             latest = info.get("latest_version", "")
             self._app_update_info = dict(info)
             text = f"Update available: {latest} (you have {current_version})."
-            if _IS_LINUX and info.get("download_url"):
+            in_place = bool(info.get("download_url")) and _update_installs_in_place()
+            button = getattr(self, "app_update_button", None)
+            if button is not None:
+                button.configure(text="Install Update" if in_place else "Get Update")
+            if in_place:
+                text += " Install Update restarts Aura into it."
+            elif _IS_LINUX and info.get("download_url"):
                 # The GitHub bundle has no update channel (not on Flathub yet):
                 # the new file is downloaded and opened by the user.
                 if IS_FLATPAK:
@@ -15344,9 +15481,9 @@ class WayfinderApp(ctk.CTk):
                 else:
                     text += " Get Update downloads the new AppImage; run it instead of this one."
             label.configure(text=text)
-            if IS_MACOS or IS_WINDOWS:
-                # A manual check may have hidden Get Update for a status line.
-                self._set_app_update_button_visible(True)
+            # A manual check or an install attempt may have hidden the button
+            # for a status line.
+            self._set_app_update_button_visible(True)
             if not banner.winfo_manager():
                 anchor = getattr(self, "_dictate_banner_anchor", None)
                 if anchor is not None:
@@ -15380,10 +15517,14 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Could not persist update dismissal: {e}")
 
     def _open_app_update_page(self) -> None:
-        """Get Update button: open the release page. The banner stays up until
-        dismissed or the new version is actually running."""
+        """Get Update button: install in place where this install can
+        (core/app_installer), else open the download or release page. The
+        banner stays up until dismissed or the new version is actually running."""
         from wayfinder.core.app_updates import RELEASES_PAGE
         info = getattr(self, "_app_update_info", {})
+        if info.get("download_url") and _update_installs_in_place():
+            self._install_app_update(info)
+            return
         url = info.get("release_url") or RELEASES_PAGE
         if IS_MACOS or IS_WINDOWS or _IS_LINUX:
             # Mac/Windows updates always carry a DMG / Setup exe, Linux
@@ -15391,6 +15532,77 @@ class WayfinderApp(ctk.CTk):
             # download it in one click, falling back to the release page.
             url = info.get("download_url") or url
         self._open_url(url)
+
+    def _install_app_update(self, info: dict) -> None:
+        """Install Update: download, verify and stage off the Tk thread, then
+        restart into the new version (core/app_installer)."""
+        if getattr(self, "_app_update_installing", False):
+            return
+        self._app_update_installing = True
+        url = info.get("download_url", "")
+        self._show_app_update_status("Downloading the update…")
+        shown = {"percent": -1}
+
+        def progress(fraction: float) -> None:
+            percent = int(fraction * 100)
+            if percent != shown["percent"]:  # at most ~100 UI updates per download
+                shown["percent"] = percent
+                self.event_queue.put((EventType.UI_CALLBACK, lambda p=percent:
+                    self._show_app_update_status(f"Downloading the update… {p}%")))
+
+        def work() -> None:
+            from wayfinder.core.app_installer import Outcome, prepare_update
+            try:
+                outcome = prepare_update(url, progress)
+            except Exception as exc:  # prepare_update shouldn't raise; be sure
+                outcome = Outcome(message=f"Couldn't install the update ({exc}).")
+            self.event_queue.put((EventType.UI_CALLBACK,
+                                  lambda: self._on_app_update_prepared(info, outcome)))
+
+        threading.Thread(target=work, daemon=True, name="app-update-install").start()
+
+    def _on_app_update_prepared(self, info: dict, outcome) -> None:
+        """Tk thread: restart into a staged update, or hand over the download."""
+        self._app_update_installing = False
+        if outcome.ready:
+            if self.app_state == AppState.IDLE:
+                self._finish_app_update(outcome)
+            else:
+                # Never cut a dictation short: update_state() finishes it at IDLE.
+                self._pending_app_update = outcome
+                self._show_app_update_status(
+                    "Update ready: Aura restarts when this dictation finishes.")
+            return
+        from wayfinder.core.app_updates import RELEASES_PAGE
+        if outcome.message:
+            self.log(f"⚠ {outcome.message}")
+        if outcome.fallback_path:
+            self._open_url(Path(outcome.fallback_path).as_uri())
+            note = "Opened the downloaded update so you can install it yourself."
+        else:
+            self._open_url(info.get("download_url") or info.get("release_url") or RELEASES_PAGE)
+            note = "Opened the download in your browser."
+        self._show_app_update_status(" ".join(filter(None, (outcome.message, note))))
+
+    def _finish_pending_app_update(self) -> None:
+        """At IDLE: install the update staged mid-dictation. A recording that
+        started before this ran keeps it waiting for the next IDLE."""
+        outcome = getattr(self, "_pending_app_update", None)
+        if outcome is None or self.app_state != AppState.IDLE:
+            return
+        self._pending_app_update = None
+        self._finish_app_update(outcome)
+
+    def _finish_app_update(self, outcome) -> None:
+        """Hand over to the update helper, then quit so it can swap and relaunch."""
+        try:
+            outcome.finish()
+        except Exception as exc:
+            self.log(f"⚠ Couldn't restart into the update: {exc}")
+            self._show_app_update_status("Couldn't restart into the update. Try again later.")
+            return
+        self.log("⟳ Installing the update and restarting Aura")
+        self.quit_app()
 
     # ── macOS "Check for Updates…" (menu-bar item) ──────────────────────────
 
@@ -15404,17 +15616,21 @@ class WayfinderApp(ctk.CTk):
         The request runs off the Tk thread and the verdict returns through
         event_queue. Unlike the daily check it ignores the settings toggle and
         a dismissed version — the user asked."""
+        channel = self.config.get("update_channel") or None
+        generation = self._next_app_update_generation()
+
         def _check():
             try:
                 from wayfinder import __version__ as current_version
                 from wayfinder.core.app_updates import check_for_app_update
 
-                info = check_for_app_update(current_version, force=True)
+                info = check_for_app_update(
+                    current_version, force=True, channel=channel)
             except Exception as exc:
                 info = {"update_available": False, "error": str(exc)}
-            self.event_queue.put(
-                (EventType.UI_CALLBACK, lambda: self._report_app_update_check(info))
-            )
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: (
+                self._report_app_update_check(info)
+                if generation == getattr(self, "_app_update_generation", 0) else None)))
 
         threading.Thread(target=_check, daemon=True, name="app-update-check").start()
 
@@ -21727,6 +21943,13 @@ class WayfinderApp(ctk.CTk):
 
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
+        # A deliberate quit is not a crash: drop this launch's native crash file.
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.mark_clean_exit()
+        except Exception:
+            pass
         # Signal all background threads to stop
         self.stop_event.set()
         if hasattr(self, '_evdev_stop_event'):
@@ -21935,6 +22158,13 @@ class WayfinderApp(ctk.CTk):
                 self._start_recording_watchdog()
             elif old_state == AppState.RECORDING:
                 self._cancel_recording_watchdog()
+
+        # An app update finished downloading mid-dictation: restart into it now.
+        if new_state == AppState.IDLE and getattr(self, "_pending_app_update", None):
+            try:
+                self.after(0, self._finish_pending_app_update)
+            except Exception:
+                pass
 
         # A model download the user started finished mid-dictation: apply it now
         # that the pipeline is idle (after this transition's own work settles).

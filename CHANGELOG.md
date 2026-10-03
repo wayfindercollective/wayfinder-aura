@@ -11,6 +11,20 @@ Linux: dictation for gamers on every desktop.
 
 ### Added
 
+- **Choose Stable or Beta updates** (Settings → System → Updates). Beta
+  offers the newest build of Aura, as often as daily; Stable offers tested
+  releases every few weeks.
+- **Install Update installs it for you.** On the Mac the new version is
+  checked (same developer, notarized by Apple), swapped in and reopened, so
+  there's no dragging into Applications; Windows and the AppImage update in
+  place too. Aura waits for a dictation to finish first, puts the previous
+  version back if the new one doesn't start, and falls back to the download
+  when it can't install itself (Flatpak, no write access).
+- **Crash reports from Beta.** When a beta crashes or hits an error, it
+  tells Wayfinder the kind of error and where in Aura's code it happened,
+  so it gets fixed: never the error message, audio, dictated text or
+  settings (see PRIVACY.md). On by default for Beta, off for Stable;
+  Settings → System → Send crash reports.
 - **Aura types into every app on Wayland desktops.** On KDE Plasma and GNOME
   the desktop's remote-control (RemoteDesktop) portal delivers the keys, so
   native Wayland apps receive dictation too, not only X11/XWayland windows.

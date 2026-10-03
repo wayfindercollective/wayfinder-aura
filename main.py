@@ -825,6 +825,15 @@ def _check_venv_health(venv_dir: Path | None = None, smoke_imports: tuple[str, .
 
 def main():
     """Run Wayfinder Aura."""
+    # An update's swap helper starts the new copy with a one-off token; take
+    # it out of the environment before any child process can inherit it.
+    try:
+        from wayfinder.core import app_installer
+
+        app_installer.take_update_token()
+    except Exception:
+        pass
+
     # Desktop actions / Flatpak CLI: send control-socket verbs and exit
     # (do not take the single-instance lock or start a second UI).
     _cli_exit = _dispatch_cli_control_verb()
@@ -838,6 +847,16 @@ def main():
     # flock-based: if another instance holds the lock, signal show and exit
     if _signal_existing_instance():
         sys.exit(0)
+
+    # Crash reports for this (GUI) process: Beta sends by default, Stable only
+    # when turned on (Settings > System). Installed early to catch startup crashes.
+    try:
+        from wayfinder import __version__ as _aura_version
+        from wayfinder.core import crash_reports
+
+        crash_reports.install(_aura_version)
+    except Exception:
+        pass
 
     # The bundle starts every process without a Dock icon (LSUIElement), so
     # the overlay helper never shows a second one; the app asks for its own.
