@@ -15329,6 +15329,9 @@ class WayfinderApp(ctk.CTk):
             crash_reports.set_config_getter(lambda: self.config)
 
             def startup_pass() -> None:
+                # The UI is up: an update helper waiting on this launch may
+                # now drop the previous copy.
+                app_installer.confirm_launch()
                 if app_installer.cleanup_stale_staging():
                     self.event_queue.put((EventType.UI_CALLBACK, lambda: self.log(
                         "⚠ The last update couldn't install itself; Get Update downloads it instead.")))

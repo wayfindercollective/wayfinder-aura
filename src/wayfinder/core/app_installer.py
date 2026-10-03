@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,6 +96,30 @@ def _failure_marker() -> Path:
     from ..utils.platform import get_cache_dir
 
     return get_cache_dir() / "update-install-failed"
+
+
+def _launch_marker() -> Path:
+    from ..utils.platform import get_cache_dir
+
+    return get_cache_dir() / "update-launched"
+
+
+# How long the swap helper waits for the new version to say it started before
+# it puts the old copy back. A cold first launch (Gatekeeper's first check of
+# a new bundle, model warm-up) takes well under a minute.
+CONFIRM_SECONDS = 180
+STALE_AFTER_S = 3600  # leftovers older than this are never a live update's
+
+
+def confirm_launch() -> None:
+    """Called by a running app once its UI is up: an update helper waiting on
+    this launch may now drop the previous copy."""
+    try:
+        marker = _launch_marker()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def install_mode() -> str | None:
@@ -197,17 +222,23 @@ def verify_mac_app(candidate: Path, running: Path) -> str | None:
 
 def _mac_helper_script() -> str:
     # $1 pid, $2 installed bundle, $3 staged bundle, $4 backup path, $5 opener,
-    # $6 failure marker. Waits for Aura to exit, swaps, opens the new copy; on
-    # any failure (e.g. macOS refusing to modify the bundle) puts the old one
-    # back, leaves the marker so the next launch hands over the download
-    # instead of retrying, and opens the old copy: the user always gets an app.
+    # $6 failure marker, $7 launch marker, $8 seconds to wait for it.
+    # Waits for Aura to exit, swaps and opens the new copy, and keeps the old
+    # one until the new one confirms it started (confirm_launch). A refused
+    # swap, a failing opener or a new copy that never confirms puts the old
+    # copy back, leaves the failure marker (the next launch hands over the
+    # download instead of retrying) and opens the old copy.
     return (
         'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
-        'rm -rf "$4"; '
+        'rm -f "$7"; rm -rf "$4"; '
         'if mv "$2" "$4" && mv "$3" "$2"; then '
-        'rm -rf "$4"; '
-        'else [ -e "$2" ] || mv "$4" "$2"; rm -rf "$3"; : > "$6"; fi; '
-        'exec "$5" "$2"'
+        '"$5" "$2"; i=0; '
+        'while [ "$i" -lt "$8" ] && [ ! -e "$7" ]; do sleep 1; i=$((i+1)); done; '
+        'if [ -e "$7" ]; then rm -rf "$4"; exit 0; fi; '
+        'pkill -f "$2/Contents/MacOS/" 2>/dev/null; sleep 2; '
+        'rm -rf "$3"; mv "$2" "$3" && mv "$4" "$2"; rm -rf "$3"; '
+        'else [ -e "$2" ] || mv "$4" "$2"; rm -rf "$3"; fi; '
+        ': > "$6"; exec "$5" "$2"'
     )
 
 
@@ -245,7 +276,7 @@ def _prepare_mac(url: str, progress: Progress) -> Outcome:
         subprocess.Popen(
             ["/bin/sh", "-c", _mac_helper_script(), "wayfinder-update",
              str(os.getpid()), str(running), str(staged), str(backup), "/usr/bin/open",
-             str(_failure_marker())],
+             str(_failure_marker()), str(_launch_marker()), str(CONFIRM_SECONDS)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
@@ -277,9 +308,23 @@ def _prepare_windows(url: str, progress: Progress) -> Outcome:
 # --- Linux AppImage ----------------------------------------------------------------
 
 def _appimage_helper_script() -> str:
-    # $1 pid, $2 running AppImage, $3 staged AppImage, $4 failure marker.
-    return ('while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
-            'mv -f "$3" "$2" || { rm -f "$3"; : > "$4"; }; exec "$2"')
+    # $1 pid, $2 AppImage path, $3 staged AppImage, $4 failure marker,
+    # $5 launch marker, $6 backup path, $7 seconds to wait for confirmation.
+    # Keeps the old AppImage until the new one confirms it started; a new one
+    # that exits early (not runnable) or never confirms is stopped, the old
+    # one is put back and run.
+    return (
+        'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
+        'rm -f "$5"; '
+        'if mv -f "$2" "$6" && mv -f "$3" "$2"; then '
+        '"$2" >/dev/null 2>&1 & child=$!; i=0; '
+        'while [ "$i" -lt "$7" ] && [ ! -e "$5" ] && kill -0 "$child" 2>/dev/null; '
+        'do sleep 1; i=$((i+1)); done; '
+        'if [ -e "$5" ]; then rm -f "$6"; exit 0; fi; '
+        'kill "$child" 2>/dev/null; sleep 1; mv -f "$6" "$2"; '
+        'else [ -e "$2" ] || mv -f "$6" "$2"; rm -f "$3"; fi; '
+        ': > "$4"; exec "$2"'
+    )
 
 
 def _prepare_appimage(url: str, progress: Progress) -> Outcome:
@@ -299,7 +344,9 @@ def _prepare_appimage(url: str, progress: Progress) -> Outcome:
 
         subprocess.Popen(
             ["/bin/sh", "-c", _appimage_helper_script(), "wayfinder-update",
-             str(os.getpid()), str(target), str(staged), str(_failure_marker())],
+             str(os.getpid()), str(target), str(staged), str(_failure_marker()),
+             str(_launch_marker()), str(target.parent / f".{target.name}.previous"),
+             str(CONFIRM_SECONDS)],
             env=host_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
@@ -331,9 +378,16 @@ def cleanup_stale_staging() -> bool:
         paths += [bundle.parent / f".{bundle.name}.update", bundle.parent / f".{bundle.name}.previous"]
     image = appimage_path() if sys.platform.startswith("linux") else None
     if image is not None:
-        paths.append(image.parent / f".{image.name}.update")
+        paths += [image.parent / f".{image.name}.update", image.parent / f".{image.name}.previous"]
+    now = time.time()
     for path in paths:
         try:
+            # A swap helper may still be waiting on a fresh backup to confirm
+            # this very launch: only clear leftovers older than its window.
+            # ctime, not mtime: ditto and mv keep the bundle's old mtime, but a
+            # copy or rename sets the inode change time to now.
+            if not path.exists() or now - path.lstat().st_ctime < STALE_AFTER_S:
+                continue
             if path.is_dir():
                 shutil.rmtree(path)
             elif path.exists():

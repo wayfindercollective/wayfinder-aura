@@ -170,38 +170,58 @@ class TestSwapHelpers:
         (path / "Contents" / "version").write_text(marker)
         return path
 
-    def test_mac_swap_replaces_and_opens_the_new_copy(self, tmp_path):
+    def _script(self, path: Path, body: str) -> Path:
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+        return path
+
+    def _mac(self, tmp_path, opener, pid=None, stage=True, wait=3):
         installed = self._bundle(tmp_path / "Wayfinder Aura.app", "old")
-        staged = self._bundle(tmp_path / ".Wayfinder Aura.app.update", "new")
-        opened = tmp_path / "opened"
-        opener = tmp_path / "open.sh"
-        opener.write_text(f'#!/bin/sh\necho "$1" > "{opened}"\n')
-        opener.chmod(0o755)
-        subprocess.run(["/bin/sh", "-c", app_installer._mac_helper_script(), "t",
-                        str(_exited_pid()), str(installed), str(staged),
-                        str(tmp_path / ".previous"), str(opener), str(tmp_path / "failed")],
-                       check=True, timeout=20)
+        staged = tmp_path / ".Wayfinder Aura.app.update"
+        if stage:
+            self._bundle(staged, "new")
+        args = ["/bin/sh", "-c", app_installer._mac_helper_script(), "t",
+                str(pid or _exited_pid()), str(installed), str(staged),
+                str(tmp_path / ".previous"), str(opener), str(tmp_path / "failed"),
+                str(tmp_path / "launched"), str(wait)]
+        return installed, staged, args
+
+    def test_mac_swap_keeps_the_new_copy_once_it_confirms(self, tmp_path):
+        opener = self._script(tmp_path / "open.sh",
+                              f'echo "$1" >> "{tmp_path}/opened"; : > "{tmp_path}/launched"')
+        installed, staged, args = self._mac(tmp_path, opener)
+        subprocess.run(args, check=True, timeout=30)
         assert (installed / "Contents" / "version").read_text() == "new"
         assert not staged.exists() and not (tmp_path / ".previous").exists()
-        assert opened.read_text().strip() == str(installed)
+        assert not (tmp_path / "failed").exists()
+        assert (tmp_path / "opened").read_text().split("\n")[0] == str(installed)
 
-    def test_mac_swap_failure_keeps_the_old_copy(self, tmp_path):
-        installed = self._bundle(tmp_path / "Wayfinder Aura.app", "old")
-        missing_stage = tmp_path / ".Wayfinder Aura.app.update"  # never staged
-        subprocess.run(["/bin/sh", "-c", app_installer._mac_helper_script(), "t",
-                        str(_exited_pid()), str(installed), str(missing_stage),
-                        str(tmp_path / ".previous"), "true", str(tmp_path / "failed")],
-                       check=True, timeout=20)
+    def test_mac_new_copy_that_never_confirms_is_rolled_back(self, tmp_path):
+        opener = self._script(tmp_path / "open.sh", f'echo "$1" >> "{tmp_path}/opened"')
+        installed, staged, args = self._mac(tmp_path, opener, wait=2)
+        subprocess.run(args, check=True, timeout=30)
         assert (installed / "Contents" / "version").read_text() == "old"
-        assert (tmp_path / "failed").exists()  # next launch hands over the download
+        assert not staged.exists() and not (tmp_path / ".previous").exists()
+        assert (tmp_path / "failed").exists()
+        assert (tmp_path / "opened").read_text().splitlines() == [str(installed)] * 2
+
+    def test_mac_failing_opener_is_rolled_back(self, tmp_path):
+        installed, _, args = self._mac(tmp_path, "/usr/bin/false", wait=2)
+        subprocess.run(args, timeout=30)
+        assert (installed / "Contents" / "version").read_text() == "old"
+        assert (tmp_path / "failed").exists()
+
+    def test_mac_refused_swap_keeps_the_old_copy(self, tmp_path):
+        installed, _, args = self._mac(tmp_path, "true", stage=False)
+        subprocess.run(args, check=True, timeout=30)
+        assert (installed / "Contents" / "version").read_text() == "old"
+        assert (tmp_path / "failed").exists()
 
     def test_mac_swap_waits_for_aura_to_exit(self, tmp_path):
-        installed = self._bundle(tmp_path / "Wayfinder Aura.app", "old")
-        staged = self._bundle(tmp_path / ".Wayfinder Aura.app.update", "new")
         aura = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-        helper = subprocess.Popen(["/bin/sh", "-c", app_installer._mac_helper_script(), "t",
-                                   str(aura.pid), str(installed), str(staged),
-                                   str(tmp_path / ".previous"), "true", str(tmp_path / "failed")])
+        opener = self._script(tmp_path / "open.sh", f': > "{tmp_path}/launched"')
+        installed, _, args = self._mac(tmp_path, opener, pid=aura.pid)
+        helper = subprocess.Popen(args)
         try:
             with pytest.raises(subprocess.TimeoutExpired):
                 helper.wait(timeout=1)
@@ -209,32 +229,62 @@ class TestSwapHelpers:
         finally:
             aura.kill()
             aura.wait()
-        helper.wait(timeout=10)
+        helper.wait(timeout=20)
         assert (installed / "Contents" / "version").read_text() == "new"
 
-    def test_appimage_swap_keeps_the_path_and_runs_it(self, tmp_path):
-        target = tmp_path / "Wayfinder_Aura-1.1.8-x86_64.AppImage"
-        target.write_text("old")
-        ran = tmp_path / "ran"
-        staged = tmp_path / ".update"
-        staged.write_text(f'#!/bin/sh\necho new > "{ran}"\n')
-        staged.chmod(0o755)
-        subprocess.run(["/bin/sh", "-c", app_installer._appimage_helper_script(), "t",
-                        str(_exited_pid()), str(target), str(staged), str(tmp_path / "failed")],
-                       check=True, timeout=20)
-        assert ran.read_text().strip() == "new"
-        assert not staged.exists() and os.access(target, os.X_OK)
+    def _appimage(self, tmp_path, staged_body, wait=3):
+        target = self._script(tmp_path / "Wayfinder_Aura-1.1.8-x86_64.AppImage",
+                              f'echo old >> "{tmp_path}/ran"')
+        staged = self._script(tmp_path / ".update", staged_body)
+        args = ["/bin/sh", "-c", app_installer._appimage_helper_script(), "t",
+                str(_exited_pid()), str(target), str(staged), str(tmp_path / "failed"),
+                str(tmp_path / "launched"), str(tmp_path / ".previous"), str(wait)]
+        return target, staged, args
+
+    def test_appimage_swap_keeps_the_path_once_the_new_one_confirms(self, tmp_path):
+        target, staged, args = self._appimage(
+            tmp_path, f'echo new >> "{tmp_path}/ran"; : > "{tmp_path}/launched"; sleep 1')
+        subprocess.run(args, check=True, timeout=30)
+        assert (tmp_path / "ran").read_text().split() == ["new"]
+        assert not staged.exists() and not (tmp_path / ".previous").exists()
+        assert "launched" in target.read_text() and os.access(target, os.X_OK)
+
+    def test_appimage_that_cannot_run_is_rolled_back(self, tmp_path):
+        # The review's case: accepted magic, but the file exits 126.
+        target, _, args = self._appimage(tmp_path, "exit 126")
+        subprocess.run(args, check=True, timeout=30)
+        assert (tmp_path / "ran").read_text().split() == ["old"]
+        assert 'echo old' in target.read_text()
+        assert (tmp_path / "failed").exists() and not (tmp_path / ".previous").exists()
 
 
 class TestLeftovers:
-    def test_unused_staging_and_backups_are_removed_at_startup(self, monkeypatch, tmp_path):
+    def _leftovers(self, monkeypatch, tmp_path):
         bundle = tmp_path / "Wayfinder Aura.app"
         (bundle / "Contents").mkdir(parents=True)
         for name in (".Wayfinder Aura.app.update", ".Wayfinder Aura.app.previous"):
             (tmp_path / name / "Contents").mkdir(parents=True)
         monkeypatch.setattr(app_installer, "mac_bundle_path", lambda: bundle)
+        monkeypatch.setattr(app_installer, "_failure_marker", lambda: tmp_path / "no-marker")
+
+    def test_stale_staging_and_backups_are_removed_at_startup(self, monkeypatch, tmp_path):
+        self._leftovers(monkeypatch, tmp_path)
+        monkeypatch.setattr(app_installer, "STALE_AFTER_S", -1)
         app_installer.cleanup_stale_staging()
         assert sorted(p.name for p in tmp_path.iterdir()) == ["Wayfinder Aura.app"]
+
+    def test_a_fresh_backup_a_helper_may_need_is_kept(self, monkeypatch, tmp_path):
+        self._leftovers(monkeypatch, tmp_path)
+        app_installer.cleanup_stale_staging()
+        assert (tmp_path / ".Wayfinder Aura.app.previous").exists()
+
+    def test_the_new_version_confirms_its_launch_before_cleanup(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_installer, "_launch_marker", lambda: tmp_path / "launched")
+        app_installer.confirm_launch()
+        assert (tmp_path / "launched").exists()
+        src = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
+        body = src.split("def startup_pass() -> None:", 1)[1].split("\n\n", 1)[0]
+        assert body.index("confirm_launch()") < body.index("cleanup_stale_staging()")
 
     def test_a_failed_swap_hands_over_the_download_for_one_launch(self, monkeypatch, tmp_path):
         marker = tmp_path / "update-install-failed"
