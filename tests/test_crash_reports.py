@@ -97,6 +97,13 @@ class TestScrubbing:
         assert "actually dictated" not in out
         assert "'short'" in out
 
+    def test_scrubbing_stays_fast_on_huge_word_runs(self):
+        import time
+        start = time.perf_counter()
+        out = cr.scrub("x" * 200_000 + " a.b@example.com " + "y" * 200_000)
+        assert time.perf_counter() - start < 0.5  # it runs on the Tk thread
+        assert "a.b@example.com" not in out
+
     def test_long_exception_messages_are_capped(self, monkeypatch):
         monkeypatch.setitem(cr._state, "config_getter", lambda: {"crash_reports": "on"})
         cr.record_exception(*_raise(RuntimeError("x" * 5000)), where="main")
@@ -116,6 +123,16 @@ class TestRecording:
         assert report["kind"] == "error" and report["where"] == "tk-callback"
         assert report["title"].startswith("KeyError in test_crash_reports.py:")
         assert report["appVersion"] == "1.2.0-beta.3" and report["channel"] == "beta"
+
+    @pytest.mark.parametrize("char", ["a", "é", "語", "🎙"])
+    def test_the_sent_body_always_fits_the_endpoints_64_kb(self, char):
+        cr.record_exception(*_raise(RuntimeError("x")), where="main")
+        (report,) = _queued()
+        report["trace"] = char * 40000
+        fitted = cr.build_report("error", "main", "t", char * 40000, ["a.py:f"], "E", {})
+        assert len(json.dumps(fitted).encode()) <= cr.MAX_BODY_BYTES < 64 * 1024
+        assert len(fitted["trace"]) <= 16000
+        assert_matches_contract(fitted)
 
     def test_same_bug_once_a_day_and_a_daily_cap(self, monkeypatch):
         for _ in range(3):

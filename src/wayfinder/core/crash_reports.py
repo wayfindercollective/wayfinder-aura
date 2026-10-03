@@ -51,6 +51,10 @@ CRASH_API_URL = os.environ.get(
 )
 HTTP_TIMEOUT = 10
 MAX_TRACE_CHARS = 16000
+# The endpoint refuses bodies over 64 KB. requests sends json.dumps output,
+# which escapes every non-ASCII character (up to 12 bytes for an emoji), so a
+# report is measured as sent and its trace trimmed to fit.
+MAX_BODY_BYTES = 60_000
 MAX_MESSAGE_CHARS = 300
 DAILY_CAP = 20
 KEEP_DAYS = 14
@@ -134,7 +138,9 @@ def _channel(config: dict[str, Any]) -> str:
 
 # --- scrubbing --------------------------------------------------------------------
 
-_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Bounded (RFC 5321 lengths) so a long run of word characters, e.g. base64 in
+# an error message, scrubs in linear time: this can run on the Tk thread.
+_EMAIL = re.compile(r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){1,8}")
 _LONG_QUOTED = re.compile(r"""(['"])(?:(?!\1).){40,}?\1""")
 _USER_PATHS = (
     re.compile(r"(/Users/)[^/\s'\"]+"),
@@ -201,12 +207,25 @@ def _os_fields() -> dict[str, str]:
     return {"os": name, "osVersion": version[:80], "arch": (platform.machine() or "")[:20]}
 
 
+def _trim_middle(text: str, keep: int) -> str:
+    if len(text) <= keep:
+        return text
+    half = max(keep // 2, 1)
+    return text[:half] + "\n…\n" + text[-half:]
+
+
+def _fit(report: dict[str, Any]) -> dict[str, Any]:
+    """Trim the trace until the encoded body is under MAX_BODY_BYTES."""
+    while (size := len(json.dumps(report))) > MAX_BODY_BYTES and len(report["trace"]) > 200:
+        keep = int(len(report["trace"]) * min(0.9, MAX_BODY_BYTES / size * 0.95))
+        report["trace"] = _trim_middle(report["trace"], keep)
+    return report
+
+
 def build_report(kind: str, where: str, title: str, trace: str, frames: list[str],
                  exc_name: str, config: dict[str, Any]) -> dict[str, Any]:
-    trace = scrub(trace)
-    if len(trace) > MAX_TRACE_CHARS:
-        trace = trace[: MAX_TRACE_CHARS // 2] + "\n…\n" + trace[-MAX_TRACE_CHARS // 2:]
-    return {
+    trace = _trim_middle(scrub(trace), MAX_TRACE_CHARS - 3)
+    return _fit({
         "reportId": uuid.uuid4().hex,
         "installId": install_id(),
         "kind": kind,
@@ -221,7 +240,7 @@ def build_report(kind: str, where: str, title: str, trace: str, frames: list[str
         "uptimeSeconds": max(0, int(time.monotonic() - _started)),
         "occurredAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "trace": trace,
-    }
+    })
 
 
 def _frames(tb) -> list[str]:
