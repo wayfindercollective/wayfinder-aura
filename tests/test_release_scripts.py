@@ -419,7 +419,7 @@ class TestMacReleaseWatcher:
         text = (REPO / "scripts" / "release" / "install_mac_release_watcher.sh").read_text(encoding="utf-8")
         assert "<key>ProcessType</key><string>Background</string>" in text
         assert "<key>LowPriorityIO</key><true/>" in text
-        assert "<key>ExitTimeOut</key><integer>120</integer>" in text  # > stop_group's 70 s
+        assert "<key>ExitTimeOut</key><integer>60</integer>" in text  # > stop_group's 40 + 10 s
         source = (REPO / "scripts" / "release" / "mac_release_watcher.py").read_text(encoding="utf-8")
         assert '"/usr/sbin/taskpolicy", "-b"' in source
 
@@ -573,7 +573,7 @@ wait
         monkeypatch.setattr(watcher, "BUILD_TIMEOUT_S", 2)
         original = watcher.stop_group
         monkeypatch.setattr(watcher, "stop_group",
-                            lambda pgid, grace=60, proc=None: original(pgid, 1, proc))
+                            lambda pgid, grace=40, proc=None: original(pgid, 1, proc))
         assert watcher.acquire_hold()
         build = {}
         try:
@@ -642,7 +642,7 @@ wait
     def test_a_build_that_will_not_stop_keeps_the_hold(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
         monkeypatch.setattr(watcher, "group_members", lambda pgid: [pgid])
-        monkeypatch.setattr(watcher, "stop_group", lambda pgid, grace=60, proc=None: False)
+        monkeypatch.setattr(watcher, "stop_group", lambda pgid, grace=40, proc=None: False)
         assert watcher.acquire_hold()
         watcher.note_build_in_hold(4242)
         watcher.finish_hold({"pgid": 4242})

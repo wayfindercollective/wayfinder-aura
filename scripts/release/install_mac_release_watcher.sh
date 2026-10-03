@@ -63,9 +63,10 @@ cat > "$PLIST" <<EOF
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
   <key>Nice</key><integer>10</integer>
-  <!-- Time to stop a running build (60 s SIGTERM grace, then SIGKILL) before
-       launchd kills the watcher; it releases the Mac CI hold last. -->
-  <key>ExitTimeOut</key><integer>120</integer>
+  <!-- Time to stop a running build (40 s SIGTERM grace, 10 s after SIGKILL)
+       before launchd kills the watcher; it releases the Mac CI hold last.
+       launchd reports 60 s as this job's limit even when asked for more. -->
+  <key>ExitTimeOut</key><integer>60</integer>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$LOG</string>
 </dict>

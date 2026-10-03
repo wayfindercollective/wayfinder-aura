@@ -338,7 +338,7 @@ def group_footprint(pgid: int) -> int:
     return sum(phys_footprint(pid) or 0 for pid in group_members(pgid))
 
 
-def stop_group(pgid: int, grace: float = 60, proc: subprocess.Popen | None = None) -> bool:
+def stop_group(pgid: int, grace: float = 40, proc: subprocess.Popen | None = None) -> bool:
     """SIGTERM the whole group, wait until every live member is gone, then
     SIGKILL whatever is left. The leader is reaped as it exits. True when
     nothing of the group is left."""
