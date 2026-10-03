@@ -88,8 +88,19 @@ def appimage_path() -> Path | None:
     return Path(path) if path and os.path.isfile(path) else None
 
 
+_in_place_failed = False  # the last swap failed: hand over downloads this launch
+
+
+def _failure_marker() -> Path:
+    from ..utils.platform import get_cache_dir
+
+    return get_cache_dir() / "update-install-failed"
+
+
 def install_mode() -> str | None:
     """"mac", "windows" or "appimage" when an in-place install is possible."""
+    if _in_place_failed:
+        return None
     if sys.platform == "darwin":
         bundle = mac_bundle_path()
         if bundle is None or "/AppTranslocation/" in str(bundle):
@@ -185,15 +196,17 @@ def verify_mac_app(candidate: Path, running: Path) -> str | None:
 
 
 def _mac_helper_script() -> str:
-    # $1 pid, $2 installed bundle, $3 staged bundle, $4 backup path, $5 opener.
-    # Waits for Aura to exit, swaps, opens the new copy; on any failure puts
-    # the old one back and opens that, so the user always gets an app.
+    # $1 pid, $2 installed bundle, $3 staged bundle, $4 backup path, $5 opener,
+    # $6 failure marker. Waits for Aura to exit, swaps, opens the new copy; on
+    # any failure (e.g. macOS refusing to modify the bundle) puts the old one
+    # back, leaves the marker so the next launch hands over the download
+    # instead of retrying, and opens the old copy: the user always gets an app.
     return (
         'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
         'rm -rf "$4"; '
         'if mv "$2" "$4" && mv "$3" "$2"; then '
         'rm -rf "$4"; '
-        'else [ -e "$2" ] || mv "$4" "$2"; rm -rf "$3"; fi; '
+        'else [ -e "$2" ] || mv "$4" "$2"; rm -rf "$3"; : > "$6"; fi; '
         'exec "$5" "$2"'
     )
 
@@ -231,7 +244,8 @@ def _prepare_mac(url: str, progress: Progress) -> Outcome:
     def finish() -> None:
         subprocess.Popen(
             ["/bin/sh", "-c", _mac_helper_script(), "wayfinder-update",
-             str(os.getpid()), str(running), str(staged), str(backup), "/usr/bin/open"],
+             str(os.getpid()), str(running), str(staged), str(backup), "/usr/bin/open",
+             str(_failure_marker())],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
@@ -263,9 +277,9 @@ def _prepare_windows(url: str, progress: Progress) -> Outcome:
 # --- Linux AppImage ----------------------------------------------------------------
 
 def _appimage_helper_script() -> str:
-    # $1 pid, $2 running AppImage, $3 staged AppImage.
+    # $1 pid, $2 running AppImage, $3 staged AppImage, $4 failure marker.
     return ('while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
-            '/bin/mv -f "$3" "$2" || /bin/rm -f "$3"; exec "$2"')
+            'mv -f "$3" "$2" || { rm -f "$3"; : > "$4"; }; exec "$2"')
 
 
 def _prepare_appimage(url: str, progress: Progress) -> Outcome:
@@ -285,12 +299,48 @@ def _prepare_appimage(url: str, progress: Progress) -> Outcome:
 
         subprocess.Popen(
             ["/bin/sh", "-c", _appimage_helper_script(), "wayfinder-update",
-             str(os.getpid()), str(target), str(staged)],
+             str(os.getpid()), str(target), str(staged), str(_failure_marker())],
             env=host_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
 
     return Outcome(ready=True, message="Update ready: restarting Aura.", finish=finish)
+
+
+# --- leftovers -------------------------------------------------------------------------
+
+def cleanup_stale_staging() -> bool:
+    """Remove a staged update this launch did not use (Aura quit before it
+    restarted into it) and a backup a failed swap left behind. Safe at startup:
+    the swap helper finishes before it opens the app.
+
+    Returns True when the last in-place install failed; this launch then hands
+    over the download instead (the next launch tries in place again).
+    """
+    global _in_place_failed
+    try:
+        marker = _failure_marker()
+        if marker.exists():
+            _in_place_failed = True
+            marker.unlink()
+    except OSError:
+        pass
+    paths = []
+    bundle = mac_bundle_path()
+    if bundle is not None:
+        paths += [bundle.parent / f".{bundle.name}.update", bundle.parent / f".{bundle.name}.previous"]
+    image = appimage_path() if sys.platform.startswith("linux") else None
+    if image is not None:
+        paths.append(image.parent / f".{image.name}.update")
+    for path in paths:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+        except OSError:
+            pass
+    return _in_place_failed
 
 
 # --- entry point ----------------------------------------------------------------------

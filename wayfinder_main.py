@@ -15320,12 +15320,20 @@ class WayfinderApp(ctk.CTk):
         threading.Thread(target=_check, daemon=True).start()
 
     def _start_crash_report_pass(self) -> None:
-        """Read consent from the live config; send earlier crashes in the background."""
+        """Read consent from the live config; send earlier crashes and clear
+        unused update staging in the background."""
         try:
-            from wayfinder.core import crash_reports
+            from wayfinder.core import app_installer, crash_reports
 
             crash_reports.set_config_getter(lambda: self.config)
-            threading.Thread(target=crash_reports.collect_and_send, daemon=True,
+
+            def startup_pass() -> None:
+                if app_installer.cleanup_stale_staging():
+                    self.event_queue.put((EventType.UI_CALLBACK, lambda: self.log(
+                        "⚠ The last update couldn't install itself; Get Update downloads it instead.")))
+                crash_reports.collect_and_send()
+
+            threading.Thread(target=startup_pass, daemon=True,
                              name="crash-report-startup").start()
         except Exception:
             pass
