@@ -36,8 +36,14 @@ otherwise it does nothing and tries again the next night
   installer, unpublished) and publishes a GitHub **prerelease**.
 - The Mac DMG is built, notarized and attached by the **Mac release watcher**
   on the Mac Studio (below), within about an hour of the release.
-- Only the newest 5 automated betas are kept; older ones (release and tag)
-  are deleted. Stable releases and older hand-made tags are never touched.
+- A beta is finished when its release carries the AppImage, its zsync file
+  and the Flatpak. If the dispatch, the build or an upload failed, the next
+  night waits on that beta's build or starts it once more instead of cutting
+  another; after two builds that left it unfinished it is left for a person
+  (Actions → Release) and the next beta may be cut.
+- Automated betas older than 14 days that are not among the newest 5 are
+  deleted (release and tag). Stable releases and older hand-made tags are
+  never touched.
 - The release is announced in Slack like any other.
 
 To pause betas, disable the Beta workflow in Actions (re-enable to resume).
@@ -64,9 +70,12 @@ centres) and the list shown with each beta, so write them for users.
 
 ## Promoting a beta to Stable
 
-When to ship: the beta is at least **5 days old**, nobody has reported a
-blocker against it (feedback, crash reports), and `## [Unreleased]` has
-something a user would notice. Otherwise wait for the next beta.
+When to ship: the beta is **complete** (AppImage, zsync, Flatpak and the
+signed Mac DMG all attached) and has been for at least **5 days**, nobody has
+reported a blocker against it (feedback, crash reports), and
+`## [Unreleased]` has something a user would notice. Otherwise wait for the
+next beta. The script never promotes an incomplete beta; the soak counts from
+its last required download.
 
 ```bash
 GH_TOKEN=$(gh auth token --user wayfindercollective) \
@@ -82,6 +91,12 @@ It ships **exactly the code the beta was built from**, not today's `main`:
 2. opens a pull request into `main` with the same notes (bullets merged after
    the beta stay Unreleased) — merge it once its checks pass;
 3. pushes `vX.Y.Z`, which builds and publishes the stable release.
+
+Re-running after a failure picks up where it stopped, for the same beta only:
+a pushed `vX.Y.Z` is kept if it was made from that beta's `main` commit, an
+open or merged notes pull request if it carries that beta's notes, and a
+notes pull request closed without merging is replaced. A tag or open pull
+request from a different beta stops the script for a person to sort out.
 
 The Mac release watcher attaches its DMG within the hour. The website's
 download links and every installed app pick the new release up by themselves.
@@ -100,7 +115,8 @@ Ship a patch outside the cycle only when it really hurts:
 - a security or privacy problem.
 
 Fix it on `main` as usual. If `main` is safe to ship, run the Beta workflow by
-hand, check the beta, and promote it with `--yes` (skips the 5-day soak). If
+hand, check the beta (wait for its Mac DMG), and promote it with `--yes`
+(skips the 5-day soak, not the completeness check). If
 `main` holds unfinished work, cut `release/X.Y` from the stable tag, fix it
 there, and tag `vX.Y.(Z+1)` from that branch.
 
@@ -115,9 +131,16 @@ from the last 7 days has no Mac DMG, it runs
 `scripts/release/attach_mac_dmg.sh` for it: build from the tag, notarize,
 staple, attach. It builds one release per run and gives a release 3 tries.
 
-It shares the Mac with the local model and the Fox Grid VM, so it only builds
-with at least 32 GiB free (the 24 GiB protected headroom plus the build) and
-the Mac CI queue not held by someone else; it holds the queue while it builds.
+It shares the Mac with the local model and the Fox Grid VM, so it is admitted
+the way Fox Grid admits Mac CI jobs ([CI.md](CI.md)): available memory, minus
+the model's unused allowance (its 160 GiB guard, or the smaller reserve in
+Fox Grid's grant for the model loaded right now), minus the VM's unused
+commitment and the 24 GiB protected headroom, must still cover the 2 GiB
+build; memory pressure must be normal, no Mac CI job running, and the Mac CI
+queue not held by someone else. It holds the queue while it builds. Every
+15 seconds it re-checks the build (4 GiB cap, 2-hour wall clock) and the host,
+re-reading the grant each time, and stops the build if any check fails. The
+hold is released only once every process of the build is gone.
 The build runs as a background task (efficiency cores, throttled disk I/O) and
 reuses the checkout's native whisper/llama binaries, so it is a single
 PyInstaller pass plus Apple's notarization wait. Its peak memory is in the log.

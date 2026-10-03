@@ -15,9 +15,10 @@ Run by .github/workflows/beta.yml (nightly, or by hand). It:
    newest --keep (5). Stable releases and hand-made tags (v1.1.8-beta.10 and
    earlier) are never touched.
 
-Resumable: when the newest automated beta's tag exists but its release does
-not (the dispatch failed, or the build did), the next run starts or waits on
-that build instead of cutting another beta.
+Resumable: when the newest automated beta is unfinished (its tag exists but
+its release does not, or lacks a Linux download: the dispatch failed, or the
+build or an upload did), the next run waits on its build or starts it again
+(once) instead of cutting another beta.
 
 Needs git, and gh authenticated (GH_TOKEN) with contents+actions write.
 """
@@ -53,9 +54,16 @@ def gh(*args: str) -> str:
     return subprocess.check_output(["gh", *args], cwd=ROOT, text=True).strip()
 
 
-def gh_ok(*args: str) -> bool:
-    """True when the gh call succeeds (e.g. a release exists)."""
-    return subprocess.run(["gh", *args], cwd=ROOT, capture_output=True).returncode == 0
+def release_for(repo: str, tag: str) -> dict | None:
+    """The tag's release, or None when it has none (any other API error raises:
+    the run fails and the next one tries again)."""
+    proc = subprocess.run(["gh", "api", f"repos/{repo}/releases/tags/{tag}"],
+                          cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return json.loads(proc.stdout or "null")
+    if "404" in proc.stderr:
+        return None
+    raise RuntimeError(f"could not read the {tag} release: {proc.stderr.strip()[:200]}")
 
 
 def note(message: str) -> None:
@@ -74,13 +82,13 @@ def beta_tags(tags):
 
 
 def latest_verdicts(runs: list) -> dict[str, str]:
-    """Each check's newest run decides (a re-run that is still pending, or that
-    failed, outranks an older success)."""
+    """Each check's newest run decides: check-run IDs only grow, so a re-run
+    outranks an older success even while it is queued with no start time yet
+    (it then reads as pending: no beta)."""
     newest: dict[str, dict] = {}
     for run in runs:
-        key = (run.get("started_at") or "", run.get("id") or 0)
         current = newest.get(run["name"])
-        if current is None or key > (current.get("started_at") or "", current.get("id") or 0):
+        if current is None or (run.get("id") or 0) > (current.get("id") or 0):
             newest[run["name"]] = run
     return {
         name: (run["conclusion"] if run["status"] == "completed" else run["status"]) or "pending"
@@ -90,7 +98,7 @@ def latest_verdicts(runs: list) -> dict[str, str]:
 
 def check_verdicts(repo: str, sha: str) -> dict[str, str]:
     raw = gh("api", f"repos/{repo}/commits/{sha}/check-runs?per_page=100",
-             "--jq", "[.check_runs[] | {id, name, status, conclusion, started_at}]")
+             "--jq", "[.check_runs[] | {id, name, status, conclusion}]")
     return latest_verdicts(json.loads(raw or "[]"))
 
 
@@ -149,14 +157,19 @@ def prune(repo: str, keep: int, keep_days: int, dry_run: bool) -> None:
             gh("release", "delete", tag, "--repo", repo, "--cleanup-tag", "--yes")
 
 
-def resume_unreleased(repo: str, tag: str, dry_run: bool) -> bool:
-    """The newest beta's tag exists but its release does not: finish it.
+def resume_unfinished(repo: str, tag: str, dry_run: bool) -> bool:
+    """Finish the newest beta when its release is missing, a draft, or lacks
+    a Linux download (the Mac DMG comes from the Mac release watcher).
 
-    True when this run handled the beta (dispatched, or left a running build
-    alone); False when there is nothing to resume. A build that failed is
-    re-dispatched once; after a second failure the beta is left for a person.
+    True when this run handled the beta (a build is running, or one was
+    started), so no new beta today. False when the beta is complete, or when
+    two builds of it ended without completing it: it is then left for a
+    person (promote.py never picks an incomplete beta) and the next beta may
+    be cut.
     """
-    if gh_ok("api", f"repos/{repo}/releases/tags/{tag}"):
+    missing = versioning.missing_assets(release_for(repo, tag),
+                                        versioning.release_assets(tag, mac=False))
+    if not missing:
         return False
     raw = gh("api", f"repos/{repo}/actions/workflows/release.yml/runs?branch={tag}&per_page=10",
              "--jq", "[.workflow_runs[] | {status, conclusion}]")
@@ -164,11 +177,11 @@ def resume_unreleased(repo: str, tag: str, dry_run: bool) -> bool:
     if any(r["status"] != "completed" for r in runs):
         note(f"{tag}: its release build is still running.")
         return True
-    failed = sum(1 for r in runs if r["conclusion"] != "success")
-    if failed >= 2:
-        note(f"{tag}: its release build failed twice; needs a look (Actions → Release).")
+    if len(runs) >= 2:
+        note(f"{tag}: still missing {', '.join(missing)} after {len(runs)} release builds; "
+             "needs a look (Actions → Release).")
         return False
-    note(f"{tag} has no release yet: starting its Release workflow.")
+    note(f"{tag} is missing {', '.join(missing)}: starting its Release workflow.")
     if not dry_run:
         gh("workflow", "run", "release.yml", "--repo", repo, "--ref", tag)
     return True
@@ -188,7 +201,7 @@ def main() -> int:
     head = git("rev-parse", "HEAD")
     tags = git("tag", "--list", "v*").split()
     ours = beta_tags(automated_betas())
-    if ours and resume_unreleased(args.repo, ours[-1], args.dry_run):
+    if ours and resume_unfinished(args.repo, ours[-1], args.dry_run):
         return 0
     betas = beta_tags(tags)
     if betas and not args.force:

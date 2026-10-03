@@ -5,8 +5,9 @@
 # this checkout into ~/Library/Application Support/wayfinder-aura-release (the
 # job never runs code it fetches), then checks hourly with launchd. Each check
 # is one GitHub API call; a build (about once a day, after the nightly beta)
-# runs at background priority on the efficiency cores, only with 32 GiB free
-# and the Mac CI queue not held by someone else (mac_release_watcher.py).
+# runs at background priority on the efficiency cores, only when Fox Grid's
+# Mac admission rule leaves room for it and the Mac CI queue is not held by
+# someone else (mac_release_watcher.py).
 # Re-run after changing either script.
 #
 #   scripts/release/install_mac_release_watcher.sh            install / update
@@ -62,6 +63,9 @@ cat > "$PLIST" <<EOF
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
   <key>Nice</key><integer>10</integer>
+  <!-- Time to stop a running build (60 s SIGTERM grace, then SIGKILL) before
+       launchd kills the watcher; it releases the Mac CI hold last. -->
+  <key>ExitTimeOut</key><integer>120</integer>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$LOG</string>
 </dict>

@@ -215,46 +215,161 @@ class TestCutBeta:
         ]
         assert cut_beta.latest_verdicts(runs) == {"Quality": "failure", "Windows tests": "in_progress"}
 
-    def test_an_unreleased_beta_is_resumed_not_skipped(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(cut_beta, "gh_ok", lambda *a: False)  # no release for the tag
-        monkeypatch.setattr(cut_beta, "note", lambda m: None)
-        monkeypatch.setattr(cut_beta, "gh", lambda *a: calls.append(a) or "[]")
-        assert cut_beta.resume_unreleased("o/r", "v1.2.0-beta.3", dry_run=False) is True
-        assert ("workflow", "run", "release.yml", "--repo", "o/r", "--ref", "v1.2.0-beta.3") in calls
+    def test_a_newer_queued_run_outranks_an_older_success(self):
+        # The re-check's case: a re-run queued with no start time yet.
+        runs = [
+            {"id": 7, "name": "Quality", "status": "completed", "conclusion": "success",
+             "started_at": "2026-10-03T10:00:00Z"},
+            {"id": 9, "name": "Quality", "status": "queued", "conclusion": None, "started_at": None},
+        ]
+        assert cut_beta.latest_verdicts(runs) == {"Quality": "queued"}
+        assert cut_beta.checks_passed({"Quality": "queued"})
 
-    def test_a_running_or_twice_failed_build_is_not_redispatched(self, monkeypatch):
-        monkeypatch.setattr(cut_beta, "gh_ok", lambda *a: False)
+    DISPATCH = ("workflow", "run", "release.yml", "--repo", "o/r", "--ref", "v1.2.0-beta.3")
+
+    def _resume(self, monkeypatch, release, runs):
+        calls = []
+        monkeypatch.setattr(cut_beta, "release_for", lambda repo, tag: release)
         monkeypatch.setattr(cut_beta, "note", lambda m: None)
-        running = '[{"status": "in_progress", "conclusion": null}]'
-        twice = '[{"status": "completed", "conclusion": "failure"}, {"status": "completed", "conclusion": "failure"}]'
-        for listing, handled in ((running, True), (twice, False)):
-            calls = []
-            monkeypatch.setattr(cut_beta, "gh", lambda *a, out=listing, log=calls: log.append(a) or out)
-            assert cut_beta.resume_unreleased("o/r", "v1.2.0-beta.3", dry_run=False) is handled
-            assert not [c for c in calls if c[:2] == ("workflow", "run")]
+        monkeypatch.setattr(cut_beta, "gh", lambda *a: calls.append(a) or json.dumps(runs))
+        handled = cut_beta.resume_unfinished("o/r", "v1.2.0-beta.3", dry_run=False)
+        return handled, self.DISPATCH in calls
+
+    @staticmethod
+    def _release(*names):
+        return {"tag_name": "v1.2.0-beta.3", "draft": False,
+                "assets": [{"name": n, "state": "uploaded"} for n in names]}
+
+    LINUX = ("Wayfinder_Aura-1.2.0-beta.3-x86_64.AppImage",
+             "Wayfinder_Aura-1.2.0-beta.3-x86_64.AppImage.zsync",
+             "io.wayfindercollective.WayfinderAura.flatpak")
+    DONE = {"status": "completed", "conclusion": "success"}
+    FAILED = {"status": "completed", "conclusion": "failure"}
+
+    def test_an_unreleased_beta_is_resumed_not_skipped(self, monkeypatch):
+        assert self._resume(monkeypatch, None, []) == (True, True)
+
+    def test_a_release_whose_uploads_failed_is_rebuilt(self, monkeypatch):
+        # The re-check's case: the release object exists, an asset does not.
+        release = self._release(*self.LINUX[:1])
+        assert self._resume(monkeypatch, release, [self.FAILED]) == (True, True)
+
+    def test_a_draft_release_is_unfinished(self, monkeypatch):
+        release = {**self._release(*self.LINUX), "draft": True}
+        assert self._resume(monkeypatch, release, []) == (True, True)
+
+    def test_a_complete_linux_release_is_finished_without_the_dmg(self, monkeypatch):
+        # The Mac DMG is the watcher's job, not the Release workflow's.
+        assert self._resume(monkeypatch, self._release(*self.LINUX), []) == (False, False)
+
+    def test_a_running_build_is_waited_on(self, monkeypatch):
+        running = {"status": "queued", "conclusion": None}
+        assert self._resume(monkeypatch, None, [self.FAILED, running]) == (True, False)
+
+    def test_two_builds_that_left_it_unfinished_are_left_for_a_person(self, monkeypatch):
+        # Failed or "successful": either way the beta still lacks a download.
+        assert self._resume(monkeypatch, None, [self.FAILED, self.FAILED]) == (False, False)
+        assert self._resume(monkeypatch, self._release(*self.LINUX[1:]),
+                            [self.DONE, self.DONE]) == (False, False)
+
+    def test_only_a_missing_release_reads_as_none(self, monkeypatch):
+        def fake(code, err):
+            return lambda *a, **k: subprocess.CompletedProcess(a, code, '{"tag_name": "v1"}', err)
+        monkeypatch.setattr(cut_beta.subprocess, "run", fake(0, ""))
+        assert cut_beta.release_for("o/r", "v1") == {"tag_name": "v1"}
+        monkeypatch.setattr(cut_beta.subprocess, "run", fake(1, "gh: Not Found (HTTP 404)"))
+        assert cut_beta.release_for("o/r", "v1") is None
+        monkeypatch.setattr(cut_beta.subprocess, "run", fake(1, "gh: Server Error (HTTP 502)"))
+        with pytest.raises(RuntimeError):
+            cut_beta.release_for("o/r", "v1")
 
 
 class TestPromote:
     NOW = __import__("datetime").datetime(2026, 10, 20, tzinfo=__import__("datetime").timezone.utc)
 
-    def test_soak_counts_from_the_last_download_not_the_commit(self):
+    @staticmethod
+    def _release(tag, linux="2026-10-10T09:40:00Z", dmg="2026-10-10T11:00:00Z", **extra):
+        version = tag[1:]
+        assets = [{"name": n, "state": "uploaded", "updated_at": linux} for n in (
+            f"Wayfinder_Aura-{version}-x86_64.AppImage",
+            f"Wayfinder_Aura-{version}-x86_64.AppImage.zsync",
+            "io.wayfindercollective.WayfinderAura.flatpak")]
+        if dmg:
+            assets.append({"name": f"Wayfinder_Aura-{version}-macOS-arm64.dmg",
+                           "state": "uploaded", "updated_at": dmg})
+        return {"tag_name": tag, "draft": False, "published_at": linux, "assets": assets, **extra}
+
+    def test_soak_counts_from_the_last_required_download(self):
         import promote
-        release = {"tag_name": "v1.2.0-beta.4", "published_at": "2026-10-10T09:30:00Z",
-                   "assets": [{"state": "uploaded", "updated_at": "2026-10-10T11:00:00Z"},
-                              {"state": "starter", "updated_at": "2026-10-19T00:00:00Z"}]}
+        release = self._release("v1.2.0-beta.4")
+        release["assets"].append({"name": "notes.txt", "state": "uploaded",
+                                  "updated_at": "2026-10-19T00:00:00Z"})
         assert promote.availability(release).isoformat() == "2026-10-10T11:00:00+00:00"
 
-    def test_the_newest_beta_that_has_soaked_is_the_candidate(self):
+    @pytest.mark.parametrize("change", ["no dmg", "dmg uploading", "no flatpak", "draft"])
+    def test_an_incomplete_beta_is_never_available(self, change):
+        import promote
+        release = self._release("v1.2.0-beta.4", dmg=None if change == "no dmg" else "2026-10-10T11:00:00Z")
+        if change == "dmg uploading":
+            release["assets"][-1]["state"] = "starter"
+        if change == "no flatpak":
+            release["assets"] = [a for a in release["assets"] if not a["name"].endswith(".flatpak")]
+        if change == "draft":
+            release["draft"] = True
+        assert promote.availability(release) is None
+
+    def test_the_newest_complete_beta_that_has_soaked_is_the_candidate(self):
         import promote
         listing = [
-            {"tag_name": "v1.2.0-beta.9", "published_at": "2026-10-19T09:30:00Z", "assets": []},
-            {"tag_name": "v1.2.0-beta.6", "published_at": "2026-10-14T09:30:00Z", "assets": []},
-            {"tag_name": "v1.2.0-beta.5", "published_at": "2026-10-13T09:30:00Z", "assets": []},
+            self._release("v1.2.0-beta.9", linux="2026-10-19T09:30:00Z", dmg="2026-10-19T10:30:00Z"),
+            # The re-check's case: six days old but its Mac DMG never came.
+            self._release("v1.2.0-beta.7", linux="2026-10-14T09:30:00Z", dmg=None),
+            self._release("v1.2.0-beta.6", linux="2026-10-14T09:30:00Z", dmg="2026-10-14T11:00:00Z"),
+            self._release("v1.2.0-beta.5", linux="2026-10-13T09:30:00Z", dmg="2026-10-13T11:00:00Z"),
         ]
-        ours = {"v1.2.0-beta.9", "v1.2.0-beta.6", "v1.2.0-beta.5"}
+        ours = {r["tag_name"] for r in listing}
         assert promote.pick_candidate(listing, ours, 5, self.NOW) == ("v1.2.0-beta.6", 5)
         assert promote.pick_candidate(listing, ours, 30, self.NOW) is None
+
+    def test_a_closed_unmerged_notes_pr_does_not_count(self):
+        import promote
+        mine = "Moves the notes shipped in v1.2.0 (from v1.2.0-beta.6) under ## [1.2.0]"
+        assert promote.usable_pr([{"url": "u1", "state": "CLOSED", "body": mine}], "v1.2.0-beta.6") is None
+        assert promote.usable_pr([{"url": "u2", "state": "OPEN", "body": mine},
+                                  {"url": "u1", "state": "CLOSED", "body": mine}],
+                                 "v1.2.0-beta.6") == "u2"
+        assert promote.usable_pr([{"url": "u3", "state": "MERGED", "body": mine}],
+                                 "v1.2.0-beta.6") == "u3"
+
+    def test_a_live_notes_pr_for_another_beta_stops_the_promotion(self):
+        import promote
+        other = "Moves the notes shipped in v1.2.0 (from v1.2.0-beta.5) under ## [1.2.0]"
+        with pytest.raises(SystemExit):
+            promote.usable_pr([{"url": "u", "state": "OPEN", "body": other}], "v1.2.0-beta.6")
+
+    def test_an_existing_tag_must_be_this_promotions(self, monkeypatch):
+        import promote
+        base = "a" * 40
+        commits = {"v1.2.0^{commit}^": base,
+                   "v1.2.0^{commit}": promote.release_message("1.2.0", "v1.2.0-beta.6", base)}
+        monkeypatch.setattr(promote, "run", lambda *a, **k: commits[a[-1]])
+        assert promote.tag_problem("v1.2.0", "v1.2.0-beta.6", base) is None
+        assert promote.tag_problem("v1.2.0", "v1.2.0-beta.5", base)
+        assert promote.tag_problem("v1.2.0", "v1.2.0-beta.6", "b" * 40)
+
+    def test_release_assets_match_what_the_workflow_and_watcher_publish(self):
+        workflow = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        for pattern in ("dist/Wayfinder_Aura-*.AppImage\n", "dist/Wayfinder_Aura-*.AppImage.zsync\n",
+                        "dist/io.wayfindercollective.WayfinderAura.flatpak\n"):
+            assert pattern in workflow
+        names = versioning.release_assets("v1.2.0-beta.3")
+        assert "Wayfinder_Aura-1.2.0-beta.3-x86_64.AppImage" in names
+        assert "io.wayfindercollective.WayfinderAura.flatpak" in names
+        missing = watcher.releases_missing_a_dmg(
+            [{"tag_name": "v1.2.0-beta.3", "published_at": "2026-10-03T09:00:00Z",
+              "assets": [{"name": n, "state": "uploaded"} for n in names]}],
+            __import__("datetime").datetime(2026, 10, 3, 12, tzinfo=__import__("datetime").timezone.utc))
+        assert missing == []  # the watcher's DMG name is the one promote requires
 
 
 class TestWorkflows:
@@ -304,6 +419,7 @@ class TestMacReleaseWatcher:
         text = (REPO / "scripts" / "release" / "install_mac_release_watcher.sh").read_text(encoding="utf-8")
         assert "<key>ProcessType</key><string>Background</string>" in text
         assert "<key>LowPriorityIO</key><true/>" in text
+        assert "<key>ExitTimeOut</key><integer>120</integer>" in text  # > stop_group's 70 s
         source = (REPO / "scripts" / "release" / "mac_release_watcher.py").read_text(encoding="utf-8")
         assert '"/usr/sbin/taskpolicy", "-b"' in source
 
@@ -353,9 +469,31 @@ class TestWatcherAdmission:
 
     @posix
     @pytest.mark.parametrize("kwargs", [
-        {"pid": 1}, {"mode": 0o666}, {"age": 2 * 86400}, {"reserve": 500 * GIB}])
+        {"pid": 1}, {"mode": 0o666}, {"age": 2 * 86400}, {"age": -3600},
+        {"reserve": 500 * GIB}, {"reserve": 0}, {"reserve": -1}])
     def test_any_doubtful_grant_falls_back_to_the_ceiling(self, tmp_path, kwargs):
         assert watcher.model_reserve(_reading(), self._grant(tmp_path, **kwargs)) == watcher.MODEL_CEILING
+
+    @posix
+    @pytest.mark.parametrize("text", [
+        # The re-check's probes: each of these used to reserve 1 byte or crash.
+        '{"modelPid": 56016, "modelReserveBytes": true}',
+        '{"modelPid": 56016, "modelReserveBytes": 1.5}',
+        '{"modelPid": 56016, "modelReserveBytes": "1"}',
+        '{"modelPid": 56016, "modelReserveBytes": Infinity}',
+        '{"modelPid": 56016, "modelReserveBytes": NaN}',
+        '{"modelPid": 56016, "modelReserveBytes": 1e300}',
+        '{"modelPid": 56016.0, "modelReserveBytes": 134217728000}',
+        '{"modelPid": "56016", "modelReserveBytes": 134217728000}',
+        '{"modelPid": true, "modelReserveBytes": 134217728000}',
+        '{"modelReserveBytes": 134217728000}',
+        '[56016, 134217728000]', '"grant"', 'null', '{"modelPid": 56016',
+    ])
+    def test_a_malformed_grant_falls_back_to_the_ceiling(self, tmp_path, text):
+        path = tmp_path / "grant.json"
+        path.write_text(text)
+        path.chmod(0o600)
+        assert watcher.model_reserve(_reading(), path) == watcher.MODEL_CEILING
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the watcher runs on the Mac (ps, process groups)")
@@ -381,6 +519,24 @@ class TestWatcherHold:
         watcher.HOLD.write_text(f"aura-mac-release pid={dead.pid} pgid={dead.pid}\n")
         assert watcher.reclaim_stale_hold() is True and not watcher.HOLD.exists()
 
+    def test_a_stop_during_a_held_block_lands_after_it(self, monkeypatch):
+        monkeypatch.setattr(watcher, "_stopping", False)
+        monkeypatch.setattr(watcher, "_held", 0)
+        monkeypatch.setattr(watcher, "_deferred", None)
+        previous = signal.signal(signal.SIGTERM, watcher._raise_stop)
+        done = []
+        try:
+            with pytest.raises(watcher.Stop):
+                with watcher.signals_held():
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(0.05)
+                    done.append("recorded")
+            os.kill(os.getpid(), signal.SIGTERM)  # a second signal is ignored
+            time.sleep(0.05)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        assert done == ["recorded"]
+
     def test_live_or_foreign_holds_are_never_reclaimed(self):
         watcher.HOLD.write_text(f"aura-mac-release pid={os.getpid()} pgid=0\n")
         assert watcher.reclaim_stale_hold() is False
@@ -398,6 +554,7 @@ class TestWatcherBuild:
         monkeypatch.setattr(watcher, "HOLD", tmp_path / "aura-mac-ci.hold")
         monkeypatch.setattr(watcher, "log", lambda message: None)
         monkeypatch.setattr(watcher, "host_reading", lambda: _reading())
+        monkeypatch.setattr(watcher, "model_reserve", lambda reading: 125 * GIB)
         monkeypatch.setattr(watcher, "CHECK_EVERY_S", 0.5)
 
     def _alive(self, pids_file):
@@ -418,10 +575,11 @@ wait
         monkeypatch.setattr(watcher, "stop_group",
                             lambda pgid, grace=60, proc=None: original(pgid, 1, proc))
         assert watcher.acquire_hold()
+        build = {}
         try:
-            assert watcher.run_build("v9.9.9-beta.1", {}, 125 * GIB) != 0
+            assert watcher.run_build("v9.9.9-beta.1", {}, build) != 0
         finally:
-            watcher.release_hold()
+            watcher.finish_hold(build)
         assert self._alive(pids) == []
         assert not watcher.HOLD.exists()
 
@@ -430,10 +588,65 @@ wait
         self._fake_attach(tmp_path, "sleep 300\n")
         monkeypatch.setattr(watcher, "group_footprint", lambda pgid: 5 * GIB)
         assert watcher.acquire_hold()
+        build = {}
         try:
-            assert watcher.run_build("v9.9.9-beta.1", {}, 125 * GIB) == -1
+            assert watcher.run_build("v9.9.9-beta.1", {}, build) == -1
         finally:
-            watcher.release_hold()
+            watcher.finish_hold(build)
+
+    def test_a_grant_that_stops_applying_mid_build_stops_the_build(self, tmp_path, monkeypatch):
+        # The re-check's case: the model restarts (new PID), so its grant no
+        # longer applies; the next check must use the 160 GiB guard again.
+        self._setup(tmp_path, monkeypatch)
+        self._fake_attach(tmp_path, "sleep 300\n")
+        reserves = iter([125 * GIB])
+        monkeypatch.setattr(watcher, "model_reserve",
+                            lambda reading: next(reserves, watcher.MODEL_CEILING))
+        build = {}
+        assert watcher.acquire_hold()
+        try:
+            assert watcher.run_build("v9.9.9-beta.1", {}, build) == -1
+        finally:
+            watcher.finish_hold(build)
+        assert not watcher.group_members(build["pgid"])
+
+    def test_a_stop_while_the_build_is_being_recorded_still_ends_it(self, tmp_path, monkeypatch):
+        # The re-check's case: Stop lands right after the build was spawned.
+        self._setup(tmp_path, monkeypatch)
+        self._fake_attach(tmp_path, "sleep 300\n")
+        original = watcher.note_build_in_hold
+
+        def note_then_stop(pgid):
+            original(pgid)
+            raise watcher.Stop("SIGTERM")
+
+        monkeypatch.setattr(watcher, "note_build_in_hold", note_then_stop)
+        build = {}
+        assert watcher.acquire_hold()
+        try:
+            with pytest.raises(watcher.Stop):
+                watcher.run_build("v9.9.9-beta.1", {}, build)
+        finally:
+            watcher.finish_hold(build)
+        assert build["pgid"] and not watcher.group_members(build["pgid"])
+        assert not watcher.HOLD.exists()
+
+    def test_the_build_is_not_started_with_stop_signals_blocked(self, tmp_path, monkeypatch):
+        # Started inside signals_held(), which must not leave a blocked
+        # signal mask to the build: it would ignore the SIGTERM that ends it.
+        self._setup(tmp_path, monkeypatch)
+        self._fake_attach(tmp_path, f'kill -TERM $$\necho ignored > "{tmp_path}/survived"\n')
+        assert watcher.run_build("v9.9.9-beta.1", {}, {}) != 0
+        assert not (tmp_path / "survived").exists()
+
+    def test_a_build_that_will_not_stop_keeps_the_hold(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(watcher, "group_members", lambda pgid: [pgid])
+        monkeypatch.setattr(watcher, "stop_group", lambda pgid, grace=60, proc=None: False)
+        assert watcher.acquire_hold()
+        watcher.note_build_in_hold(4242)
+        watcher.finish_hold({"pgid": 4242})
+        assert watcher.HOLD.exists()
 
     def test_sigterm_to_the_watcher_ends_the_build_and_lifts_the_hold(self, tmp_path):
         pids = tmp_path / "pids"
@@ -446,16 +659,18 @@ import mac_release_watcher as w
 from pathlib import Path
 w.HERE = Path({str(tmp_path)!r}); w.HOLD = Path({str(tmp_path / "hold")!r})
 w.host_reading = lambda: {_reading()!r}
+w.model_reserve = lambda reading: 125 * 1024 ** 3
 w.CHECK_EVERY_S = 0.5
 for sig in (signal.SIGTERM,):
     signal.signal(sig, w._raise_stop)
 w.acquire_hold()
+build = {{}}
 try:
-    w.run_build("v9.9.9-beta.1", {{}}, 125 * 1024 ** 3)
+    w.run_build("v9.9.9-beta.1", {{}}, build)
 except w.Stop:
     pass
 finally:
-    w.release_hold()
+    w.finish_hold(build)
 """)
         proc = subprocess.Popen([sys.executable, str(script)])
         for _ in range(100):

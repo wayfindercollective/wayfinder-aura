@@ -30,6 +30,31 @@ VERSION_FILES = (
 METAINFO = "flatpak/io.wayfindercollective.WayfinderAura.metainfo.xml"
 CHANGELOG = "CHANGELOG.md"
 
+# What a complete release carries ({v}: the tag without its "v"). The Release
+# workflow uploads the Linux files; the Mac release watcher (or publish-macos,
+# once signing secrets exist) attaches the DMG. Windows stays internal.
+WORKFLOW_ASSETS = (
+    "Wayfinder_Aura-{v}-x86_64.AppImage",
+    "Wayfinder_Aura-{v}-x86_64.AppImage.zsync",
+    "io.wayfindercollective.WayfinderAura.flatpak",
+)
+MAC_ASSET = "Wayfinder_Aura-{v}-macOS-arm64.dmg"
+
+
+def release_assets(tag: str, mac: bool = True) -> set[str]:
+    """Asset names release ``tag`` must carry (without the DMG: mac=False)."""
+    version = tag[1:] if tag.startswith("v") else tag
+    return {name.format(v=version) for name in WORKFLOW_ASSETS + ((MAC_ASSET,) if mac else ())}
+
+
+def missing_assets(release: dict | None, names: set[str]) -> list[str]:
+    """Which of ``names`` the release lacks as uploaded assets (all of them
+    when there is no published release)."""
+    if not release or release.get("draft"):
+        return sorted(names)
+    have = {a.get("name") for a in release.get("assets") or [] if a.get("state") == "uploaded"}
+    return sorted(names - have)
+
 _TAG_RE = re.compile(
     r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"

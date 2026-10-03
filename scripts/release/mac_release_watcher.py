@@ -23,11 +23,15 @@ may be running, and nobody else may hold the Mac CI queue.
 
 Bounded by design: one instance (flock), one build per run, the build in its
 own process group under a 2-hour wall clock and re-checked every 15 s (it is
-stopped if memory pressure rises, the host loses its protected headroom, or
-the build passes BUILD_CAP_BYTES), every process of that group stopped and
-gone before the CI hold is released, the hold taken atomically and released
-only by its owner, and a hold left by a killed watcher reclaimed once its
-owner and build are both gone. The build runs at background priority
+stopped if memory pressure rises, the host loses its protected headroom with
+the model's allowance re-read from a grant that must still be valid, or the
+build passes BUILD_CAP_BYTES), every process of that group stopped and gone
+before the CI hold is released (a group that will not die keeps the hold),
+the hold taken atomically and released only by its owner, and a hold left by
+a killed watcher reclaimed once its owner and build are both gone.
+Termination signals are held off while the hold is taken and the build is
+started and recorded, so a stop can never land between the two and leave an
+unrecorded build running. The build runs at background priority
 (taskpolicy -b: efficiency cores, throttled I/O); its measured peak was
 0.42 GB (2026-10-03).
 """
@@ -42,6 +46,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -69,6 +74,42 @@ HOLD_TAG = "aura-mac-release"
 
 class Stop(Exception):
     """A termination signal: unwind so the build and the hold are cleaned up."""
+
+
+# getattr: Windows has no SIGHUP, and the tests import this module there.
+STOP_SIGNALS = tuple(getattr(signal, name) for name in ("SIGTERM", "SIGINT", "SIGHUP")
+                     if hasattr(signal, name))
+_stopping = False   # Stop was raised: later signals are ignored while cleanup runs
+_held = 0           # inside signals_held(): a signal is noted, not raised
+_deferred: int | None = None
+
+
+def _raise_stop(signum, _frame):
+    """Raise Stop once, or note it for the end of a signals_held() block."""
+    global _stopping, _deferred
+    if _stopping:
+        return
+    if _held:
+        _deferred = signum
+        return
+    _stopping = True
+    raise Stop(signal.Signals(signum).name)
+
+
+@contextmanager
+def signals_held():
+    """Defer Stop until the block has finished: a signal that arrives inside
+    is raised right after it. A flag, not a signal mask: a mask would be
+    inherited by the build started inside the block."""
+    global _held, _deferred
+    _held += 1
+    try:
+        yield
+    finally:
+        _held -= 1
+    if not _held and _deferred is not None:
+        signum, _deferred = _deferred, None
+        _raise_stop(signum, None)
 
 
 def log(message: str) -> None:
@@ -167,22 +208,31 @@ def host_reading() -> dict:
     }
 
 
+def _positive_int(value) -> int | None:
+    """A JSON integer above zero; never a bool, float, string or other coercion."""
+    return value if type(value) is int and value > 0 else None
+
+
 def model_reserve(reading: dict, grant_path: Path = GRANT) -> int:
     """The model's full allowance: the 160 GiB guard, or Fox Grid's measured
-    reserve when its grant names the model process loaded right now."""
+    reserve when its grant (owner-only, under a day old, well-formed) names
+    the model process loaded right now. Anything else gets the guard."""
     try:
         info = grant_path.stat()
         if info.st_uid != os.getuid() or info.st_mode & 0o022:
             return MODEL_CEILING
-        if time.time() - info.st_mtime > 86400:
+        if not 0 <= time.time() - info.st_mtime <= 86400:
             return MODEL_CEILING
         grant = json.loads(grant_path.read_text(encoding="utf-8"))
-        reserve = int(grant["modelReserveBytes"])
-        if grant.get("modelPid") in reading["modelPids"] and 0 < reserve <= MODEL_CEILING:
-            return reserve
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return MODEL_CEILING
+    except (OSError, ValueError):
+        return MODEL_CEILING
+    if not isinstance(grant, dict):
+        return MODEL_CEILING
+    pid = _positive_int(grant.get("modelPid"))
+    reserve = _positive_int(grant.get("modelReserveBytes"))
+    if pid is None or reserve is None or reserve > MODEL_CEILING:
+        return MODEL_CEILING
+    return reserve if pid in reading["modelPids"] else MODEL_CEILING
 
 
 def spare_bytes(reading: dict, reserve: int, job_bytes: int = BUILD_BYTES) -> int:
@@ -288,9 +338,10 @@ def group_footprint(pgid: int) -> int:
     return sum(phys_footprint(pid) or 0 for pid in group_members(pgid))
 
 
-def stop_group(pgid: int, grace: float = 60, proc: subprocess.Popen | None = None) -> None:
+def stop_group(pgid: int, grace: float = 60, proc: subprocess.Popen | None = None) -> bool:
     """SIGTERM the whole group, wait until every live member is gone, then
-    SIGKILL whatever is left. The leader is reaped as it exits."""
+    SIGKILL whatever is left. The leader is reaped as it exits. True when
+    nothing of the group is left."""
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 10)):
         members = group_members(pgid)
         if not members:
@@ -315,21 +366,34 @@ def stop_group(pgid: int, grace: float = 60, proc: subprocess.Popen | None = Non
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
+    return not group_members(pgid)
 
 
-def run_build(tag: str, env: dict, reserve: int) -> int:
+def build_command(tag: str) -> list[str]:
+    return ["/usr/sbin/taskpolicy", "-b", "/usr/bin/time", "-l",
+            "/bin/bash", str(HERE / "attach_mac_dmg.sh"), tag]
+
+
+def run_build(tag: str, env: dict, build: dict) -> int:
     """attach_mac_dmg.sh under the hold this run already took: background QoS,
-    a wall clock, and memory re-checked every CHECK_EVERY_S seconds."""
-    proc = subprocess.Popen(
-        ["/usr/sbin/taskpolicy", "-b", "/usr/bin/time", "-l",
-         "/bin/bash", str(HERE / "attach_mac_dmg.sh"), tag],
-        env={**env, "AURA_REPO": str(AURA_REPO), "AURA_HOLD_HELD": "1",
-             "AURA_BUILD_DEADLINE_S": str(BUILD_TIMEOUT_S + 300)},
-        start_new_session=True)
-    pgid = proc.pid
-    note_build_in_hold(pgid)
-    deadline = time.monotonic() + BUILD_TIMEOUT_S
+    a wall clock, and memory re-checked every CHECK_EVERY_S seconds (with the
+    model's allowance re-read each time: a grant that expired or no longer
+    names the loaded model falls back to the 160 GiB guard mid-build).
+
+    ``build["pgid"]`` records the build's process group the moment it exists;
+    the caller keeps the hold until that group is gone."""
+    proc = None
     try:
+        with signals_held():  # a stop lands after the build is recorded, never between
+            proc = subprocess.Popen(
+                build_command(tag),
+                env={**env, "AURA_REPO": str(AURA_REPO), "AURA_HOLD_HELD": "1",
+                     "AURA_BUILD_DEADLINE_S": str(BUILD_TIMEOUT_S + 300)},
+                start_new_session=True)
+            build["pgid"] = proc.pid
+            note_build_in_hold(proc.pid)
+        pgid = proc.pid
+        deadline = time.monotonic() + BUILD_TIMEOUT_S
         while True:
             try:
                 return proc.wait(timeout=CHECK_EVERY_S)
@@ -346,24 +410,42 @@ def run_build(tag: str, env: dict, reserve: int) -> int:
                     reading = host_reading()
                     if reading["pressure"] != 1:
                         reason = f"memory pressure rose to level {reading['pressure']}"
-                    elif spare_bytes(reading, reserve, job_bytes=0) < 0:
+                    elif spare_bytes(reading, model_reserve(reading), job_bytes=0) < 0:
                         reason = "the host lost its protected headroom"
             if reason:
                 log(f"Stopping the Mac DMG build for {tag}: it {reason}.")
                 return -1
     finally:
-        stop_group(pgid, proc=proc)
+        if proc is not None:
+            with signals_held():
+                stop_group(proc.pid, proc=proc)
 
 
-def _raise_stop(signum, _frame):
-    raise Stop(signal.Signals(signum).name)
+def finish_hold(build: dict) -> None:
+    """Release the CI hold once the build's group is gone. A group that
+    survives SIGKILL keeps the hold (it names the group, so the next run
+    reclaims it only after the group is gone)."""
+    pgid = build.get("pgid")
+    if pgid and group_members(pgid) and not stop_group(pgid):
+        log(f"The Mac DMG build (process group {pgid}) would not stop: "
+            "the Mac CI hold stays until it is gone.")
+        return
+    release_hold()
 
 
 def main() -> int:
+    for sig in STOP_SIGNALS:
+        signal.signal(sig, _raise_stop)
+    try:
+        return watch()
+    except Stop as stop:
+        log(f"Stopped by {stop}.")
+        return 0
+
+
+def watch() -> int:
     import fcntl  # macOS only; imported here so the module loads on Windows test runs
 
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, _raise_stop)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOCK, "w") as lock:
         try:
@@ -397,15 +479,19 @@ def main() -> int:
         if refusal:
             log(f"Not building {pending[0]} yet: {refusal}. Trying next hour.")
             return 0
-        if not acquire_hold():
-            log("The Mac CI queue was just held by someone else: trying next hour.")
-            return 0
+        held = False
+        build: dict = {}
         try:
+            with signals_held():  # taken and owned with no gap a stop could land in
+                held = acquire_hold()
+            if not held:
+                log("The Mac CI queue was just held by someone else: trying next hour.")
+                return 0
             tag = pending[0]
             tries[tag] = tries.get(tag, 0) + 1
             save_state(state)
             log(f"Building the Mac DMG for {tag} (try {tries[tag]} of {MAX_TRIES}).")
-            returncode = run_build(tag, env, reserve)
+            returncode = run_build(tag, env, build)
             if returncode == 0:
                 tries.pop(tag, None)
                 state.setdefault("attached", []).append(tag)
@@ -415,9 +501,11 @@ def main() -> int:
                 log(f"Mac DMG for {tag} failed (exit {returncode}).")
             save_state(state)
         except Stop as stop:
-            log(f"Stopped by {stop}: the build was ended and the hold released.")
+            log(f"Stopped by {stop}: ending the build before releasing the hold.")
         finally:
-            release_hold()
+            if held:
+                with signals_held():
+                    finish_hold(build)
     return 0
 
 

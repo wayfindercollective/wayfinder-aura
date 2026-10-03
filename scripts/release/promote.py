@@ -8,8 +8,9 @@
 Stable ships exactly the code the beta was built from (the main commit under
 the beta's release commit), not whatever main holds today. The script:
 
-1. picks the newest beta whose downloads (Mac DMG included) have been
-   available for --min-days (the soak; --yes overrides);
+1. picks the newest beta that carries every download (AppImage, zsync,
+   Flatpak and the signed Mac DMG) and has had all of them out for
+   --min-days (the soak; --yes skips the wait, never the completeness);
 2. commits "release: X.Y.Z" on that main commit: version stamped everywhere,
    the beta's Unreleased CHANGELOG notes moved under ## [X.Y.Z], and a stable
    <release> in the metainfo (Flathub/AppStream);
@@ -18,9 +19,12 @@ the beta's release commit), not whatever main holds today. The script:
 4. pushes tag vX.Y.Z, which runs the Release workflow: Linux packages, and the
    signed Mac DMG once the signing secrets are set (docs/RELEASING.md).
 
-Re-running after a failure resumes: a pushed tag or an open notes PR is
-kept, a tag that never left this machine is remade. --dry-run prints the
-plan and writes nothing.
+Re-running after a failure resumes, bound to the same beta: a pushed tag is
+kept only if it was made from this beta and its main commit, an open or
+merged notes PR only if it carries this beta's notes (anything else stops the
+script for a person), a closed unmerged notes PR is replaced, and a tag that
+never left this machine is remade. --dry-run prints the plan and writes
+nothing.
 """
 
 from __future__ import annotations
@@ -59,29 +63,61 @@ def stamp_release(tree: Path, version: str, released: str, today: date) -> None:
         development=False, root=tree)
 
 
-def availability(release: dict) -> datetime | None:
-    """When a beta became fully available: its newest uploaded asset (the Mac
-    DMG lands an hour or so after the Linux packages), else its publication."""
-    stamps = [a.get("updated_at") for a in release.get("assets") or []
-              if a.get("state") == "uploaded"] + [release.get("published_at")]
+def availability(release: dict | None) -> datetime | None:
+    """When a beta became complete: the upload time of the newest of the
+    assets it must carry (the Mac DMG lands an hour or more after the Linux
+    packages). None while any of them is missing."""
+    if release is None:
+        return None
+    required = versioning.release_assets(release.get("tag_name") or "")
+    if versioning.missing_assets(release, required):
+        return None
     times = []
-    for stamp in stamps:
-        try:
-            times.append(datetime.fromisoformat(str(stamp).replace("Z", "+00:00")))
-        except ValueError:
-            continue
+    for asset in release.get("assets") or []:
+        if asset.get("name") in required and asset.get("state") == "uploaded":
+            try:
+                times.append(datetime.fromisoformat(str(asset.get("updated_at")).replace("Z", "+00:00")))
+            except ValueError:
+                return None
     return max(times) if times else None
 
 
 def pick_candidate(releases: list[dict], ours: set[str], min_days: int,
                    now: datetime) -> tuple[str, int] | None:
-    """The newest automated beta that has been available for min_days."""
+    """The newest automated beta that has been complete for min_days."""
     by_tag = {r["tag_name"]: r for r in releases
               if r.get("tag_name") in ours and not r.get("draft")}
     for tag in reversed(beta_tags(by_tag)):
         when = availability(by_tag[tag])
         if when is not None and (now - when).days >= min_days:
             return tag, (now - when).days
+    return None
+
+
+def release_message(version: str, beta: str, base: str) -> str:
+    return f"release: {version}\n\nStable release of {beta} (main {base})."
+
+
+def tag_problem(tag: str, beta: str, base: str) -> str | None:
+    """Why the existing ``tag`` is not this promotion's, or None if it is."""
+    parent = run("git", "rev-parse", f"{tag}^{{commit}}^")
+    body = run("git", "log", "-1", "--format=%B", f"{tag}^{{commit}}")
+    if parent != base or f"Stable release of {beta} (main {base})" not in body:
+        return f"{tag} already exists but was not made from {beta} (main {base[:9]})"
+    return None
+
+
+def usable_pr(prs: list[dict], beta: str) -> str | None:
+    """URL of the open or merged notes PR for this beta. A closed, unmerged
+    PR does not count (a new one is opened); an open or merged one for
+    another beta stops the script."""
+    for pr in prs:
+        if pr.get("state") not in ("OPEN", "MERGED"):
+            continue
+        if f"(from {beta})" not in (pr.get("body") or ""):
+            raise SystemExit(f"Notes PR {pr.get('url')} is for another beta; "
+                             "close it or promote that beta instead.")
+        return pr.get("url")
     return None
 
 
@@ -106,13 +142,18 @@ def main() -> int:
     if args.beta:
         beta = args.beta
         release = next((r for r in listing if r.get("tag_name") == beta), None)
-        when = availability(release) if release else None
+        missing = versioning.missing_assets(release, versioning.release_assets(beta))
+        if missing:
+            raise SystemExit(f"{beta} is missing {', '.join(missing)}: only a complete "
+                             "beta can be promoted (--yes skips the soak, not this).")
+        when = availability(release)
         age = (now - when).days if when else -1
     else:
         found = pick_candidate(listing, ours, 0 if args.yes else args.min_days, now)
         if not found:
-            raise SystemExit(f"no beta has been available for {args.min_days} days yet "
-                             "(the Beta workflow makes them; --yes skips the soak)")
+            raise SystemExit(f"no complete beta (Mac DMG included) has been out for "
+                             f"{args.min_days} days yet (the Beta workflow makes them; "
+                             "--yes skips the soak)")
         beta, age = found
     if versioning.beta_number(beta) is None or beta not in ours:
         raise SystemExit(f"{beta} is not a beta the Beta workflow made")
@@ -129,29 +170,44 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    # Resumable: whatever an earlier run finished stays finished.
+    # Resumable: whatever an earlier run of THIS promotion finished stays
+    # finished; anything made for another beta stops here for a person.
     tag_pushed = remote_has(f"refs/tags/{tag}")
-    if not tag_pushed and run("git", "tag", "--list", tag):
+    if tag_pushed:
+        problem = tag_problem(tag, beta, base)
+        if problem:
+            raise SystemExit(problem)
+    elif run("git", "tag", "--list", tag):
         run("git", "tag", "-d", tag)  # made locally by a run that stopped before pushing
-    pr = run("gh", "pr", "list", "--repo", REPO, "--head", branch, "--state", "all",
-             "--json", "url", "--jq", ".[0].url // empty")
+    pr = usable_pr(json.loads(run("gh", "pr", "list", "--repo", REPO, "--head", branch,
+                                  "--state", "all", "--json", "url,state,body") or "[]"), beta)
+    notes_mark = f"Notes shipped in {tag} (from {beta})."
 
     today = date.today()
     with tempfile.TemporaryDirectory(prefix="aura-promote-") as tmp:
         if not pr:
             notes_tree = Path(tmp) / "notes"
-            start = f"origin/{branch}" if remote_has(f"refs/heads/{branch}") else "origin/main"
+            remote_tip = ""
+            if remote_has(f"refs/heads/{branch}"):
+                run("git", "fetch", "-q", "origin", branch)
+                remote_tip = run("git", "rev-parse", f"origin/{branch}")
+            # An earlier run's notes branch for this beta is reused; one left
+            # from another beta is rebuilt from main and replaced.
+            reuse = bool(remote_tip) and notes_mark in run("git", "log", "-1", "--format=%B", remote_tip)
+            start = remote_tip if reuse else "origin/main"
             run("git", "worktree", "add", "-q", "-B", branch, str(notes_tree), start)
             try:
-                if start == "origin/main":
+                if not reuse:
                     released = versioning.unreleased_body(
                         run("git", "show", f"{base}:{versioning.CHANGELOG}") + "\n")
                     stamp_release(notes_tree, version, released, today)
                     current = versioning.parse(versioning.read_version(notes_tree))[0]
                     if current < versioning.parse(version)[0]:
                         versioning.set_version(version, root=notes_tree)
-                    run("git", "commit", "-qam", f"docs(release): {version} notes", cwd=notes_tree)
-                run("git", "push", "-q", "-u", "origin", branch, cwd=notes_tree)
+                    run("git", "commit", "-qam", f"docs(release): {version} notes\n\n{notes_mark}",
+                        cwd=notes_tree)
+                run("git", "push", "-q", "-u", f"--force-with-lease=refs/heads/{branch}:{remote_tip}",
+                    "origin", branch, cwd=notes_tree)
                 pr = run("gh", "pr", "create", "--repo", REPO, "--base", "main", "--head", branch,
                          "--title", f"docs(release): {version} notes",
                          "--body", f"Moves the notes shipped in {tag} (from {beta}) under "
@@ -168,8 +224,7 @@ def main() -> int:
                     (release_tree / versioning.CHANGELOG).read_text(encoding="utf-8"))
                 versioning.set_version(version, root=release_tree)
                 stamp_release(release_tree, version, released, today)
-                run("git", "commit", "-qam",
-                    f"release: {version}\n\nStable release of {beta} (main {base}).",
+                run("git", "commit", "-qam", release_message(version, beta, base),
                     cwd=release_tree)
                 run("git", "tag", "-a", tag, "-m", f"Wayfinder Aura {version} (from {beta})",
                     cwd=release_tree)
