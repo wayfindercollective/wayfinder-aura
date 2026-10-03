@@ -169,7 +169,7 @@ def _tidy(body: str) -> str:
 
 def promote_changelog(text: str, version: str, released_body: str, when: date) -> str:
     """Move ``released_body`` (the Unreleased notes of the commit being
-    released) under ``## [version] - date``, leaving anything newer under
+    released) under ``## [version] — date``, leaving anything newer under
     Unreleased. Bullets are matched verbatim, so notes added to main after
     the beta was cut stay unreleased."""
     body = unreleased_body(text)
@@ -182,7 +182,7 @@ def promote_changelog(text: str, version: str, released_body: str, when: date) -
     head, tail = text.split(body, 1) if body else (text, "")
     new_unreleased = _tidy(remaining)
     released = _tidy(released_body)
-    section = f"## [{version}] - {when.isoformat()}\n\n{released}\n\n"
+    section = f"## [{version}] — {when.isoformat()}\n\n{released}\n\n"
     return (
         head.rstrip("\n") + "\n\n"
         + (new_unreleased + "\n\n" if new_unreleased else "")

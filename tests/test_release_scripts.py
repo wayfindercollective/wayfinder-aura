@@ -75,20 +75,20 @@ class TestStamping:
 
     def test_development_release_entry_is_valid_and_first(self, tree):
         versioning.add_metainfo_release(
-            "1.2.0-beta.1", date(2026, 10, 3), "Beta <of> main", ["A & B", "C"],
+            "99.0.0-beta.1", date(2026, 10, 3), "Beta <of> main", ["A & B", "C"],
             development=True, root=tree)
         root = ET.parse(tree / versioning.METAINFO).getroot()
         first = root.find("releases/release")
-        assert first.get("version") == "1.2.0-beta.1"
+        assert first.get("version") == "99.0.0-beta.1"
         assert first.get("type") == "development"
         assert [li.text for li in first.findall("description/ul/li")] == ["A & B", "C"]
 
     def test_release_entry_is_not_added_twice(self, tree):
         for _ in range(2):
             versioning.add_metainfo_release(
-                "1.2.0", date(2026, 10, 3), "x", [], development=False, root=tree)
+                "99.0.0", date(2026, 10, 3), "x", [], development=False, root=tree)
         text = (tree / versioning.METAINFO).read_text(encoding="utf-8")
-        assert text.count('<release version="1.2.0"') == 1
+        assert text.count('<release version="99.0.0"') == 1
 
 
 CHANGELOG = """# Changelog
@@ -123,7 +123,7 @@ class TestChangelog:
         out = versioning.promote_changelog(CHANGELOG, "1.2.0", body, date(2026, 10, 10))
         unreleased = versioning.unreleased_body(out)
         assert unreleased.strip() == ""
-        released = out.split("## [1.2.0] - 2026-10-10", 1)[1].split("## [1.1.8]", 1)[0]
+        released = out.split("## [1.2.0] — 2026-10-10", 1)[1].split("## [1.1.8]", 1)[0]
         assert "Mac: here at last." in released
         assert "- **Mac app.** Signed and\n  notarized." in released
         assert "### Fixed" in released
