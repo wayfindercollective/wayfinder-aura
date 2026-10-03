@@ -1518,11 +1518,14 @@ class GlassmorphicOverlay(QWidget):
         self._setup_kde_blur()
         self._apply_squircle_mask()
         
-        # Position after window is shown (Wayland often ignores pre-show positioning)
-        self._position_at_bottom()
-        
-        # One delayed retry to handle WM not being ready yet
-        QTimer.singleShot(500, self._position_at_bottom)
+        # The Mac's transient pill is mapped once offscreen at startup. Moving
+        # it onscreen here would expose an idle window before dictation.
+        if not (getattr(self, "_overlay_mode", "persistent") == "transient"
+                and self._state == OverlayState.HIDDEN):
+            # Position after window is shown (Wayland often ignores pre-show positioning)
+            self._position_at_bottom()
+            # One delayed retry to handle WM not being ready yet
+            QTimer.singleShot(500, self._position_at_bottom)
         
         # KWin backend only: keep-above + position via KWin script (once, with
         # delay). On the x11 backend this used to fire whenever the desktop was
@@ -1664,6 +1667,9 @@ class GlassmorphicOverlay(QWidget):
         entirely here — it was unreachable in the sandbox anyway, and loadScript
         spam can freeze the overlay on SteamOS X11.
         """
+        if getattr(self, "_overlay_mode", "persistent") == "transient" and self._state == OverlayState.HIDDEN:
+            return
+
         w, h = self.width(), self.height()
         x, y = self._calculate_position(w, h)
         
@@ -1704,7 +1710,7 @@ class GlassmorphicOverlay(QWidget):
             pass
         # The Flatpak runs this branch through XWayland. Restack once after the
         # final native position is applied so nothing sits over the pill.
-        if self.isVisible():
+        if self.isVisible() and getattr(self, "_overlay_mode", "persistent") != "transient":
             self.raise_()
     
     def _update_size(self):
@@ -1815,6 +1821,11 @@ class GlassmorphicOverlay(QWidget):
             state: Target state
             animate: Whether to animate the transition
         """
+        # The Mac's transient pill has no READY frame. Keep its mapped window
+        # offscreen while idle so dictation never has to show/activate a window.
+        if getattr(self, "_overlay_mode", "persistent") == "transient" and state == OverlayState.READY:
+            state = OverlayState.HIDDEN
+
         # Import the debug logger from the run_overlay scope
         import time
         def _log(msg):
@@ -2015,8 +2026,8 @@ class GlassmorphicOverlay(QWidget):
             return
         try:
             mode = getattr(self, '_overlay_mode', 'persistent')
-            if mode == "persistent":
-                # Move off-screen instead of hiding (prevents focus stealing on show)
+            if mode in ("persistent", "transient"):
+                # Keep the surface mapped; a future show() would steal focus.
                 self.setGeometry(-9999, -9999, self.width(), self.height())
             else:
                 # Standard mode: actually hide
@@ -2086,6 +2097,10 @@ class GlassmorphicOverlay(QWidget):
         if mode == "persistent":
             # Window is already shown, just raise it
             self.raise_()
+        elif mode == "transient":
+            # Already mapped offscreen. Geometry + opacity reveal it without
+            # show()/raise_(), which would activate the helper on macOS.
+            pass
         else:
             # Standard mode: show the window
             self.show()
@@ -2737,6 +2752,20 @@ def run_overlay():
         # No on-screen pill: window stays HIDDEN; StatusNotifier tray still runs below.
         overlay._overlay_mode = mode
         overlay.hide()
+    elif mode == "transient":
+        # Map once while transparent and offscreen. On each dictation the
+        # existing window only moves and fades; no new show/raise steals the
+        # insertion target's focus.
+        content_width = max(
+            overlay._calculate_target_width(lbl) for lbl in STATE_LABELS.values()
+        )
+        final_width = content_width + (overlay.glow_margin * 2)
+        overlay._static_width = final_width
+        overlay.setFixedSize(final_width, overlay.widget_height)
+        overlay.setWindowOpacity(0.0)
+        overlay._opacity._value = 0.0
+        overlay.setGeometry(-9999, -9999, final_width, overlay.widget_height)
+        overlay.show()
     elif mode == "persistent":
         # Start in READY state (visible, soft brand-blue READY palette)
         overlay._overlay_mode = mode
@@ -2852,6 +2881,7 @@ def run_overlay():
                 if elapsed > _COMMAND_TIMEOUT:
                     _debug_log(f"WATCHDOG: no commands for {elapsed:.0f}s, returning to READY")
                     overlay.set_state(OverlayState.READY)
+                    _update_tray(OverlayState.READY)
 
         except Exception as e:
             _debug_log(f"process_commands error: {e}")
