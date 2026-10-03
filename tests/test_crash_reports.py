@@ -30,6 +30,7 @@ def _isolated(tmp_path, monkeypatch):
     monkeypatch.setitem(cr._state, "native_file", None)
     monkeypatch.setitem(cr._state, "config_getter", lambda: {})
     monkeypatch.setattr(cr, "_send_soon", lambda: None)  # never touch the network
+    monkeypatch.setattr(cr, "_is_packaged", lambda: True)  # tests stand in for a release build
 
 
 def _queued():
@@ -75,6 +76,11 @@ class TestConsent:
     def test_beta_on_stable_opt_in(self, version, config, expected):
         assert cr.reports_enabled(config, version) is expected
 
+    def test_source_checkouts_never_report_whatever_the_setting(self, monkeypatch):
+        monkeypatch.setattr(cr, "_is_packaged", lambda: False)
+        assert cr.reports_enabled({"crash_reports": "on"}, "1.2.0-beta.3") is False
+        assert cr.reports_enabled({"update_channel": "beta"}, "1.2.0") is False
+
     def test_disabled_records_nothing(self, monkeypatch):
         monkeypatch.setitem(cr._state, "config_getter", lambda: {"crash_reports": "off"})
         assert cr.record_exception(*_raise(ValueError("x")), where="main") is False
@@ -106,11 +112,18 @@ class TestScrubbing:
         assert time.perf_counter() - start < 5
         assert "a.b@example.com" not in out
 
-    def test_long_exception_messages_are_capped(self, monkeypatch):
+    def test_messages_and_source_lines_never_leave(self, monkeypatch):
+        # The review's case: a quoted transcript past the old 300-character cut
+        # (which dropped its closing quote) and an unquoted bearer token.
         monkeypatch.setitem(cr._state, "config_getter", lambda: {"crash_reports": "on"})
-        cr.record_exception(*_raise(RuntimeError("x" * 5000)), where="main")
+        transcript = "'" + "please send the quarterly numbers to the board " * 10 + "'"
+        secret = "Bearer sk-live-0123456789abcdefSECRET"
+        cr.record_exception(*_raise(ValueError(transcript + " " + secret)), where="main")
         (report,) = _queued()
-        assert "x" * (cr.MAX_MESSAGE_CHARS + 1) not in report["trace"]
+        assert "quarterly" not in report["trace"] and "SECRET" not in report["trace"]
+        assert "raise exc" not in report["trace"]  # the source line of _raise()
+        assert report["trace"].rstrip().endswith("ValueError")
+        assert 'File "test_crash_reports.py", line ' in report["trace"]
 
 
 class TestRecording:
@@ -187,6 +200,7 @@ CRASHER = textwrap.dedent("""
     sys.path.insert(0, sys.argv[1])
     from wayfinder.core import crash_reports as cr
     cr._state["dir"] = __import__("pathlib").Path(sys.argv[2])
+    cr._is_packaged = lambda: True
     cr.install("1.2.0-beta.3", lambda: {"crash_reports": "on"})
     if sys.platform == "win32":  # no Windows Error Reporting dialog in CI
         import ctypes
@@ -214,6 +228,17 @@ class TestNativeCrash:
         assert report["kind"] == "crash" and report["where"] == "native"
         assert "native_part" in report["trace"]
         assert not list(reports.glob("native-*.log"))
+
+    def test_native_logs_keep_only_known_safe_lines(self, monkeypatch):
+        text = ("Fatal Python error: Segmentation fault\n\n"
+                "Current thread 0x00000001f1b2c840 (most recent call first):\n"
+                '  File "/Users/someone/app/wayfinder/core/recorder.py", line 42 in _callback\n'
+                "my dictated sentence about the merger\n"
+                "Extension modules: numpy.core._multiarray_umath, secret_module (total: 2)\n")
+        out = cr.native_trace(text)
+        assert "Fatal Python error: Segmentation fault" in out
+        assert 'File "recorder.py", line 42 in _callback' in out
+        assert "someone" not in out and "merger" not in out and "secret_module" not in out
 
     def test_empty_files_from_earlier_launches_are_just_removed(self, monkeypatch):
         monkeypatch.setitem(cr._state, "config_getter", lambda: {"crash_reports": "on"})

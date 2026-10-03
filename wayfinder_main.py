@@ -1571,9 +1571,10 @@ SETTING_TOOLTIPS = {
         "Going back to Stable keeps your version until the next stable release."
     ),
     "crash_reports": (
-        "When Aura crashes or hits an error, send the error details, app and "
-        "system versions to Wayfinder so it gets fixed. Never audio, dictated "
-        "text or your settings.\n"
+        "When Aura crashes or hits an error, send Wayfinder the kind of error, "
+        "where in Aura's code it happened and the app and system versions, so "
+        "it gets fixed. Never the error message, audio, dictated text or your "
+        "settings.\n"
         "On by default for Beta, off for Stable."
     ),
     "gamer_mode": (

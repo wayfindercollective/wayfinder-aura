@@ -85,21 +85,29 @@ involved. You can turn it off with the **Check for model updates** setting
 ## Crash reports (Beta: on; Stable: off)
 
 When Aura crashes or hits an error it didn't expect, it can send a crash
-report to Wayfinder (our own server; no third party) so the bug gets fixed.
-**Beta** builds and installs set to Beta updates send them unless you turn
-them off; **Stable** sends nothing unless you turn them on. The switch is
-**Settings → System → Send crash reports** (`crash_reports: "on"` / `"off"`).
+report to Wayfinder so the bug gets fixed. **Beta** builds and installs set to
+Beta updates send them unless you turn them off; **Stable** sends nothing
+unless you turn them on. The switch is **Settings → System → Send crash
+reports** (`crash_reports: "on"` / `"off"`).
 
-A report holds the error and where in Aura's code it happened, the app
+A report holds the kind of error (for example `KeyError`) and where in Aura's
+own code it happened: file names, function names and line numbers, with your
+home folder and user name removed from any path. It also holds the app
 version and update channel, your operating system's name, version and
 processor type, how Aura was installed, how long it had been running, and a
 random ID made on your machine (not linked to you or your license) so we can
-tell one machine's repeat from many. Before it leaves your computer, your home
-folder and user name are removed from file paths, email addresses and longer
-quoted text are removed, and the error message is shortened. A report never
-contains audio, dictated or transcribed text, the clipboard, your settings,
-license keys or API keys. On the Mac, a crash logged by macOS for Aura is
-summarised to its error type and the functions it crashed in.
+tell one machine's repeat from many. On the Mac, a crash logged by macOS for
+Aura is summarised the same way: the error kind and the functions it crashed
+in.
+
+A report never contains the error's message or any source code, and never
+audio, dictated or transcribed text, the clipboard, your settings, license
+keys or API keys. Builds run from source code never send reports.
+
+Reports go to Wayfinder's own backend, which runs on Convex (a hosted
+database service), and are used only to find and fix bugs. When a new kind of
+crash arrives, a short summary (the error kind, app and system versions, and
+the first few code locations) is posted to the Wayfinder team's Slack.
 
 The same bug is sent at most once a day, and no more than 20 reports a day.
 Reports wait on your computer when you're offline and are deleted after 14

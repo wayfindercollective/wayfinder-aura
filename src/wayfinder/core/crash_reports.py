@@ -55,7 +55,6 @@ MAX_TRACE_CHARS = 16000
 # which escapes every non-ASCII character (up to 12 bytes for an emoji), so a
 # report is measured as sent and its trace trimmed to fit.
 MAX_BODY_BYTES = 60_000
-MAX_MESSAGE_CHARS = 300
 DAILY_CAP = 20
 KEEP_DAYS = 14
 MAX_QUEUE = 50
@@ -111,8 +110,16 @@ def install_id() -> str:
 
 # --- consent ------------------------------------------------------------------------
 
+def _is_packaged() -> bool:
+    """A released build (PyInstaller bundle). Source checkouts never report."""
+    return bool(getattr(sys, "frozen", False))
+
+
 def reports_enabled(config: dict[str, Any] | None = None, app_version: str = "") -> bool:
-    """The user's choice; unset follows the update channel (Beta on, Stable off)."""
+    """The user's choice; unset follows the update channel (Beta on, Stable off).
+    Never for a source checkout, whatever its version or setting."""
+    if not _is_packaged():
+        return False
     if config is None:
         try:
             from ..config import load_config
@@ -158,13 +165,6 @@ def scrub(text: str) -> str:
         text = pattern.sub(r"\1<user>", text)
     text = _EMAIL.sub("<email>", text)
     return _LONG_QUOTED.sub(r"\1…\1", text)
-
-
-def _message(exc: BaseException) -> str:
-    message = str(exc)
-    if len(message) > MAX_MESSAGE_CHARS:
-        message = message[:MAX_MESSAGE_CHARS] + "…"
-    return scrub(message)
 
 
 def signature(kind: str, frames: list[str], exc_name: str) -> str:
@@ -247,6 +247,15 @@ def _frames(tb) -> list[str]:
     return [f"{Path(f.filename).name}:{f.name}" for f in traceback.extract_tb(tb)]
 
 
+def location_trace(exc_type, tb) -> str:
+    """The traceback as code locations only: file name, line, function, then the
+    exception type. No exception message and no source lines: either can carry
+    dictated text or a key, and no pattern can reliably scrub arbitrary text."""
+    lines = [f'  File "{Path(f.filename).name}", line {f.lineno}, in {f.name}'
+             for f in traceback.extract_tb(tb)]
+    return "Traceback (most recent call last):\n" + "\n".join(lines) + f"\n{exc_type.__name__}\n"
+
+
 def record_exception(exc_type, exc, tb, *, where: str, kind: str = "error") -> bool:
     """Queue a report for an exception (any thread). Never raises."""
     try:
@@ -258,7 +267,7 @@ def record_exception(exc_type, exc, tb, *, where: str, kind: str = "error") -> b
         frames = _frames(tb)
         location = frames[-1] if frames else "unknown"
         title = f"{exc_type.__name__} in {location}"
-        body = "".join(traceback.format_tb(tb)) + f"{exc_type.__name__}: {_message(exc)}\n"
+        body = location_trace(exc_type, tb)
         return _enqueue(build_report(kind, where, title, body, frames, exc_type.__name__, config))
     except Exception:
         return False
@@ -329,15 +338,38 @@ def collect_native_crashes() -> int:
     return found
 
 
+_NATIVE_FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+) in ([\w.<>]+)\s*$')
+_NATIVE_KEEP = re.compile(
+    r"^(Fatal Python error: [\w .:()-]{1,120}"
+    r"|Windows fatal exception: [\w .:()-]{1,80}"
+    r"|(?:Current thread|Thread) 0x[0-9a-fA-F]+[\w ()]*:?"
+    r"|\s*<no Python frame>"
+    r"|macOS crash: [\w ()]{1,80}|app [\w.+-]{1,40} / macOS [\w. ]{1,40}"
+    r"|termination: [\w :()-]{1,80})\s*$")
+
+
+def native_trace(text: str) -> str:
+    """Only lines of known shape survive (fatal-error kind, thread headers, and
+    frames as file name, line and function); anything else is dropped."""
+    kept = []
+    for line in text.splitlines():
+        frame = _NATIVE_FRAME.match(line)
+        if frame:
+            kept.append(f'  File "{Path(frame[1]).name}", line {frame[2]} in {frame[3]}')
+        elif _NATIVE_KEEP.match(line):
+            kept.append(line.strip())
+    return "\n".join(kept) + "\n"
+
+
 def _record_native(text: str, *, where: str) -> bool:
     config = _config()
     if not reports_enabled(config):
         return False
-    first = next((line for line in text.splitlines() if line.strip()), "Native crash")
-    frames = re.findall(r'File "([^"]+)", line \d+ in (\S+)', text)
-    names = [f"{Path(f).name}:{fn}" for f, fn in frames[:8]]
-    title = scrub(first.strip())[:200]
-    return _enqueue(build_report("crash", where, title, text, names, first.strip()[:60], config))
+    safe = native_trace(text)
+    first = next((line for line in safe.splitlines() if line.strip()), "Native crash")
+    frames = re.findall(r'File "([^"]+)", line \d+ in (\S+)', safe)
+    names = [f"{f}:{fn}" for f, fn in frames[:8]]
+    return _enqueue(build_report("crash", where, first[:200], safe, names, first[:60], config))
 
 
 def collect_macos_crash_logs(directory: Path | None = None) -> int:
