@@ -17,8 +17,9 @@ Linux: dictation for gamers on every desktop.
 - **Install Update installs it for you.** On the Mac the new version is
   checked (same developer, notarized by Apple), swapped in and reopened, so
   there's no dragging into Applications; Windows and the AppImage update in
-  place too. Aura waits for a dictation to finish first, and falls back to
-  the download when it can't install itself (Flatpak, no write access).
+  place too. Aura waits for a dictation to finish first, puts the previous
+  version back if the new one doesn't start, and falls back to the download
+  when it can't install itself (Flatpak, no write access).
 - **Crash reports from Beta.** When a beta crashes or hits an error, it
   tells Wayfinder the kind of error and where in Aura's code it happened,
   so it gets fixed: never the error message, audio, dictated text or

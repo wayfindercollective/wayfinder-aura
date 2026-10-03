@@ -175,35 +175,90 @@ class TestSwapHelpers:
         path.chmod(0o755)
         return path
 
+    TOKEN = "0123456789abcdef0123456789abcdef"
+
     def _mac(self, tmp_path, opener, pid=None, stage=True, wait=3):
         installed = self._bundle(tmp_path / "Wayfinder Aura.app", "old")
         staged = tmp_path / ".Wayfinder Aura.app.update"
         if stage:
             self._bundle(staged, "new")
+            (staged / "Contents" / "MacOS").mkdir()
+            self._script(staged / "Contents" / "MacOS" / "aura", "sleep 30")
         args = ["/bin/sh", "-c", app_installer._mac_helper_script(), "t",
                 str(pid or _exited_pid()), str(installed), str(staged),
                 str(tmp_path / ".previous"), str(opener), str(tmp_path / "failed"),
-                str(tmp_path / "launched"), str(wait)]
+                str(tmp_path / "launched"), str(wait), self.TOKEN]
         return installed, staged, args
 
+    # A stand-in for `open --env AURA_UPDATE_TOKEN=... <app>`: starts the
+    # app's binary and, like confirm_launch, writes "<token> <pid>".
+    def _opener(self, tmp_path, confirm=True, token=None):
+        body = f'echo "$*" >> "{tmp_path}/opened"\n'
+        if confirm:
+            body += ('[ "$1" = --env ] || exit 0\n'
+                     '"$3/Contents/MacOS/aura" & echo $! >> "' + str(tmp_path) + '/pids"\n'
+                     f'echo "{token or "${2#*=}"} $!" > "{tmp_path}/launched"\n')
+        return self._script(tmp_path / "open.sh", body)
+
+    def _reap(self, tmp_path):
+        for pid in (tmp_path / "pids").read_text().split() if (tmp_path / "pids").exists() else []:
+            try:
+                os.kill(int(pid), 9)
+            except OSError:
+                pass
+
     def test_mac_swap_keeps_the_new_copy_once_it_confirms(self, tmp_path):
-        opener = self._script(tmp_path / "open.sh",
-                              f'echo "$1" >> "{tmp_path}/opened"; : > "{tmp_path}/launched"')
-        installed, staged, args = self._mac(tmp_path, opener)
-        subprocess.run(args, check=True, timeout=30)
+        installed, staged, args = self._mac(tmp_path, self._opener(tmp_path))
+        try:
+            subprocess.run(args, check=True, timeout=30)
+        finally:
+            self._reap(tmp_path)
         assert (installed / "Contents" / "version").read_text() == "new"
         assert not staged.exists() and not (tmp_path / ".previous").exists()
         assert not (tmp_path / "failed").exists()
-        assert (tmp_path / "opened").read_text().split("\n")[0] == str(installed)
+        assert (tmp_path / "opened").read_text().splitlines()[0] == (
+            f"--env AURA_UPDATE_TOKEN={self.TOKEN} {installed}")
 
     def test_mac_new_copy_that_never_confirms_is_rolled_back(self, tmp_path):
-        opener = self._script(tmp_path / "open.sh", f'echo "$1" >> "{tmp_path}/opened"')
-        installed, staged, args = self._mac(tmp_path, opener, wait=2)
+        installed, staged, args = self._mac(tmp_path, self._opener(tmp_path, confirm=False), wait=2)
         subprocess.run(args, check=True, timeout=30)
         assert (installed / "Contents" / "version").read_text() == "old"
         assert not staged.exists() and not (tmp_path / ".previous").exists()
         assert (tmp_path / "failed").exists()
-        assert (tmp_path / "opened").read_text().splitlines() == [str(installed)] * 2
+        assert (tmp_path / "opened").read_text().splitlines()[1] == str(installed)
+
+    def test_mac_a_confirmation_without_this_updates_token_is_ignored(self, tmp_path):
+        # The re-check's case: the candidate hangs while some other Aura (or
+        # an older marker) confirms. The backup must survive and come back.
+        opener = self._opener(tmp_path, token="f" * 32)
+        installed, staged, args = self._mac(tmp_path, opener, wait=2)
+        try:
+            subprocess.run(args, check=True, timeout=30)
+        finally:
+            self._reap(tmp_path)
+        assert (installed / "Contents" / "version").read_text() == "old"
+        assert (tmp_path / "failed").exists() and not (tmp_path / ".previous").exists()
+
+    def test_mac_a_confirmation_from_a_process_outside_the_bundle_is_ignored(self, tmp_path):
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        opener = self._script(tmp_path / "open.sh",
+                              f'echo "{self.TOKEN} {other.pid}" > "{tmp_path}/launched"')
+        installed, _, args = self._mac(tmp_path, opener, wait=2)
+        try:
+            subprocess.run(args, check=True, timeout=30)
+        finally:
+            other.kill()
+            other.wait()
+        assert (installed / "Contents" / "version").read_text() == "old"
+        assert (tmp_path / "failed").exists()
+
+    def test_mac_a_confirmation_from_a_dead_process_is_ignored(self, tmp_path):
+        opener = self._script(tmp_path / "open.sh",
+                              f'echo "{self.TOKEN} {_exited_pid()}" > "{tmp_path}/launched"')
+        installed, _, args = self._mac(tmp_path, opener, wait=2)
+        subprocess.run(args, check=True, timeout=30)
+        assert (installed / "Contents" / "version").read_text() == "old"
+        assert (tmp_path / "failed").exists()
 
     def test_mac_failing_opener_is_rolled_back(self, tmp_path):
         installed, _, args = self._mac(tmp_path, "/usr/bin/false", wait=2)
@@ -219,8 +274,7 @@ class TestSwapHelpers:
 
     def test_mac_swap_waits_for_aura_to_exit(self, tmp_path):
         aura = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-        opener = self._script(tmp_path / "open.sh", f': > "{tmp_path}/launched"')
-        installed, _, args = self._mac(tmp_path, opener, pid=aura.pid)
+        installed, _, args = self._mac(tmp_path, self._opener(tmp_path), pid=aura.pid)
         helper = subprocess.Popen(args)
         try:
             with pytest.raises(subprocess.TimeoutExpired):
@@ -229,7 +283,10 @@ class TestSwapHelpers:
         finally:
             aura.kill()
             aura.wait()
-        helper.wait(timeout=20)
+        try:
+            helper.wait(timeout=20)
+        finally:
+            self._reap(tmp_path)
         assert (installed / "Contents" / "version").read_text() == "new"
 
     def _appimage(self, tmp_path, staged_body, wait=3):
@@ -238,16 +295,33 @@ class TestSwapHelpers:
         staged = self._script(tmp_path / ".update", staged_body)
         args = ["/bin/sh", "-c", app_installer._appimage_helper_script(), "t",
                 str(_exited_pid()), str(target), str(staged), str(tmp_path / "failed"),
-                str(tmp_path / "launched"), str(tmp_path / ".previous"), str(wait)]
+                str(tmp_path / "launched"), str(tmp_path / ".previous"), str(wait),
+                self.TOKEN]
         return target, staged, args
 
     def test_appimage_swap_keeps_the_path_once_the_new_one_confirms(self, tmp_path):
         target, staged, args = self._appimage(
-            tmp_path, f'echo new >> "{tmp_path}/ran"; : > "{tmp_path}/launched"; sleep 1')
+            tmp_path, f'echo new >> "{tmp_path}/ran"; '
+                      f'echo "$AURA_UPDATE_TOKEN $$" > "{tmp_path}/launched"; sleep 3')
         subprocess.run(args, check=True, timeout=30)
         assert (tmp_path / "ran").read_text().split() == ["new"]
         assert not staged.exists() and not (tmp_path / ".previous").exists()
         assert "launched" in target.read_text() and os.access(target, os.X_OK)
+
+    def test_appimage_confirmed_by_another_process_is_rolled_back(self, tmp_path):
+        # The re-check's Linux probe: the new AppImage hangs and an unrelated
+        # Aura writes the marker. Without this update's token it is ignored.
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            target, _, args = self._appimage(
+                tmp_path, f'echo new >> "{tmp_path}/ran"; '
+                          f'echo "{"f" * 32} {other.pid}" > "{tmp_path}/launched"; sleep 30', wait=2)
+            subprocess.run(args, check=True, timeout=30)
+        finally:
+            other.kill()
+            other.wait()
+        assert 'echo old' in target.read_text()
+        assert (tmp_path / "failed").exists() and not (tmp_path / ".previous").exists()
 
     def test_appimage_that_cannot_run_is_rolled_back(self, tmp_path):
         # The review's case: accepted magic, but the file exits 126.
@@ -280,11 +354,21 @@ class TestLeftovers:
 
     def test_the_new_version_confirms_its_launch_before_cleanup(self, monkeypatch, tmp_path):
         monkeypatch.setattr(app_installer, "_launch_marker", lambda: tmp_path / "launched")
+        monkeypatch.setenv(app_installer.TOKEN_ENV, "ab" * 16)
         app_installer.confirm_launch()
-        assert (tmp_path / "launched").exists()
+        assert (tmp_path / "launched").read_text() == f"{'ab' * 16} {os.getpid()}\n"
+        assert app_installer.TOKEN_ENV not in os.environ  # children never inherit it
         src = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
         body = src.split("def startup_pass() -> None:", 1)[1].split("\n\n", 1)[0]
         assert body.index("confirm_launch()") < body.index("cleanup_stale_staging()")
+
+    def test_a_launch_the_helper_did_not_start_confirms_nothing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app_installer, "_launch_marker", lambda: tmp_path / "launched")
+        monkeypatch.delenv(app_installer.TOKEN_ENV, raising=False)
+        app_installer.confirm_launch()
+        monkeypatch.setenv(app_installer.TOKEN_ENV, "not-a-token")
+        app_installer.confirm_launch()
+        assert not (tmp_path / "launched").exists()
 
     def test_a_failed_swap_hands_over_the_download_for_one_launch(self, monkeypatch, tmp_path):
         marker = tmp_path / "update-install-failed"

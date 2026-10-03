@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -111,13 +112,25 @@ CONFIRM_SECONDS = 180
 STALE_AFTER_S = 3600  # leftovers older than this are never a live update's
 
 
+# The swap helper hands the copy it starts a one-off token in this variable
+# (and nothing else gets it): only that copy can confirm the update. Another
+# Aura starting meanwhile (a second install, a source run) has no token, so a
+# hung update is still rolled back.
+TOKEN_ENV = "AURA_UPDATE_TOKEN"
+
+
 def confirm_launch() -> None:
-    """Called by a running app once its UI is up: an update helper waiting on
-    this launch may now drop the previous copy."""
+    """Called by a running app once its UI is up: when the swap helper started
+    this copy, tell it (token and PID) that it may drop the previous copy."""
+    token = os.environ.pop(TOKEN_ENV, "")
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        return
     try:
         marker = _launch_marker()
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(os.getpid()), encoding="utf-8")
+        partial = marker.with_name(marker.name + ".part")
+        partial.write_text(f"{token} {os.getpid()}\n", encoding="utf-8")
+        os.replace(partial, marker)
     except OSError:
         pass
 
@@ -220,21 +233,34 @@ def verify_mac_app(candidate: Path, running: Path) -> str | None:
     return None
 
 
+# Shell test both helpers use for "the launch marker names a live process
+# that was given this update's token" (confirm_launch writes "token pid").
+def _confirmed(marker: str, token: str, extra: str = "") -> str:
+    return (f'{{ [ -e "{marker}" ] && read -r tok pid < "{marker}" && '
+            f'[ "$tok" = "{token}" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null{extra}; }}')
+
+
 def _mac_helper_script() -> str:
     # $1 pid, $2 installed bundle, $3 staged bundle, $4 backup path, $5 opener,
-    # $6 failure marker, $7 launch marker, $8 seconds to wait for it.
-    # Waits for Aura to exit, swaps and opens the new copy, and keeps the old
-    # one until the new one confirms it started (confirm_launch). A refused
+    # $6 failure marker, $7 launch marker, $8 seconds to wait for it, $9 token.
+    # Waits for Aura to exit, swaps and opens the new copy with the token, and
+    # keeps the old one until that copy confirms it started (confirm_launch:
+    # the token, and a live PID running from the installed bundle). A refused
     # swap, a failing opener or a new copy that never confirms puts the old
     # copy back, leaves the failure marker (the next launch hands over the
     # download instead of retrying) and opens the old copy.
+    in_bundle = (' && case "$(ps -ww -p "$pid" -o command= 2>/dev/null)" in '
+                 '*"$2/Contents/MacOS/"*) true;; *) false;; esac')
     return (
         'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
         'rm -f "$7"; rm -rf "$4"; '
         'if mv "$2" "$4" && mv "$3" "$2"; then '
-        '"$5" "$2"; i=0; '
-        'while [ "$i" -lt "$8" ] && [ ! -e "$7" ]; do sleep 1; i=$((i+1)); done; '
-        'if [ -e "$7" ]; then rm -rf "$4"; exit 0; fi; '
+        f'"$5" --env "{TOKEN_ENV}=$9" "$2"; i=0; ok=; '
+        'while [ "$i" -lt "$8" ]; do '
+        f'if {_confirmed("$7", "$9", in_bundle)}; then ok=1; break; fi; '
+        'sleep 1; i=$((i+1)); done; '
+        'rm -f "$7"; '
+        'if [ -n "$ok" ]; then rm -rf "$4"; exit 0; fi; '
         'pkill -f "$2/Contents/MacOS/" 2>/dev/null; sleep 2; '
         'rm -rf "$3"; mv "$2" "$3" && mv "$4" "$2"; rm -rf "$3"; '
         'else [ -e "$2" ] || mv "$4" "$2"; rm -rf "$3"; fi; '
@@ -276,7 +302,8 @@ def _prepare_mac(url: str, progress: Progress) -> Outcome:
         subprocess.Popen(
             ["/bin/sh", "-c", _mac_helper_script(), "wayfinder-update",
              str(os.getpid()), str(running), str(staged), str(backup), "/usr/bin/open",
-             str(_failure_marker()), str(_launch_marker()), str(CONFIRM_SECONDS)],
+             str(_failure_marker()), str(_launch_marker()), str(CONFIRM_SECONDS),
+             secrets.token_hex(16)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
@@ -309,18 +336,20 @@ def _prepare_windows(url: str, progress: Progress) -> Outcome:
 
 def _appimage_helper_script() -> str:
     # $1 pid, $2 AppImage path, $3 staged AppImage, $4 failure marker,
-    # $5 launch marker, $6 backup path, $7 seconds to wait for confirmation.
-    # Keeps the old AppImage until the new one confirms it started; a new one
-    # that exits early (not runnable) or never confirms is stopped, the old
-    # one is put back and run.
+    # $5 launch marker, $6 backup path, $7 seconds to wait for confirmation,
+    # $8 token. Keeps the old AppImage until the new one (started with the
+    # token) confirms it started; a new one that exits early (not runnable) or
+    # never confirms is stopped, the old one is put back and run.
     return (
         'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
         'rm -f "$5"; '
         'if mv -f "$2" "$6" && mv -f "$3" "$2"; then '
-        '"$2" >/dev/null 2>&1 & child=$!; i=0; '
-        'while [ "$i" -lt "$7" ] && [ ! -e "$5" ] && kill -0 "$child" 2>/dev/null; '
-        'do sleep 1; i=$((i+1)); done; '
-        'if [ -e "$5" ]; then rm -f "$6"; exit 0; fi; '
+        f'{TOKEN_ENV}="$8" "$2" >/dev/null 2>&1 & child=$!; i=0; ok=; '
+        'while [ "$i" -lt "$7" ] && kill -0 "$child" 2>/dev/null; do '
+        f'if {_confirmed("$5", "$8")}; then ok=1; break; fi; '
+        'sleep 1; i=$((i+1)); done; '
+        'rm -f "$5"; '
+        'if [ -n "$ok" ]; then rm -f "$6"; exit 0; fi; '
         'kill "$child" 2>/dev/null; sleep 1; mv -f "$6" "$2"; '
         'else [ -e "$2" ] || mv -f "$6" "$2"; rm -f "$3"; fi; '
         ': > "$4"; exec "$2"'
@@ -346,7 +375,7 @@ def _prepare_appimage(url: str, progress: Progress) -> Outcome:
             ["/bin/sh", "-c", _appimage_helper_script(), "wayfinder-update",
              str(os.getpid()), str(target), str(staged), str(_failure_marker()),
              str(_launch_marker()), str(target.parent / f".{target.name}.previous"),
-             str(CONFIRM_SECONDS)],
+             str(CONFIRM_SECONDS), secrets.token_hex(16)],
             env=host_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
