@@ -939,13 +939,14 @@ def test_right_alt_masks_every_auto_repeat_while_held(monkeypatch):
     masks = []
     pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
     press(pl.Key.alt_r)
-    time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+    # The hold fires on a timer thread. Wait for its event before testing
+    # repeats; a fixed sleep can release Alt first on a busy CI host.
+    assert events.get(timeout=2) == (EventType.HOTKEY_PRESSED, pl.HOLD_START)
     press(pl.Key.alt_r)      # keyboard auto-repeat
     press(pl.Key.alt_r)
     release(pl.Key.alt_r)
     assert masks == ["mask"] * 3
-    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
-                              (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_END)]
 
 
 def test_only_a_right_alt_hotkey_sends_the_menu_mask(monkeypatch):

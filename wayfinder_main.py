@@ -3653,6 +3653,15 @@ def resolve_status_indicator_target(
     return "none"
 
 
+def visual_overlay_mode(platform: str, overlay_type: str) -> str | None:
+    """Use a separate Qt process when a hidden Mac app needs a visible pill."""
+    if overlay_type == "always_on":
+        return "persistent"
+    if platform == "darwin" and overlay_type == "disappearing":
+        return "transient"
+    return None
+
+
 def normalize_indicator_audio_level(value) -> float:
     """Convert recorder scalar types (including NumPy float32) to finite 0..1."""
     try:
@@ -4572,14 +4581,24 @@ class FloatingIndicator:
         glow_b = int(34 + b * 0.05)
         inner_glow_color = f"#{glow_r:02x}{glow_g:02x}{glow_b:02x}"
         
-        self.window.configure(fg_color=shadow_color)
+        # Tk's toplevel and CTk's outer frame each have rectangular backing
+        # pixels outside the rounded pill. Key out their shared backdrop on
+        # Windows so only the rounded border and pill remain.
+        window_bg = "#010203" if IS_WINDOWS else shadow_color
+        self.window.configure(fg_color=window_bg)
+        if IS_WINDOWS:
+            try:
+                self.window.attributes("-transparentcolor", window_bg)
+            except tk.TclError:
+                window_bg = shadow_color
+                self.window.configure(fg_color=window_bg)
         
         # Outer frame with blue rim light (pre-blended, no alpha)
         self.glow_frame = ctk.CTkFrame(
             self.window,
-            fg_color=shadow_color,
+            fg_color=window_bg if IS_WINDOWS else shadow_color,
             corner_radius=RADIUS["lg"],  # Squircle feel
-            border_width=1,
+            border_width=0 if IS_WINDOWS else 1,
             border_color=COLORS["border_rim"],  # Pre-blended 10% blue
         )
         self.glow_frame.pack(padx=0, pady=0)
@@ -5100,8 +5119,12 @@ class OverlayController:
         log_callback=None,
         want_tray: bool = False,
         tray_only: bool = False,
+        cancel_hint: str = "",
     ):
         self._process: subprocess.Popen | None = None
+        # "✕ Shift+Esc" above the pill while recording; kept here so a restarted
+        # overlay process gets it again (passed as --cancel-hint).
+        self._cancel_hint = cancel_hint or ""
         # When True, the overlay subprocess hosts a QSystemTrayIcon (used when the main
         # process has no in-process pystray tray — the Flatpak). tray_available is re-set
         # live from the overlay's ready handshake on each (re)start, so it never goes stale.
@@ -5284,6 +5307,8 @@ class OverlayController:
                     cmd_args.append(f"--offset={offset}")
                     cmd_args.append(f"--anchor={anchor}")
                     cmd_args.append(f"--quality={quality}")
+                    if self._cancel_hint:
+                        cmd_args.append(f"--cancel-hint={self._cancel_hint}")
                 def _overlay_preexec() -> None:
                     # If the main process is hard-killed, the overlay (tray) must not
                     # outlive it. Linux PR_SET_PDEATHSIG delivers SIGTERM to the child
@@ -5555,6 +5580,14 @@ class OverlayController:
     def set_quality(self, quality: str):
         """Set the overlay render quality live ('high' | 'performance')."""
         self._send_command({"cmd": "quality", "value": quality})
+
+    def set_cancel_hint(self, hint: str):
+        """The key that discards a recording, shown above the pill while recording."""
+        hint = hint or ""
+        if hint == self._cancel_hint:
+            return
+        self._cancel_hint = hint
+        self._send_command({"cmd": "cancel_hint", "value": hint})
 
     def quit(self):
         """Shut down the overlay subprocess."""
@@ -6166,6 +6199,7 @@ class WayfinderApp(ctk.CTk):
             self.config.get("enable_tray_icon", True),
         )
         want_visual = overlay_enabled and not getattr(self, "_game_mode", False)
+        qt_visual_mode = visual_overlay_mode(sys.platform, overlay_type) if want_visual else None
         initial_style = self.config.get("output_tone", "minimal")
 
         def _start_overlay_controller(*, tray_only: bool) -> bool:
@@ -6176,12 +6210,13 @@ class WayfinderApp(ctk.CTk):
                 return False
             self.overlay_controller = OverlayController(
                 audio_level_callback=get_audio_level,
-                mode="persistent",
+                mode=qt_visual_mode if not tray_only else "persistent",
                 initial_style=initial_style,
                 config=self.config,
                 log_callback=self.log,
                 want_tray=want_tray or tray_only,
                 tray_only=tray_only,
+                cancel_hint=self._cancel_hotkey_display() or "",
             )
             self.overlay_controller._start_process()
             if not tray_only:
@@ -6197,10 +6232,14 @@ class WayfinderApp(ctk.CTk):
             # Game Mode: neither the PyQt overlay nor the CTk indicator can render over a
             # fullscreen gamescope game — feedback is audio cues only (feedback/audio.py).
             self.log("🎮 Game Mode: visual overlay disabled (audio cues only)")
-        elif want_visual and overlay_type == "always_on":
+        elif qt_visual_mode is not None:
             if _start_overlay_controller(tray_only=False):
                 self._use_pyqt_overlay = True
-                self.log("✨ Using Always On indicator (PyQt6)")
+                self.log(
+                    "✨ Using Disappearing indicator (PyQt6)"
+                    if qt_visual_mode == "transient"
+                    else "✨ Using Always On indicator (PyQt6)"
+                )
             else:
                 self.log("⚠ PyQt6 not available, using Disappearing indicator")
         elif want_visual:
@@ -9655,7 +9694,7 @@ class WayfinderApp(ctk.CTk):
         self.overlay_type_var = ctk.StringVar(value=overlay_type)
         overlay_type_labels = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
         }
         self.overlay_type_dropdown = self.create_dropdown_row(
             overlay_content, "Indicator Style",
@@ -12638,7 +12677,7 @@ class WayfinderApp(ctk.CTk):
         return 0.0
 
     def _has_visual_pyqt_overlay(self) -> bool:
-        """True when the Always On PyQt pill is the on-screen status surface.
+        """True when the PyQt pill owns the on-screen status surface.
 
         tray_only controllers host the system tray only — they must NOT steal
         show/hide from FloatingIndicator (Disappearing mode).
@@ -12656,7 +12695,7 @@ class WayfinderApp(ctk.CTk):
 
         state: ``listening`` | ``processing`` | ``ready`` | ``hide``
 
-        Returns the controller show/update result when using PyQt Always On
+        Returns the controller show/update result when using a PyQt pill
         (so callers can retry critical ready transitions); otherwise None.
         """
         ctrl = getattr(self, "overlay_controller", None)
@@ -12710,7 +12749,7 @@ class WayfinderApp(ctk.CTk):
         return want_tray
 
     def _start_live_overlay_controller(self, *, tray_only: bool, want_tray: bool) -> bool:
-        """Start Always On / tray-only subprocess mid-session. Returns True on success."""
+        """Start visual / tray-only subprocess mid-session. Returns True on success."""
         try:
             import PyQt6  # noqa: F401
         except ImportError:
@@ -12718,7 +12757,9 @@ class WayfinderApp(ctk.CTk):
         try:
             self.overlay_controller = OverlayController(
                 audio_level_callback=None if tray_only else self._audio_level_for_overlay,
-                mode="persistent",
+                mode=("persistent" if tray_only else
+                      visual_overlay_mode(sys.platform, self.config.get("overlay_type", "always_on"))
+                      or "persistent"),
                 initial_style=self.config.get("output_tone", "minimal"),
                 config=self.config,
                 log_callback=self.log,
@@ -12892,8 +12933,8 @@ class WayfinderApp(ctk.CTk):
                 self.log("🙈 Status overlay off")
             return
 
-        # Visual on — Always On (PyQt) preferred; CTk disappearing otherwise.
-        if overlay_type == "always_on":
+        # Mac's disappearing pill must live outside the hidden Tk application.
+        if visual_overlay_mode(sys.platform, overlay_type) is not None:
             if self._start_live_overlay_controller(tray_only=False, want_tray=want_tray):
                 self.log("✨ Status overlay on")
                 return
@@ -16709,7 +16750,7 @@ class WayfinderApp(ctk.CTk):
         
         type_names = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
         }
         self.log(f"⚙ Status indicator: {type_names.get(value, value)}")
         
@@ -18121,13 +18162,41 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def _deactivate_license(self) -> None:
-        """Remove the locally stored license after the inline confirmation."""
-        from wayfinder.license import remove_license, get_feature_gate
-        remove_license()
+        """Remove the license after the inline confirmation.
+
+        Freeing the activation slot is a call to the licensing service, so it
+        runs off the Tk thread; _finish_license_removal updates the UI.
+        """
+        feedback = getattr(self, "_license_feedback", None)
+        if feedback is not None:
+            try:
+                feedback.configure(text="Removing the license…",
+                                   text_color=COLORS["text_muted"])
+            except Exception:
+                pass
+
+        def _release() -> None:
+            from wayfinder.license import LicenseRelease, release_license, remove_license
+
+            try:
+                result = release_license()
+            except Exception:
+                remove_license()
+                result = LicenseRelease(False, "error", "License removed from this device.")
+            self.event_queue.put(
+                (EventType.UI_CALLBACK, lambda: self._finish_license_removal(result)))
+
+        threading.Thread(target=_release, daemon=True, name="license-release").start()
+
+    def _finish_license_removal(self, result) -> None:
+        """Tk thread: the license is gone; show Free and say whether the slot was freed."""
+        from wayfinder.license import get_feature_gate
         self.feature_gate = get_feature_gate(force_refresh=True)
         # Entitlements changed — republish so locked_tabs is not stale.
         self._write_status_breadcrumb()
-        self.log("License removed from this device")
+        self.log("License removed from this device"
+                 + ("; activation slot freed" if result.released
+                    else f"; activation slot not freed ({result.status})"))
         from wayfinder.config import enforce_license_config
         repaired = enforce_license_config(self.config, self.feature_gate)
         if repaired:
@@ -18157,7 +18226,7 @@ class WayfinderApp(ctk.CTk):
         feedback = getattr(self, "_license_feedback", None)
         if feedback is not None:
             feedback.configure(
-                text="License removed from this device.",
+                text=result.message,
                 text_color=COLORS["text_muted"],
             )
 
@@ -18590,11 +18659,13 @@ class WayfinderApp(ctk.CTk):
         """The key that discards a recording from any app, or None if unbound.
 
         Linux portal sessions bind the cancel-dictation shortcut, so the
-        desktop's own trigger is the truth; every other listener (macOS,
-        Windows, X11 pynput, evdev) takes a bare Escape.
+        desktop's own trigger is the truth. Every other listener (macOS,
+        Windows, X11 pynput, evdev) cancels on Escape with or without Shift,
+        so Shift+Esc is the one key taught everywhere (overlay hint, hero,
+        welcome guide).
         """
         if getattr(self, "_hotkey_backend", None) != "portal":
-            return "Esc"
+            return "Shift+Esc"
         triggers = getattr(self, "_portal_triggers", None)
         if triggers is None:  # bind still in flight: what the app asked for
             from wayfinder.hotkeys.dbus import encode_trigger
@@ -18791,6 +18862,12 @@ class WayfinderApp(ctk.CTk):
             return
         from wayfinder.hotkeys.dbus import parse_trigger_description
         self._portal_triggers = dict(triggers)
+        controller = getattr(self, "overlay_controller", None)
+        if controller is not None:
+            try:
+                controller.set_cancel_hint(self._cancel_hotkey_display() or "")
+            except Exception:
+                pass
         changed = []
         for shortcut_id, key_field, mods_field, target in (
             ("record-toggle", "hotkey_key", "hotkey_modifiers", "record"),
@@ -24143,7 +24220,7 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         self._processing_start_time = None
-        # Return overlay to ready (Always On) or hide Disappearing CTk pill.
+        # Return overlay to ready (Always On) or hide Disappearing pill.
         # Verify critical PyQt ready reaches the subprocess so it isn't stuck "Listening…".
         try:
             ok = self._set_status_indicator("ready")

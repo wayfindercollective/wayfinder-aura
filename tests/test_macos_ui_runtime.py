@@ -6,10 +6,76 @@ import sys
 import importlib.util
 from queue import Queue
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import wayfinder_main
+
+
+def test_disappearing_uses_separate_qt_process_only_on_macos():
+    assert wayfinder_main.visual_overlay_mode("darwin", "disappearing") == "transient"
+    assert wayfinder_main.visual_overlay_mode("darwin", "always_on") == "persistent"
+    assert wayfinder_main.visual_overlay_mode("linux", "disappearing") is None
+    assert wayfinder_main.visual_overlay_mode("win32", "disappearing") is None
+
+
+@pytest.mark.parametrize("tray_required", [False, True])
+def test_macos_enabling_disappearing_uses_qt_instead_of_hidden_tk(monkeypatch, tray_required):
+    started = []
+    monkeypatch.setattr(wayfinder_main.sys, "platform", "darwin")
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda config: None)
+    monkeypatch.setattr(
+        wayfinder_main, "should_host_qt_tray", lambda *args: tray_required
+    )
+    monkeypatch.setattr(
+        wayfinder_main, "FloatingIndicator",
+        lambda *args, **kwargs: pytest.fail("Tk indicator cannot survive native Hide"),
+    )
+    app = SimpleNamespace(
+        overlay_enabled_var=SimpleNamespace(get=lambda: True),
+        config={"overlay_type": "disappearing", "enable_tray_icon": True},
+        _stop_overlay_process=lambda: False,
+        _start_live_overlay_controller=lambda **kwargs: started.append(kwargs) or True,
+        log=lambda message: None,
+    )
+
+    wayfinder_main.WayfinderApp._on_overlay_enabled_toggled(app)
+
+    assert started == [{"tray_only": False, "want_tray": tray_required}]
+
+
+def test_live_disappearing_controller_starts_in_focus_safe_mode(monkeypatch):
+    created = []
+    monkeypatch.setattr(wayfinder_main.sys, "platform", "darwin")
+
+    class Controller:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+        def _start_process(self):
+            return True
+
+        def set_quality(self, quality):
+            pass
+
+        def show(self, state):
+            assert state == "ready"
+
+    monkeypatch.setattr(wayfinder_main, "OverlayController", Controller)
+    app = SimpleNamespace(
+        config={"overlay_type": "disappearing"},
+        app_state=wayfinder_main.AppState.IDLE,
+        _audio_level_for_overlay=lambda: 0.0,
+        log=lambda message: None,
+    )
+
+    assert wayfinder_main.WayfinderApp._start_live_overlay_controller(
+        app, tray_only=False, want_tray=False
+    )
+
+    assert created[0]["mode"] == "transient"
+    assert app._use_pyqt_overlay is True
 
 
 def test_aqua_idle_matches_linux_while_active_uses_thirty_fps():
