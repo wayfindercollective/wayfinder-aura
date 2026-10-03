@@ -9,7 +9,7 @@
 ; Linux AppImage/Flatpak or macOS .app build.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.8"
+  #define MyAppVersion "1.2.0"
 #endif
 #define MyAppName "Wayfinder Aura"
 #define MyAppPublisher "Wayfinder Collective"

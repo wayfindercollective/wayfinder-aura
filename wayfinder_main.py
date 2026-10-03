@@ -1555,6 +1555,12 @@ SETTING_TOOLTIPS = {
         "Turn it off if your menu bar is crowded."
     ),
     "ui_scale": "Size of Aura's window and text.",
+    "update_channel": (
+        "Stable: tested releases, every few weeks.\n"
+        "Beta: the newest build, as often as daily. New features sooner, "
+        "and sometimes new bugs.\n"
+        "Going back to Stable keeps your version until the next stable release."
+    ),
     "gamer_mode": (
         "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
         "M+...), keeps your words as said, and sends them to chat: don't press "
@@ -9660,6 +9666,8 @@ class WayfinderApp(ctk.CTk):
         if IS_MACOS or IS_WINDOWS:
             self._create_login_item_row(system_content)
 
+        self._create_update_channel_row(system_content)
+
         yield "system"
 
         # === BENTO TILE: Status Overlay ===
@@ -15295,7 +15303,7 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_check, daemon=True).start()
 
-    def _check_app_update_background(self) -> None:
+    def _check_app_update_background(self, force: bool = False) -> None:
         """Check GitHub for a newer app release in a background thread.
 
         Network and parsing live in core/app_updates (cached, once/day); only
@@ -15304,13 +15312,15 @@ class WayfinderApp(ctk.CTk):
         update nag must never become a startup error."""
         if not self.config.get("check_for_app_updates", True):
             return
+        channel = self.config.get("update_channel") or None
 
         def _check():
             try:
                 from wayfinder import __version__ as current_version
                 from wayfinder.core.app_updates import check_for_app_update
 
-                info = check_for_app_update(current_version)
+                info = check_for_app_update(
+                    current_version, force=force, channel=channel)
                 if not info.get("update_available"):
                     return
                 if info.get("latest_version") == self.config.get(
@@ -15321,6 +15331,34 @@ class WayfinderApp(ctk.CTk):
                 pass  # Silent failure - don't annoy user
 
         threading.Thread(target=_check, daemon=True).start()
+
+    _UPDATE_CHANNEL_CHOICES = {"Stable": "stable", "Beta": "beta"}
+
+    def _create_update_channel_row(self, parent) -> None:
+        """Settings ▸ System: which releases this install is offered."""
+        from wayfinder import __version__ as current_version
+        from wayfinder.core.app_updates import channel_label
+
+        self._update_channel_var = ctk.StringVar(
+            value=channel_label(current_version, self.config.get("update_channel"))
+        )
+        self.create_dropdown_row(
+            parent, "Updates", list(self._UPDATE_CHANNEL_CHOICES),
+            self._update_channel_var, self._on_update_channel_changed,
+            tooltip=SETTING_TOOLTIPS["update_channel"], width=160,
+        )
+
+    def _on_update_channel_changed(self, choice: str) -> None:
+        """Persist the update channel and look for that channel's newest
+        release right away (the daily check would otherwise wait a day)."""
+        channel = self._UPDATE_CHANNEL_CHOICES.get(choice)
+        if channel is None or channel == self.config.get("update_channel"):
+            return
+        self.config["update_channel"] = channel
+        save_config(self.config)
+        self.log(f"⟳ Updates: {choice}")
+        self._hide_app_update_banner()
+        self._check_app_update_background(force=True)
 
     def _show_app_update_banner(self, info: dict) -> None:
         """Show the app-update banner on the Dictate tab (Tk thread only).
@@ -15404,12 +15442,15 @@ class WayfinderApp(ctk.CTk):
         The request runs off the Tk thread and the verdict returns through
         event_queue. Unlike the daily check it ignores the settings toggle and
         a dismissed version — the user asked."""
+        channel = self.config.get("update_channel") or None
+
         def _check():
             try:
                 from wayfinder import __version__ as current_version
                 from wayfinder.core.app_updates import check_for_app_update
 
-                info = check_for_app_update(current_version, force=True)
+                info = check_for_app_update(
+                    current_version, force=True, channel=channel)
             except Exception as exc:
                 info = {"update_available": False, "error": str(exc)}
             self.event_queue.put(

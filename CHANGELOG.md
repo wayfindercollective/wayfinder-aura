@@ -11,6 +11,9 @@ Linux: dictation for gamers on every desktop.
 
 ### Added
 
+- **Choose Stable or Beta updates** (Settings → System → Updates). Beta
+  offers the newest build of Aura, as often as daily; Stable offers tested
+  releases every few weeks.
 - **Aura types into every app on Wayland desktops.** On KDE Plasma and GNOME
   the desktop's remote-control (RemoteDesktop) portal delivers the keys, so
   native Wayland apps receive dictation too, not only X11/XWayland windows.

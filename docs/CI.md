@@ -123,19 +123,21 @@ native inference binaries, and release-grade package smokes.
 
 ## User update contract
 
-A push to `main` validates source but is not itself a public release. Shipping
-every merged commit would make an accidental merge an immediate customer
-rollout and would provide no stable version for Flatpak/AppStream metadata.
+A push to `main` validates source but is not itself a customer release.
+Shipping every merged commit to customers would make an accidental merge an
+immediate rollout and would provide no stable version for Flatpak/AppStream
+metadata. The full process is [RELEASING.md](RELEASING.md); in short:
 
-The release boundary is a version tag:
-
-1. Merge the release commit into `main` by pull request and wait for `Quality`.
-2. Build and test the exact commit with
-   `scripts/ci/build-flatpak-on-mini-inf.sh`.
-3. After hands-on signoff, push the matching `vX.Y.Z` tag.
-4. The tag workflow builds both packages and publishes a GitHub Release.
-5. Direct-install users are notified in-app. Stable installs follow stable
-   releases; prerelease installs also follow newer prereleases.
+1. Every night the **Beta** workflow publishes `vX.Y.Z-beta.N` (a GitHub
+   prerelease) from `main`, if `main` moved and its required checks passed.
+   Only users who chose Beta (Settings → System → Updates) are offered it.
+2. A beta that has held up for at least 5 days is promoted with
+   `scripts/release/promote.py`: it tags `vX.Y.Z` on exactly the beta's code.
+   For Linux, build and test that commit with
+   `scripts/ci/build-flatpak-on-mini-inf.sh` and sign off hands-on first.
+3. The tag workflow builds the packages and publishes the GitHub Release.
+4. Direct-install users are notified in-app. Stable installs follow stable
+   releases; Beta (and beta builds that never chose) also follow betas.
 6. Once accepted on Flathub, its external-data checker notices new stable tags
    and opens an update PR. Merging that green PR publishes the Flatpak update;
    Discover/GNOME Software can then install it automatically.
