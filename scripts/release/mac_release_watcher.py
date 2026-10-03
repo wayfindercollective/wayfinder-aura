@@ -28,7 +28,6 @@ throttled disk I/O), and its peak memory is logged for Infra Mac's budget.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -140,6 +139,8 @@ def run_build(tag: str, env: dict) -> int:
 
 
 def main() -> int:
+    import fcntl  # macOS only; imported here so the module loads on Windows test runs
+
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOCK, "w") as lock:
         try:

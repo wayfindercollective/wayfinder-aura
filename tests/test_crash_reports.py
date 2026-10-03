@@ -101,7 +101,9 @@ class TestScrubbing:
         import time
         start = time.perf_counter()
         out = cr.scrub("x" * 200_000 + " a.b@example.com " + "y" * 200_000)
-        assert time.perf_counter() - start < 0.5  # it runs on the Tk thread
+        # Linear: ~0.2 s here, under 1 s on a busy CI runner. The quadratic
+        # pattern took 4 s for 40,000 characters, so minutes for this input.
+        assert time.perf_counter() - start < 5
         assert "a.b@example.com" not in out
 
     def test_long_exception_messages_are_capped(self, monkeypatch):
