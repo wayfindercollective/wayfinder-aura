@@ -143,21 +143,66 @@ def test_macos_hide_uses_native_application_hide(monkeypatch):
     assert calls == [None]
 
 
-def test_macos_status_menu_defers_until_native_menu_unwinds(monkeypatch):
+def _tray_app(scheduled, **attrs):
     import queue
 
-    ran = []
-    monkeypatch.setattr(wayfinder_main.sys, "platform", "darwin")
-    action_queue = queue.Queue()
-    app = type("App", (), {"_tray_action_queue": action_queue})()
+    cls = wayfinder_main.WayfinderApp
+    return type("App", (), {
+        "_tray_action_queue": queue.Queue(),
+        "event_queue": queue.Queue(),
+        "after": lambda self, ms, fn: scheduled.append((ms, fn)),
+        "log": lambda self, message: None,
+        "_refresh_tray_menu": lambda self: None,
+        "_drain_tray_actions": cls._drain_tray_actions,
+        "_schedule_tray_actions": cls._schedule_tray_actions,
+        **attrs,
+    })()
+
+
+def test_macos_status_menu_defers_until_native_menu_unwinds(monkeypatch):
+    ran, scheduled = [], []
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    app = _tray_app(scheduled)
 
     wayfinder_main.WayfinderApp._dispatch_tray_action(
         app, lambda: ran.append(True)
     )
 
-    assert ran == []
-    action_queue.get_nowait()()
+    # The PyObjC callback only queues: the action, and a pipe wake-up for Tk.
+    assert ran == [] and scheduled == []
+    event_type, wake = app.event_queue.get_nowait()
+    assert event_type == wayfinder_main.EventType.UI_CALLBACK
+    # Tk handles the wake-up by arming a one-shot, still not running inline.
+    wake()
+    assert ran == [] and [ms for ms, _ in scheduled] == [100]
+    scheduled.pop()[1]()
     assert ran == [True]
+    assert app._tray_action_queue.empty()
+
+
+def test_macos_idle_poll_is_a_backstop_once_the_event_pipe_is_attached(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    assert wayfinder_main._MACOS_IDLE_SAFETY_POLL_MS >= 500  # CLAUDE.md rule 1
+
+    def next_poll(**attrs):
+        scheduled = []
+        attrs.setdefault("app_state", wayfinder_main.AppState.IDLE)
+        app = _tray_app(scheduled, _draining_events=False,
+                        poll_events=wayfinder_main.WayfinderApp.poll_events, **attrs)
+        app.handle_event = lambda event_type, data: None
+        app.poll_events()
+        return [ms for ms, fn in scheduled if fn == app.poll_events]
+
+    assert next_poll(_event_wakeup_attached=True) == [
+        wayfinder_main._MACOS_IDLE_SAFETY_POLL_MS
+    ]
+    # Recording (or Detect armed) keeps the 100 ms floor.
+    assert next_poll(
+        _event_wakeup_attached=True,
+        app_state=wayfinder_main.AppState.RECORDING,
+    ) == [100]
+    # No pipe (createfilehandler failed, or another OS): the 250 ms poll stays.
+    assert next_poll(_event_wakeup_attached=False) == [250]
 
 
 def test_macos_stuck_microphone_relaunch_is_marshaled_to_tk():
@@ -685,6 +730,21 @@ def test_ctk_dpi_poll_is_idle_on_macos():
         assert _ctk.ScalingTracker.update_loop_interval >= 60_000
         # The check it would run is a constant on macOS, so nothing is lost.
         assert _ctk.ScalingTracker.get_window_dpi_scaling(None) == 1
+
+
+def test_ctk_background_polls_stay_idle():
+    import re
+    import customtkinter as _ctk
+
+    # CTk's 30 ms system light/dark poll was 32 of 36 idle wakeups/s.
+    assert _ctk.AppearanceModeTracker.update_loop_interval >= 60_000
+    # That is only lossless while the app pins dark mode; following the
+    # system theme would need the fast poll (or a native notification).
+    source = Path(wayfinder_main.__file__).read_text(encoding="utf-8")
+    modes = re.findall(r"set_appearance_mode\(\s*[\"'](\w+)", source)
+    assert modes and set(modes) == {"dark"}
+    # Every CTkTextbox polls its scrollbars for its whole life (5/s at 200 ms).
+    assert _ctk.CTkTextbox._scrollbar_update_time >= 1000
 
 
 def test_settings_footer_names_the_platform():
