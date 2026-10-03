@@ -23,9 +23,10 @@ may be running, and nobody else may hold the Mac CI queue.
 
 Bounded by design: one instance (flock), one build per run, the build in its
 own process group under a 2-hour wall clock and re-checked every 15 s (it is
-stopped if memory pressure rises, the host loses its protected headroom with
-the model's allowance re-read from a grant that must still be valid, or the
-build passes BUILD_CAP_BYTES), every process of that group stopped and gone
+stopped if memory pressure rises, a Mac CI job starts, the host loses its
+protected headroom with the model's allowance re-read from a grant that must
+still be valid, or the build passes BUILD_CAP_BYTES; admission itself is
+checked again once the hold is taken), every process of that group stopped and gone
 before the CI hold is released (a group that will not die keeps the hold),
 the hold taken atomically and released only by its owner, and a hold left by
 a killed watcher reclaimed once its owner and build are both gone.
@@ -243,6 +244,18 @@ def spare_bytes(reading: dict, reserve: int, job_bytes: int = BUILD_BYTES) -> in
             - PROTECTED_HEADROOM - job_bytes)
 
 
+def running_refusal(reading: dict) -> str | None:
+    """Re-checked every CHECK_EVERY_S while a build runs (the build's own
+    memory is already in the reading, so no allowance is added for it)."""
+    if reading["pressure"] != 1:
+        return f"memory pressure rose to level {reading['pressure']}"
+    if reading["ciJobRunning"]:
+        return "a Mac CI job started"
+    if spare_bytes(reading, model_reserve(reading), job_bytes=0) < 0:
+        return "the host lost its protected headroom"
+    return None
+
+
 def admission_refusal(reading: dict, reserve: int) -> str | None:
     if reading["pressure"] != 1:
         return f"memory pressure level {reading['pressure']}"
@@ -407,11 +420,7 @@ def run_build(tag: str, env: dict, build: dict) -> int:
                 if used > BUILD_CAP_BYTES:
                     reason = f"used {used / GIB:.1f} GiB (cap {BUILD_CAP_BYTES / GIB:.0f})"
                 else:
-                    reading = host_reading()
-                    if reading["pressure"] != 1:
-                        reason = f"memory pressure rose to level {reading['pressure']}"
-                    elif spare_bytes(reading, model_reserve(reading), job_bytes=0) < 0:
-                        reason = "the host lost its protected headroom"
+                    reason = running_refusal(host_reading())
             if reason:
                 log(f"Stopping the Mac DMG build for {tag}: it {reason}.")
                 return -1
@@ -486,6 +495,13 @@ def watch() -> int:
                 held = acquire_hold()
             if not held:
                 log("The Mac CI queue was just held by someone else: trying next hour.")
+                return 0
+            # Admitted again under the hold: a CI job (or memory use) that
+            # started since the first check refuses the build here.
+            reading = host_reading()
+            refusal = admission_refusal(reading, model_reserve(reading))
+            if refusal:
+                log(f"Not building {pending[0]} yet: {refusal}. Trying next hour.")
                 return 0
             tag = pending[0]
             tries[tag] = tries.get(tag, 0) + 1

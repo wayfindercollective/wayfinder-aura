@@ -334,24 +334,35 @@ class TestPromote:
     def test_a_closed_unmerged_notes_pr_does_not_count(self):
         import promote
         mine = "Moves the notes shipped in v1.2.0 (from v1.2.0-beta.6) under ## [1.2.0]"
-        closed = [{"url": "u1", "state": "CLOSED", "body": mine}]
+        closed = [{"url": "u1", "state": "CLOSED", "body": mine, "baseRefName": "main"}]
         # Not done, and not silently replaced: someone may have closed it on purpose.
         with pytest.raises(SystemExit, match="closed without merging"):
             promote.usable_pr(closed, "v1.2.0-beta.6")
         assert promote.usable_pr(closed, "v1.2.0-beta.6", new_after_closed=True) is None
-        other = [{"url": "u0", "state": "CLOSED", "body": mine.replace("beta.6", "beta.5")}]
+        other = [{"url": "u0", "state": "CLOSED", "body": mine.replace("beta.6", "beta.5"), "baseRefName": "main"}]
         assert promote.usable_pr(other, "v1.2.0-beta.6") is None
-        assert promote.usable_pr([{"url": "u2", "state": "OPEN", "body": mine},
-                                  {"url": "u1", "state": "CLOSED", "body": mine}],
+        assert promote.usable_pr([{"url": "u2", "state": "OPEN", "body": mine, "baseRefName": "main"},
+                                  {"url": "u1", "state": "CLOSED", "body": mine, "baseRefName": "main"}],
                                  "v1.2.0-beta.6") == "u2"
-        assert promote.usable_pr([{"url": "u3", "state": "MERGED", "body": mine}],
+        assert promote.usable_pr([{"url": "u3", "state": "MERGED", "body": mine, "baseRefName": "main"}],
                                  "v1.2.0-beta.6") == "u3"
+
+    def test_only_a_notes_pr_into_main_counts(self):
+        # The re-check's case: the right beta's notes, merged into another branch.
+        import promote
+        mine = "Moves the notes shipped in v1.2.0 (from v1.2.0-beta.6) under ## [1.2.0]"
+        elsewhere = [{"url": "u9", "state": "MERGED", "body": mine, "baseRefName": "release-preview"},
+                     {"url": "u8", "state": "OPEN", "body": mine, "baseRefName": "release/1.1"},
+                     {"url": "u7", "state": "MERGED", "body": mine}]
+        assert promote.usable_pr(elsewhere, "v1.2.0-beta.6") is None
+        source = (REPO / "scripts" / "release" / "promote.py").read_text(encoding="utf-8")
+        assert '"--base", "main"' in source and "baseRefName" in source
 
     def test_a_live_notes_pr_for_another_beta_stops_the_promotion(self):
         import promote
         other = "Moves the notes shipped in v1.2.0 (from v1.2.0-beta.5) under ## [1.2.0]"
         with pytest.raises(SystemExit):
-            promote.usable_pr([{"url": "u", "state": "OPEN", "body": other}], "v1.2.0-beta.6")
+            promote.usable_pr([{"url": "u", "state": "OPEN", "body": other, "baseRefName": "main"}], "v1.2.0-beta.6")
 
     def test_nothing_is_ever_force_pushed(self):
         # A person's commits on the notes branch must survive a re-run.
@@ -556,6 +567,36 @@ class TestWatcherHold:
         assert watcher.reclaim_stale_hold() is False and watcher.HOLD.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the watcher runs on the Mac (fcntl, ps)")
+class TestWatcherRun:
+    def test_admission_is_checked_again_once_the_hold_is_taken(self, tmp_path, monkeypatch):
+        # The re-check's case: no CI job at the first check, one by the time
+        # the hold is taken. No build, no try spent, and the hold released.
+        for name in ("STATE_DIR", "LOCK", "STATE", "HOLD"):
+            monkeypatch.setattr(watcher, name, tmp_path / name.lower())
+        monkeypatch.setattr(watcher, "log", lambda message: None)
+        monkeypatch.setattr(watcher, "gh_env", lambda: {})
+        monkeypatch.setattr(watcher, "model_reserve", lambda reading: 125 * GIB)
+        readings = iter([_reading(), _reading(ciJobRunning=True)])
+        monkeypatch.setattr(watcher, "host_reading", lambda: next(readings))
+        listing = json.dumps([{"tag_name": "v1.2.0-beta.1", "published_at": "2099-01-01T00:00:00Z",
+                               "assets": []}])
+        real_run = subprocess.run
+
+        def fake_run(args, *a, **k):
+            if args[0] == "gh":
+                return subprocess.CompletedProcess(args, 0, listing, "")
+            return real_run(args, *a, **k)
+
+        monkeypatch.setattr(watcher.subprocess, "run", fake_run)
+        monkeypatch.setattr(watcher, "releases_missing_a_dmg", lambda releases, now: ["v1.2.0-beta.1"])
+        builds = []
+        monkeypatch.setattr(watcher, "run_build", lambda *a: builds.append(a) or 0)
+        assert watcher.watch() == 0
+        assert builds == [] and not watcher.HOLD.exists()
+        assert watcher.load_state().get("tries", {}) == {}
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS taskpolicy, time -l and libproc")
 class TestWatcherBuild:
     def _fake_attach(self, tmp_path, body):
@@ -650,6 +691,19 @@ wait
         self._fake_attach(tmp_path, f'kill -TERM $$\necho ignored > "{tmp_path}/survived"\n')
         assert watcher.run_build("v9.9.9-beta.1", {}, {}) != 0
         assert not (tmp_path / "survived").exists()
+
+    def test_a_ci_job_that_starts_mid_build_stops_it(self, tmp_path, monkeypatch):
+        # The re-check's probe: admitted with no CI job, then one starts.
+        self._setup(tmp_path, monkeypatch)
+        self._fake_attach(tmp_path, "sleep 300\n")
+        monkeypatch.setattr(watcher, "host_reading", lambda: _reading(ciJobRunning=True))
+        build = {}
+        assert watcher.acquire_hold()
+        try:
+            assert watcher.run_build("v9.9.9-beta.1", {}, build) == -1
+        finally:
+            watcher.finish_hold(build)
+        assert not watcher.group_members(build["pgid"]) and not watcher.HOLD.exists()
 
     def test_a_build_that_will_not_stop_keeps_the_hold(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)

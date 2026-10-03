@@ -110,7 +110,8 @@ def tag_problem(tag: str, beta: str, base: str) -> str | None:
 
 
 def usable_pr(prs: list[dict], beta: str, new_after_closed: bool = False) -> str | None:
-    """URL of the open or merged notes PR for this beta, or None to open one.
+    """URL of the open or merged notes PR into main for this beta, or None to
+    open one. PRs into any other branch never count.
 
     An open or merged PR for another beta stops the script. A PR for this
     beta closed without merging never counts as done, and is not silently
@@ -118,6 +119,8 @@ def usable_pr(prs: list[dict], beta: str, new_after_closed: bool = False) -> str
     unless --new-notes-pr asks for a fresh one."""
     closed = None
     for pr in prs:
+        if pr.get("baseRefName") != "main":
+            continue
         mine = f"(from {beta})" in (pr.get("body") or "")
         if pr.get("state") in ("OPEN", "MERGED"):
             if not mine:
@@ -193,7 +196,8 @@ def main() -> int:
     elif run("git", "tag", "--list", tag):
         run("git", "tag", "-d", tag)  # made locally by a run that stopped before pushing
     pr = usable_pr(json.loads(run("gh", "pr", "list", "--repo", REPO, "--head", branch,
-                                  "--state", "all", "--json", "url,state,body") or "[]"),
+                                  "--base", "main", "--state", "all",
+                                  "--json", "url,state,body,baseRefName") or "[]"),
                    beta, args.new_notes_pr)
     notes_mark = f"Notes shipped in {tag} (from {beta})."
 
