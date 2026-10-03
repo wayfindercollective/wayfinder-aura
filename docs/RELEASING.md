@@ -78,7 +78,7 @@ GH_TOKEN=$(gh auth token --user wayfindercollective) \
 It ships **exactly the code the beta was built from**, not today's `main`:
 
 1. commits `release: X.Y.Z` on the beta's `main` commit, moving that beta's
-   Unreleased notes under `## [X.Y.Z] - date` and adding the stable AppStream
+   Unreleased notes under `## [X.Y.Z] — date` and adding the stable AppStream
    `<release>`;
 2. opens a pull request into `main` with the same notes (bullets merged after
    the beta stay Unreleased) — merge it once its checks pass;
