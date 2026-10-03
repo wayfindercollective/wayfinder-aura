@@ -334,7 +334,13 @@ class TestPromote:
     def test_a_closed_unmerged_notes_pr_does_not_count(self):
         import promote
         mine = "Moves the notes shipped in v1.2.0 (from v1.2.0-beta.6) under ## [1.2.0]"
-        assert promote.usable_pr([{"url": "u1", "state": "CLOSED", "body": mine}], "v1.2.0-beta.6") is None
+        closed = [{"url": "u1", "state": "CLOSED", "body": mine}]
+        # Not done, and not silently replaced: someone may have closed it on purpose.
+        with pytest.raises(SystemExit, match="closed without merging"):
+            promote.usable_pr(closed, "v1.2.0-beta.6")
+        assert promote.usable_pr(closed, "v1.2.0-beta.6", new_after_closed=True) is None
+        other = [{"url": "u0", "state": "CLOSED", "body": mine.replace("beta.6", "beta.5")}]
+        assert promote.usable_pr(other, "v1.2.0-beta.6") is None
         assert promote.usable_pr([{"url": "u2", "state": "OPEN", "body": mine},
                                   {"url": "u1", "state": "CLOSED", "body": mine}],
                                  "v1.2.0-beta.6") == "u2"
@@ -346,6 +352,12 @@ class TestPromote:
         other = "Moves the notes shipped in v1.2.0 (from v1.2.0-beta.5) under ## [1.2.0]"
         with pytest.raises(SystemExit):
             promote.usable_pr([{"url": "u", "state": "OPEN", "body": other}], "v1.2.0-beta.6")
+
+    def test_nothing_is_ever_force_pushed(self):
+        # A person's commits on the notes branch must survive a re-run.
+        source = (REPO / "scripts" / "release" / "promote.py").read_text(encoding="utf-8")
+        pushes = [line for line in source.splitlines() if '"push"' in line]
+        assert pushes and not [line for line in pushes if "force" in line]
 
     def test_an_existing_tag_must_be_this_promotions(self, monkeypatch):
         import promote

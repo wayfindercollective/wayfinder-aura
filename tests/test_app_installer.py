@@ -274,7 +274,7 @@ class TestSwapHelpers:
 
     def test_mac_swap_waits_for_aura_to_exit(self, tmp_path):
         aura = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-        installed, _, args = self._mac(tmp_path, self._opener(tmp_path), pid=aura.pid)
+        installed, _, args = self._mac(tmp_path, self._opener(tmp_path), pid=aura.pid, wait=10)
         helper = subprocess.Popen(args)
         try:
             with pytest.raises(subprocess.TimeoutExpired):
@@ -288,6 +288,18 @@ class TestSwapHelpers:
         finally:
             self._reap(tmp_path)
         assert (installed / "Contents" / "version").read_text() == "new"
+
+    def test_an_aura_that_never_exits_is_left_alone(self, tmp_path):
+        aura = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            installed, staged, args = self._mac(tmp_path, self._opener(tmp_path), pid=aura.pid, wait=1)
+            assert subprocess.run(args, timeout=30).returncode == 1
+        finally:
+            aura.kill()
+            aura.wait()
+        assert (installed / "Contents" / "version").read_text() == "old"
+        assert not staged.exists() and (tmp_path / "failed").exists()
+        assert not (tmp_path / "opened").exists()
 
     def _appimage(self, tmp_path, staged_body, wait=3):
         target = self._script(tmp_path / "Wayfinder_Aura-1.1.8-x86_64.AppImage",
@@ -354,6 +366,7 @@ class TestLeftovers:
 
     def test_the_new_version_confirms_its_launch_before_cleanup(self, monkeypatch, tmp_path):
         monkeypatch.setattr(app_installer, "_launch_marker", lambda: tmp_path / "launched")
+        monkeypatch.setattr(app_installer, "_update_token", "")
         monkeypatch.setenv(app_installer.TOKEN_ENV, "ab" * 16)
         app_installer.confirm_launch()
         assert (tmp_path / "launched").read_text() == f"{'ab' * 16} {os.getpid()}\n"
@@ -362,8 +375,24 @@ class TestLeftovers:
         body = src.split("def startup_pass() -> None:", 1)[1].split("\n\n", 1)[0]
         assert body.index("confirm_launch()") < body.index("cleanup_stale_staging()")
 
+    def test_the_token_leaves_the_environment_at_startup(self, monkeypatch, tmp_path):
+        # Taken before any child process starts, so none inherits it; the
+        # confirmation later still has it.
+        monkeypatch.setattr(app_installer, "_launch_marker", lambda: tmp_path / "launched")
+        monkeypatch.setattr(app_installer, "_update_token", "")
+        monkeypatch.setenv(app_installer.TOKEN_ENV, "cd" * 16)
+        app_installer.take_update_token()
+        assert app_installer.TOKEN_ENV not in os.environ
+        app_installer.confirm_launch()
+        assert (tmp_path / "launched").read_text().split()[0] == "cd" * 16
+        assert app_installer._update_token == ""
+        src = (REPO / "main.py").read_text(encoding="utf-8")
+        body = src.split("def main():", 1)[1]
+        assert body.index("take_update_token()") < body.index("_dispatch_cli_control_verb()")
+
     def test_a_launch_the_helper_did_not_start_confirms_nothing(self, monkeypatch, tmp_path):
         monkeypatch.setattr(app_installer, "_launch_marker", lambda: tmp_path / "launched")
+        monkeypatch.setattr(app_installer, "_update_token", "")
         monkeypatch.delenv(app_installer.TOKEN_ENV, raising=False)
         app_installer.confirm_launch()
         monkeypatch.setenv(app_installer.TOKEN_ENV, "not-a-token")

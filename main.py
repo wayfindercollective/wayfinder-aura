@@ -825,6 +825,15 @@ def _check_venv_health(venv_dir: Path | None = None, smoke_imports: tuple[str, .
 
 def main():
     """Run Wayfinder Aura."""
+    # An update's swap helper starts the new copy with a one-off token; take
+    # it out of the environment before any child process can inherit it.
+    try:
+        from wayfinder.core import app_installer
+
+        app_installer.take_update_token()
+    except Exception:
+        pass
+
     # Desktop actions / Flatpak CLI: send control-socket verbs and exit
     # (do not take the single-instance lock or start a second UI).
     _cli_exit = _dispatch_cli_control_verb()

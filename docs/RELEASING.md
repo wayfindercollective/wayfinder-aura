@@ -93,10 +93,12 @@ It ships **exactly the code the beta was built from**, not today's `main`:
 3. pushes `vX.Y.Z`, which builds and publishes the stable release.
 
 Re-running after a failure picks up where it stopped, for the same beta only:
-a pushed `vX.Y.Z` is kept if it was made from that beta's `main` commit, an
-open or merged notes pull request if it carries that beta's notes, and a
-notes pull request closed without merging is replaced. A tag or open pull
-request from a different beta stops the script for a person to sort out.
+a pushed `vX.Y.Z` is kept if it was made from that beta's `main` commit, and
+an open or merged notes pull request or an existing notes branch if it
+carries that beta's notes (commits added on top are kept; nothing is
+force-pushed). Anything else stops the script for a person: a tag, branch or
+open pull request from a different beta, or a notes pull request closed
+without merging (reopen it, or re-run with `--new-notes-pr`).
 
 The Mac release watcher attaches its DMG within the hour. The website's
 download links and every installed app pick the new release up by themselves.

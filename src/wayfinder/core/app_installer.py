@@ -117,12 +117,23 @@ STALE_AFTER_S = 3600  # leftovers older than this are never a live update's
 # Aura starting meanwhile (a second install, a source run) has no token, so a
 # hung update is still rolled back.
 TOKEN_ENV = "AURA_UPDATE_TOKEN"
+_update_token = ""
+
+
+def take_update_token() -> None:
+    """First thing at startup, before any child process exists: move the swap
+    helper's token out of the environment, so no helper process (overlay,
+    supervisor, whisper/llama servers) ever inherits it."""
+    global _update_token
+    _update_token = os.environ.pop(TOKEN_ENV, "") or _update_token
 
 
 def confirm_launch() -> None:
     """Called by a running app once its UI is up: when the swap helper started
     this copy, tell it (token and PID) that it may drop the previous copy."""
-    token = os.environ.pop(TOKEN_ENV, "")
+    global _update_token
+    take_update_token()  # entry points that didn't take it at startup
+    token, _update_token = _update_token, ""
     if not re.fullmatch(r"[0-9a-f]{32}", token):
         return
     try:
@@ -242,17 +253,21 @@ def _confirmed(marker: str, token: str, extra: str = "") -> str:
 
 def _mac_helper_script() -> str:
     # $1 pid, $2 installed bundle, $3 staged bundle, $4 backup path, $5 opener,
-    # $6 failure marker, $7 launch marker, $8 seconds to wait for it, $9 token.
+    # $6 failure marker, $7 launch marker, $8 seconds to wait (for Aura to exit,
+    # then for the new copy to confirm), $9 token.
     # Waits for Aura to exit, swaps and opens the new copy with the token, and
     # keeps the old one until that copy confirms it started (confirm_launch:
     # the token, and a live PID running from the installed bundle). A refused
     # swap, a failing opener or a new copy that never confirms puts the old
     # copy back, leaves the failure marker (the next launch hands over the
-    # download instead of retrying) and opens the old copy.
+    # download instead of retrying) and opens the old copy. An Aura that
+    # never exits leaves everything as it was (and the failure marker).
     in_bundle = (' && case "$(ps -ww -p "$pid" -o command= 2>/dev/null)" in '
                  '*"$2/Contents/MacOS/"*) true;; *) false;; esac')
     return (
-        'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
+        'i=0; while kill -0 "$1" 2>/dev/null; do '
+        'if [ "$i" -ge "$(($8 * 5))" ]; then rm -rf "$3"; : > "$6"; exit 1; fi; '
+        'sleep 0.2; i=$((i+1)); done; '
         'rm -f "$7"; rm -rf "$4"; '
         'if mv "$2" "$4" && mv "$3" "$2"; then '
         f'"$5" --env "{TOKEN_ENV}=$9" "$2"; i=0; ok=; '
@@ -336,12 +351,15 @@ def _prepare_windows(url: str, progress: Progress) -> Outcome:
 
 def _appimage_helper_script() -> str:
     # $1 pid, $2 AppImage path, $3 staged AppImage, $4 failure marker,
-    # $5 launch marker, $6 backup path, $7 seconds to wait for confirmation,
-    # $8 token. Keeps the old AppImage until the new one (started with the
-    # token) confirms it started; a new one that exits early (not runnable) or
-    # never confirms is stopped, the old one is put back and run.
+    # $5 launch marker, $6 backup path, $7 seconds to wait (for Aura to exit,
+    # then for confirmation), $8 token. Keeps the old AppImage until the new
+    # one (started with the token) confirms it started; a new one that exits
+    # early (not runnable) or never confirms is stopped, the old one is put
+    # back and run. An Aura that never exits leaves everything as it was.
     return (
-        'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
+        'i=0; while kill -0 "$1" 2>/dev/null; do '
+        'if [ "$i" -ge "$(($7 * 5))" ]; then rm -f "$3"; : > "$4"; exit 1; fi; '
+        'sleep 0.2; i=$((i+1)); done; '
         'rm -f "$5"; '
         'if mv -f "$2" "$6" && mv -f "$3" "$2"; then '
         f'{TOKEN_ENV}="$8" "$2" >/dev/null 2>&1 & child=$!; i=0; ok=; '

@@ -21,10 +21,12 @@ the beta's release commit), not whatever main holds today. The script:
 
 Re-running after a failure resumes, bound to the same beta: a pushed tag is
 kept only if it was made from this beta and its main commit, an open or
-merged notes PR only if it carries this beta's notes (anything else stops the
-script for a person), a closed unmerged notes PR is replaced, and a tag that
-never left this machine is remade. --dry-run prints the plan and writes
-nothing.
+merged notes PR and an existing notes branch only if they carry this beta's
+notes (commits a person added on top are kept; the branch is never
+force-pushed), and a tag that never left this machine is remade. Anything
+else stops the script for a person, including a notes PR closed without
+merging: reopen it, or pass --new-notes-pr to open a fresh one. --dry-run
+prints the plan and writes nothing.
 """
 
 from __future__ import annotations
@@ -107,17 +109,26 @@ def tag_problem(tag: str, beta: str, base: str) -> str | None:
     return None
 
 
-def usable_pr(prs: list[dict], beta: str) -> str | None:
-    """URL of the open or merged notes PR for this beta. A closed, unmerged
-    PR does not count (a new one is opened); an open or merged one for
-    another beta stops the script."""
+def usable_pr(prs: list[dict], beta: str, new_after_closed: bool = False) -> str | None:
+    """URL of the open or merged notes PR for this beta, or None to open one.
+
+    An open or merged PR for another beta stops the script. A PR for this
+    beta closed without merging never counts as done, and is not silently
+    replaced either (someone may have closed it on purpose): the script stops
+    unless --new-notes-pr asks for a fresh one."""
+    closed = None
     for pr in prs:
-        if pr.get("state") not in ("OPEN", "MERGED"):
-            continue
-        if f"(from {beta})" not in (pr.get("body") or ""):
-            raise SystemExit(f"Notes PR {pr.get('url')} is for another beta; "
-                             "close it or promote that beta instead.")
-        return pr.get("url")
+        mine = f"(from {beta})" in (pr.get("body") or "")
+        if pr.get("state") in ("OPEN", "MERGED"):
+            if not mine:
+                raise SystemExit(f"Notes PR {pr.get('url')} is for another beta; "
+                                 "close it or promote that beta instead.")
+            return pr.get("url")
+        if mine and closed is None:
+            closed = pr.get("url")
+    if closed and not new_after_closed:
+        raise SystemExit(f"Notes PR {closed} was closed without merging. Reopen it and "
+                         "re-run, or re-run with --new-notes-pr to open a fresh one.")
     return None
 
 
@@ -132,6 +143,8 @@ def main() -> int:
     parser.add_argument("--version", help="stable version (default: the beta's X.Y.Z)")
     parser.add_argument("--min-days", type=int, default=5, help="minimum soak, in days")
     parser.add_argument("--yes", action="store_true", help="promote a younger beta anyway")
+    parser.add_argument("--new-notes-pr", action="store_true",
+                        help="open a fresh notes PR although this beta's was closed unmerged")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -180,21 +193,26 @@ def main() -> int:
     elif run("git", "tag", "--list", tag):
         run("git", "tag", "-d", tag)  # made locally by a run that stopped before pushing
     pr = usable_pr(json.loads(run("gh", "pr", "list", "--repo", REPO, "--head", branch,
-                                  "--state", "all", "--json", "url,state,body") or "[]"), beta)
+                                  "--state", "all", "--json", "url,state,body") or "[]"),
+                   beta, args.new_notes_pr)
     notes_mark = f"Notes shipped in {tag} (from {beta})."
 
     today = date.today()
     with tempfile.TemporaryDirectory(prefix="aura-promote-") as tmp:
         if not pr:
             notes_tree = Path(tmp) / "notes"
-            remote_tip = ""
+            reuse = False
             if remote_has(f"refs/heads/{branch}"):
+                # An earlier run's branch for this beta is reused as it is,
+                # with anything a person added on top. Any other branch of
+                # that name is left alone: it is never force-pushed.
                 run("git", "fetch", "-q", "origin", branch)
-                remote_tip = run("git", "rev-parse", f"origin/{branch}")
-            # An earlier run's notes branch for this beta is reused; one left
-            # from another beta is rebuilt from main and replaced.
-            reuse = bool(remote_tip) and notes_mark in run("git", "log", "-1", "--format=%B", remote_tip)
-            start = remote_tip if reuse else "origin/main"
+                history = run("git", "log", "--format=%B", f"origin/main..origin/{branch}")
+                if notes_mark not in history:
+                    raise SystemExit(f"Branch {branch} exists but holds no notes for {beta}; "
+                                     "delete it (or promote the beta it was made for).")
+                reuse = True
+            start = f"origin/{branch}" if reuse else "origin/main"
             run("git", "worktree", "add", "-q", "-B", branch, str(notes_tree), start)
             try:
                 if not reuse:
@@ -206,8 +224,7 @@ def main() -> int:
                         versioning.set_version(version, root=notes_tree)
                     run("git", "commit", "-qam", f"docs(release): {version} notes\n\n{notes_mark}",
                         cwd=notes_tree)
-                run("git", "push", "-q", "-u", f"--force-with-lease=refs/heads/{branch}:{remote_tip}",
-                    "origin", branch, cwd=notes_tree)
+                run("git", "push", "-q", "-u", "origin", branch, cwd=notes_tree)
                 pr = run("gh", "pr", "create", "--repo", REPO, "--base", "main", "--head", branch,
                          "--title", f"docs(release): {version} notes",
                          "--body", f"Moves the notes shipped in {tag} (from {beta}) under "
