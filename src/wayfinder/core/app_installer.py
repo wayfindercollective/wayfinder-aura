@@ -103,7 +103,7 @@ def install_mode() -> str | None:
         return None
     if sys.platform == "darwin":
         bundle = mac_bundle_path()
-        if bundle is None or "/AppTranslocation/" in str(bundle):
+        if bundle is None or "AppTranslocation" in bundle.parts:
             return None
         return "mac" if os.access(bundle.parent, os.W_OK) else None
     if sys.platform == "win32":

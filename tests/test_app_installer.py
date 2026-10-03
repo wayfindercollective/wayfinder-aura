@@ -137,9 +137,11 @@ class TestMacVerification:
 
     ID, TEAM = "io.wayfindercollective.WayfinderAura", "5JJQ8L5HHD"
 
+    NEW, OLD = str(Path("/new")), str(Path("/old"))  # "\\new" on Windows
+
     def test_same_team_notarized_update_passes(self, monkeypatch):
         monkeypatch.setattr(app_installer, "_run", self._fake_run(
-            {"/new": (self.ID, self.TEAM), "/old": (self.ID, self.TEAM)}))
+            {self.NEW: (self.ID, self.TEAM), self.OLD: (self.ID, self.TEAM)}))
         assert app_installer.verify_mac_app(Path("/new"), Path("/old")) is None
 
     @pytest.mark.parametrize("new,old,strict,gk,reason", [
@@ -151,7 +153,7 @@ class TestMacVerification:
     ])
     def test_anything_else_is_refused(self, monkeypatch, new, old, strict, gk, reason):
         monkeypatch.setattr(app_installer, "_run", self._fake_run(
-            {"/new": new, "/old": old}, strict_ok=strict, gatekeeper_ok=gk))
+            {self.NEW: new, self.OLD: old}, strict_ok=strict, gatekeeper_ok=gk))
         assert reason in app_installer.verify_mac_app(Path("/new"), Path("/old"))
 
 
