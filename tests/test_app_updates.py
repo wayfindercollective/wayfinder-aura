@@ -629,7 +629,7 @@ class TestBannerWiring:
     def test_banner_show_is_marshalled_to_the_tk_thread(self, src):
         body = src.split("def _check_app_update_background", 1)[1]
         body = body.split("def _show_app_update_banner", 1)[0]
-        assert "self.after(0, lambda: self._show_app_update_banner(info))" in body
+        assert "self.after(0, lambda: self._show_app_update_banner_if_current(info, generation))" in body
 
     def test_config_defaults_exist(self):
         from wayfinder.config import DEFAULT_CONFIG
@@ -665,6 +665,7 @@ class TestUpdateChannelSetting:
             _UPDATE_CHANNEL_CHOICES=wm.WayfinderApp._UPDATE_CHANNEL_CHOICES,
             log=lambda message: calls.append(("log", message)),
             _hide_app_update_banner=lambda: calls.append(("hide",)),
+            _next_app_update_generation=lambda: calls.append(("generation",)),
             _check_app_update_background=lambda force=False: calls.append(("check", force)),
         )
         return app, calls
@@ -678,6 +679,15 @@ class TestUpdateChannelSetting:
         assert app.config["update_channel"] == "beta"
         assert saved and saved[-1]["update_channel"] == "beta"
         assert ("hide",) in calls and ("check", True) in calls
+
+    def test_an_answer_for_an_old_channel_never_reaches_the_banner(self):
+        import wayfinder_main as wm
+        shown = []
+        app = types.SimpleNamespace(_show_app_update_banner=shown.append)
+        old = wm.WayfinderApp._next_app_update_generation(app)   # Beta check starts
+        wm.WayfinderApp._next_app_update_generation(app)         # user switches to Stable
+        wm.WayfinderApp._show_app_update_banner_if_current(app, {"v": "beta"}, old)
+        assert shown == []
 
     def test_reselecting_the_same_channel_does_nothing(self, monkeypatch):
         import wayfinder_main as wm
@@ -749,7 +759,10 @@ class TestMacUpdateActions:
 
         monkeypatch.setattr(app_updates, "check_for_app_update", fake_check)
         app = types.SimpleNamespace(
-            event_queue=queue.Queue(), config={"update_channel": "beta"})
+            event_queue=queue.Queue(), config={"update_channel": "beta"},
+            _app_update_generation=0)
+        app._next_app_update_generation = (
+            lambda: wm.WayfinderApp._next_app_update_generation(app))
         wm.WayfinderApp._check_app_update_now(app)
         event_type, callback = app.event_queue.get(timeout=5)
         assert event_type == wm.EventType.UI_CALLBACK

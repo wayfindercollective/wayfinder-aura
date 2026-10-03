@@ -15362,6 +15362,7 @@ class WayfinderApp(ctk.CTk):
         if not self.config.get("check_for_app_updates", True):
             return
         channel = self.config.get("update_channel") or None
+        generation = self._next_app_update_generation()
 
         def _check():
             try:
@@ -15375,7 +15376,7 @@ class WayfinderApp(ctk.CTk):
                 if info.get("latest_version") == self.config.get(
                         "app_update_dismissed_version", ""):
                     return
-                self.after(0, lambda: self._show_app_update_banner(info))
+                self.after(0, lambda: self._show_app_update_banner_if_current(info, generation))
             except Exception:
                 pass  # Silent failure - don't annoy user
 
@@ -15438,8 +15439,19 @@ class WayfinderApp(ctk.CTk):
                 var.set(reports_enabled(self.config, current_version))
             except Exception:
                 pass
+        self._next_app_update_generation()  # answers for the old channel are void
         self._hide_app_update_banner()
         self._check_app_update_background(force=True)
+
+    def _next_app_update_generation(self) -> int:
+        """Each check (and a channel change) starts a new generation; only the
+        newest check's answer may change the banner."""
+        self._app_update_generation = getattr(self, "_app_update_generation", 0) + 1
+        return self._app_update_generation
+
+    def _show_app_update_banner_if_current(self, info: dict, generation: int) -> None:
+        if generation == getattr(self, "_app_update_generation", 0):
+            self._show_app_update_banner(info)
 
     def _show_app_update_banner(self, info: dict) -> None:
         """Show the app-update banner on the Dictate tab (Tk thread only).
@@ -15573,10 +15585,13 @@ class WayfinderApp(ctk.CTk):
         self._show_app_update_status(" ".join(filter(None, (outcome.message, note))))
 
     def _finish_pending_app_update(self) -> None:
+        """At IDLE: install the update staged mid-dictation. A recording that
+        started before this ran keeps it waiting for the next IDLE."""
         outcome = getattr(self, "_pending_app_update", None)
+        if outcome is None or self.app_state != AppState.IDLE:
+            return
         self._pending_app_update = None
-        if outcome is not None and self.app_state == AppState.IDLE:
-            self._finish_app_update(outcome)
+        self._finish_app_update(outcome)
 
     def _finish_app_update(self, outcome) -> None:
         """Hand over to the update helper, then quit so it can swap and relaunch."""
@@ -15602,6 +15617,7 @@ class WayfinderApp(ctk.CTk):
         event_queue. Unlike the daily check it ignores the settings toggle and
         a dismissed version — the user asked."""
         channel = self.config.get("update_channel") or None
+        generation = self._next_app_update_generation()
 
         def _check():
             try:
@@ -15612,9 +15628,9 @@ class WayfinderApp(ctk.CTk):
                     current_version, force=True, channel=channel)
             except Exception as exc:
                 info = {"update_available": False, "error": str(exc)}
-            self.event_queue.put(
-                (EventType.UI_CALLBACK, lambda: self._report_app_update_check(info))
-            )
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: (
+                self._report_app_update_check(info)
+                if generation == getattr(self, "_app_update_generation", 0) else None)))
 
         threading.Thread(target=_check, daemon=True, name="app-update-check").start()
 

@@ -357,11 +357,16 @@ class TestInstallButton:
         outcome = Outcome(ready=True, finish=lambda: pytest.fail("finished mid-dictation"))
         wm.WayfinderApp._on_app_update_prepared(app, {}, outcome)
         assert app._pending_app_update is outcome and ("quit",) not in calls
+        # The review's case: another recording starts before the deferred
+        # IDLE callback runs. The staged update must still be there afterwards.
+        wm.WayfinderApp._finish_pending_app_update(app)
+        assert app._pending_app_update is outcome
         app.app_state = wm.AppState.IDLE
         finished = []
         outcome.finish = lambda: finished.append(True)
         wm.WayfinderApp._finish_pending_app_update(app)
         assert finished == [True] and ("quit",) in calls
+        assert app._pending_app_update is None
 
     def test_failed_install_hands_over_the_download(self, wm, tmp_path):
         app, calls = self._prepared(wm, wm.AppState.IDLE)
