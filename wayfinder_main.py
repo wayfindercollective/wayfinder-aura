@@ -1396,6 +1396,15 @@ def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
     return 50
 
 
+def _update_installs_in_place() -> bool:
+    """True when Install Update can swap this install itself (core/app_installer)."""
+    try:
+        from wayfinder.core.app_installer import install_mode
+        return install_mode() is not None
+    except Exception:
+        return False
+
+
 # Idle poll_events cadence once the macOS event pipe is attached
 # (WakingQueue): every producer wakes Tk itself, so the poll is only a backstop.
 _MACOS_IDLE_SAFETY_POLL_MS = 1000
@@ -15374,7 +15383,13 @@ class WayfinderApp(ctk.CTk):
             latest = info.get("latest_version", "")
             self._app_update_info = dict(info)
             text = f"Update available: {latest} (you have {current_version})."
-            if _IS_LINUX and info.get("download_url"):
+            in_place = bool(info.get("download_url")) and _update_installs_in_place()
+            button = getattr(self, "app_update_button", None)
+            if button is not None:
+                button.configure(text="Install Update" if in_place else "Get Update")
+            if in_place:
+                text += " Install Update restarts Aura into it."
+            elif _IS_LINUX and info.get("download_url"):
                 # The GitHub bundle has no update channel (not on Flathub yet):
                 # the new file is downloaded and opened by the user.
                 if IS_FLATPAK:
@@ -15382,9 +15397,9 @@ class WayfinderApp(ctk.CTk):
                 else:
                     text += " Get Update downloads the new AppImage; run it instead of this one."
             label.configure(text=text)
-            if IS_MACOS or IS_WINDOWS:
-                # A manual check may have hidden Get Update for a status line.
-                self._set_app_update_button_visible(True)
+            # A manual check or an install attempt may have hidden the button
+            # for a status line.
+            self._set_app_update_button_visible(True)
             if not banner.winfo_manager():
                 anchor = getattr(self, "_dictate_banner_anchor", None)
                 if anchor is not None:
@@ -15418,10 +15433,14 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Could not persist update dismissal: {e}")
 
     def _open_app_update_page(self) -> None:
-        """Get Update button: open the release page. The banner stays up until
-        dismissed or the new version is actually running."""
+        """Get Update button: install in place where this install can
+        (core/app_installer), else open the download or release page. The
+        banner stays up until dismissed or the new version is actually running."""
         from wayfinder.core.app_updates import RELEASES_PAGE
         info = getattr(self, "_app_update_info", {})
+        if info.get("download_url") and _update_installs_in_place():
+            self._install_app_update(info)
+            return
         url = info.get("release_url") or RELEASES_PAGE
         if IS_MACOS or IS_WINDOWS or _IS_LINUX:
             # Mac/Windows updates always carry a DMG / Setup exe, Linux
@@ -15429,6 +15448,74 @@ class WayfinderApp(ctk.CTk):
             # download it in one click, falling back to the release page.
             url = info.get("download_url") or url
         self._open_url(url)
+
+    def _install_app_update(self, info: dict) -> None:
+        """Install Update: download, verify and stage off the Tk thread, then
+        restart into the new version (core/app_installer)."""
+        if getattr(self, "_app_update_installing", False):
+            return
+        self._app_update_installing = True
+        url = info.get("download_url", "")
+        self._show_app_update_status("Downloading the update…")
+        shown = {"percent": -1}
+
+        def progress(fraction: float) -> None:
+            percent = int(fraction * 100)
+            if percent != shown["percent"]:  # at most ~100 UI updates per download
+                shown["percent"] = percent
+                self.event_queue.put((EventType.UI_CALLBACK, lambda p=percent:
+                    self._show_app_update_status(f"Downloading the update… {p}%")))
+
+        def work() -> None:
+            from wayfinder.core.app_installer import Outcome, prepare_update
+            try:
+                outcome = prepare_update(url, progress)
+            except Exception as exc:  # prepare_update shouldn't raise; be sure
+                outcome = Outcome(message=f"Couldn't install the update ({exc}).")
+            self.event_queue.put((EventType.UI_CALLBACK,
+                                  lambda: self._on_app_update_prepared(info, outcome)))
+
+        threading.Thread(target=work, daemon=True, name="app-update-install").start()
+
+    def _on_app_update_prepared(self, info: dict, outcome) -> None:
+        """Tk thread: restart into a staged update, or hand over the download."""
+        self._app_update_installing = False
+        if outcome.ready:
+            if self.app_state == AppState.IDLE:
+                self._finish_app_update(outcome)
+            else:
+                # Never cut a dictation short: update_state() finishes it at IDLE.
+                self._pending_app_update = outcome
+                self._show_app_update_status(
+                    "Update ready: Aura restarts when this dictation finishes.")
+            return
+        from wayfinder.core.app_updates import RELEASES_PAGE
+        if outcome.message:
+            self.log(f"⚠ {outcome.message}")
+        if outcome.fallback_path:
+            self._open_url(Path(outcome.fallback_path).as_uri())
+            note = "Opened the downloaded update so you can install it yourself."
+        else:
+            self._open_url(info.get("download_url") or info.get("release_url") or RELEASES_PAGE)
+            note = "Opened the download in your browser."
+        self._show_app_update_status(" ".join(filter(None, (outcome.message, note))))
+
+    def _finish_pending_app_update(self) -> None:
+        outcome = getattr(self, "_pending_app_update", None)
+        self._pending_app_update = None
+        if outcome is not None and self.app_state == AppState.IDLE:
+            self._finish_app_update(outcome)
+
+    def _finish_app_update(self, outcome) -> None:
+        """Hand over to the update helper, then quit so it can swap and relaunch."""
+        try:
+            outcome.finish()
+        except Exception as exc:
+            self.log(f"⚠ Couldn't restart into the update: {exc}")
+            self._show_app_update_status("Couldn't restart into the update. Try again later.")
+            return
+        self.log("⟳ Installing the update and restarting Aura")
+        self.quit_app()
 
     # ── macOS "Check for Updates…" (menu-bar item) ──────────────────────────
 
@@ -21976,6 +22063,13 @@ class WayfinderApp(ctk.CTk):
                 self._start_recording_watchdog()
             elif old_state == AppState.RECORDING:
                 self._cancel_recording_watchdog()
+
+        # An app update finished downloading mid-dictation: restart into it now.
+        if new_state == AppState.IDLE and getattr(self, "_pending_app_update", None):
+            try:
+                self.after(0, self._finish_pending_app_update)
+            except Exception:
+                pass
 
         # A model download the user started finished mid-dictation: apply it now
         # that the pipeline is idle (after this transition's own work settles).
