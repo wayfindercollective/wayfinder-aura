@@ -291,3 +291,61 @@ def test_input_monitoring_allow_registers_without_resetting_a_working_grant(monk
     assert macos_permissions.ask_for_permission("input_monitoring") is True
     assert calls == [("preflight", False), "register",
                      ("settings", "input_monitoring")]
+
+
+def _patch_build(monkeypatch, build):
+    monkeypatch.setattr(macos_permissions, "_build_identity", lambda: build)
+
+
+def test_allow_resets_only_on_this_builds_first_ask(monkeypatch):
+    # The second "allow" can come right after the user turned the switch on,
+    # before macOS applied it to this process: resetting then wiped the grant.
+    calls, _ = _ask_env(monkeypatch, trusted=False, bundle=macos_permissions.AURA_BUNDLE_ID)
+    _patch_build(monkeypatch, "build-1")
+    macos_permissions.ask_for_permission("accessibility")
+    macos_permissions.ask_for_permission("accessibility")
+    resets = [c for c in calls if "tccutil" in str(c)]
+    assert resets == [["/usr/bin/tccutil", "reset", "Accessibility",
+                       macos_permissions.AURA_BUNDLE_ID]]
+
+
+def test_each_permission_gets_its_own_first_reset(monkeypatch):
+    calls, _ = _ask_env(monkeypatch, trusted=False, bundle=macos_permissions.AURA_BUNDLE_ID)
+    _patch_build(monkeypatch, "build-1")
+    monkeypatch.setattr(macos_permissions, "microphone_authorization",
+                        lambda: macos_permissions.MIC_DENIED)
+    monkeypatch.setattr(macos_permissions, "request_microphone_access", lambda: True)
+    macos_permissions.ask_for_permission("accessibility")
+    macos_permissions.ask_for_permission("microphone")
+    macos_permissions.ask_for_permission("microphone")
+    services = [c[2] for c in calls if "tccutil" in str(c)]
+    assert services == ["Accessibility", "Microphone"]
+
+
+def test_a_newly_installed_build_may_clear_its_stale_entry_again(monkeypatch):
+    calls, _ = _ask_env(monkeypatch, trusted=False, bundle=macos_permissions.AURA_BUNDLE_ID)
+    _patch_build(monkeypatch, "build-1")
+    macos_permissions.ask_for_permission("accessibility")
+    _patch_build(monkeypatch, "build-2")
+    macos_permissions.ask_for_permission("accessibility")
+    macos_permissions.ask_for_permission("accessibility")
+    assert sum("tccutil" in str(c) for c in calls) == 2
+
+
+def test_a_failed_reset_is_not_recorded(monkeypatch):
+    calls = []
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_permissions, "own_bundle_identifier",
+                        lambda: macos_permissions.AURA_BUNDLE_ID)
+    results = iter([1, 0])
+    monkeypatch.setattr(macos_permissions.subprocess, "run",
+                        lambda args, **k: calls.append(args)
+                        or type("R", (), {"returncode": next(results, 0)})())
+    monkeypatch.setattr(macos_permissions, "request_accessibility_permission",
+                        lambda *, prompt: False)
+    _patch_build(monkeypatch, "build-1")
+    macos_permissions.ask_for_permission("accessibility")  # tccutil failed
+    macos_permissions.ask_for_permission("accessibility")  # so it may try again
+    macos_permissions.ask_for_permission("accessibility")  # and then never
+    assert sum("tccutil" in str(c) for c in calls) == 2
+

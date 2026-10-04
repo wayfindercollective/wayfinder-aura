@@ -92,6 +92,19 @@ Linux: dictation for gamers on every desktop.
   actions now wake the app themselves, so its idle check runs once a second.
   Main process on a Mac Studio: ~2.7% → ~0.5% of a core, window shown or
   hidden.
+- **Mac: the hotkey works as soon as macOS allows it, and Aura says when it
+  can't.** On a new Mac, Right Option could stay dead after every permission
+  was allowed, and the banner's buttons seemed to do nothing:
+  - Aura now checks that keys actually reach it. When macOS hasn't applied a
+    permission yet, the banner says so and offers **Relaunch Aura**.
+  - Aura retries by itself every few seconds, so allowing Accessibility in
+    System Settings takes effect without a restart.
+  - A second "allow" no longer clears a switch you just turned on.
+  - **Recheck** answers "Still off" when nothing changed, and
+    **Permissions…** always opens the checklist.
+  - If macOS pauses Aura's keyboard listener, Aura replaces it at once.
+  - The activity log records each permission change and the macOS version,
+    so a report shows what happened.
 - **Long chunked dictations keep their words at the chunk boundaries.** The
   prompt for each piece no longer ends on the half-heard word at the cut, the
   join matches the overlap even when that word came out wrong, and a piece
