@@ -127,6 +127,34 @@
   </supports>
 
   <releases>
+    <release version="1.2.0-beta.5" date="2026-10-04" type="development">
+      <description>
+        <p>Beta built from main on 2026-10-04. Changes since the last stable release:</p>
+        <ul>
+          <li>Windows downloads.</li>
+          <li>Choose Stable or Beta updates</li>
+          <li>Install Update installs it for you.</li>
+          <li>Crash reports from Beta.</li>
+          <li>Aura types into every app on Wayland desktops.</li>
+          <li>Gamer mode on Linux.</li>
+          <li>Cancel a dictation from any app</li>
+          <li>Vocabulary corrections as Heard / Write-as pairs.</li>
+          <li>Vocabulary fixes near-misses of your words (Ultra).</li>
+          <li>Ultra switches on its recommended setup once.</li>
+          <li>Setup recommends Large v3 Turbo Q5 for Ultra on a GPU</li>
+          <li>Free removes um/uh out of the box.</li>
+          <li>The macOS design on Linux:</li>
+          <li>Get Update on Linux downloads the new Flatpak bundle (or AppImage);</li>
+          <li>A muted or switched-off mic is named as the problem.</li>
+          <li>Aura uses about a sixth of the CPU while it waits.</li>
+          <li>Mac: the hotkey works as soon as macOS allows it, and Aura says when it can't.</li>
+          <li>Long chunked dictations keep their words at the chunk boundaries.</li>
+          <li>Keys typed into games through Wine arrive intact:</li>
+          <li>Wine focus left on a launcher window after Alt+Tab</li>
+          <li>A stale Alt/Shift state from XWayland no longer blocks or shifts a dictation</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.8" date="2026-08-26">
       <description>
         <p>Faster local dictation, dependable sandbox integration, and clearer update behavior:</p>
