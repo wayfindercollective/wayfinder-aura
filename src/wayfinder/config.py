@@ -409,7 +409,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Floating indicator settings
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
-    "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
+    "overlay_type": "always_on",  # always_on (PyQt6) | disappearing (PyQt6 on macOS, CTk elsewhere)
     # Master switch for the on-screen status pill. Off = no visual overlay; a
     # tray-only overlay subprocess still hosts the Qt StatusNotifier tray on Linux.
     "overlay_enabled": True,
@@ -521,6 +521,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # App update checking
     "check_for_app_updates": True,  # Check GitHub Releases for a newer app version on startup (once/day)
     "app_update_dismissed_version": "",  # Release tag the user dismissed; a newer tag shows the banner again
+    "update_channel": "",  # "stable" or "beta" (Settings > System > Updates); "" follows the running build
+    "crash_reports": "",  # "on" / "off" (Settings > System); "" follows the channel: Beta sends, Stable doesn't
 
     # License / Premium
     # "Buy Now" goes straight to the Ultra checkout; "More Info" goes to the landing page.

@@ -66,9 +66,8 @@ the separate installer candidate workflow on pull requests. Passing Linux
 alone is insufficient to merge shared application changes to Main.
 
 `main` is protected, for admins too: changes arrive only by pull request, and
-`Quality` plus `Platform smoke (macOS)` must pass first. `Windows tests` becomes
-required once the Windows runner is admitted; until then it runs but does not
-block. Do not put `[skip ci]` in a pull request's head commit: the required
+`Quality`, `Platform smoke (macOS)` and `Windows tests` must pass first. Do not
+put `[skip ci]` in a pull request's head commit: the required
 checks never report and the pull request cannot merge. Branch rules are in
 [PLATFORM-DEVELOPMENT.md](PLATFORM-DEVELOPMENT.md#branches-and-merges).
 
@@ -124,19 +123,21 @@ native inference binaries, and release-grade package smokes.
 
 ## User update contract
 
-A push to `main` validates source but is not itself a public release. Shipping
-every merged commit would make an accidental merge an immediate customer
-rollout and would provide no stable version for Flatpak/AppStream metadata.
+A push to `main` validates source but is not itself a customer release.
+Shipping every merged commit to customers would make an accidental merge an
+immediate rollout and would provide no stable version for Flatpak/AppStream
+metadata. The full process is [RELEASING.md](RELEASING.md); in short:
 
-The release boundary is a version tag:
-
-1. Merge the release commit into `main` by pull request and wait for `Quality`.
-2. Build and test the exact commit with
-   `scripts/ci/build-flatpak-on-mini-inf.sh`.
-3. After hands-on signoff, push the matching `vX.Y.Z` tag.
-4. The tag workflow builds both packages and publishes a GitHub Release.
-5. Direct-install users are notified in-app. Stable installs follow stable
-   releases; prerelease installs also follow newer prereleases.
+1. Every night the **Beta** workflow publishes `vX.Y.Z-beta.N` (a GitHub
+   prerelease) from `main`, if `main` moved and its required checks passed.
+   Only users who chose Beta (Settings → System → Updates) are offered it.
+2. A beta that has held up for at least 5 days is promoted with
+   `scripts/release/promote.py`: it tags `vX.Y.Z` on exactly the beta's code.
+   For Linux, build and test that commit with
+   `scripts/ci/build-flatpak-on-mini-inf.sh` and sign off hands-on first.
+3. The tag workflow builds the packages and publishes the GitHub Release.
+4. Direct-install users are notified in-app. Stable installs follow stable
+   releases; Beta (and beta builds that never chose) also follow betas.
 6. Once accepted on Flathub, its external-data checker notices new stable tags
    and opens an update PR. Merging that green PR publishes the Flatpak update;
    Discover/GNOME Software can then install it automatically.
@@ -157,17 +158,36 @@ the job workspace; a workflow must never install or update it.
 | --- | --- | --- |
 | mini-inf-aura | `aura-linux` | 2 CPU cores, 6 GiB RAM |
 | mini-infinity-aura-linux (old WSL; disabled) | pending shared-capacity integration | stopped |
-| Native Windows | `aura-windows` after admission | one bounded native job at a time |
-| mac-studio-aura (offline) | `aura-macos` | peak-model admission required |
+| mini-infinity-aura-windows (native) | `aura-windows` | one job at a time: 4 GiB, 12.5% CPU, 60 min (Job Object) |
+| mac-studio-aura | `aura-macos` | one job at a time through the host run queue (every 3 min), after the peak-model budget check |
 
-**Windows jobs wait for admission.** Until the Windows runner takes jobs, the
-`Windows tests` job (CI) and the PR `Windows Candidate` build are skipped on
-pushes and pull requests. A queued Windows job used to keep every run open, and
-GitHub refuses to rerun a failed job in a run that is still open. Set the repo
-variable `AURA_WINDOWS_CI` to `true` once the runner is admitted:
-`gh variable set AURA_WINDOWS_CI --body true`. At that point also add
-`Windows tests` to `main`'s required checks. Tag releases (`refs/tags/v*`) and
-manual `workflow_dispatch` runs always include Windows.
+**Windows jobs are admitted automatically** (since 2026-10-01). A poller on the
+Mac (every 2 minutes; it only reads GitHub, with the Mac's existing login) looks
+for queued `aura-windows` jobs from trusted events of this repository, judged by
+the same rules as the installed `trusted-runner.py` (a reference copy beside the
+poller): pushes and tags, `workflow_dispatch`, `schedule` and same-repository
+pull requests; never forks, `release` or `workflow_run`. It writes an exact
+reservation on mini-infinity naming each queued run and head sha; an unused
+reservation expires after 90 minutes. The host then runs one bounded one-shot
+job and closes the reservation when the runner is idle. Its job-start hook
+rechecks trust with the installed copy, and the reservation, before checkout.
+The job runner refuses to start unless 8 GiB is free (the 4 GiB job plus 4 GiB
+headroom); the poller then backs off 10 minutes and the job waits queued. The
+Windows model keeps running beside the job. The first auto-admitted job was the
+installer candidate (run 36831537380, 2026-10-01).
+
+The repo variable `AURA_WINDOWS_CI=true` runs `Windows tests` (CI) on pushes and
+pull requests, and the `Windows Candidate` installer build on every push to
+`main` (a newer push cancels an older build). A pull request builds the
+installer only when it touches Windows packaging (`packaging/windows/`,
+requirements, `pyproject.toml`, or the workflow itself), so an ordinary PR
+queues one Windows job. If the Windows runner is
+down for a while, set it to `false`
+(`gh variable set AURA_WINDOWS_CI --body false`) and drop `Windows tests` from
+`main`'s required checks until it is back: a queued Windows job keeps its run
+open, and GitHub refuses to rerun a failed job in a run that is still open. Tag
+releases (`refs/tags/v*`) and manual `workflow_dispatch` runs always include
+Windows.
 
 Linux runners use a dedicated `aurarunner` account and systemd service caps.
 The prepared WSL builder's private **rootless** Docker daemon is also disabled;
@@ -176,7 +196,11 @@ membership in the privileged Docker group. AppImage containers cap CPU at 2 and 
 at 12 GiB. Host package installation is an administrator task; workflows do not
 change host swap or overcommit. Python environments are recreated for every job.
 
-The Mac runner is currently **offline**, pending shared-capacity acceptance. The
+The Mac runner takes one queued job every 3 minutes through the host's run
+queue (a claim ledger plus the budget check below; a budget refusal just defers
+the job to the next tick). Before a DMG build, or anything else that needs the
+Mac quiet, pause the queue with `touch ~/.cache/foxgrid/aura-mac-ci.hold` and
+resume it with `rm ~/.cache/foxgrid/aura-mac-ci.hold`. The
 owner requires the local model at full context, existing server processes and
 at least one cloud coding agent to take precedence. On 2026-09-30, the owner
 approved testing a smaller, model-specific budget on the 256 GiB Mac Studio.

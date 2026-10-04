@@ -740,6 +740,35 @@ class TestOverlayIsClickThrough:
             ov.deleteLater()
 
 
+def test_disappearing_qt_pill_moves_without_remapping_or_raising(monkeypatch):
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "transient"
+        overlay.setWindowOpacity(0.0)
+        overlay.setGeometry(-9999, -9999, overlay.width(), overlay.height())
+        overlay.show()  # one startup map, while transparent and offscreen
+        app.processEvents()
+        monkeypatch.setattr(overlay, "show", lambda: pytest.fail("remapped during dictation"))
+        monkeypatch.setattr(overlay, "raise_", lambda: pytest.fail("raised during dictation"))
+
+        overlay._state = OverlayState.LISTENING
+        overlay._delayed_show(animate=False)
+        assert overlay._state == OverlayState.LISTENING
+
+        overlay.set_state(OverlayState.READY, animate=False)
+        app.processEvents()
+        assert overlay._state == OverlayState.HIDDEN
+        assert overlay.geometry().x() <= -9999
+    finally:
+        overlay.deleteLater()
+
+
 @pytest.mark.parametrize("platform_name, expected", [("linux", "primary"), ("darwin", "pointer")])
 def test_overlay_screen_follows_pointer_on_macos_only(
     monkeypatch, overlay_module, platform_name, expected

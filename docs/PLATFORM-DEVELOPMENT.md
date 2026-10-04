@@ -50,10 +50,9 @@ although 174 of its 179 commits were already on `main`.
   it by area: `mac/`, `win/`, `linux/`, `deck/`, `ci/`, `docs/` (`fix/` and
   `feat/` also fine). Merge within days, then delete it.
 - **`main` is protected.** Changes land only by pull request, after the
-  `Quality` (Linux) and `Platform smoke (macOS)` checks pass. The rule applies to
-  admins and agents too; nobody pushes to `main` directly. `Windows tests` still
-  runs on every pull request but is not yet required, because the Windows runner
-  awaits admission ([CI.md](CI.md)); make it required once the runner takes jobs.
+  `Quality` (Linux), `Platform smoke (macOS)` and `Windows tests` checks pass.
+  The rule applies to admins and agents too; nobody pushes to `main` directly.
+  Windows jobs are admitted automatically ([CI.md](CI.md)).
 - **Land shared changes once.** CI, docs, runner policy and test infrastructure
   go to `main` in one pull request. Never cherry-pick a commit onto several
   branches; a branch picks up `main` by merging or rebasing on it.

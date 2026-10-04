@@ -10,8 +10,9 @@ Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
-Linux is the current production release. macOS and Windows are ports in
-testing, not publicly released; contributors should follow the
+Linux is the current production release. **macOS is in public preview**
+([download](#macos-public-preview)); Windows is in testing and not publicly
+released. Contributors should follow the
 [platform development contract](docs/PLATFORM-DEVELOPMENT.md) so platform work
 does not regress the Linux app.
 
@@ -96,16 +97,25 @@ then, the AppImage above is the fastest path. (Developers can build the
 Flatpak locally from `flatpak/io.wayfindercollective.WayfinderAura.yml` with
 `flatpak-builder`.)
 
-### macOS candidate
+### macOS (public preview)
 
-The Mac build targets Apple Silicon and macOS 14+. Download the architecture-
-labelled DMG, drag **Wayfinder Aura** into **Applications**, then launch that
-copy. The first-run flow downloads the Base speech model and walks through
-Microphone, Accessibility, and Input Monitoring. Input Monitoring may require
-clicking **+** and selecting `/Applications/Wayfinder Aura.app` manually.
+**[⬇ Download the Mac preview](https://github.com/wayfindercollective/wayfinder-aura/releases/tag/macos-preview-2)**:
+`Wayfinder_Aura-*-macOS-arm64.dmg`, for Apple Silicon Macs on macOS 14 or
+later. It is signed with Developer ID and notarized by Apple, so it opens
+without warnings. (The "latest AppImage" link above is the Linux app.)
 
-The default shortcuts are **Fn+Space** for dictation and **Fn+Enter** for the
-Ultra style cycle. The stateful menu-bar item is optional under Settings.
+1. Open the DMG, drag **Wayfinder Aura** into **Applications**, then launch
+   that copy.
+2. The setup checklist walks through Microphone, Accessibility and Input
+   Monitoring, and downloads the Base speech model. After you allow Input
+   Monitoring, macOS needs a relaunch; the app has a button for it. If Input
+   Monitoring doesn't list Aura, click **+** and pick
+   `/Applications/Wayfinder Aura.app`.
+3. Tap **Right Option** to start and stop dictating, or hold it to talk while
+   it's held. **Fn+Enter** cycles the Ultra styles. Both can be changed in
+   Settings.
+
+An Ultra key works on Mac, Windows and Linux: Settings → Ultra → Activate.
 
 ### Windows (internal testing)
 
