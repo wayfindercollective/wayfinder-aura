@@ -1004,6 +1004,150 @@ class TestChunkSilenceGuard:
 
 
 # ===========================================================================
+# Silent mic: exact digital zeros vs quiet-but-live audio
+# ===========================================================================
+
+def _write_wav(path, samples):
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16000)
+        wav_file.writeframes(samples.tobytes())
+
+
+def _all_zero_wav(tmp_path):
+    import numpy as np
+
+    path = tmp_path / "muted-headset.wav"
+    _write_wav(path, np.zeros(48000, dtype=np.int16))
+    return path
+
+
+def _quiet_noise_wav(tmp_path):
+    import numpy as np
+
+    path = tmp_path / "quiet-room.wav"
+    rng = np.random.default_rng(7)
+    _write_wav(path, np.clip(rng.normal(0, 6, 48000), -32768, 32767).astype(np.int16))
+    return path
+
+
+class TestSilentMicMessage:
+    """Field report 2026-10-01: a muted USB headset recorded pure zeros and the
+    banner said "try again, a bit closer to the mic", so the owner blamed paste.
+    Exact digital silence now says the mic sent nothing; quiet-but-live audio
+    keeps the no-speech message."""
+
+    DEVICE = "Wireless Stereo Headset"
+
+    @pytest.fixture(autouse=True)
+    def _platform_neutral(self, app, monkeypatch, tmp_path):
+        # Permission checks have their own tests; real TCC/registry reads here
+        # would make the message depend on the machine running the suite.
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        # Real recorders write their WAVs here instead of the user's cache.
+        recordings = tmp_path / "recordings"
+        recordings.mkdir()
+        monkeypatch.setattr("wayfinder.utils.fs_security.get_app_temp_dir",
+                            lambda: recordings)
+        self.transcribed = []
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
+                            lambda path, cfg, **k: self.transcribed.append(path) or "hallucination")
+        self.banners = []
+        app._show_error_banner = self.banners.append
+        app.config["audio_device_name"] = self.DEVICE
+
+    @staticmethod
+    def _recorder_from_wav(path, chunked):
+        """A real recorder whose stream delivered *path*'s samples."""
+        from unittest.mock import patch
+
+        import numpy as np
+        from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder
+
+        with patch("wayfinder.core.recorder.sd"):
+            recorder = ChunkedRecorder() if chunked else AudioRecorder()
+        with wave.open(str(path), "rb") as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+        samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        for start in range(0, samples.size, 512):
+            block = samples[start:start + 512].reshape(-1, 1)
+            recorder._audio_callback(block, block.shape[0], None, None)
+        if chunked:
+            recorder._stream = SimpleNamespace(active=True, stop=lambda: None,
+                                               close=lambda: None)
+        return recorder
+
+    def _stop(self, app, recorder, chunked):
+        if chunked:
+            app.config["chunked_mode"] = "on"
+            app.chunked_recorder = recorder
+        else:
+            app.recorder = recorder
+        app.app_state = AppState.RECORDING
+        app.stop_recording_and_process()
+        app.run_after()
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
+    def test_all_zero_recording_says_mic_sent_no_sound(self, app, tmp_path, chunked):
+        recorder = self._recorder_from_wav(_all_zero_wav(tmp_path), chunked)
+        self._stop(app, recorder, chunked)
+
+        expected = ("Your mic “Wireless Stereo Headset” sent no sound at all — "
+                    "it may be muted or switched off (Settings → Audio)")
+        assert self.transcribed == []
+        assert f"⚠ {expected}" in app.logs
+        assert self.banners == [expected]
+        assert ("show", "error") in app.overlay_controller.commands
+        assert app.app_state == AppState.IDLE
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
+    def test_quiet_noise_keeps_the_no_speech_message(self, app, tmp_path, chunked):
+        recorder = self._recorder_from_wav(_quiet_noise_wav(tmp_path), chunked)
+        self._stop(app, recorder, chunked)
+
+        assert self.transcribed == []
+        assert any(m.startswith("⚠ No speech detected from “Wireless Stereo Headset”")
+                   for m in app.logs)
+        assert not any("sent no sound" in m for m in app.logs)
+        assert self.banners == ["No speech detected — try again, a bit closer to the mic."]
+
+    def test_all_zero_recording_without_a_device_name(self, app, tmp_path):
+        app.config["audio_device_name"] = None
+        self._stop(app, self._recorder_from_wav(_all_zero_wav(tmp_path), False), False)
+
+        assert self.banners == ["Your mic sent no sound at all — it may be muted or "
+                                "switched off (Settings → Audio)"]
+
+    def test_blocked_mac_microphone_still_gets_the_permission_message(
+        self, app, tmp_path, monkeypatch
+    ):
+        # macOS delivers exact zeros when it blocks the mic; the fix is a
+        # privacy switch, not a mute button.
+        from wayfinder.utils import macos_permissions as mp
+
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        monkeypatch.setattr(mp, "microphone_authorization", lambda: mp.MIC_DENIED)
+        app._refresh_macos_permission_banner = lambda: None
+        self._stop(app, self._recorder_from_wav(_all_zero_wav(tmp_path), False), False)
+
+        assert len(self.banners) == 1
+        assert "Privacy & Security → Microphone" in self.banners[0]
+        assert "sent no sound" not in self.banners[0]
+
+    @pytest.mark.parametrize("message", [
+        "No speech detected from “USB Type-C Headset” — check the mic's mute/gain, "
+        "reduce steady background noise, or pick another in Settings → Audio",
+        "Your mic “USB Type-C Headset” sent no sound at all — it may be muted or "
+        "switched off (Settings → Audio)",
+    ])
+    def test_device_name_never_reads_as_a_paste_failure(self, message):
+        guidance = WApp._error_guidance(None, message)
+        assert "paste" not in guidance.lower() and "type the text" not in guidance
+
+
+# ===========================================================================
 # stop_recording_and_process — chunked path wiring
 # ===========================================================================
 

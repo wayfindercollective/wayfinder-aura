@@ -77,6 +77,12 @@ Linux: dictation for gamers on every desktop.
 
 ### Fixed
 
+- **A muted or switched-off mic is named as the problem.** When the mic sends
+  pure digital silence (a muted USB headset, a wireless headset turned off
+  with its dongle still plugged in), Aura now says "Your mic … sent no sound
+  at all — it may be muted or switched off" instead of asking you to speak
+  closer. Quiet audio from a live mic keeps the no-speech message, and a mic
+  name containing words like "Type-C" no longer reads as a paste failure.
 - **Aura uses about a sixth of the CPU while it waits.** A CustomTkinter
   theme check ran 33 times a second although Aura is always dark, and each
   text box checked its scrollbars 5 times a second. On the Mac, menu-bar

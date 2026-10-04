@@ -23840,19 +23840,23 @@ class WayfinderApp(ctk.CTk):
         )
         if not has_speech:
             self.recorder.cleanup()
-            self.on_error(self._silence_error_message(), gen)
+            self.on_error(self._silence_error_message(self.recorder), gen)
             return
 
         self._maybe_show_gpu_nudge(duration)
         self.executor.submit(self.transcribe_and_inject, audio_path, gen)
 
-    def _silence_error_message(self) -> str:
+    def _silence_error_message(self, recorder=None) -> str:
         """Actionable 'no audio' message that NAMES the selected mic.
 
         The recording was pure/near silence (whisper would hallucinate on it). Naming the
         device makes the common cause obvious — the right mic IS selected but it's muted at
         the hardware (e.g. a Shure MV7's touch-mute / gain knob), which reads as digital zero.
         Without the name, users assume it's a wrong-device bug and never check the mic itself.
+
+        When *recorder* reports exact digital silence (every sample 0 — a muted USB headset,
+        a headset switched off with its dongle still plugged in, a dead virtual device),
+        say the mic sent nothing at all; "speak closer" is wrong advice for a mic that is off.
         """
         if IS_MACOS:
             # A blocked microphone records pure digital silence; don't send
@@ -23894,6 +23898,14 @@ class WayfinderApp(ctk.CTk):
                     pass
                 return message
         name = self.config.get("audio_device_name")
+        try:
+            digital_silence = bool(recorder.is_digital_silence())
+        except Exception:
+            digital_silence = False
+        if digital_silence:
+            mic = f"Your mic “{name}”" if name else "Your mic"
+            return (f"{mic} sent no sound at all — it may be muted or switched off "
+                    "(Settings → Audio)")
         if name:
             return (f"No speech detected from “{name}” — check the mic's mute/gain, "
                     "reduce steady background noise, or pick another in Settings → Audio")
@@ -23950,7 +23962,7 @@ class WayfinderApp(ctk.CTk):
             recorder.cleanup()
             if self.chunked_recorder is recorder:
                 self.chunked_recorder = None
-            self.on_error(self._silence_error_message(), gen)
+            self.on_error(self._silence_error_message(recorder), gen)
             return
 
         self._maybe_show_gpu_nudge(duration)
@@ -24536,6 +24548,13 @@ class WayfinderApp(ctk.CTk):
         def has(*needles: str) -> bool:
             return any(n in m for n in needles)
 
+        # Silence messages embed the mic's name, which can contain words the
+        # checks below key on ("USB Type-C Headset" would read as a paste
+        # failure via "type"), so classify them first.
+        if has("sent no sound at all"):
+            return message.strip()
+        if has("no speech"):
+            return "No speech detected — try again, a bit closer to the mic."
         if has("wayfinder aura was frontmost"):
             return message.split("Injection: ", 1)[-1]
         if has("inject", "ydotool", "wtype", "type"):
@@ -24554,8 +24573,6 @@ class WayfinderApp(ctk.CTk):
             return "Cloud service is rate-limited — try again shortly."
         if has("network", "connection", "timeout", "internet"):
             return "No internet — can't reach the cloud service."
-        if has("no speech"):
-            return "No speech detected — try again, a bit closer to the mic."
         if has("model", "not found"):
             return "No speech model yet — finish setup to download one."
         return (message or "").strip()
