@@ -77,6 +77,12 @@ Linux: dictation for gamers on every desktop.
 
 ### Fixed
 
+- **Aura uses about a sixth of the CPU while it waits.** A CustomTkinter
+  theme check ran 33 times a second although Aura is always dark, and each
+  text box checked its scrollbars 5 times a second. On the Mac, menu-bar
+  actions now wake the app themselves, so its idle check runs once a second.
+  Main process on a Mac Studio: ~2.7% → ~0.5% of a core, window shown or
+  hidden.
 - **Mac: the hotkey works as soon as macOS allows it, and Aura says when it
   can't.** On a new Mac, Right Option could stay dead after every permission
   was allowed, and the banner's buttons seemed to do nothing:
@@ -90,12 +96,6 @@ Linux: dictation for gamers on every desktop.
   - If macOS pauses Aura's keyboard listener, Aura replaces it at once.
   - The activity log records each permission change and the macOS version,
     so a report shows what happened.
-- **Aura uses about a sixth of the CPU while it waits.** A CustomTkinter
-  theme check ran 33 times a second although Aura is always dark, and each
-  text box checked its scrollbars 5 times a second. On the Mac, menu-bar
-  actions now wake the app themselves, so its idle check runs once a second.
-  Main process on a Mac Studio: ~2.7% → ~0.5% of a core, window shown or
-  hidden.
 - **Long chunked dictations keep their words at the chunk boundaries.** The
   prompt for each piece no longer ends on the half-heard word at the cut, the
   join matches the overlap even when that word came out wrong, and a piece
