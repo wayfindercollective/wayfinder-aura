@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
@@ -672,40 +673,81 @@ def _release_cleanup_residency() -> None:
 _WHEEL_SCROLL_ACTIVE = False
 
 
+#: Every ToolTip that has been constructed and not yet destroyed.
+#: A WeakSet so holding a reference here never keeps a dead widget alive.
+#: Tk's event delivery through pack_forget() is the thing that failed here, so
+#: hide_all_tooltips() does not rely on it — the tab switcher calls it directly.
+_LIVE_TOOLTIPS: "weakref.WeakSet[ToolTip]" = weakref.WeakSet()
+
+
+def hide_all_tooltips() -> None:
+    """Dismiss every visible tooltip. Safe to call at any time."""
+    for tip in list(_LIVE_TOOLTIPS):
+        try:
+            tip.on_leave()
+        except Exception:
+            # One stuck tooltip must never stop the others being cleared.
+            pass
+
+
 class ToolTip:
     """
     Modern hover tooltip for CustomTkinter widgets.
     Styled to match Nano Banana design system.
     """
-    
+
     def __init__(self, widget, text, delay=300):
         self.widget = widget
         self.text = text
         self.delay = delay
         self.tooltip_window = None
         self.scheduled_id = None
+        _LIVE_TOOLTIPS.add(self)
 
         widget.bind("<Enter>", self.on_enter)
         widget.bind("<Leave>", self.on_leave)
         widget.bind("<ButtonPress>", self.on_leave)
-    
+        # Switching tabs calls pack_forget() on the pane, which unmaps this
+        # widget without the pointer ever leaving it — so <Leave> never fires
+        # and the tooltip was left stranded. It is an overrideredirect topmost
+        # Toplevel with no chrome, so there is then no way to dismiss it: it
+        # floats over every other tab until the app restarts.
+        widget.bind("<Unmap>", self.on_leave, add="+")
+        widget.bind("<Destroy>", self.on_destroy, add="+")
+
     def on_enter(self, event=None):
         # Pointer is skating across rows during a wheel gesture — scheduling a
         # Toplevel tooltip mid-scroll is a common source of bottom-of-pane jank.
         if _WHEEL_SCROLL_ACTIVE:
             return
         self.scheduled_id = self.widget.after(self.delay, self.show_tooltip)
-    
+
     def on_leave(self, event=None):
         if self.scheduled_id:
-            self.widget.after_cancel(self.scheduled_id)
+            try:
+                self.widget.after_cancel(self.scheduled_id)
+            except Exception:
+                # The widget may already be gone; the timer dies with it.
+                pass
             self.scheduled_id = None
         self.hide_tooltip()
-    
+
+    def on_destroy(self, event=None):
+        self.on_leave()
+        _LIVE_TOOLTIPS.discard(self)
+
     def show_tooltip(self):
         if self.tooltip_window:
             return
         if _WHEEL_SCROLL_ACTIVE:
+            return
+        # The 300ms timer can outlive the widget: hover a row, switch tab, and
+        # this fires against something unmapped or destroyed, stranding a
+        # tooltip from a pane the user already left.
+        try:
+            if not self.widget.winfo_exists() or not self.widget.winfo_ismapped():
+                return
+        except Exception:
             return
 
         # Create tooltip window
@@ -8793,6 +8835,10 @@ class WayfinderApp(ctk.CTk):
 
     def _switch_tab(self, tab_id: str, inspection: bool = False) -> None:
         """Switch to the specified tab."""
+        # Before anything else, and before the early returns below: a tooltip
+        # open over the outgoing pane has no owner once that pane is unmapped,
+        # and nothing else will dismiss it.
+        hide_all_tooltips()
         required_feature = None if inspection else feature_for_tab(tab_id)
         if required_feature:
             gate = getattr(self, "feature_gate", None)
