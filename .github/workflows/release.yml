@@ -122,6 +122,8 @@ jobs:
         # default font, and with other fonts listed apt picks one of those
         # instead, so "DejaVu Sans" resolved to Nimbus Sans (v1.2.0-beta.3).
         # wget: build-appimage.sh fetches its pinned appimagetool with it.
+        # file: appimagetool refuses to run without it ("file command is
+        # missing but required"; v1.2.0-beta.2..4 never published).
         run: |
           # sudo resets the environment: pass the non-interactive frontend on.
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
@@ -133,7 +135,8 @@ jobs:
             wtype \
             xvfb libxft2 pulseaudio libasound2-plugins \
             libfuse2 desktop-file-utils appstream \
-            fonts-dejavu-core fonts-liberation fonts-freefont-ttf fonts-urw-base35 wget
+            fonts-dejavu-core fonts-liberation fonts-freefont-ttf fonts-urw-base35 wget \
+            file
 
       - name: Install glslc for Vulkan builds
         # glslc from shaderc; glslangValidator from apt glslang-tools (required by

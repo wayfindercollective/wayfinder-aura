@@ -1521,3 +1521,14 @@ def test_pull_requests_build_the_windows_installer_only_for_packaging_changes():
     assert "packaging/windows/**" in paths
     assert ".github/workflows/windows-build.yml" in paths
     assert not any(p.startswith("src") for p in paths)
+
+
+
+def test_appimage_container_installs_what_appimagetool_needs():
+    """appimagetool exits with "file command is missing but required" in the
+    bare build container (v1.2.0-beta.2..4 never published for this)."""
+    release = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    start = release.index("apt-get install -y python3-tk")
+    packages = release[start:release.index("\n\n", start)].replace("\\\n", " ").split()
+    for needed in ("libfuse2", "wget", "file"):
+        assert needed in packages, needed
