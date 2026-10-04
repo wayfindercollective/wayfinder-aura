@@ -227,13 +227,25 @@ class TestCutBeta:
 
     DISPATCH = ("workflow", "run", "release.yml", "--repo", "o/r", "--ref", "v1.2.0-beta.3")
 
-    def _resume(self, monkeypatch, release, runs):
+    MAIN = "a" * 40
+
+    def _resume(self, monkeypatch, release, runs, beta_base=MAIN):
         calls = []
         monkeypatch.setattr(cut_beta, "release_for", lambda repo, tag: release)
         monkeypatch.setattr(cut_beta, "note", lambda m: None)
         monkeypatch.setattr(cut_beta, "gh", lambda *a: calls.append(a) or json.dumps(runs))
-        handled = cut_beta.resume_unfinished("o/r", "v1.2.0-beta.3", dry_run=False)
+        monkeypatch.setattr(cut_beta, "git", lambda *a: beta_base)
+        handled = cut_beta.resume_unfinished("o/r", "v1.2.0-beta.3", dry_run=False, head=self.MAIN)
         return handled, self.DISPATCH in calls
+
+    def test_an_unfinished_beta_is_replaced_once_main_moves(self, monkeypatch):
+        # beta.1's tag kept the workflow that hung; the fix landed on main.
+        # Rebuilding the tag would hang again, so the next beta replaces it.
+        assert self._resume(monkeypatch, None, [self.FAILED], beta_base="b" * 40) == (False, False)
+
+    def test_a_running_build_is_waited_on_even_after_main_moves(self, monkeypatch):
+        running = {"status": "in_progress", "conclusion": None}
+        assert self._resume(monkeypatch, None, [running], beta_base="b" * 40) == (True, False)
 
     @staticmethod
     def _release(*names):
@@ -402,6 +414,16 @@ class TestWorkflows:
         assert "python scripts/release/cut_beta.py" in text
         assert "contents: write" in text and "actions: write" in text
         assert "schedule:" in text and "workflow_dispatch:" in text
+
+    def test_apt_in_the_release_container_never_waits_for_an_answer(self):
+        # v1.2.0-beta.1's AppImage job sat 2 h at tzdata's time-zone question.
+        text = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        job = text.split("  build-appimage:", 1)[1].split("\n  build-flatpak:", 1)[0]
+        assert "DEBIAN_FRONTEND: noninteractive" in job and "TZ: Etc/UTC" in job
+        for line in job.splitlines():
+            if line.strip().startswith("sudo") and "apt-get" in line:
+                assert "sudo DEBIAN_FRONTEND=noninteractive apt-get" in line, line
+        assert "tzdata" in job.split("Prepare Jammy container", 1)[1].split("- uses:", 1)[0]
 
     def test_tag_builds_skip_the_mac_until_signing_is_configured(self):
         text = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

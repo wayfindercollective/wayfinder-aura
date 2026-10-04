@@ -38,9 +38,11 @@ otherwise it does nothing and tries again the next night
   on the Mac Studio (below), within about an hour of the release.
 - A beta is finished when its release carries the AppImage, its zsync file
   and the Flatpak. If the dispatch, the build or an upload failed, the next
-  night waits on that beta's build or starts it once more instead of cutting
-  another; after two builds that left it unfinished it is left for a person
-  (Actions → Release) and the next beta may be cut.
+  night waits on that beta's build, or starts it once more while `main` is
+  unchanged. Once `main` has moved (say, with the fix: a tag always rebuilds
+  with the workflow it was cut with), the next beta replaces it instead.
+  After two builds that left it unfinished it is left for a person
+  (Actions → Release). Promotion never picks an unfinished beta.
 - Automated betas older than 14 days that are not among the newest 5 are
   deleted (release and tag). Stable releases and older hand-made tags are
   never touched.

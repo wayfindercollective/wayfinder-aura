@@ -17,8 +17,10 @@ Run by .github/workflows/beta.yml (nightly, or by hand). It:
 
 Resumable: when the newest automated beta is unfinished (its tag exists but
 its release does not, or lacks a Linux download: the dispatch failed, or the
-build or an upload did), the next run waits on its build or starts it again
-(once) instead of cutting another beta.
+build or an upload did), the next run waits on its build, or starts it again
+(once) while main is unchanged. Once main has moved (a fix landed, perhaps for
+the very failure: a tag rebuilds with the workflow it was cut with), the next
+beta replaces it instead.
 
 Needs git, and gh authenticated (GH_TOKEN) with contents+actions write.
 """
@@ -157,15 +159,15 @@ def prune(repo: str, keep: int, keep_days: int, dry_run: bool) -> None:
             gh("release", "delete", tag, "--repo", repo, "--cleanup-tag", "--yes")
 
 
-def resume_unfinished(repo: str, tag: str, dry_run: bool) -> bool:
+def resume_unfinished(repo: str, tag: str, dry_run: bool, head: str | None = None) -> bool:
     """Finish the newest beta when its release is missing, a draft, or lacks
     a Linux download (the Mac DMG comes from the Mac release watcher).
 
     True when this run handled the beta (a build is running, or one was
-    started), so no new beta today. False when the beta is complete, or when
-    two builds of it ended without completing it: it is then left for a
-    person (promote.py never picks an incomplete beta) and the next beta may
-    be cut.
+    started), so no new beta today. False when the beta is complete; when
+    main (``head``) has moved since the beta was cut, so the next beta
+    replaces it; or when two builds of it ended without completing it. An
+    unfinished beta is left as it is (promote.py never picks one).
     """
     missing = versioning.missing_assets(release_for(repo, tag),
                                         versioning.release_assets(tag, mac=False))
@@ -177,6 +179,10 @@ def resume_unfinished(repo: str, tag: str, dry_run: bool) -> bool:
     if any(r["status"] != "completed" for r in runs):
         note(f"{tag}: its release build is still running.")
         return True
+    if head and git("rev-parse", f"{tag}^{{commit}}^") != head:
+        note(f"{tag} is missing {', '.join(missing)}, and main has moved since it was cut: "
+             "the next beta replaces it.")
+        return False
     if len(runs) >= 2:
         note(f"{tag}: still missing {', '.join(missing)} after {len(runs)} release builds; "
              "needs a look (Actions → Release).")
@@ -201,7 +207,7 @@ def main() -> int:
     head = git("rev-parse", "HEAD")
     tags = git("tag", "--list", "v*").split()
     ours = beta_tags(automated_betas())
-    if ours and resume_unfinished(args.repo, ours[-1], args.dry_run):
+    if ours and resume_unfinished(args.repo, ours[-1], args.dry_run, head):
         return 0
     betas = beta_tags(tags)
     if betas and not args.force:
