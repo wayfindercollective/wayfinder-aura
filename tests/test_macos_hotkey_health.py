@@ -163,6 +163,10 @@ def _finish(run):
     run.stop.set()
     run.thread.join(5)
     assert not run.thread.is_alive()
+    # The stopped fake taps' threads end just after; a slow runner (Windows CI)
+    # can still be inside run() when the listener function returns.
+    for listener in run.listener_cls.made:
+        listener.join(5)
 
 
 @needs_pynput
@@ -196,7 +200,9 @@ def test_a_paused_tap_is_replaced_and_never_doubled(monkeypatch):
         assert first.stopped.is_set()
         assert _wait_for(lambda: run.health[-1:] == ["listening"])
         assert any("paused the hotkey's event tap" in m for m in run.logs)
-        assert sum(listener.is_alive() for listener in run.listener_cls.made) == 1
+        first.join(5)
+        assert not first.is_alive()
+        assert run.listener_cls.made[1].is_alive()
     finally:
         _finish(run)
 
