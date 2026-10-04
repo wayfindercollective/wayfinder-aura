@@ -31,12 +31,14 @@ METAINFO = "flatpak/io.wayfindercollective.WayfinderAura.metainfo.xml"
 CHANGELOG = "CHANGELOG.md"
 
 # What a complete release carries ({v}: the tag without its "v"). The Release
-# workflow uploads the Linux files; the Mac release watcher (or publish-macos,
-# once signing secrets exist) attaches the DMG. Windows stays internal.
+# workflow uploads the Linux files and (publish-windows) the Windows installer;
+# the Mac release watcher (or publish-macos, once signing secrets exist)
+# attaches the DMG.
 WORKFLOW_ASSETS = (
     "Wayfinder_Aura-{v}-x86_64.AppImage",
     "Wayfinder_Aura-{v}-x86_64.AppImage.zsync",
     "io.wayfindercollective.WayfinderAura.flatpak",
+    "WayfinderAura-Setup-{v}.exe",
 )
 MAC_ASSET = "Wayfinder_Aura-{v}-macOS-arm64.dmg"
 

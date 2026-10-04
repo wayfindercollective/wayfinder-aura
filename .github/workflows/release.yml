@@ -324,11 +324,9 @@ jobs:
     with:
       source_sha: ${{ github.sha }}
 
-  # Windows builds run with the release gates, but the installer is NOT attached
-  # to the public release: owner decision (2026-09-21) keeps Windows internal
-  # until it is fully tested and signed off. The build uploads an artifact the
-  # team can install from. Re-attaching lives on
-  # release/windows-public-pending-signoff.
+  # Windows builds run with the release gates; publish-windows attaches the
+  # installer (public since 2026-10-04, owner decision). Not a dependency of
+  # `release`, so the Linux assets never wait on the Windows runner.
   build-windows:
     name: Build (Windows)
     needs: [quality, release-readiness]
@@ -619,4 +617,41 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "$GITHUB_REF_NAME" dist/Wayfinder_Aura-*-macOS-*.dmg \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+  # Attach the Windows installer to the release `release` just published, the
+  # same way publish-macos does (see its notes): Linux never waits on Windows,
+  # a failed Linux release is never turned into a Windows-only one, and
+  # `gh release upload` only adds the asset. The installer is not code-signed
+  # yet (SmartScreen: More info -> Run anyway); the in-app updater offers a
+  # release to Windows users only once it carries WayfinderAura-Setup-<v>.exe.
+  publish-windows:
+    name: Publish (Windows)
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 15
+    needs: [release, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows installer
+        uses: actions/download-artifact@v8
+        with:
+          name: wayfinder-aura-windows-x64
+          path: dist/
+
+      - name: Attach installer to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          installer="$(find dist -type f -name "WayfinderAura-Setup-${version}.exe")"
+          count="$(printf '%s' "$installer" | grep -c . || true)"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected one WayfinderAura-Setup-${version}.exe in the artifact, found ${count}"
+            find dist -type f
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$installer" \
             --repo "$GITHUB_REPOSITORY" --clobber

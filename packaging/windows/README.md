@@ -83,12 +83,13 @@ installing host packages. An unavailable runner leaves jobs queued; see
 [CI and resource admission](../../docs/CI.md).
 
 The Release workflow reuses this build after quality and release-readiness
-checks, but the installer is **not attached to public releases**: Windows stays
-internal until testing is complete and the owner signs off (2026-09-21). Team
-members install from the workflow artifact. Dispatch Release with
-`artifacts: windows` for a fully gated candidate. The re-attach change is parked
-on `release/windows-public-pending-signoff`. Manual Windows acceptance on the exact installer remains required
-by [the platform contract](../../docs/PLATFORM-DEVELOPMENT.md).
+checks. On a `v*` tag, `publish-windows` attaches the installer to the GitHub
+release as `WayfinderAura-Setup-<version>.exe`. Windows has been public since
+2026-10-04 (owner decision). Dispatch Release with `artifacts: windows` for a
+fully gated candidate without a release. The installer is not code-signed yet,
+so SmartScreen warns on first run (**More info → Run anyway**). Manual Windows
+acceptance on the exact installer remains required before Windows leaves
+preview; see [the platform contract](../../docs/PLATFORM-DEVELOPMENT.md).
 
 ## Packaged LLM engine self-test
 

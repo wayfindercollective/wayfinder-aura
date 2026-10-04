@@ -75,7 +75,7 @@ retired (2026-09-30). New Windows work uses a short `win/*` branch from `main`
 | Bluetooth mic released right after dictating | Same |
 | Keys in the Keychain | Credential Manager (`utils/windows_credentials.py`) |
 | System trust store, loopback without proxy, keys scrubbed from children, retired cloud models, key help / Verify / Remove | Same |
-| Platform-aware update check (DMG) | Only releases carrying `WayfinderAura-Setup-<v>.exe` count (none today: Windows is internal) |
+| Platform-aware update check (DMG) | Only releases carrying `WayfinderAura-Setup-<v>.exe` count (every release since Windows went public, 2026-10-04) |
 | Transient clipboard | Excluded from Win+V history and Cloud Clipboard |
 | Packaged logs in ~/Library/Logs | `%LOCALAPPDATA%\wayfinder-aura\logs\app.log` (the windowed exe dropped all output) |
 | Benchmark system info | Present PCI display adapters (EnumDisplayDevices; the registry also lists removed cards) + GlobalMemoryStatusEx (was "Unknown") |

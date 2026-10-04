@@ -11,8 +11,9 @@ In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
 Linux is the current production release. **macOS is in public preview**
-([download](#macos-public-preview)); Windows is in testing and not publicly
-released. Contributors should follow the
+([download](#macos-public-preview)), and **Windows is public too**
+([download](#windows)), with an installer that is not code-signed yet.
+Contributors should follow the
 [platform development contract](docs/PLATFORM-DEVELOPMENT.md) so platform work
 does not regress the Linux app.
 
@@ -117,12 +118,21 @@ without warnings. (The "latest AppImage" link above is the Linux app.)
 
 An Ultra key works on Mac, Windows and Linux: Settings → Ultra → Activate.
 
-### Windows (internal testing)
+### Windows
 
-A Windows installer is built and tested in CI, but it is **not publicly
-released** yet: it ships once testing is complete and the owner signs off.
-Team members can install the candidate from the **Windows Candidate** workflow
-artifact; see [packaging/windows/README.md](packaging/windows/README.md).
+**[⬇ Download for Windows](https://github.com/wayfindercollective/wayfinder-aura/releases)**:
+`WayfinderAura-Setup-<version>.exe` on the newest release that has one (until
+the next Stable release, that's a Beta, marked Pre-release). For Windows 10 and
+11 on x64. It installs for your user only, without administrator rights.
+
+1. Run the installer. It isn't code-signed yet, so SmartScreen says "Windows
+   protected your PC": click **More info → Run anyway**.
+2. Tap **Right Alt** (Alt Gr) to start and stop dictating, or hold it while you
+   talk. You can change it in Settings.
+3. Updates install from inside the app (Settings → System → Updates).
+
+Building the installer yourself: see
+[packaging/windows/README.md](packaging/windows/README.md).
 
 ### From source
 

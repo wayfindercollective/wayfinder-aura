@@ -94,25 +94,33 @@ def _workflow_job_body(name: str) -> str:
     return match.group("body")
 
 
-def test_windows_release_build_is_gated_but_not_published():
-    """Windows builds run behind the release gates; the installer stays internal.
-
-    Owner decision 2026-09-21: no public Windows distribution until testing is
-    complete and the owner signs off. The re-attach change is parked on
-    release/windows-public-pending-signoff.
+def test_windows_installer_is_published_without_holding_up_linux():
+    """Owner decision 2026-10-04: Windows is public. Like the Mac DMG, the
+    installer is attached by its own job, so the Linux release never waits on
+    the Windows runner and a failed Linux release never becomes Windows-only.
     """
     build = _workflow_job_body("build-windows")
     release = _workflow_job_body("release")
+    publish = _workflow_job_body("publish-windows")
 
     assert "needs: [quality, release-readiness]" in build
     assert "uses: ./.github/workflows/windows-build.yml" in build
     assert "startsWith(github.ref, 'refs/tags/v')" in build
     assert "inputs.artifacts == 'windows'" in build
     assert "inputs.artifacts == 'all'" in build
-    # The published release must not carry the Windows installer.
     assert "build-windows" not in release
-    assert "wayfinder-aura-windows-x64" not in release
     assert "WayfinderAura-Setup" not in release
+
+    assert "needs: [release, build-windows]" in publish
+    assert "startsWith(github.ref, 'refs/tags/v')" in publish
+    assert "name: wayfinder-aura-windows-x64" in publish
+    # Exactly the tag's installer, added to the existing release only.
+    assert 'WayfinderAura-Setup-${version}.exe' in publish
+    assert 'version="${GITHUB_REF_NAME#v}"' in publish
+    assert 'gh release upload "$GITHUB_REF_NAME"' in publish
+    assert "--clobber" in publish
+    assert "softprops/action-gh-release" not in publish
+    assert "runs-on: [self-hosted, Linux, X64, aura-linux]" in publish
 
 
 def test_appimage_metadata_copies_authoritative_desktop_and_metainfo():

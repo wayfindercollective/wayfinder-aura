@@ -470,7 +470,7 @@ class TestWindowsDownloads:
         _simulate_platform(monkeypatch, "win32", machine="AMD64")
 
     def test_release_without_an_installer_is_not_an_update(self):
-        # Today's situation: Windows is internal, tags carry no Setup exe.
+        # A release without its Setup exe (e.g. its Windows build failed).
         with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
             info = check_for_app_update("1.1.7")
         assert info["update_available"] is False

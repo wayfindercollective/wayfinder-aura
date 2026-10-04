@@ -254,7 +254,8 @@ class TestCutBeta:
 
     LINUX = ("Wayfinder_Aura-1.2.0-beta.3-x86_64.AppImage",
              "Wayfinder_Aura-1.2.0-beta.3-x86_64.AppImage.zsync",
-             "io.wayfindercollective.WayfinderAura.flatpak")
+             "io.wayfindercollective.WayfinderAura.flatpak",
+             "WayfinderAura-Setup-1.2.0-beta.3.exe")
     DONE = {"status": "completed", "conclusion": "success"}
     FAILED = {"status": "completed", "conclusion": "failure"}
 
@@ -305,7 +306,8 @@ class TestPromote:
         assets = [{"name": n, "state": "uploaded", "updated_at": linux} for n in (
             f"Wayfinder_Aura-{version}-x86_64.AppImage",
             f"Wayfinder_Aura-{version}-x86_64.AppImage.zsync",
-            "io.wayfindercollective.WayfinderAura.flatpak")]
+            "io.wayfindercollective.WayfinderAura.flatpak",
+            f"WayfinderAura-Setup-{version}.exe")]
         if dmg:
             assets.append({"name": f"Wayfinder_Aura-{version}-macOS-arm64.dmg",
                            "state": "uploaded", "updated_at": dmg})
@@ -318,7 +320,8 @@ class TestPromote:
                                   "updated_at": "2026-10-19T00:00:00Z"})
         assert promote.availability(release).isoformat() == "2026-10-10T11:00:00+00:00"
 
-    @pytest.mark.parametrize("change", ["no dmg", "dmg uploading", "no flatpak", "draft"])
+    @pytest.mark.parametrize("change", ["no dmg", "dmg uploading", "no flatpak",
+                                        "no windows installer", "draft"])
     def test_an_incomplete_beta_is_never_available(self, change):
         import promote
         release = self._release("v1.2.0-beta.4", dmg=None if change == "no dmg" else "2026-10-10T11:00:00Z")
@@ -326,6 +329,8 @@ class TestPromote:
             release["assets"][-1]["state"] = "starter"
         if change == "no flatpak":
             release["assets"] = [a for a in release["assets"] if not a["name"].endswith(".flatpak")]
+        if change == "no windows installer":
+            release["assets"] = [a for a in release["assets"] if not a["name"].endswith(".exe")]
         if change == "draft":
             release["draft"] = True
         assert promote.availability(release) is None
@@ -397,9 +402,14 @@ class TestPromote:
         for pattern in ("dist/Wayfinder_Aura-*.AppImage\n", "dist/Wayfinder_Aura-*.AppImage.zsync\n",
                         "dist/io.wayfindercollective.WayfinderAura.flatpak\n"):
             assert pattern in workflow
+        assert 'WayfinderAura-Setup-${version}.exe' in workflow  # publish-windows
         names = versioning.release_assets("v1.2.0-beta.3")
         assert "Wayfinder_Aura-1.2.0-beta.3-x86_64.AppImage" in names
         assert "io.wayfindercollective.WayfinderAura.flatpak" in names
+        assert "WayfinderAura-Setup-1.2.0-beta.3.exe" in names
+        # The updater's Windows pattern recognises the name promote requires.
+        from wayfinder.core import app_updates
+        assert app_updates._WIN_SETUP_RE.match("WayfinderAura-Setup-1.2.0-beta.3.exe")
         missing = watcher.releases_missing_a_dmg(
             [{"tag_name": "v1.2.0-beta.3", "published_at": "2026-10-03T09:00:00Z",
               "assets": [{"name": n, "state": "uploaded"} for n in names]}],
