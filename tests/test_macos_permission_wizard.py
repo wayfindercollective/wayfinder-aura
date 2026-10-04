@@ -45,7 +45,7 @@ class TestShowPermissionsSetup:
         monkeypatch.setattr(mp, "permission_snapshot", lambda: {
             "microphone": True, "accessibility": True, "input_monitoring": True})
         shown = []
-        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True))
+        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True) or True)
         ns = _ns(_welcome_active=True, _welcome_pane=pane)
         assert WayfinderApp.show_permissions_setup(ns, force=True) is True
         assert shown == [True]
@@ -57,7 +57,7 @@ class TestShowPermissionsSetup:
         monkeypatch.setattr(mp, "permission_snapshot", lambda: {
             "microphone": True, "accessibility": False, "input_monitoring": False})
         shown = []
-        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True))
+        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True) or True)
         ns = _ns(_welcome_active=True, _welcome_pane=pane)
         assert WayfinderApp.show_permissions_setup(ns) is True
         assert shown == [True]
@@ -179,7 +179,7 @@ class TestListenerRestartEventWiring:
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", is_mac)
         monkeypatch.setattr(hk, "pynput_hotkey_listener", fake_listener)
         monkeypatch.setattr(hk, "is_pynput_available", lambda: True)
-        ns = _ns()
+        ns = _ns(_queue_macos_hotkey_health=lambda state: None)
         WayfinderApp._start_pynput_listener(ns)
         assert done.wait(3)
         ns._pynput_thread.join(3)
@@ -190,10 +190,12 @@ class TestListenerRestartEventWiring:
         assert isinstance(seen.get("restart_event"), threading.Event)
         assert seen["restart_event"] is ns._pynput_restart_event
         assert seen["restart_event"] is not ns.stop_event
+        assert seen["on_health"] is ns._queue_macos_hotkey_health
 
     def test_linux_listener_call_is_unchanged(self, monkeypatch):
         ns, seen = self._start(monkeypatch, False)
         assert "restart_event" not in seen
+        assert "on_health" not in seen
         assert ns._pynput_restart_event is None
 
     def test_finished_listener_clears_started_flag(self, monkeypatch):

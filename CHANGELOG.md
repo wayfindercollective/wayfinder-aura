@@ -77,6 +77,19 @@ Linux: dictation for gamers on every desktop.
 
 ### Fixed
 
+- **Mac: the hotkey works as soon as macOS allows it, and Aura says when it
+  can't.** On a new Mac, Right Option could stay dead after every permission
+  was allowed, and the banner's buttons seemed to do nothing:
+  - Aura now checks that keys actually reach it. When macOS hasn't applied a
+    permission yet, the banner says so and offers **Relaunch Aura**.
+  - Aura retries by itself every few seconds, so allowing Accessibility in
+    System Settings takes effect without a restart.
+  - A second "allow" no longer clears a switch you just turned on.
+  - **Recheck** answers "Still off" when nothing changed, and
+    **Permissions…** always opens the checklist.
+  - If macOS pauses Aura's keyboard listener, Aura replaces it at once.
+  - The activity log records each permission change and the macOS version,
+    so a report shows what happened.
 - **Aura uses about a sixth of the CPU while it waits.** A CustomTkinter
   theme check ran 33 times a second although Aura is always dark, and each
   text box checked its scrollbars 5 times a second. On the Mac, menu-bar

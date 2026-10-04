@@ -8998,14 +8998,15 @@ class WayfinderApp(ctk.CTk):
             command=self._open_missing_macos_permission,
         )
         self.macos_permission_open_btn.pack(side="right", padx=(SPACING["sm"], 0))
-        ctk.CTkButton(
+        self.macos_permission_recheck_btn = ctk.CTkButton(
             _mp_inner, text="Recheck",
             font=(self.font_body[0], self.font_sizes["small"]),
             height=28, width=76, corner_radius=RADIUS["xs"],
             fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
-            command=self._refresh_macos_permission_banner,
-        ).pack(side="right")
+            command=self._recheck_macos_permissions,
+        )
+        self.macos_permission_recheck_btn.pack(side="right")
         self.macos_permission_label.pack(side="left", fill="x", expand=True)
 
         # (D) Persistent "finish setup — download a model" cue.
@@ -17106,9 +17107,13 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             install_ready = True
         accessibility, input_monitoring = self._macos_permission_state()
+        # The listener's own check outranks the switches: keys reaching the
+        # tap ("live") need no relaunch; none reaching it with every switch
+        # on ("refused"/"deaf") does (DarwinTapHealth).
+        health = getattr(self, "_macos_hotkey_health", None)
         input_relaunch_required = bool(
             getattr(self, "_macos_input_relaunch_required", False)
-        )
+        ) and health != "live"
         try:
             from wayfinder.utils.macos_permissions import (
                 MIC_DENIED, MIC_RESTRICTED, microphone_authorization,
@@ -17121,8 +17126,16 @@ class WayfinderApp(ctk.CTk):
             else "microphone" if mic_blocked
             else "accessibility" if accessibility is not True
             else "input_monitoring" if input_monitoring is not True or input_relaunch_required
+            else "hotkey_relaunch" if health in ("refused", "deaf")
             else None
         )
+        try:
+            self._log_macos_permission_state(
+                install_ready, mic_blocked, accessibility, input_monitoring,
+                input_relaunch_required, health,
+            )
+        except Exception:
+            pass
         if self._missing_macos_permission is None:
             try:
                 banner.pack_forget()
@@ -17151,6 +17164,12 @@ class WayfinderApp(ctk.CTk):
                 "(the copy in Applications), then quit and reopen it."
             )
             button_text = "Open Accessibility"
+        elif self._missing_macos_permission == "hotkey_relaunch":
+            text = (
+                f"{hotkey} isn't reaching Wayfinder Aura yet. macOS applies new "
+                "permissions after a restart: relaunch Aura."
+            )
+            button_text = "Relaunch Aura"
         else:
             if input_monitoring is True and input_relaunch_required:
                 text = "Input Monitoring is on. Relaunch Wayfinder Aura to activate the hotkey."
@@ -17169,6 +17188,61 @@ class WayfinderApp(ctk.CTk):
                     banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
                 else:
                     banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
+    def _log_macos_permission_state(self, install_ready, mic_blocked, accessibility,
+                                    input_monitoring, relaunch_required, health) -> None:
+        """One activity-log line whenever a macOS grant changes: the trail a
+        "permissions didn't work" report needs."""
+        def word(value):
+            return "on" if value is True else "off" if value is False else "unknown"
+
+        state = (install_ready, mic_blocked, accessibility, input_monitoring,
+                 relaunch_required, health)
+        if state == getattr(self, "_macos_permission_logged", None):
+            return
+        first = getattr(self, "_macos_permission_logged", None) is None
+        self._macos_permission_logged = state
+        line = (f"macOS permissions: Accessibility {word(accessibility)}, "
+                f"Input Monitoring {word(input_monitoring)}, "
+                f"microphone {'blocked' if mic_blocked else 'ok'}, "
+                f"hotkey tap {health or 'starting'}"
+                + (", relaunch pending" if relaunch_required else "")
+                + ("" if install_ready else ", NOT in Applications"))
+        if first:
+            try:
+                import platform
+
+                line += f" (macOS {platform.mac_ver()[0] or '?'}, {platform.machine()})"
+            except Exception:
+                pass
+        self.log(line)
+
+    def _queue_macos_hotkey_health(self, state: str) -> None:
+        """Listener thread: hand a tap-health change to the Tk thread."""
+        self.event_queue.put(
+            (EventType.UI_CALLBACK, lambda: self._on_macos_hotkey_health(state))
+        )
+
+    def _on_macos_hotkey_health(self, state: str) -> None:
+        self._macos_hotkey_health = state
+        if state == "live":
+            # Keys demonstrably reach Aura: no relaunch is owed any more.
+            self._macos_input_relaunch_required = False
+        self._refresh_macos_permission_banner()
+
+    def _recheck_macos_permissions(self) -> None:
+        """Recheck: re-read every grant, and answer visibly when nothing changed."""
+        before = getattr(self, "_missing_macos_permission", None)
+        self._refresh_macos_permission_banner()
+        missing = getattr(self, "_missing_macos_permission", None)
+        button = getattr(self, "macos_permission_recheck_btn", None)
+        if missing is None or missing != before or button is None:
+            return
+        try:
+            button.configure(text="Still off")
+            self.after(2000, lambda: button.winfo_exists() and button.configure(text="Recheck"))
         except Exception:
             pass
 
@@ -17236,6 +17310,8 @@ class WayfinderApp(ctk.CTk):
             permission = getattr(self, "_missing_macos_permission", None)
         if permission is None:
             return
+        if permission == "hotkey_relaunch" and self.relaunch_app():
+            return
         if (permission == "input_monitoring"
                 and getattr(self, "_macos_input_relaunch_required", False)):
             _, input_monitoring = self._macos_permission_state()
@@ -17274,11 +17350,14 @@ class WayfinderApp(ctk.CTk):
         welcome = getattr(self, "_welcome_pane", None)
         if getattr(self, "_welcome_active", False) and welcome is not None:
             try:
-                welcome.show_permissions_step()
-                return True
+                if welcome.show_permissions_step():
+                    return True
             except Exception:
-                return False
-        if getattr(self, "_permissions_pane", None) is not None:
+                pass  # a finished tour: fall through to the checklist
+        pane = getattr(self, "_permissions_pane", None)
+        if pane is not None and getattr(pane, "_destroyed", False):
+            self._permissions_pane = pane = None
+        if pane is not None:
             self._switch_tab("dictate")
             return True
         try:
@@ -22888,7 +22967,9 @@ class WayfinderApp(ctk.CTk):
                     style_toggle_key, style_toggle_modifiers,
                     config_ref=self.config,
                     capture_state=_HOTKEY_CAPTURE,
-                    **({"restart_event": restart_event} if restart_event is not None else {}),
+                    **({"restart_event": restart_event,
+                        "on_health": self._queue_macos_hotkey_health}
+                       if restart_event is not None else {}),
                 )
             except Exception as e:
                 print(f"[Hotkey] pynput listener crashed: {e}", flush=True)

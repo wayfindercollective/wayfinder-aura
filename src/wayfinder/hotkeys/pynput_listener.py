@@ -300,6 +300,9 @@ _SECURE_INPUT_FN = None
 # lost, so only the Secure Input notice and the event-tap check run, and they
 # can wait half a second: 2 wakeups/s instead of 10 (CLAUDE.md rule 1).
 _DARWIN_IDLE_TICK_S = 0.5
+# A refused event tap is retried this often (fast for the first minute after
+# launch or a grant, then slower), so a permission takes effect by itself.
+_DARWIN_TAP_RETRY_S = (3.0, 15.0)
 
 
 def _listener_tick_s(busy: bool, platform_name: Optional[str] = None) -> float:
@@ -344,6 +347,73 @@ def _darwin_secure_input_owner() -> str | None:
         return str(app.localizedName()) if app is not None else None
     except Exception:
         return None
+
+
+def _darwin_hid_key_events() -> int | None:
+    """How many physical key events macOS has seen (key-downs plus modifier
+    changes), from its own counter; readable without any permission."""
+    try:
+        from Quartz import (
+            CGEventSourceCounterForEventType,
+            kCGEventFlagsChanged,
+            kCGEventKeyDown,
+            kCGEventSourceStateHIDSystemState,
+        )
+
+        return int(CGEventSourceCounterForEventType(
+            kCGEventSourceStateHIDSystemState, kCGEventKeyDown)) + int(
+            CGEventSourceCounterForEventType(
+                kCGEventSourceStateHIDSystemState, kCGEventFlagsChanged))
+    except Exception:
+        return None
+
+
+class DarwinTapHealth:
+    """Is macOS actually delivering keys to the hotkey's event tap?
+
+    pynput ends its listener thread without a word when macOS refuses the
+    tap (Accessibility not in effect for this process yet), and a tap made
+    before Input Monitoring is in effect can exist yet receive nothing. Both
+    read as "Right Option does nothing" with every switch on, so the listener
+    compares macOS's own key counter with the events the tap saw.
+
+    States: "refused" (no tap), "listening" (tap made, no key typed yet),
+    "live" (the tap saw a key), "deaf" (keys were typed, the tap saw none).
+    """
+
+    REFUSED, LISTENING, LIVE, DEAF = "refused", "listening", "live", "deaf"
+    DEAF_AFTER_KEYS = 25  # typed key events the tap missed before saying so
+
+    def __init__(self, counter: Optional[Callable[[], int | None]] = None):
+        self._counter = counter if counter is not None else _darwin_hid_key_events
+        self._baseline: int | None = None
+        self.seen = 0
+        self.state: str | None = None
+
+    def started(self, alive: bool) -> str:
+        """A new tap was attempted; ``alive`` = pynput's thread survived it."""
+        self.seen = 0
+        self._baseline = self._counter() if alive else None
+        self.state = self.LISTENING if alive else self.REFUSED
+        return self.state
+
+    def saw_event(self) -> None:
+        self.seen += 1  # tap callback thread; a lost increment is harmless
+
+    def check(self, secure_input: bool) -> str | None:
+        """While the tap's thread runs: has it seen a key, or missed many?"""
+        if self.seen:
+            self.state = self.LIVE
+        elif secure_input:
+            # Secure Input hides keys from every tap: those keys prove nothing.
+            self._baseline = self._counter()
+        elif self.state == self.LISTENING:
+            now = self._counter()
+            if self._baseline is None:
+                self._baseline = now
+            elif now is not None and now - self._baseline >= self.DEAF_AFTER_KEYS:
+                self.state = self.DEAF
+        return self.state
 
 
 def _darwin_fn_pressed() -> bool:
@@ -566,6 +636,7 @@ def pynput_hotkey_listener(
     config_ref: Optional[dict] = None,
     capture_state: Optional[dict] = None,
     restart_event: Optional[Event] = None,
+    on_health: Optional[Callable[[str], None]] = None,
 ):
     """
     Cross-platform hotkey listener using pynput.
@@ -576,6 +647,9 @@ def pynput_hotkey_listener(
     restart_event (optional) ends just this listener, leaving the shared
     stop_event untouched — macOS uses it to re-create the event tap once
     Accessibility / Input Monitoring is granted, without a relaunch.
+
+    on_health (optional, macOS) receives each DarwinTapHealth state change,
+    from this thread.
     """
     def log(msg: str):
         if log_callback:
@@ -859,6 +933,8 @@ def pynput_hotkey_listener(
     
     # Start the listener
     listener_kwargs = {}
+    tap_health: Optional[DarwinTapHealth] = None  # macOS only
+    tap_paused = [False]
     if sys.platform == "darwin":
         try:
             from Quartz import (
@@ -874,8 +950,14 @@ def pynput_hotkey_listener(
                 kCGEventKeyUp,
                 kCGKeyboardEventKeycode,
             )
+            import Quartz
 
             suppressed_keycodes: set[int] = set()
+            # Apple's fixed values, should a PyObjC build lack the names.
+            key_event_types = (kCGEventKeyDown, kCGEventKeyUp,
+                               getattr(Quartz, "kCGEventFlagsChanged", 12))
+            tap_pause_types = (getattr(Quartz, "kCGEventTapDisabledByTimeout", 0xFFFFFFFE),
+                               getattr(Quartz, "kCGEventTapDisabledByUserInput", 0xFFFFFFFF))
 
             modifier_masks = {
                 "fn": kCGEventFlagMaskSecondaryFn,
@@ -900,6 +982,13 @@ def pynput_hotkey_listener(
             def _darwin_intercept(event_type, event):
                 """Trigger only from a physical key event carrying the full chord."""
                 nonlocal _last_hotkey_time, _last_style_time, captured_darwin_vk
+                if event_type in tap_pause_types:
+                    # macOS switched the tap off (a slow callback, or secure
+                    # input); it stays off until a new one is made.
+                    tap_paused[0] = True
+                    return event
+                if event_type in key_event_types:
+                    tap_health.saw_event()
                 flags = CGEventGetFlags(event)
                 fn_active = bool(flags & kCGEventFlagMaskSecondaryFn)
                 if fn_active:
@@ -970,19 +1059,61 @@ def pynput_hotkey_listener(
                 return event
 
             listener_kwargs["darwin_intercept"] = _darwin_intercept
+            tap_health = DarwinTapHealth()
         except Exception as exc:
             log(f"⚠️ macOS hotkeys disabled: physical-event verification unavailable ({exc})")
 
-    listener = keyboard.Listener(
-        on_press=on_press,
-        on_release=on_release,
-        **listener_kwargs,
-    )
-    listener.start()
+    def _new_listener():
+        made = keyboard.Listener(
+            on_press=on_press,
+            on_release=on_release,
+            **listener_kwargs,
+        )
+        made.start()
+        return made
+
+    listener = _new_listener()
 
     print(f"[Hotkey] pynput listener started, waiting for: {get_key_name(target_key)}", flush=True)
     log("🎧 Cross-platform hotkey listener active (pynput)")
-    
+
+    last_health = [None]
+
+    def _report_health(state):
+        if state is None or state == last_health[0]:
+            return
+        before, last_health[0] = last_health[0], state
+        if state == DarwinTapHealth.REFUSED:
+            log("⚠ macOS hasn't given Wayfinder Aura keyboard access yet, so the hotkey "
+                "can't reach it. Turn on Wayfinder Aura in System Settings → Privacy & "
+                "Security → Accessibility; Aura retries by itself every few seconds.")
+        elif state == DarwinTapHealth.DEAF:
+            log("⚠ Keys aren't reaching Wayfinder Aura although macOS made its hotkey "
+                "tap. This happens until Aura is relaunched after Input Monitoring is "
+                "turned on: quit and reopen Aura.")
+        elif state == DarwinTapHealth.LIVE:
+            log("✓ Hotkey check: keys are reaching Wayfinder Aura")
+        elif before == DarwinTapHealth.REFUSED:
+            log("✓ macOS allowed keyboard access — the hotkey listener is running")
+        if on_health is not None:
+            try:
+                on_health(state)
+            except Exception:
+                pass
+
+    def _tap_made(made) -> bool:
+        # pynput's thread ends at once when macOS refuses the tap (never
+        # wait(): it blocks forever if the tap call itself raised).
+        made.join(0.3)
+        return made.is_alive()
+
+    next_tap_retry, tap_retries = 0.0, 0
+    if tap_health is not None and not stop_event.is_set():
+        tap_ok = _tap_made(listener)
+        _report_health(tap_health.started(tap_ok))
+        if not tap_ok:
+            next_tap_retry = time.monotonic() + _DARWIN_TAP_RETRY_S[0]
+
     secure_input_on = False
     win_ticks, elevated_front = 0, False  # Windows: elevated-foreground warning state
     try:
@@ -1031,8 +1162,27 @@ def pynput_hotkey_listener(
                     and not _darwin_key_pressed(current_style_code)
                 ):
                     active_actions.discard("style")
-                if not getattr(listener, "running", True):
-                    raise RuntimeError("macOS event tap stopped")
+                if tap_health is None:
+                    if not getattr(listener, "running", True):
+                        raise RuntimeError("macOS event tap stopped")
+                elif tap_paused[0] or not listener.is_alive():
+                    # A refused tap is retried (_DARWIN_TAP_RETRY_S), so a
+                    # grant made in System Settings takes effect without the
+                    # user doing anything else; a paused one is replaced now.
+                    now = time.monotonic()
+                    if tap_paused[0] or now >= next_tap_retry:
+                        if tap_paused[0]:
+                            log("↻ macOS paused the hotkey's event tap — starting a fresh one")
+                            tap_paused[0] = False
+                            listener.stop()
+                            listener.join(1.0)
+                        listener = _new_listener()
+                        tap_ok = _tap_made(listener)
+                        _report_health(tap_health.started(tap_ok))
+                        tap_retries = 0 if tap_ok else tap_retries + 1
+                        next_tap_retry = now + _DARWIN_TAP_RETRY_S[0 if tap_retries < 20 else 1]
+                else:
+                    _report_health(tap_health.check(secure_input_on))
             elif sys.platform == "win32":
                 win_ticks += 1
                 if win_ticks % 10 == 0:  # once a second: an elevated app in front
@@ -1068,7 +1218,10 @@ def pynput_hotkey_listener(
                     active_actions.discard("style")
             time.sleep(_listener_tick_s(bool(active_actions) or solo_gesture.is_down))
     finally:
-        # DELIBERATELY no liveness monitoring here. Watching the inner listener
+        # DELIBERATELY no liveness monitoring here beyond macOS's own tap
+        # (above: pynput's darwin listener stops cleanly, and a dead or paused
+        # tap is replaced in this same thread, so there is never a second
+        # live one). Watching the inner listener
         # and reporting its death upward was implemented and then reverted:
         # pynput's Xorg stop() itself performs an unbounded wait() when X init
         # failed before its context existed, so any teardown path that touches

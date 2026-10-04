@@ -568,3 +568,17 @@ def _no_real_macos_keystrokes(monkeypatch):
     monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
     yield
     macos_paste.pending_restore.flush()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_tcc_reset_record(monkeypatch, tmp_path_factory):
+    """ask_for_permission records its one-per-build TCC reset in CONFIG_DIR;
+    keep every test's record out of the developer's Application Support."""
+    try:
+        from wayfinder.utils import macos_permissions as _mp
+    except Exception:
+        yield
+        return
+    record = tmp_path_factory.getbasetemp() / f"tcc-resets-{os.urandom(6).hex()}.json"
+    monkeypatch.setattr(_mp, "_reset_marker_path", lambda: record)
+    yield

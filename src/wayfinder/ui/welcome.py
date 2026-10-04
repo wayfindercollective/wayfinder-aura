@@ -63,6 +63,18 @@ def permission_row_plan(name: str, hint: str, snapshot: dict, requested: set[str
     return (hint, ()) if granted else (hint, ("allow",))
 
 
+def relaunch_aware_requests(requested: set[str], snapshot: dict, health) -> set[str]:
+    """The requests that still owe a relaunch, given what the hotkey listener
+    saw (DarwinTapHealth): keys reaching Aura ("live") owe none; none reaching
+    it with every switch on ("refused"/"deaf") owe one whatever was asked."""
+    result = set(requested)
+    if health == "live":
+        result.discard("input_monitoring")
+    elif health in ("refused", "deaf") and all(v is True for v in snapshot.values()):
+        result.add("input_monitoring")
+    return result
+
+
 def needs_permissions_shortcut(snapshot: dict, requested: set[str]) -> bool:
     """A tour detour stays reachable after the user leaves its first step."""
     return (any(value is not True for value in snapshot.values())
@@ -598,9 +610,13 @@ class WelcomePane:
         snapshot = permission_snapshot()
         self._perm_snapshot = snapshot
         # Input Monitoring may preflight as granted before its event tap can
-        # receive keys. A request made in this process always needs a relaunch.
+        # receive keys. A request made in this process needs a relaunch unless
+        # the hotkey listener has seen keys arrive since; one that has seen
+        # none with every switch on needs a relaunch whatever was requested.
+        requested = relaunch_aware_requests(
+            self._perm_requested, snapshot, getattr(self.app, "_macos_hotkey_health", None))
         all_on = (all(v is True for v in snapshot.values())
-                  and "input_monitoring" not in self._perm_requested)
+                  and "input_monitoring" not in requested)
         self._body_label(
             body,
             "all set — Aura can hear you and type for you."
@@ -616,7 +632,7 @@ class WelcomePane:
         for name, title, why, icon in self._PERMISSION_ROWS:
             granted = snapshot.get(name) is True
             why, actions = permission_row_plan(
-                name, why, snapshot, self._perm_requested,
+                name, why, snapshot, requested,
                 always_open_settings=self._only_permissions,
             )
             row = ctk.CTkFrame(rows, fg_color="transparent")
@@ -634,7 +650,7 @@ class WelcomePane:
                          text_color=COLORS["text_primary"]).pack(anchor="w")
             ctk.CTkLabel(text, text=why, anchor="w",
                          height=(FONT_SIZES["small"] * 2 + 5 if name in ("accessibility", "input_monitoring")
-                                 and name in self._perm_requested else FONT_SIZES["small"] + 5),
+                                 and name in requested else FONT_SIZES["small"] + 5),
                          wraplength=240,
                          font=(FONTS["body"][0], FONT_SIZES["small"]),
                          text_color=COLORS["text_muted"]).pack(anchor="w")
@@ -966,6 +982,18 @@ class WelcomePane:
                 else "input_monitoring" if input_monitoring is not True
                 else None
             )
+            if missing is None and getattr(self.app, "_macos_hotkey_health", None) in (
+                    "refused", "deaf"):
+                self._status_label(
+                    body,
+                    "Your Mac hasn't applied the new permissions to Aura yet, so the "
+                    "hotkey can't reach it. Relaunch Aura; the short tour starts again.",
+                    COLORS["accent_yellow"],
+                    pady=(SPACING["md"], 0),
+                )
+                self._continue_button(body, "relaunch aura",
+                                      command=self._relaunch_for_permissions)
+                return
             if missing is not None:
                 self.app._missing_macos_permission = missing
                 pane = (
@@ -1008,12 +1036,14 @@ class WelcomePane:
                 return
         self._continue_button(body, "continue")
 
-    def show_permissions_step(self) -> None:
-        """Show the permissions checklist inside this pane (app entry point)."""
+    def show_permissions_step(self) -> bool:
+        """Show the permissions checklist inside this pane (app entry point).
+        False when this pane is gone, so the caller opens its own checklist."""
         if self._destroyed or self.flow.is_complete:
-            return
+            return False
         self.flow.detour_to("permissions")
         self._render_step()
+        return True
 
     def _show_permission_checklist(self) -> None:
         self.show_permissions_step()
