@@ -74,6 +74,16 @@ jobs:
     container:
       image: ubuntu:22.04
       options: --cpus 2 --memory 12g --memory-swap 13g
+    # No terminal in the container: a package that asks a question (tzdata's
+    # time zone) would wait forever. v1.2.0-beta.1 hung 2 h on it.
+    # AGENT_TOOLSDIRECTORY keeps setup-python's jammy Python inside the
+    # container: in the runner's shared tool cache its scripts point at
+    # /__w/_tool/..., which breaks every host job that picks that version up
+    # (beta.1 broke pip for the host's Quality job that way).
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+      AGENT_TOOLSDIRECTORY: /opt/hostedtoolcache
     defaults:
       run:
         shell: bash
@@ -82,8 +92,10 @@ jobs:
     steps:
       - name: Prepare Jammy container
         run: |
+          ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime
+          echo Etc/UTC > /etc/timezone
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y sudo git curl ca-certificates libicu70
+          apt-get install -y sudo git curl ca-certificates libicu70 tzdata
           printf 'AURA_WORKSPACE_OWNER=%s\n' "$(stat -c '%u:%g' "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v7
@@ -103,8 +115,9 @@ jobs:
         # now asserts Vulkan). libgirepository/libdbus/libcairo dev: build deps
         # for the pip PyGObject/dbus-python below.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk portaudio19-dev \
+          # sudo resets the environment: pass the non-interactive frontend on.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-tk portaudio19-dev \
             cmake make gcc g++ git pkg-config \
             libvulkan-dev vulkan-tools glslang-tools \
             spirv-headers spirv-tools \
