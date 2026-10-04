@@ -420,6 +420,8 @@ class TestWorkflows:
         text = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         job = text.split("  build-appimage:", 1)[1].split("\n  build-flatpak:", 1)[0]
         assert "DEBIAN_FRONTEND: noninteractive" in job and "TZ: Etc/UTC" in job
+        # Its Python stays in the container, out of the host's shared tool cache.
+        assert "AGENT_TOOLSDIRECTORY: /opt/hostedtoolcache" in job
         for line in job.splitlines():
             if line.strip().startswith("sudo") and "apt-get" in line:
                 assert "sudo DEBIAN_FRONTEND=noninteractive apt-get" in line, line
