@@ -156,7 +156,7 @@ def mock_online_license():
 
     with patch("wayfinder.license.activate_online", _activate), patch(
         "wayfinder.license._verify_token", _verify
-    ):
+    ), patch("wayfinder.license.deactivate_online", lambda *a, **k: "released"):
         yield
 
 

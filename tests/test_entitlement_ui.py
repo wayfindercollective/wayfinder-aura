@@ -1,6 +1,8 @@
 """Headless checks for UI entitlement boundaries (real unbound methods)."""
 
 from types import SimpleNamespace
+
+import pytest
 from unittest.mock import patch
 
 import wayfinder_main
@@ -463,29 +465,57 @@ def test_successful_activation_replaces_form_with_active_state():
     assert "breadcrumb" in events
 
 
-def test_license_removal_rerenders_free_state_and_explains_scope():
+class _SyncThread:
+    def __init__(self, target, daemon=None, name=None):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+@pytest.mark.parametrize("released, says", [
+    (True, "activation is free again"),
+    (False, "still counted"),
+])
+def test_license_removal_frees_the_slot_off_the_ui_thread(monkeypatch, released, says):
+    """Remove license calls the licensing service on a worker thread, then the
+    Tk thread re-renders Free and says whether the activation slot was freed."""
+    from wayfinder.license import LicenseRelease
+
     feedback = _Label()
     gate = SimpleNamespace(is_premium=False)
-    events = []
+    events, queued = [], []
     app = SimpleNamespace(
         config={},
         _license_feedback=feedback,
         _ultra_banner=None,
         log=events.append,
+        event_queue=SimpleNamespace(put=queued.append),
         _rebuild_header=lambda: events.append("header"),
         _refresh_entitlement_ui=lambda: events.append("entitlements"),
         _render_license_tile=lambda: events.append("license"),
         _write_status_breadcrumb=lambda: events.append("breadcrumb"),
     )
+    app._finish_license_removal = lambda result: wayfinder_main.WayfinderApp._finish_license_removal(
+        app, result)
+    message = ("License removed. This computer's activation is free again." if released
+               else "License removed from this computer. Its activation slot is still counted.")
+    result = LicenseRelease(released=released, status="released" if released else "offline",
+                            message=message)
+    monkeypatch.setattr(wayfinder_main.threading, "Thread", _SyncThread)
 
-    with patch("wayfinder.license.remove_license") as remove, patch(
+    with patch("wayfinder.license.release_license", return_value=result) as release, patch(
         "wayfinder.license.get_feature_gate", return_value=gate
     ), patch("wayfinder.config.enforce_license_config", return_value=False):
         wayfinder_main.WayfinderApp._deactivate_license(app)
+        assert "removing" in feedback.options["text"].lower()  # before the UI callback
+        (kind, callback), = queued
+        assert kind == wayfinder_main.EventType.UI_CALLBACK
+        callback()
 
-    remove.assert_called_once_with()
+    release.assert_called_once_with()
     assert app.feature_gate is gate
-    assert "removed from this device" in feedback.options["text"].lower()
+    assert says in feedback.options["text"]
     assert events[-3:] == ["header", "entitlements", "license"]
 
 

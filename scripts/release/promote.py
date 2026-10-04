@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""Promote a beta that has held up to a stable release.
+
+    GH_TOKEN=$(gh auth token --user wayfindercollective) \
+        python scripts/release/promote.py            # newest beta, its version
+    python scripts/release/promote.py --beta v1.2.0-beta.3 --version 1.2.0
+
+Stable ships exactly the code the beta was built from (the main commit under
+the beta's release commit), not whatever main holds today. The script:
+
+1. picks the newest beta that carries every download (AppImage, zsync,
+   Flatpak and the signed Mac DMG) and has had all of them out for
+   --min-days (the soak; --yes skips the wait, never the completeness);
+2. commits "release: X.Y.Z" on that main commit: version stamped everywhere,
+   the beta's Unreleased CHANGELOG notes moved under ## [X.Y.Z], and a stable
+   <release> in the metainfo (Flathub/AppStream);
+3. opens a pull request into main carrying the same CHANGELOG and metainfo
+   notes (only the bullets the beta had, so newer notes stay Unreleased);
+4. pushes tag vX.Y.Z, which runs the Release workflow: Linux packages, and the
+   signed Mac DMG once the signing secrets are set (docs/RELEASING.md).
+
+Re-running after a failure resumes, bound to the same beta: a pushed tag is
+kept only if it was made from this beta and its main commit, an open or
+merged notes PR and an existing notes branch only if they carry this beta's
+notes (commits a person added on top are kept; the branch is never
+force-pushed), and a tag that never left this machine is remade. Anything
+else stops the script for a person, including a notes PR closed without
+merging: reopen it, or pass --new-notes-pr to open a fresh one. --dry-run
+prints the plan and writes nothing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import tempfile
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import versioning  # noqa: E402
+from cut_beta import automated_betas, beta_tags  # noqa: E402
+
+ROOT = versioning.ROOT
+REPO = "wayfindercollective/wayfinder-aura"
+
+
+def run(*args: str, cwd: Path = ROOT) -> str:
+    return subprocess.check_output(list(args), cwd=cwd, text=True).strip()
+
+
+def stamp_release(tree: Path, version: str, released: str, today: date) -> None:
+    """Version, CHANGELOG and metainfo for ``version`` in the checkout ``tree``."""
+    changelog = tree / versioning.CHANGELOG
+    changelog.write_text(
+        versioning.promote_changelog(
+            changelog.read_text(encoding="utf-8"), version, released, today),
+        encoding="utf-8")
+    lead = released.split("\n### ", 1)[0].strip()
+    intro = lead if lead and not lead.startswith("- ") else f"Wayfinder Aura {version}:"
+    versioning.add_metainfo_release(
+        version, today, intro, versioning.bullet_titles(released),
+        development=False, root=tree)
+
+
+def availability(release: dict | None) -> datetime | None:
+    """When a beta became complete: the upload time of the newest of the
+    assets it must carry (the Mac DMG lands an hour or more after the Linux
+    packages). None while any of them is missing."""
+    if release is None:
+        return None
+    required = versioning.release_assets(release.get("tag_name") or "")
+    if versioning.missing_assets(release, required):
+        return None
+    times = []
+    for asset in release.get("assets") or []:
+        if asset.get("name") in required and asset.get("state") == "uploaded":
+            try:
+                times.append(datetime.fromisoformat(str(asset.get("updated_at")).replace("Z", "+00:00")))
+            except ValueError:
+                return None
+    return max(times) if times else None
+
+
+def pick_candidate(releases: list[dict], ours: set[str], min_days: int,
+                   now: datetime) -> tuple[str, int] | None:
+    """The newest automated beta that has been complete for min_days."""
+    by_tag = {r["tag_name"]: r for r in releases
+              if r.get("tag_name") in ours and not r.get("draft")}
+    for tag in reversed(beta_tags(by_tag)):
+        when = availability(by_tag[tag])
+        if when is not None and (now - when).days >= min_days:
+            return tag, (now - when).days
+    return None
+
+
+def release_message(version: str, beta: str, base: str) -> str:
+    return f"release: {version}\n\nStable release of {beta} (main {base})."
+
+
+def tag_problem(tag: str, beta: str, base: str) -> str | None:
+    """Why the existing ``tag`` is not this promotion's, or None if it is."""
+    parent = run("git", "rev-parse", f"{tag}^{{commit}}^")
+    body = run("git", "log", "-1", "--format=%B", f"{tag}^{{commit}}")
+    if parent != base or f"Stable release of {beta} (main {base})" not in body:
+        return f"{tag} already exists but was not made from {beta} (main {base[:9]})"
+    return None
+
+
+def usable_pr(prs: list[dict], beta: str, new_after_closed: bool = False) -> str | None:
+    """URL of the open or merged notes PR into main for this beta, or None to
+    open one. PRs into any other branch never count.
+
+    An open or merged PR for another beta stops the script. A PR for this
+    beta closed without merging never counts as done, and is not silently
+    replaced either (someone may have closed it on purpose): the script stops
+    unless --new-notes-pr asks for a fresh one."""
+    closed = None
+    for pr in prs:
+        if pr.get("baseRefName") != "main":
+            continue
+        mine = f"(from {beta})" in (pr.get("body") or "")
+        if pr.get("state") in ("OPEN", "MERGED"):
+            if not mine:
+                raise SystemExit(f"Notes PR {pr.get('url')} is for another beta; "
+                                 "close it or promote that beta instead.")
+            return pr.get("url")
+        if mine and closed is None:
+            closed = pr.get("url")
+    if closed and not new_after_closed:
+        raise SystemExit(f"Notes PR {closed} was closed without merging. Reopen it and "
+                         "re-run, or re-run with --new-notes-pr to open a fresh one.")
+    return None
+
+
+def remote_has(ref: str) -> bool:
+    return bool(run("git", "ls-remote", "origin", ref))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--beta", help="beta tag to promote (default: the newest one "
+                                       "available for --min-days)")
+    parser.add_argument("--version", help="stable version (default: the beta's X.Y.Z)")
+    parser.add_argument("--min-days", type=int, default=5, help="minimum soak, in days")
+    parser.add_argument("--yes", action="store_true", help="promote a younger beta anyway")
+    parser.add_argument("--new-notes-pr", action="store_true",
+                        help="open a fresh notes PR although this beta's was closed unmerged")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    run("git", "fetch", "-q", "origin", "main", "--tags")
+    now = datetime.now(timezone.utc)
+    listing = json.loads(run("gh", "api", f"repos/{REPO}/releases?per_page=100") or "[]")
+    ours = automated_betas()
+    if args.beta:
+        beta = args.beta
+        release = next((r for r in listing if r.get("tag_name") == beta), None)
+        missing = versioning.missing_assets(release, versioning.release_assets(beta))
+        if missing:
+            raise SystemExit(f"{beta} is missing {', '.join(missing)}: only a complete "
+                             "beta can be promoted (--yes skips the soak, not this).")
+        when = availability(release)
+        age = (now - when).days if when else -1
+    else:
+        found = pick_candidate(listing, ours, 0 if args.yes else args.min_days, now)
+        if not found:
+            raise SystemExit(f"no complete beta (Mac DMG included) has been out for "
+                             f"{args.min_days} days yet (the Beta workflow makes them; "
+                             "--yes skips the soak)")
+        beta, age = found
+    if versioning.beta_number(beta) is None or beta not in ours:
+        raise SystemExit(f"{beta} is not a beta the Beta workflow made")
+    version = args.version or versioning.core_str(versioning.parse(beta)[0])
+    if versioning.parse(version) is None or versioning.parse(version)[1] is not None:
+        raise SystemExit(f"{version!r} is not a stable version (X.Y.Z)")
+    tag = f"v{version}"
+    branch = f"docs/release-notes-{version}"
+    base = run("git", "rev-parse", f"{beta}^{{commit}}^")
+    print(f"Promoting {beta} (main {base[:9]}, available {age} day(s)) to {tag}.")
+    if age < args.min_days and not args.yes:
+        raise SystemExit(f"{beta} has been available only {age} day(s) (soak is "
+                         f"{args.min_days}); re-run with --yes to ship it anyway.")
+    if args.dry_run:
+        return 0
+
+    # Resumable: whatever an earlier run of THIS promotion finished stays
+    # finished; anything made for another beta stops here for a person.
+    tag_pushed = remote_has(f"refs/tags/{tag}")
+    if tag_pushed:
+        problem = tag_problem(tag, beta, base)
+        if problem:
+            raise SystemExit(problem)
+    elif run("git", "tag", "--list", tag):
+        run("git", "tag", "-d", tag)  # made locally by a run that stopped before pushing
+    pr = usable_pr(json.loads(run("gh", "pr", "list", "--repo", REPO, "--head", branch,
+                                  "--base", "main", "--state", "all",
+                                  "--json", "url,state,body,baseRefName") or "[]"),
+                   beta, args.new_notes_pr)
+    notes_mark = f"Notes shipped in {tag} (from {beta})."
+
+    today = date.today()
+    with tempfile.TemporaryDirectory(prefix="aura-promote-") as tmp:
+        if not pr:
+            notes_tree = Path(tmp) / "notes"
+            reuse = False
+            if remote_has(f"refs/heads/{branch}"):
+                # An earlier run's branch for this beta is reused as it is,
+                # with anything a person added on top. Any other branch of
+                # that name is left alone: it is never force-pushed.
+                run("git", "fetch", "-q", "origin", branch)
+                history = run("git", "log", "--format=%B", f"origin/main..origin/{branch}")
+                if notes_mark not in history:
+                    raise SystemExit(f"Branch {branch} exists but holds no notes for {beta}; "
+                                     "delete it (or promote the beta it was made for).")
+                reuse = True
+            start = f"origin/{branch}" if reuse else "origin/main"
+            run("git", "worktree", "add", "-q", "-B", branch, str(notes_tree), start)
+            try:
+                if not reuse:
+                    released = versioning.unreleased_body(
+                        run("git", "show", f"{base}:{versioning.CHANGELOG}") + "\n")
+                    stamp_release(notes_tree, version, released, today)
+                    current = versioning.parse(versioning.read_version(notes_tree))[0]
+                    if current < versioning.parse(version)[0]:
+                        versioning.set_version(version, root=notes_tree)
+                    run("git", "commit", "-qam", f"docs(release): {version} notes\n\n{notes_mark}",
+                        cwd=notes_tree)
+                run("git", "push", "-q", "-u", "origin", branch, cwd=notes_tree)
+                pr = run("gh", "pr", "create", "--repo", REPO, "--base", "main", "--head", branch,
+                         "--title", f"docs(release): {version} notes",
+                         "--body", f"Moves the notes shipped in {tag} (from {beta}) under "
+                                   f"## [{version}] and adds its AppStream release entry.",
+                         cwd=notes_tree)
+            finally:
+                run("git", "worktree", "remove", "--force", str(notes_tree))
+
+        if not tag_pushed:
+            release_tree = Path(tmp) / "release"
+            run("git", "worktree", "add", "-q", "--detach", str(release_tree), base)
+            try:
+                released = versioning.unreleased_body(
+                    (release_tree / versioning.CHANGELOG).read_text(encoding="utf-8"))
+                versioning.set_version(version, root=release_tree)
+                stamp_release(release_tree, version, released, today)
+                run("git", "commit", "-qam", release_message(version, beta, base),
+                    cwd=release_tree)
+                run("git", "tag", "-a", tag, "-m", f"Wayfinder Aura {version} (from {beta})",
+                    cwd=release_tree)
+                run("git", "push", "origin", f"refs/tags/{tag}")
+            finally:
+                run("git", "worktree", "remove", "--force", str(release_tree))
+
+    print(f"{tag} is pushed: the Release workflow builds it, and the Mac release "
+          "watcher attaches its DMG within the hour.")
+    print(f"Notes pull request: {pr} (merge it once its checks pass).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

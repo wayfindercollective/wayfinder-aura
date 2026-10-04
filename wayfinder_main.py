@@ -140,6 +140,22 @@ try:
     ctk.ScalingTracker.update_loop_interval = 3_600_000
 except Exception:
     pass
+# CustomTkinter's appearance tracker re-arms a 30 ms `after` forever to
+# follow the system light/dark setting: ~33 wakeups/s, measured as 32 of the
+# 36 Tcl wakeups/s an idle Mac app made (most of its ~2% idle CPU). The app
+# pins dark mode (setup_window), so every tick is a no-op. Hourly, as above.
+try:
+    ctk.AppearanceModeTracker.update_loop_interval = 3_600_000
+except Exception:
+    pass
+# Each CTkTextbox re-arms its own 200 ms "are scrollbars needed?" check for as
+# long as it exists (History log, Ultra vocabulary boxes): 5 wakeups/s apiece,
+# window hidden or not. A scrollbar appearing within a second of the text
+# overflowing is still prompt.
+try:
+    ctk.CTkTextbox._scrollbar_update_time = 1000
+except Exception:
+    pass
 # Microphone picker's first option (matched by the "Auto-detect" substring).
 # No emoji prefix: no emoji as UI chrome (rule 11).
 AUTO_DETECT_MIC_LABEL = "Auto-detect (Recommended)"
@@ -1380,6 +1396,20 @@ def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
     return 50
 
 
+def _update_installs_in_place() -> bool:
+    """True when Install Update can swap this install itself (core/app_installer)."""
+    try:
+        from wayfinder.core.app_installer import install_mode
+        return install_mode() is not None
+    except Exception:
+        return False
+
+
+# Idle poll_events cadence once the macOS event pipe is attached
+# (WakingQueue): every producer wakes Tk itself, so the poll is only a backstop.
+_MACOS_IDLE_SAFETY_POLL_MS = 1000
+
+
 def _settings_preload_interval_ms(platform_name: str | None = None) -> int:
     """Yield time between hidden Settings construction slices.
 
@@ -1534,6 +1564,19 @@ SETTING_TOOLTIPS = {
         "Turn it off if your menu bar is crowded."
     ),
     "ui_scale": "Size of Aura's window and text.",
+    "update_channel": (
+        "Stable: tested releases, every few weeks.\n"
+        "Beta: the newest build, as often as daily. New features sooner, "
+        "and sometimes new bugs.\n"
+        "Going back to Stable keeps your version until the next stable release."
+    ),
+    "crash_reports": (
+        "When Aura crashes or hits an error, send Wayfinder the kind of error, "
+        "where in Aura's code it happened and the app and system versions, so "
+        "it gets fixed. Never the error message, audio, dictated text or your "
+        "settings.\n"
+        "On by default for Beta, off for Stable."
+    ),
     "gamer_mode": (
         "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
         "M+...), keeps your words as said, and sends them to chat: don't press "
@@ -3632,6 +3675,15 @@ def resolve_status_indicator_target(
     return "none"
 
 
+def visual_overlay_mode(platform: str, overlay_type: str) -> str | None:
+    """Use a separate Qt process when a hidden Mac app needs a visible pill."""
+    if overlay_type == "always_on":
+        return "persistent"
+    if platform == "darwin" and overlay_type == "disappearing":
+        return "transient"
+    return None
+
+
 def normalize_indicator_audio_level(value) -> float:
     """Convert recorder scalar types (including NumPy float32) to finite 0..1."""
     try:
@@ -4551,14 +4603,24 @@ class FloatingIndicator:
         glow_b = int(34 + b * 0.05)
         inner_glow_color = f"#{glow_r:02x}{glow_g:02x}{glow_b:02x}"
         
-        self.window.configure(fg_color=shadow_color)
+        # Tk's toplevel and CTk's outer frame each have rectangular backing
+        # pixels outside the rounded pill. Key out their shared backdrop on
+        # Windows so only the rounded border and pill remain.
+        window_bg = "#010203" if IS_WINDOWS else shadow_color
+        self.window.configure(fg_color=window_bg)
+        if IS_WINDOWS:
+            try:
+                self.window.attributes("-transparentcolor", window_bg)
+            except tk.TclError:
+                window_bg = shadow_color
+                self.window.configure(fg_color=window_bg)
         
         # Outer frame with blue rim light (pre-blended, no alpha)
         self.glow_frame = ctk.CTkFrame(
             self.window,
-            fg_color=shadow_color,
+            fg_color=window_bg if IS_WINDOWS else shadow_color,
             corner_radius=RADIUS["lg"],  # Squircle feel
-            border_width=1,
+            border_width=0 if IS_WINDOWS else 1,
             border_color=COLORS["border_rim"],  # Pre-blended 10% blue
         )
         self.glow_frame.pack(padx=0, pady=0)
@@ -5079,8 +5141,12 @@ class OverlayController:
         log_callback=None,
         want_tray: bool = False,
         tray_only: bool = False,
+        cancel_hint: str = "",
     ):
         self._process: subprocess.Popen | None = None
+        # "✕ Shift+Esc" above the pill while recording; kept here so a restarted
+        # overlay process gets it again (passed as --cancel-hint).
+        self._cancel_hint = cancel_hint or ""
         # When True, the overlay subprocess hosts a QSystemTrayIcon (used when the main
         # process has no in-process pystray tray — the Flatpak). tray_available is re-set
         # live from the overlay's ready handshake on each (re)start, so it never goes stale.
@@ -5263,6 +5329,8 @@ class OverlayController:
                     cmd_args.append(f"--offset={offset}")
                     cmd_args.append(f"--anchor={anchor}")
                     cmd_args.append(f"--quality={quality}")
+                    if self._cancel_hint:
+                        cmd_args.append(f"--cancel-hint={self._cancel_hint}")
                 def _overlay_preexec() -> None:
                     # If the main process is hard-killed, the overlay (tray) must not
                     # outlive it. Linux PR_SET_PDEATHSIG delivers SIGTERM to the child
@@ -5534,6 +5602,14 @@ class OverlayController:
     def set_quality(self, quality: str):
         """Set the overlay render quality live ('high' | 'performance')."""
         self._send_command({"cmd": "quality", "value": quality})
+
+    def set_cancel_hint(self, hint: str):
+        """The key that discards a recording, shown above the pill while recording."""
+        hint = hint or ""
+        if hint == self._cancel_hint:
+            return
+        self._cancel_hint = hint
+        self._send_command({"cmd": "cancel_hint", "value": hint})
 
     def quit(self):
         """Shut down the overlay subprocess."""
@@ -5941,8 +6017,9 @@ class WayfinderApp(ctk.CTk):
         else:
             self.event_queue = queue.Queue()
         # Menu delegates (especially PyObjC's NSMenu callback) must never call
-        # Tk/AppKit window code inline. poll_events drains this only after the
-        # native menu tracking callback has returned to Tk's main loop.
+        # Tk/AppKit window code inline. Tk drains this only after the native
+        # menu tracking callback has returned to Tk's main loop (see
+        # _dispatch_tray_action).
         self._tray_action_queue = queue.Queue()
         # UI → GlobalShortcuts worker commands. The portal connection and its
         # session live on a private GLib thread, so the Settings button asks
@@ -6144,6 +6221,7 @@ class WayfinderApp(ctk.CTk):
             self.config.get("enable_tray_icon", True),
         )
         want_visual = overlay_enabled and not getattr(self, "_game_mode", False)
+        qt_visual_mode = visual_overlay_mode(sys.platform, overlay_type) if want_visual else None
         initial_style = self.config.get("output_tone", "minimal")
 
         def _start_overlay_controller(*, tray_only: bool) -> bool:
@@ -6154,12 +6232,13 @@ class WayfinderApp(ctk.CTk):
                 return False
             self.overlay_controller = OverlayController(
                 audio_level_callback=get_audio_level,
-                mode="persistent",
+                mode=qt_visual_mode if not tray_only else "persistent",
                 initial_style=initial_style,
                 config=self.config,
                 log_callback=self.log,
                 want_tray=want_tray or tray_only,
                 tray_only=tray_only,
+                cancel_hint=self._cancel_hotkey_display() or "",
             )
             self.overlay_controller._start_process()
             if not tray_only:
@@ -6175,10 +6254,14 @@ class WayfinderApp(ctk.CTk):
             # Game Mode: neither the PyQt overlay nor the CTk indicator can render over a
             # fullscreen gamescope game — feedback is audio cues only (feedback/audio.py).
             self.log("🎮 Game Mode: visual overlay disabled (audio cues only)")
-        elif want_visual and overlay_type == "always_on":
+        elif qt_visual_mode is not None:
             if _start_overlay_controller(tray_only=False):
                 self._use_pyqt_overlay = True
-                self.log("✨ Using Always On indicator (PyQt6)")
+                self.log(
+                    "✨ Using Disappearing indicator (PyQt6)"
+                    if qt_visual_mode == "transient"
+                    else "✨ Using Always On indicator (PyQt6)"
+                )
             else:
                 self.log("⚠ PyQt6 not available, using Disappearing indicator")
         elif want_visual:
@@ -6347,6 +6430,7 @@ class WayfinderApp(ctk.CTk):
         self.after(2000, self._check_model_updates_background)
         # Check for a newer app release (non-blocking, once per day)
         self.after(2600, self._check_app_update_background)
+        self.after(8000, self._start_crash_report_pass)
 
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay and not IS_MACOS:
@@ -9599,6 +9683,8 @@ class WayfinderApp(ctk.CTk):
         if IS_MACOS or IS_WINDOWS:
             self._create_login_item_row(system_content)
 
+        self._create_update_channel_row(system_content)
+
         yield "system"
 
         # === BENTO TILE: Status Overlay ===
@@ -9633,7 +9719,7 @@ class WayfinderApp(ctk.CTk):
         self.overlay_type_var = ctk.StringVar(value=overlay_type)
         overlay_type_labels = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
         }
         self.overlay_type_dropdown = self.create_dropdown_row(
             overlay_content, "Indicator Style",
@@ -12616,7 +12702,7 @@ class WayfinderApp(ctk.CTk):
         return 0.0
 
     def _has_visual_pyqt_overlay(self) -> bool:
-        """True when the Always On PyQt pill is the on-screen status surface.
+        """True when the PyQt pill owns the on-screen status surface.
 
         tray_only controllers host the system tray only — they must NOT steal
         show/hide from FloatingIndicator (Disappearing mode).
@@ -12634,7 +12720,7 @@ class WayfinderApp(ctk.CTk):
 
         state: ``listening`` | ``processing`` | ``ready`` | ``hide``
 
-        Returns the controller show/update result when using PyQt Always On
+        Returns the controller show/update result when using a PyQt pill
         (so callers can retry critical ready transitions); otherwise None.
         """
         ctrl = getattr(self, "overlay_controller", None)
@@ -12688,7 +12774,7 @@ class WayfinderApp(ctk.CTk):
         return want_tray
 
     def _start_live_overlay_controller(self, *, tray_only: bool, want_tray: bool) -> bool:
-        """Start Always On / tray-only subprocess mid-session. Returns True on success."""
+        """Start visual / tray-only subprocess mid-session. Returns True on success."""
         try:
             import PyQt6  # noqa: F401
         except ImportError:
@@ -12696,7 +12782,9 @@ class WayfinderApp(ctk.CTk):
         try:
             self.overlay_controller = OverlayController(
                 audio_level_callback=None if tray_only else self._audio_level_for_overlay,
-                mode="persistent",
+                mode=("persistent" if tray_only else
+                      visual_overlay_mode(sys.platform, self.config.get("overlay_type", "always_on"))
+                      or "persistent"),
                 initial_style=self.config.get("output_tone", "minimal"),
                 config=self.config,
                 log_callback=self.log,
@@ -12870,8 +12958,8 @@ class WayfinderApp(ctk.CTk):
                 self.log("🙈 Status overlay off")
             return
 
-        # Visual on — Always On (PyQt) preferred; CTk disappearing otherwise.
-        if overlay_type == "always_on":
+        # Mac's disappearing pill must live outside the hidden Tk application.
+        if visual_overlay_mode(sys.platform, overlay_type) is not None:
             if self._start_live_overlay_controller(tray_only=False, want_tray=want_tray):
                 self.log("✨ Status overlay on")
                 return
@@ -15232,7 +15320,39 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_check, daemon=True).start()
 
-    def _check_app_update_background(self) -> None:
+    def _start_crash_report_pass(self) -> None:
+        """Read consent from the live config; send earlier crashes and clear
+        unused update staging in the background."""
+        try:
+            from wayfinder.core import app_installer, crash_reports
+
+            crash_reports.set_config_getter(lambda: self.config)
+
+            def startup_pass() -> None:
+                # The UI is up: an update helper waiting on this launch may
+                # now drop the previous copy.
+                app_installer.confirm_launch()
+                if app_installer.cleanup_stale_staging():
+                    self.event_queue.put((EventType.UI_CALLBACK, lambda: self.log(
+                        "⚠ The last update couldn't install itself; Get Update downloads it instead.")))
+                crash_reports.collect_and_send()
+
+            threading.Thread(target=startup_pass, daemon=True,
+                             name="crash-report-startup").start()
+        except Exception:
+            pass
+
+    def report_callback_exception(self, exc, val, tb):
+        """An error in a Tk callback: print it as Tk does, and report it."""
+        super().report_callback_exception(exc, val, tb)
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.record_exception(exc, val, tb, where="tk-callback")
+        except Exception:
+            pass
+
+    def _check_app_update_background(self, force: bool = False) -> None:
         """Check GitHub for a newer app release in a background thread.
 
         Network and parsing live in core/app_updates (cached, once/day); only
@@ -15241,23 +15361,97 @@ class WayfinderApp(ctk.CTk):
         update nag must never become a startup error."""
         if not self.config.get("check_for_app_updates", True):
             return
+        channel = self.config.get("update_channel") or None
+        generation = self._next_app_update_generation()
 
         def _check():
             try:
                 from wayfinder import __version__ as current_version
                 from wayfinder.core.app_updates import check_for_app_update
 
-                info = check_for_app_update(current_version)
+                info = check_for_app_update(
+                    current_version, force=force, channel=channel)
                 if not info.get("update_available"):
                     return
                 if info.get("latest_version") == self.config.get(
                         "app_update_dismissed_version", ""):
                     return
-                self.after(0, lambda: self._show_app_update_banner(info))
+                self.after(0, lambda: self._show_app_update_banner_if_current(info, generation))
             except Exception:
                 pass  # Silent failure - don't annoy user
 
         threading.Thread(target=_check, daemon=True).start()
+
+    _UPDATE_CHANNEL_CHOICES = {"Stable": "stable", "Beta": "beta"}
+
+    def _create_update_channel_row(self, parent) -> None:
+        """Settings ▸ System: which releases this install is offered."""
+        from wayfinder import __version__ as current_version
+        from wayfinder.core.app_updates import channel_label
+
+        self._update_channel_var = ctk.StringVar(
+            value=channel_label(current_version, self.config.get("update_channel"))
+        )
+        self.create_dropdown_row(
+            parent, "Updates", list(self._UPDATE_CHANNEL_CHOICES),
+            self._update_channel_var, self._on_update_channel_changed,
+            tooltip=SETTING_TOOLTIPS["update_channel"], width=160,
+        )
+        from wayfinder.core.crash_reports import reports_enabled
+
+        self._crash_reports_var = ctk.BooleanVar(
+            value=reports_enabled(self.config, current_version))
+        self.create_toggle_row(
+            parent, "Send crash reports", self._crash_reports_var,
+            self._on_crash_reports_toggled, tooltip=SETTING_TOOLTIPS["crash_reports"],
+        )
+
+    def _on_crash_reports_toggled(self) -> None:
+        """An explicit choice; turning reports off also deletes unsent ones."""
+        enabled = bool(self._crash_reports_var.get())
+        self.config["crash_reports"] = "on" if enabled else "off"
+        save_config(self.config)
+        self.log(f"Crash reports: {'on' if enabled else 'off'}")
+        if not enabled:
+            try:
+                from wayfinder.core import crash_reports
+
+                crash_reports.clear_queue()
+            except Exception:
+                pass
+
+    def _on_update_channel_changed(self, choice: str) -> None:
+        """Persist the update channel and look for that channel's newest
+        release right away (the daily check would otherwise wait a day)."""
+        channel = self._UPDATE_CHANNEL_CHOICES.get(choice)
+        if channel is None or channel == self.config.get("update_channel"):
+            return
+        self.config["update_channel"] = channel
+        save_config(self.config)
+        self.log(f"⟳ Updates: {choice}")
+        var = getattr(self, "_crash_reports_var", None)
+        if var is not None and not self.config.get("crash_reports"):
+            # Reports follow the channel until the user picks: show the new default.
+            try:
+                from wayfinder import __version__ as current_version
+                from wayfinder.core.crash_reports import reports_enabled
+
+                var.set(reports_enabled(self.config, current_version))
+            except Exception:
+                pass
+        self._next_app_update_generation()  # answers for the old channel are void
+        self._hide_app_update_banner()
+        self._check_app_update_background(force=True)
+
+    def _next_app_update_generation(self) -> int:
+        """Each check (and a channel change) starts a new generation; only the
+        newest check's answer may change the banner."""
+        self._app_update_generation = getattr(self, "_app_update_generation", 0) + 1
+        return self._app_update_generation
+
+    def _show_app_update_banner_if_current(self, info: dict, generation: int) -> None:
+        if generation == getattr(self, "_app_update_generation", 0):
+            self._show_app_update_banner(info)
 
     def _show_app_update_banner(self, info: dict) -> None:
         """Show the app-update banner on the Dictate tab (Tk thread only).
@@ -15273,7 +15467,13 @@ class WayfinderApp(ctk.CTk):
             latest = info.get("latest_version", "")
             self._app_update_info = dict(info)
             text = f"Update available: {latest} (you have {current_version})."
-            if _IS_LINUX and info.get("download_url"):
+            in_place = bool(info.get("download_url")) and _update_installs_in_place()
+            button = getattr(self, "app_update_button", None)
+            if button is not None:
+                button.configure(text="Install Update" if in_place else "Get Update")
+            if in_place:
+                text += " Install Update restarts Aura into it."
+            elif _IS_LINUX and info.get("download_url"):
                 # The GitHub bundle has no update channel (not on Flathub yet):
                 # the new file is downloaded and opened by the user.
                 if IS_FLATPAK:
@@ -15281,9 +15481,9 @@ class WayfinderApp(ctk.CTk):
                 else:
                     text += " Get Update downloads the new AppImage; run it instead of this one."
             label.configure(text=text)
-            if IS_MACOS or IS_WINDOWS:
-                # A manual check may have hidden Get Update for a status line.
-                self._set_app_update_button_visible(True)
+            # A manual check or an install attempt may have hidden the button
+            # for a status line.
+            self._set_app_update_button_visible(True)
             if not banner.winfo_manager():
                 anchor = getattr(self, "_dictate_banner_anchor", None)
                 if anchor is not None:
@@ -15317,10 +15517,14 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Could not persist update dismissal: {e}")
 
     def _open_app_update_page(self) -> None:
-        """Get Update button: open the release page. The banner stays up until
-        dismissed or the new version is actually running."""
+        """Get Update button: install in place where this install can
+        (core/app_installer), else open the download or release page. The
+        banner stays up until dismissed or the new version is actually running."""
         from wayfinder.core.app_updates import RELEASES_PAGE
         info = getattr(self, "_app_update_info", {})
+        if info.get("download_url") and _update_installs_in_place():
+            self._install_app_update(info)
+            return
         url = info.get("release_url") or RELEASES_PAGE
         if IS_MACOS or IS_WINDOWS or _IS_LINUX:
             # Mac/Windows updates always carry a DMG / Setup exe, Linux
@@ -15328,6 +15532,77 @@ class WayfinderApp(ctk.CTk):
             # download it in one click, falling back to the release page.
             url = info.get("download_url") or url
         self._open_url(url)
+
+    def _install_app_update(self, info: dict) -> None:
+        """Install Update: download, verify and stage off the Tk thread, then
+        restart into the new version (core/app_installer)."""
+        if getattr(self, "_app_update_installing", False):
+            return
+        self._app_update_installing = True
+        url = info.get("download_url", "")
+        self._show_app_update_status("Downloading the update…")
+        shown = {"percent": -1}
+
+        def progress(fraction: float) -> None:
+            percent = int(fraction * 100)
+            if percent != shown["percent"]:  # at most ~100 UI updates per download
+                shown["percent"] = percent
+                self.event_queue.put((EventType.UI_CALLBACK, lambda p=percent:
+                    self._show_app_update_status(f"Downloading the update… {p}%")))
+
+        def work() -> None:
+            from wayfinder.core.app_installer import Outcome, prepare_update
+            try:
+                outcome = prepare_update(url, progress)
+            except Exception as exc:  # prepare_update shouldn't raise; be sure
+                outcome = Outcome(message=f"Couldn't install the update ({exc}).")
+            self.event_queue.put((EventType.UI_CALLBACK,
+                                  lambda: self._on_app_update_prepared(info, outcome)))
+
+        threading.Thread(target=work, daemon=True, name="app-update-install").start()
+
+    def _on_app_update_prepared(self, info: dict, outcome) -> None:
+        """Tk thread: restart into a staged update, or hand over the download."""
+        self._app_update_installing = False
+        if outcome.ready:
+            if self.app_state == AppState.IDLE:
+                self._finish_app_update(outcome)
+            else:
+                # Never cut a dictation short: update_state() finishes it at IDLE.
+                self._pending_app_update = outcome
+                self._show_app_update_status(
+                    "Update ready: Aura restarts when this dictation finishes.")
+            return
+        from wayfinder.core.app_updates import RELEASES_PAGE
+        if outcome.message:
+            self.log(f"⚠ {outcome.message}")
+        if outcome.fallback_path:
+            self._open_url(Path(outcome.fallback_path).as_uri())
+            note = "Opened the downloaded update so you can install it yourself."
+        else:
+            self._open_url(info.get("download_url") or info.get("release_url") or RELEASES_PAGE)
+            note = "Opened the download in your browser."
+        self._show_app_update_status(" ".join(filter(None, (outcome.message, note))))
+
+    def _finish_pending_app_update(self) -> None:
+        """At IDLE: install the update staged mid-dictation. A recording that
+        started before this ran keeps it waiting for the next IDLE."""
+        outcome = getattr(self, "_pending_app_update", None)
+        if outcome is None or self.app_state != AppState.IDLE:
+            return
+        self._pending_app_update = None
+        self._finish_app_update(outcome)
+
+    def _finish_app_update(self, outcome) -> None:
+        """Hand over to the update helper, then quit so it can swap and relaunch."""
+        try:
+            outcome.finish()
+        except Exception as exc:
+            self.log(f"⚠ Couldn't restart into the update: {exc}")
+            self._show_app_update_status("Couldn't restart into the update. Try again later.")
+            return
+        self.log("⟳ Installing the update and restarting Aura")
+        self.quit_app()
 
     # ── macOS "Check for Updates…" (menu-bar item) ──────────────────────────
 
@@ -15341,17 +15616,21 @@ class WayfinderApp(ctk.CTk):
         The request runs off the Tk thread and the verdict returns through
         event_queue. Unlike the daily check it ignores the settings toggle and
         a dismissed version — the user asked."""
+        channel = self.config.get("update_channel") or None
+        generation = self._next_app_update_generation()
+
         def _check():
             try:
                 from wayfinder import __version__ as current_version
                 from wayfinder.core.app_updates import check_for_app_update
 
-                info = check_for_app_update(current_version, force=True)
+                info = check_for_app_update(
+                    current_version, force=True, channel=channel)
             except Exception as exc:
                 info = {"update_available": False, "error": str(exc)}
-            self.event_queue.put(
-                (EventType.UI_CALLBACK, lambda: self._report_app_update_check(info))
-            )
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: (
+                self._report_app_update_check(info)
+                if generation == getattr(self, "_app_update_generation", 0) else None)))
 
         threading.Thread(target=_check, daemon=True, name="app-update-check").start()
 
@@ -16687,7 +16966,7 @@ class WayfinderApp(ctk.CTk):
         
         type_names = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
         }
         self.log(f"⚙ Status indicator: {type_names.get(value, value)}")
         
@@ -17040,7 +17319,7 @@ class WayfinderApp(ctk.CTk):
             if restart_event is not None:
                 restart_event.set()
             if old_thread is not None and old_thread.is_alive():
-                old_thread.join(timeout=2.0)  # loop wakes every 0.1 s
+                old_thread.join(timeout=2.0)  # loop wakes at least every 0.5 s
             if self.stop_event.is_set():
                 return
             self._pynput_listener_started = False
@@ -18099,13 +18378,41 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def _deactivate_license(self) -> None:
-        """Remove the locally stored license after the inline confirmation."""
-        from wayfinder.license import remove_license, get_feature_gate
-        remove_license()
+        """Remove the license after the inline confirmation.
+
+        Freeing the activation slot is a call to the licensing service, so it
+        runs off the Tk thread; _finish_license_removal updates the UI.
+        """
+        feedback = getattr(self, "_license_feedback", None)
+        if feedback is not None:
+            try:
+                feedback.configure(text="Removing the license…",
+                                   text_color=COLORS["text_muted"])
+            except Exception:
+                pass
+
+        def _release() -> None:
+            from wayfinder.license import LicenseRelease, release_license, remove_license
+
+            try:
+                result = release_license()
+            except Exception:
+                remove_license()
+                result = LicenseRelease(False, "error", "License removed from this device.")
+            self.event_queue.put(
+                (EventType.UI_CALLBACK, lambda: self._finish_license_removal(result)))
+
+        threading.Thread(target=_release, daemon=True, name="license-release").start()
+
+    def _finish_license_removal(self, result) -> None:
+        """Tk thread: the license is gone; show Free and say whether the slot was freed."""
+        from wayfinder.license import get_feature_gate
         self.feature_gate = get_feature_gate(force_refresh=True)
         # Entitlements changed — republish so locked_tabs is not stale.
         self._write_status_breadcrumb()
-        self.log("License removed from this device")
+        self.log("License removed from this device"
+                 + ("; activation slot freed" if result.released
+                    else f"; activation slot not freed ({result.status})"))
         from wayfinder.config import enforce_license_config
         repaired = enforce_license_config(self.config, self.feature_gate)
         if repaired:
@@ -18135,7 +18442,7 @@ class WayfinderApp(ctk.CTk):
         feedback = getattr(self, "_license_feedback", None)
         if feedback is not None:
             feedback.configure(
-                text="License removed from this device.",
+                text=result.message,
                 text_color=COLORS["text_muted"],
             )
 
@@ -18568,11 +18875,13 @@ class WayfinderApp(ctk.CTk):
         """The key that discards a recording from any app, or None if unbound.
 
         Linux portal sessions bind the cancel-dictation shortcut, so the
-        desktop's own trigger is the truth; every other listener (macOS,
-        Windows, X11 pynput, evdev) takes a bare Escape.
+        desktop's own trigger is the truth. Every other listener (macOS,
+        Windows, X11 pynput, evdev) cancels on Escape with or without Shift,
+        so Shift+Esc is the one key taught everywhere (overlay hint, hero,
+        welcome guide).
         """
         if getattr(self, "_hotkey_backend", None) != "portal":
-            return "Esc"
+            return "Shift+Esc"
         triggers = getattr(self, "_portal_triggers", None)
         if triggers is None:  # bind still in flight: what the app asked for
             from wayfinder.hotkeys.dbus import encode_trigger
@@ -18769,6 +19078,12 @@ class WayfinderApp(ctk.CTk):
             return
         from wayfinder.hotkeys.dbus import parse_trigger_description
         self._portal_triggers = dict(triggers)
+        controller = getattr(self, "overlay_controller", None)
+        if controller is not None:
+            try:
+                controller.set_cancel_hint(self._cancel_hotkey_display() or "")
+            except Exception:
+                pass
         changed = []
         for shortcut_id, key_field, mods_field, target in (
             ("record-toggle", "hotkey_key", "hotkey_modifiers", "record"),
@@ -21399,6 +21714,10 @@ class WayfinderApp(ctk.CTk):
         # NSMenu delegate and can abort in PyEval_RestoreThread. queue.Queue.put
         # is native-thread-safe and poll_events owns all later UI work.
         self._tray_action_queue.put(callback)
+        if IS_MACOS:
+            # The event queue's put() only writes a byte to its wake-up pipe
+            # (no Tcl), so the idle poll no longer bounds menu latency.
+            self.event_queue.put((EventType.UI_CALLBACK, self._schedule_tray_actions))
 
     def _refresh_tray_menu(self) -> None:
         try:
@@ -21624,6 +21943,13 @@ class WayfinderApp(ctk.CTk):
 
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
+        # A deliberate quit is not a crash: drop this launch's native crash file.
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.mark_clean_exit()
+        except Exception:
+            pass
         # Signal all background threads to stop
         self.stop_event.set()
         if hasattr(self, '_evdev_stop_event'):
@@ -21832,6 +22158,13 @@ class WayfinderApp(ctk.CTk):
                 self._start_recording_watchdog()
             elif old_state == AppState.RECORDING:
                 self._cancel_recording_watchdog()
+
+        # An app update finished downloading mid-dictation: restart into it now.
+        if new_state == AppState.IDLE and getattr(self, "_pending_app_update", None):
+            try:
+                self.after(0, self._finish_pending_app_update)
+            except Exception:
+                pass
 
         # A model download the user started finished mid-dictation: apply it now
         # that the pipeline is idle (after this transition's own work settles).
@@ -22761,6 +23094,23 @@ class WayfinderApp(ctk.CTk):
                     self.handle_event(event_type, data)
             except queue.Empty:
                 pass
+        self._drain_tray_actions()
+        # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
+        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
+        # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
+        # capture is applied promptly without a sub-100ms self-rearming poll.
+        if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
+            interval = 100
+        elif getattr(self, "_event_wakeup_attached", False):
+            # macOS: worker events and menu actions wake Tk through the event
+            # pipe as they are queued, so idle polling is only a safety net.
+            interval = _MACOS_IDLE_SAFETY_POLL_MS
+        else:
+            interval = 250
+        self.after(interval, self.poll_events)
+
+    def _drain_tray_actions(self) -> None:
+        """Run queued status-menu actions on the Tk thread."""
         try:
             while True:
                 callback = self._tray_action_queue.get_nowait()
@@ -22773,15 +23123,12 @@ class WayfinderApp(ctk.CTk):
                 self.after(100, self._refresh_tray_menu)
         except queue.Empty:
             pass
-        # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
-        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
-        # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
-        # capture is applied promptly without a sub-100ms self-rearming poll.
-        if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
-            interval = 100
-        else:
-            interval = 250
-        self.after(interval, self.poll_events)
+
+    def _schedule_tray_actions(self) -> None:
+        """Pipe wake-up for a menu action: run it on a 100 ms one-shot, the
+        cadence the 250 ms idle poll used to give it, so the native menu has
+        long closed before Tk/AppKit window code runs."""
+        self.after(100, self._drain_tray_actions)
 
     @staticmethod
     def _split_gen(data):
@@ -24115,7 +24462,7 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         self._processing_start_time = None
-        # Return overlay to ready (Always On) or hide Disappearing CTk pill.
+        # Return overlay to ready (Always On) or hide Disappearing pill.
         # Verify critical PyQt ready reaches the subprocess so it isn't stuck "Listening…".
         try:
             ok = self._set_status_indicator("ready")

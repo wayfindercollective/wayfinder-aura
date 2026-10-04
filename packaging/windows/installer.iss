@@ -9,7 +9,7 @@
 ; Linux AppImage/Flatpak or macOS .app build.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.8"
+  #define MyAppVersion "1.2.0"
 #endif
 #define MyAppName "Wayfinder Aura"
 #define MyAppPublisher "Wayfinder Collective"
@@ -74,6 +74,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupA
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Install Update in the app runs this installer with /VERYSILENT /relaunch=1
+; (src/wayfinder/core/app_installer.py): start the new version afterwards.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: RelaunchAfterSilentUpdate
 
 [Code]
 { Aura's window close button hides it to the tray (as on the Mac), so the
@@ -115,6 +118,11 @@ begin
   end;
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM "{#MyAppExeName}"', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function RelaunchAfterSilentUpdate(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:relaunch|0}') = '1');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

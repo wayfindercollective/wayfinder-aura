@@ -274,10 +274,15 @@ class TestListenerEndToEnd:
         import time
         press, release, drain, _ = listener
         press(pl.Key.alt_r)
-        time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+        # The hold threshold fires from a timer thread, which a busy CI host
+        # can run well after SOLO_HOLD_SECONDS: release once the hold began.
+        started, deadline = [], time.monotonic() + 5
+        while not started and time.monotonic() < deadline:
+            time.sleep(0.05)
+            started = drain()
         release(pl.Key.alt_r)
-        assert drain() == [(pl.EventType.HOTKEY_PRESSED, HOLD_START),
-                           (pl.EventType.HOTKEY_PRESSED, HOLD_END)]
+        assert started + drain() == [(pl.EventType.HOTKEY_PRESSED, HOLD_START),
+                                     (pl.EventType.HOTKEY_PRESSED, HOLD_END)]
 
     def test_option_accent_does_not_record(self, listener):
         press, release, drain, _ = listener
@@ -323,3 +328,14 @@ def test_keypad_enter_counts_as_enter():
 
 def test_secure_input_probe_is_safe():
     assert pl._darwin_secure_input_enabled() in (True, False)
+
+
+def test_supervisor_loop_idles_slowly_until_a_hotkey_is_held():
+    # Nothing held: the Secure Input / event-tap checks run twice a second.
+    assert pl._DARWIN_IDLE_TICK_S >= 0.5  # CLAUDE.md rule 1 idle floor
+    assert pl._listener_tick_s(False, "darwin") == pl._DARWIN_IDLE_TICK_S
+    # A held hotkey keeps the 100 ms lost-key-up reconcile.
+    assert pl._listener_tick_s(True, "darwin") == 0.1
+    # Windows counts 0.1 s ticks for its once-a-second elevated-window check.
+    assert pl._listener_tick_s(False, "win32") == 0.1
+    assert pl._listener_tick_s(True, "win32") == 0.1

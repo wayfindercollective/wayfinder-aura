@@ -1127,6 +1127,12 @@ class GlassmorphicOverlay(QWidget):
     # bounds, leaving a harsh flat cutoff at the edge (visible as a hard red rim
     # in the LISTENING state). 14 lets the glow fade to zero inside the widget.
     BASE_GLOW_MARGIN = 14
+    # Cancel hint ("✕ Shift+Esc") shown just outside the pill while recording:
+    # people didn't know a dictation can be discarded. Space for it is reserved
+    # whenever a hint is set, so the window never resizes between states.
+    BASE_HINT_SPACE = 15
+    BASE_HINT_HEIGHT = 14
+    BASE_HINT_GAP = 5
     
     # Layout constants
     TASKBAR_GAP = 12  # Gap above taskbar to prevent overlap
@@ -1134,11 +1140,13 @@ class GlassmorphicOverlay(QWidget):
     FADE_MS = 200  # window-opacity fade in/out on show/hide (QVariantAnimation, NOT a QTimer — Rule 1 safe)
     
     def __init__(self, scale: float = 0.7, vertical_offset: int = 0, anchor: str = "bottom-center",
-                 quality: str = "high"):
+                 quality: str = "high", cancel_hint: str = ""):
         # Scale factor must be set first (before any property access)
         self._scale = max(0.5, min(2.0, scale))
         self._vertical_offset = vertical_offset  # pixels: negative = higher, positive = lower
         self._anchor = anchor  # corner/edge placement: {top,bottom}-{left,center,right}
+        # The key that discards a recording (e.g. "Shift+Esc"); "" = no hint.
+        self._cancel_hint = str(cancel_hint or "")[:24]
 
         # Which mechanism owns this window's position — decided by the ACTUAL Qt
         # platform, not session env (the Flatpak is xcb on a Wayland desktop, so
@@ -1242,9 +1250,24 @@ class GlassmorphicOverlay(QWidget):
         return max(8, int(self.BASE_GLOW_MARGIN * self._scale))  # Min 8px so the falloff has room
     
     @property
+    def hint_space(self) -> int:
+        """Extra height reserved for the cancel hint (0 when there is none)."""
+        return int(self.BASE_HINT_SPACE * self._scale) if self._cancel_hint else 0
+
+    @property
+    def hint_above(self) -> bool:
+        """The hint sits above the pill, or below it when the pill is on the top edge."""
+        return parse_anchor(self._anchor)[0] != "top"
+
+    @property
+    def pill_top(self) -> float:
+        """Y of the pill inside the widget: below the hint strip when it is above."""
+        return float(self.glow_margin + (self.hint_space if self.hint_above else 0))
+
+    @property
     def widget_height(self):
-        """Total widget height including glow margins."""
-        return self.scaled_height + (self.glow_margin * 2)
+        """Total widget height including glow margins (and the cancel-hint strip)."""
+        return self.scaled_height + (self.glow_margin * 2) + self.hint_space
 
     @staticmethod
     def _target_screen():
@@ -1323,6 +1346,17 @@ class GlassmorphicOverlay(QWidget):
             return
         self._anchor = anchor
         self._position_at_bottom()
+        self.update()  # the cancel hint flips above/below with the edge
+
+    def set_cancel_hint(self, hint: str):
+        """Set the cancel key shown while recording ("" hides the hint)."""
+        hint = str(hint or "")[:24]
+        if hint == self._cancel_hint:
+            return
+        self._cancel_hint = hint
+        self._update_size_full()  # the hint strip changes the height (rare)
+        self._position_at_bottom()
+        self.update()
 
     def set_scale(self, scale: float):
         """Update the overlay scale and resize."""
@@ -1484,11 +1518,14 @@ class GlassmorphicOverlay(QWidget):
         self._setup_kde_blur()
         self._apply_squircle_mask()
         
-        # Position after window is shown (Wayland often ignores pre-show positioning)
-        self._position_at_bottom()
-        
-        # One delayed retry to handle WM not being ready yet
-        QTimer.singleShot(500, self._position_at_bottom)
+        # The Mac's transient pill is mapped once offscreen at startup. Moving
+        # it onscreen here would expose an idle window before dictation.
+        if not (getattr(self, "_overlay_mode", "persistent") == "transient"
+                and self._state == OverlayState.HIDDEN):
+            # Position after window is shown (Wayland often ignores pre-show positioning)
+            self._position_at_bottom()
+            # One delayed retry to handle WM not being ready yet
+            QTimer.singleShot(500, self._position_at_bottom)
         
         # KWin backend only: keep-above + position via KWin script (once, with
         # delay). On the x11 backend this used to fire whenever the desktop was
@@ -1630,6 +1667,9 @@ class GlassmorphicOverlay(QWidget):
         entirely here — it was unreachable in the sandbox anyway, and loadScript
         spam can freeze the overlay on SteamOS X11.
         """
+        if getattr(self, "_overlay_mode", "persistent") == "transient" and self._state == OverlayState.HIDDEN:
+            return
+
         w, h = self.width(), self.height()
         x, y = self._calculate_position(w, h)
         
@@ -1670,7 +1710,7 @@ class GlassmorphicOverlay(QWidget):
             pass
         # The Flatpak runs this branch through XWayland. Restack once after the
         # final native position is applied so nothing sits over the pill.
-        if self.isVisible():
+        if self.isVisible() and getattr(self, "_overlay_mode", "persistent") != "transient":
             self.raise_()
     
     def _update_size(self):
@@ -1781,6 +1821,11 @@ class GlassmorphicOverlay(QWidget):
             state: Target state
             animate: Whether to animate the transition
         """
+        # The Mac's transient pill has no READY frame. Keep its mapped window
+        # offscreen while idle so dictation never has to show/activate a window.
+        if getattr(self, "_overlay_mode", "persistent") == "transient" and state == OverlayState.READY:
+            state = OverlayState.HIDDEN
+
         # Import the debug logger from the run_overlay scope
         import time
         def _log(msg):
@@ -1981,8 +2026,8 @@ class GlassmorphicOverlay(QWidget):
             return
         try:
             mode = getattr(self, '_overlay_mode', 'persistent')
-            if mode == "persistent":
-                # Move off-screen instead of hiding (prevents focus stealing on show)
+            if mode in ("persistent", "transient"):
+                # Keep the surface mapped; a future show() would steal focus.
                 self.setGeometry(-9999, -9999, self.width(), self.height())
             else:
                 # Standard mode: actually hide
@@ -2052,6 +2097,10 @@ class GlassmorphicOverlay(QWidget):
         if mode == "persistent":
             # Window is already shown, just raise it
             self.raise_()
+        elif mode == "transient":
+            # Already mapped offscreen. Geometry + opacity reveal it without
+            # show()/raise_(), which would activate the helper on macOS.
+            pass
         else:
             # Standard mode: show the window
             self.show()
@@ -2188,7 +2237,7 @@ class GlassmorphicOverlay(QWidget):
         if w <= 0 or h <= 0:
             return None
         key = (
-            w, h, round(dpr, 4),
+            w, h, round(dpr, 4), self.pill_top,
             round(self._current_width, 2), round(self._scale, 4),
             round(self._glow_intensity.value, 4),
             self._glow_color.color.rgba(),
@@ -2263,7 +2312,7 @@ class GlassmorphicOverlay(QWidget):
             # exactly glow_margin, so both modes share one formula.
             bar_rect = QRectF(
                 max(self.glow_margin, (self.width() - self._current_width) / 2.0),
-                self.glow_margin,
+                self.pill_top,
                 self._current_width,
                 self.scaled_height
             )
@@ -2288,6 +2337,10 @@ class GlassmorphicOverlay(QWidget):
             # Draw border chaser if processing
             if self._state == OverlayState.PROCESSING:
                 self.border_chaser.render(painter, squircle, self._glow_color.color)
+
+            # How to discard the dictation, just outside the pill (not clipped).
+            if self._state == OverlayState.LISTENING and self._cancel_hint:
+                self._draw_cancel_hint(painter, bar_rect)
 
             # Clip to squircle for content (text, wave)
             painter.setClipPath(squircle)
@@ -2446,6 +2499,53 @@ class GlassmorphicOverlay(QWidget):
         
         painter.restore()
     
+    def _cancel_hint_rect(self, bar_rect: QRectF) -> QRectF:
+        """The hint capsule: centred on the pill, just above it (below on top edges)."""
+        from PyQt6.QtGui import QFontMetrics
+
+        h = self.BASE_HINT_HEIGHT * self._scale
+        gap = self.BASE_HINT_GAP * self._scale
+        fm = QFontMetrics(self._hint_font())
+        icon = h * 0.42
+        width = h * 0.5 + icon + h * 0.3 + fm.horizontalAdvance(self._cancel_hint) + h * 0.5
+        top = bar_rect.top() - gap - h if self.hint_above else bar_rect.bottom() + gap
+        return QRectF(bar_rect.center().x() - width / 2.0, top, width, h)
+
+    def _hint_font(self) -> QFont:
+        font = QFont(self._font)
+        font.setPointSizeF(max(6.0, self._font.pointSizeF() * 0.82))
+        return font
+
+    def _draw_cancel_hint(self, painter: QPainter, bar_rect: QRectF):
+        """Subtle "✕ Shift+Esc": a faint dark capsule (readable on any wallpaper)
+        with a drawn ✕ and the key, while recording."""
+        rect = self._cancel_hint_rect(bar_rect)
+        h = rect.height()
+        painter.save()
+        try:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(12, 12, 16, 120))
+            painter.drawRoundedRect(rect, h / 2.0, h / 2.0)
+
+            ink = QColor("#E8E8E8")
+            ink.setAlphaF(0.78)
+            icon = h * 0.42
+            x0 = rect.left() + h * 0.5
+            y0 = rect.center().y() - icon / 2.0
+            pen = QPen(ink, max(1.0, 1.3 * self._scale))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(x0, y0), QPointF(x0 + icon, y0 + icon))
+            painter.drawLine(QPointF(x0 + icon, y0), QPointF(x0, y0 + icon))
+
+            painter.setFont(self._hint_font())
+            text_left = x0 + icon + h * 0.3
+            painter.drawText(QRectF(text_left, rect.top(), rect.right() - text_left, h),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             self._cancel_hint)
+        finally:
+            painter.restore()
+
     def _draw_text(self, painter: QPainter, rect: QRectF):
         """Draw the status text."""
         label = STATE_LABELS.get(self._state, "")
@@ -2576,6 +2676,7 @@ def run_overlay():
     initial_offset = 0
     initial_anchor = "bottom-center"
     initial_quality = "high"  # high = ambient wave always animates; performance = freeze when idle
+    initial_cancel_hint = ""  # e.g. "Shift+Esc": shown above the pill while recording
     enable_tray = False  # --tray: host a QSystemTrayIcon in this subprocess (Flatpak/KDE)
     tray_only = False  # --tray-only: no on-screen pill; tray icon + menu only
     for arg in sys.argv:
@@ -2597,6 +2698,8 @@ def run_overlay():
             initial_anchor = arg.split("=", 1)[1]
         elif arg.startswith("--quality="):
             initial_quality = arg.split("=", 1)[1]
+        elif arg.startswith("--cancel-hint="):
+            initial_cancel_hint = arg.split("=", 1)[1]
         elif arg == "--tray":
             enable_tray = True
         elif arg == "--tray-only":
@@ -2639,7 +2742,8 @@ def run_overlay():
         pass
 
     overlay = GlassmorphicOverlay(scale=initial_scale, vertical_offset=initial_offset,
-                                  anchor=initial_anchor, quality=initial_quality)
+                                  anchor=initial_anchor, quality=initial_quality,
+                                  cancel_hint=initial_cancel_hint)
     overlay._overlay_mode = mode  # Store mode for later use
     overlay._tray_only = tray_only
     overlay.set_style_indicator(initial_style, animate=False)  # Set initial style
@@ -2648,6 +2752,20 @@ def run_overlay():
         # No on-screen pill: window stays HIDDEN; StatusNotifier tray still runs below.
         overlay._overlay_mode = mode
         overlay.hide()
+    elif mode == "transient":
+        # Map once while transparent and offscreen. On each dictation the
+        # existing window only moves and fades; no new show/raise steals the
+        # insertion target's focus.
+        content_width = max(
+            overlay._calculate_target_width(lbl) for lbl in STATE_LABELS.values()
+        )
+        final_width = content_width + (overlay.glow_margin * 2)
+        overlay._static_width = final_width
+        overlay.setFixedSize(final_width, overlay.widget_height)
+        overlay.setWindowOpacity(0.0)
+        overlay._opacity._value = 0.0
+        overlay.setGeometry(-9999, -9999, final_width, overlay.widget_height)
+        overlay.show()
     elif mode == "persistent":
         # Start in READY state (visible, soft brand-blue READY palette)
         overlay._overlay_mode = mode
@@ -2763,6 +2881,7 @@ def run_overlay():
                 if elapsed > _COMMAND_TIMEOUT:
                     _debug_log(f"WATCHDOG: no commands for {elapsed:.0f}s, returning to READY")
                     overlay.set_state(OverlayState.READY)
+                    _update_tray(OverlayState.READY)
 
         except Exception as e:
             _debug_log(f"process_commands error: {e}")
@@ -2926,6 +3045,9 @@ def run_overlay():
 
         elif command == "quality":
             overlay.set_quality(str(cmd.get("value", "high")))
+
+        elif command == "cancel_hint":
+            overlay.set_cancel_hint(str(cmd.get("value", "") or ""))
 
         elif command == "quit":
             app.quit()

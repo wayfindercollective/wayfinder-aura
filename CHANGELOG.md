@@ -11,6 +11,20 @@ Linux: dictation for gamers on every desktop.
 
 ### Added
 
+- **Choose Stable or Beta updates** (Settings → System → Updates). Beta
+  offers the newest build of Aura, as often as daily; Stable offers tested
+  releases every few weeks.
+- **Install Update installs it for you.** On the Mac the new version is
+  checked (same developer, notarized by Apple), swapped in and reopened, so
+  there's no dragging into Applications; Windows and the AppImage update in
+  place too. Aura waits for a dictation to finish first, puts the previous
+  version back if the new one doesn't start, and falls back to the download
+  when it can't install itself (Flatpak, no write access).
+- **Crash reports from Beta.** When a beta crashes or hits an error, it
+  tells Wayfinder the kind of error and where in Aura's code it happened,
+  so it gets fixed: never the error message, audio, dictated text or
+  settings (see PRIVACY.md). On by default for Beta, off for Stable;
+  Settings → System → Send crash reports.
 - **Aura types into every app on Wayland desktops.** On KDE Plasma and GNOME
   the desktop's remote-control (RemoteDesktop) portal delivers the keys, so
   native Wayland apps receive dictation too, not only X11/XWayland windows.
@@ -21,7 +35,10 @@ Linux: dictation for gamers on every desktop.
   `steam_app_<id>`, SteamOS Game Mode). Dark Age of Camelot (Eden) is typed
   into the chat box you opened and sent with Enter.
 - **Cancel a dictation from any app** (default Shift+Esc; Esc where Aura sees
-  keys) without anything being typed.
+  keys) without anything being typed. While you're recording, a subtle
+  "✕ Shift+Esc" sits just above the pill (below it when the pill is on the top
+  edge), and the first-run guide says so too: Shift+Esc works on Mac, Windows
+  and Linux alike.
 - **Vocabulary corrections as Heard / Write-as pairs.**
 - **Vocabulary fixes near-misses of your words (Ultra).** The speech model
   rarely misspells a rare name the same way twice (Large v3 Turbo Q5 wrote
@@ -66,6 +83,12 @@ Linux: dictation for gamers on every desktop.
   at all — it may be muted or switched off" instead of asking you to speak
   closer. Quiet audio from a live mic keeps the no-speech message, and a mic
   name containing words like "Type-C" no longer reads as a paste failure.
+- **Aura uses about a sixth of the CPU while it waits.** A CustomTkinter
+  theme check ran 33 times a second although Aura is always dark, and each
+  text box checked its scrollbars 5 times a second. On the Mac, menu-bar
+  actions now wake the app themselves, so its idle check runs once a second.
+  Main process on a Mac Studio: ~2.7% → ~0.5% of a core, window shown or
+  hidden.
 - **Long chunked dictations keep their words at the chunk boundaries.** The
   prompt for each piece no longer ends on the half-heard word at the cut, the
   join matches the overlap even when that word came out wrong, and a piece
