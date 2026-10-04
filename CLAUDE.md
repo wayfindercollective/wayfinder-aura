@@ -9,7 +9,8 @@ Local voice dictation for Linux. CustomTkinter UI + PyQt6 overlay + whisper.cpp 
   `python scripts/ci/check-runner-policy.py` before workflow changes. Preserve
   runner limits and the Mac model/server/agent memory reserves.
 - Branches: `main` is the only long-lived branch and is protected (pull request
-  plus the `Quality` and `Platform smoke (macOS)` checks, admins included). Each
+  plus the `Quality`, `Platform smoke (macOS)` and `Windows tests` checks, admins
+  included). Each
   task gets its own worktree and branch from the latest `origin/main`, named
   `mac/`, `win/`, `linux/`, `deck/`, `ci/` or `docs/`. Never cherry-pick one
   commit onto several branches. Releases are `vX.Y.Z` tags on `main`; a

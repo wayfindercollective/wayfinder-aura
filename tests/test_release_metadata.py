@@ -1502,6 +1502,22 @@ def test_windows_jobs_wait_for_admission_but_never_skip_a_release():
 
     build = (REPO / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
     gate = build[build.index("    if:"):build.index("\n", build.index("    if:"))]
-    # Only the pull_request branch is gated: release calls and manual runs build.
-    assert gate.startswith("    if: github.event_name != 'pull_request' || (")
+    # Release calls (tags) and manual runs always build; main pushes and
+    # same-repo PRs follow the runner switch; forks never qualify.
+    assert gate.startswith("    if: github.event_name == 'workflow_dispatch' || "
+                           "startsWith(github.ref, 'refs/tags/') || (")
     assert "vars.AURA_WINDOWS_CI == 'true'" in gate
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in gate
+
+
+def test_pull_requests_build_the_windows_installer_only_for_packaging_changes():
+    """One Windows job per ordinary PR (Windows tests); the installer build runs
+    on main pushes, tags, manual runs, and PRs that touch Windows packaging."""
+    build = (REPO / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+    triggers = build[build.index("\non:"):build.index("\npermissions:")]
+    assert "  push:\n    branches: [main]" in triggers
+    pull = triggers[triggers.index("  pull_request:"):]
+    paths = [line.strip()[2:].strip('"') for line in pull.splitlines() if line.strip().startswith("- ")]
+    assert "packaging/windows/**" in paths
+    assert ".github/workflows/windows-build.yml" in paths
+    assert not any(p.startswith("src") for p in paths)

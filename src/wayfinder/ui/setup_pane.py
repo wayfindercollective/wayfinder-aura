@@ -1044,8 +1044,9 @@ class SetupPane:
 
     def _get_selected_model(self) -> str:
         selected_label = self._model_var.get()
+        # Exact match: "Large v3 Turbo" is a prefix of "Large v3 Turbo Q5".
         for key, info in getattr(self, "_model_choices", WHISPER_MODELS).items():
-            if selected_label.startswith(info["label"]):
+            if selected_label == f"{info['label']} ({info['size']})":
                 return key
         return get_recommended_model()
 

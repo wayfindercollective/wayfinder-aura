@@ -236,3 +236,17 @@ class TestRelaunch:
         assert args[-2] == str(wayfinder_main.os.getpid())
         assert kwargs.get("start_new_session") is True
         assert quit_calls == [True]
+
+    def test_audio_recovery_relaunches_hidden_and_in_background(self, monkeypatch):
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        _stub_bundle(monkeypatch, "/Applications/Wayfinder Aura.app")
+        spawned, quit_calls = [], []
+        monkeypatch.setattr(wayfinder_main.subprocess, "Popen",
+                            lambda args, **k: spawned.append(args))
+        ns = _ns(quit_app=lambda: quit_calls.append(True))
+
+        assert WayfinderApp.relaunch_app(ns, background=True) is True
+
+        assert 'open -gj "$2" --args --minimized' in spawned[0][2]
+        assert spawned[0][-1] == "/Applications/Wayfinder Aura.app"
+        assert quit_calls == [True]

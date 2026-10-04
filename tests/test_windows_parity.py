@@ -887,10 +887,13 @@ def test_right_ctrl_hold_is_push_to_talk(monkeypatch):
 
     pl, press, release, events = _win_listener(monkeypatch)
     press(pl.Key.ctrl_r)
-    time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+    # The hold threshold fires from a timer thread, which a busy CI host can
+    # run well after SOLO_HOLD_SECONDS (v1.2.0-beta.3's macOS smoke released
+    # first and saw nothing): release only once the hold has begun.
+    started = events.get(timeout=5)
     release(pl.Key.ctrl_r)
-    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
-                              (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+    assert [started] + _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
+                                          (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
 
 
 def test_ctrl_alt_space_chord_is_unchanged_on_windows(monkeypatch):
@@ -939,13 +942,14 @@ def test_right_alt_masks_every_auto_repeat_while_held(monkeypatch):
     masks = []
     pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
     press(pl.Key.alt_r)
-    time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+    # The hold fires on a timer thread. Wait for its event before testing
+    # repeats; a fixed sleep can release Alt first on a busy CI host.
+    assert events.get(timeout=2) == (EventType.HOTKEY_PRESSED, pl.HOLD_START)
     press(pl.Key.alt_r)      # keyboard auto-repeat
     press(pl.Key.alt_r)
     release(pl.Key.alt_r)
     assert masks == ["mask"] * 3
-    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
-                              (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_END)]
 
 
 def test_only_a_right_alt_hotkey_sends_the_menu_mask(monkeypatch):

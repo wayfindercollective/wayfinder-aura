@@ -1,0 +1,51 @@
+name: Beta
+
+# Nightly beta from main (docs/RELEASING.md). When main has moved since the
+# last beta and its required checks passed, scripts/release/cut_beta.py tags
+# vX.Y.Z-beta.N on a version-stamping commit on top of main, starts the
+# Release workflow on that tag and prunes old betas. main is never written.
+# Users choose Stable or Beta in Settings > System > Updates.
+
+on:
+  schedule:
+    - cron: "0 9 * * *" # 09:00 UTC (early morning in the US), after the day's merges
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Cut a beta even if main has not changed since the last one"
+        type: boolean
+        default: false
+
+concurrency:
+  group: aura-beta
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  cut:
+    name: Cut beta
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 15
+    permissions:
+      contents: write # push the beta tag and delete old beta releases (never main)
+      actions: write  # start the Release workflow on the new tag
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cut beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release/cut_beta.py ${{ inputs.force && '--force' || '' }}

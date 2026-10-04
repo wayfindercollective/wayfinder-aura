@@ -249,6 +249,9 @@ simply aren't ducked.
   for the Linux 800 px window are clamped to the card each label sits in.
 - **Pill placement:** inside the screen's visible frame, clear of the Dock
   at its real size.
+- **Disappearing pill:** the same PyQt helper keeps its window mapped offscreen
+  at rest and moves it onscreen for dictation without a show/raise call. A Tk
+  toplevel cannot appear while the main app is natively hidden to the menu bar.
 - **Idle budget:** CustomTkinter's 100 ms DPI poll is stretched to hourly
   (Aqua scales on its own); the hero doesn't poll while the window is hidden.
   On non-Dictate tabs its visible canvas updates at 15 fps.
