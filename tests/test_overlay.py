@@ -178,7 +178,9 @@ assert str(src_root) in sys.path
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        # A cold PyQt6 import on the shared Windows runner (Defender scanning
+        # every DLL) took over 10 s once (PR #21); this checks paths, not speed.
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr or result.stdout
 
