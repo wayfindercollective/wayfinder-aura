@@ -388,3 +388,34 @@ class TestRelaunchAwareRequests:
 
     def test_unknown_health_changes_nothing(self):
         assert relaunch_aware_requests({"accessibility"}, ALL_ON, None) == {"accessibility"}
+
+
+class TestChecklistFollowsTheHotkeyCheck:
+    """A tap that recovers by itself (the 3 s retry) must clear the checklist's
+    "relaunch" button even though no permission switch changed."""
+
+    def _pane(self, monkeypatch, drawn_with, now):
+        import wayfinder.utils.macos_permissions as mp
+        from wayfinder.ui.welcome import WelcomePane
+
+        monkeypatch.setattr(mp, "permission_snapshot", lambda: dict(ALL_ON))
+        renders, polls = [], []
+        pane = SimpleNamespace(
+            _perm_poll_id=None, _destroyed=False,
+            flow=SimpleNamespace(current="permissions"),
+            _perm_snapshot=dict(ALL_ON), _perm_health=drawn_with,
+            app=SimpleNamespace(_macos_hotkey_health=now),
+            _render_step=lambda: renders.append(True),
+            card=SimpleNamespace(after=lambda ms, fn: polls.append(ms) or "id"),
+            _PERMISSION_POLL_MS=1000, _poll_permissions=lambda: None,
+        )
+        WelcomePane._poll_permissions(pane)
+        return renders, polls
+
+    def test_a_health_change_redraws_the_rows(self, monkeypatch):
+        renders, polls = self._pane(monkeypatch, drawn_with="refused", now="listening")
+        assert renders == [True] and polls == []
+
+    def test_no_change_just_polls_again(self, monkeypatch):
+        renders, polls = self._pane(monkeypatch, drawn_with="live", now="live")
+        assert renders == [] and polls == [1000]

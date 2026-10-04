@@ -370,6 +370,7 @@ class WelcomePane:
         self._only_permissions = bool(only_permissions)
         self._perm_poll_id = None
         self._perm_snapshot = None
+        self._perm_health = None  # the hotkey check the rows were drawn with
         self._perm_done_scheduled = False
         self._perm_requested: set[str] = set()  # native requests made in this process
         if getattr(app, "_macos_input_relaunch_required", False):
@@ -613,8 +614,8 @@ class WelcomePane:
         # receive keys. A request made in this process needs a relaunch unless
         # the hotkey listener has seen keys arrive since; one that has seen
         # none with every switch on needs a relaunch whatever was requested.
-        requested = relaunch_aware_requests(
-            self._perm_requested, snapshot, getattr(self.app, "_macos_hotkey_health", None))
+        self._perm_health = getattr(self.app, "_macos_hotkey_health", None)
+        requested = relaunch_aware_requests(self._perm_requested, snapshot, self._perm_health)
         all_on = (all(v is True for v in snapshot.values())
                   and "input_monitoring" not in requested)
         self._body_label(
@@ -736,7 +737,10 @@ class WelcomePane:
         except Exception:
             snapshot = self._perm_snapshot
         before = self._perm_snapshot or {}
-        if snapshot != before:
+        # The hotkey listener's own check (DarwinTapHealth) changes rows too.
+        health_changed = getattr(self.app, "_macos_hotkey_health", None) != getattr(
+            self, "_perm_health", None)
+        if snapshot != before or health_changed:
             newly = [n for n in ("accessibility", "input_monitoring")
                      if snapshot.get(n) is True and before.get(n) is not True]
             if newly:
