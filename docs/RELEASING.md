@@ -32,12 +32,13 @@ otherwise it does nothing and tries again the next night
 - The tag points at a one-commit `release: X.Y.Z-beta.N` on top of `main`
   that stamps the version into every file (`scripts/release/versioning.py`).
   `main` is never written.
-- The Release workflow then builds the AppImage and Flatpak (and the Windows
-  installer, unpublished) and publishes a GitHub **prerelease**.
+- The Release workflow then builds the AppImage, the Flatpak and the Windows
+  installer and publishes a GitHub **prerelease**. The Windows installer is
+  attached by its own job (`publish-windows`), so Linux never waits on it.
 - The Mac DMG is built, notarized and attached by the **Mac release watcher**
   on the Mac Studio (below), within about an hour of the release.
-- A beta is finished when its release carries the AppImage, its zsync file
-  and the Flatpak. If the dispatch, the build or an upload failed, the next
+- A beta is finished when its release carries the AppImage, its zsync file,
+  the Flatpak and the Windows installer. If the dispatch, the build or an upload failed, the next
   night waits on that beta's build, or starts it once more while `main` is
   unchanged. Once `main` has moved (say, with the fix: a tag always rebuilds
   with the workflow it was cut with), the next beta replaces it instead.
@@ -72,8 +73,8 @@ centres) and the list shown with each beta, so write them for users.
 
 ## Promoting a beta to Stable
 
-When to ship: the beta is **complete** (AppImage, zsync, Flatpak and the
-signed Mac DMG all attached) and has been for at least **5 days**, nobody has
+When to ship: the beta is **complete** (AppImage, zsync, Flatpak, the
+Windows installer and the signed Mac DMG all attached) and has been for at least **5 days**, nobody has
 reported a blocker against it (feedback, crash reports), and
 `## [Unreleased]` has something a user would notice. Otherwise wait for the
 next beta. The script never promotes an incomplete beta; the soak counts from

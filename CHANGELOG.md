@@ -11,6 +11,9 @@ Linux: dictation for gamers on every desktop.
 
 ### Added
 
+- **Windows downloads.** Every release now carries the Windows installer
+  (`WayfinderAura-Setup-<version>.exe`, Windows 10 and 11, x64). It isn't
+  code-signed yet, so SmartScreen asks once: **More info → Run anyway**.
 - **Choose Stable or Beta updates** (Settings → System → Updates). Beta
   offers the newest build of Aura, as often as daily; Stable offers tested
   releases every few weeks.

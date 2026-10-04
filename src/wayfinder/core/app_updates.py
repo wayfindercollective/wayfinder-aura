@@ -23,8 +23,8 @@ DMG's direct URL is returned as ``download_url`` for a one-click download.
 
 Windows likewise: only a release carrying ``WayfinderAura-Setup-<version>.exe``
 (packaging/windows/installer.iss) is an update, and that installer is the
-``download_url``. Releases without one (Windows is internal until sign-off, so
-tags currently carry no Setup exe) never nag a Windows user.
+``download_url``. Releases without one (those from before Windows went public
+on 2026-10-04, or one whose Windows build failed) never nag a Windows user.
 
 Linux packages likewise: the Flatpak gets the release's
 ``io.wayfindercollective.WayfinderAura.flatpak`` bundle and the AppImage its

@@ -11,12 +11,13 @@ and tests drift, so they are not the development model for this project.
 |---|---|---|
 | Linux | Production baseline | AppImage and Flatpak behavior must not regress |
 | macOS | Active port | Source and bundle work lands on `main` through short `mac/*` branches |
-| Windows | Internal candidate | Installer built and smoke-tested in CI; not attached to public releases until sign-off |
+| Windows | Public, unsigned installer | Installer built and smoke-tested in CI and attached to every release; not code-signed yet (SmartScreen warns) |
 
-Do not advertise macOS or Windows as generally available until their manual
-release checklist has been completed and the owner signs off (decision
-2026-09-21: Windows stays internal until then, and is published to neither the
-releases page nor the storefront).
+Do not advertise macOS or Windows as generally available (out of preview) until
+their manual release checklist has been completed and the owner signs off.
+Decision 2026-10-04: Windows is public. The installer goes on every release
+and the website lists it, which reverses the 2026-09-21 decision that kept it
+internal.
 
 ## Code ownership boundaries
 
@@ -63,8 +64,8 @@ although 174 of its 179 commits were already on `main`.
   one per OS. Carry fixes from `main` into it, never the other way.
 - **One parked branch.** `release/windows-public-pending-signoff` keeps the
   release workflow from before the 2026-09-21 decision, which attached the
-  Windows installer. At sign-off, redo that change as a fresh pull request from
-  `main`; do not merge the parked branch.
+  Windows installer. Its change was redone from `main` when Windows went
+  public (2026-10-04, `publish-windows`); do not merge the parked branch.
 - **Retired branches.** `macos`, `windows`, `develop` and
   `feat/premium-feel-polish` are retired: do not commit to or recreate them.
   Their tips are kept as `archive/<name>` tags. A machine with unpushed work on
@@ -131,10 +132,11 @@ fallback that types into an unknown window.
 
 ## Windows port checklist
 
-Windows has a working, CI-tested installer that is not public yet. Windows
+Windows has a working, CI-tested installer, public since 2026-10-04. Windows
 development must use explicit adapters and packaging, not widen Linux or macOS
 conditionals until they happen to run. Complete this manual checklist on the
-exact artifact before any public release.
+exact artifact before calling Windows generally available (code signing
+included).
 
 - Add a Windows text-injection adapter that supports Unicode, preserves the
   clipboard when paste is used, verifies modifier release, and fails closed if
