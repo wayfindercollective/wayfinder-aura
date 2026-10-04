@@ -427,6 +427,20 @@ class TestWorkflows:
                 assert "sudo DEBIAN_FRONTEND=noninteractive apt-get" in line, line
         assert "tzdata" in job.split("Prepare Jammy container", 1)[1].split("- uses:", 1)[0]
 
+    def test_the_appimage_container_has_fonts_for_the_tk_renderer_probe(self):
+        # v1.2.0-beta.2 stopped at "only 3 font families are visible": the
+        # bare jammy image has DejaVu only, and the probe wants >= 10.
+        text = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        job = text.split("  build-appimage:", 1)[1].split("\n  build-flatpak:", 1)[0]
+        deps = job.split("Install system dependencies", 1)[1].split("- name:", 1)[0]
+        for package in ("fonts-liberation", "fonts-freefont-ttf", "fonts-urw-base35"):
+            assert package in deps
+        # build-appimage.sh downloads its pinned appimagetool with wget.
+        assert "wget -q -O" in (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
+        assert " wget" in deps
+        probe = (REPO / "src" / "wayfinder" / "utils" / "tk_renderer.py").read_text(encoding="utf-8")
+        assert "family_count < 10" in probe  # 3 DejaVu + 3 + 3 + 10 URW families clear it
+
     def test_tag_builds_skip_the_mac_until_signing_is_configured(self):
         text = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         job = text.split("  build-macos:", 1)[1].split("\n  release:", 1)[0]

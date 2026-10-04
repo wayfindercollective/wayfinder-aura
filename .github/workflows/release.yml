@@ -113,7 +113,12 @@ jobs:
         # configure hard-requires SPIRV-Headers — without it the build script
         # SILENTLY falls back to CPU-only inference binaries (smoke test below
         # now asserts Vulkan). libgirepository/libdbus/libcairo dev: build deps
-        # for the pip PyGObject/dbus-python below.
+        # for the pip PyGObject/dbus-python below. Font packages: the build's
+        # Tk renderer probe (src/wayfinder/utils/tk_renderer.py) wants >= 10
+        # font families, its sign of a working Xft Tk; the bare jammy
+        # container has only DejaVu (3), so v1.2.0-beta.2 stopped there. They
+        # are build-time only: the AppImage bundles its own product fonts.
+        # wget: build-appimage.sh fetches its pinned appimagetool with it.
         run: |
           # sudo resets the environment: pass the non-interactive frontend on.
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
@@ -124,7 +129,8 @@ jobs:
             libgirepository1.0-dev libdbus-1-dev libcairo2-dev \
             wtype \
             xvfb libxft2 pulseaudio libasound2-plugins \
-            libfuse2 desktop-file-utils appstream
+            libfuse2 desktop-file-utils appstream \
+            fonts-liberation fonts-freefont-ttf fonts-urw-base35 wget
 
       - name: Install glslc for Vulkan builds
         # glslc from shaderc; glslangValidator from apt glslang-tools (required by
