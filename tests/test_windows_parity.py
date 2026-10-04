@@ -887,10 +887,13 @@ def test_right_ctrl_hold_is_push_to_talk(monkeypatch):
 
     pl, press, release, events = _win_listener(monkeypatch)
     press(pl.Key.ctrl_r)
-    time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+    # The hold threshold fires from a timer thread, which a busy CI host can
+    # run well after SOLO_HOLD_SECONDS (v1.2.0-beta.3's macOS smoke released
+    # first and saw nothing): release only once the hold has begun.
+    started = events.get(timeout=5)
     release(pl.Key.ctrl_r)
-    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
-                              (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+    assert [started] + _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
+                                          (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
 
 
 def test_ctrl_alt_space_chord_is_unchanged_on_windows(monkeypatch):
