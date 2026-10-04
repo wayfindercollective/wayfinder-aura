@@ -20,7 +20,7 @@ import requests
 
 from ..config import IS_APPIMAGE, IS_FLATPAK, APPDIR
 from ..utils.hostexec import host_env
-from ..utils.platform import get_user_llm_models_dir, get_user_whisper_models_dir
+from ..utils.platform import get_user_whisper_models_dir
 
 
 # ─── Model Catalog ───────────────────────────────────────────────
@@ -88,7 +88,10 @@ MODEL_DOWNLOAD_BASE = (
     f"https://huggingface.co/ggerganov/whisper.cpp/resolve/{MODEL_DOWNLOAD_REVISION}"
 )
 
-# LLM models for post-processing (dictation cleanup)
+# LLM models for post-processing (dictation cleanup). Setup does not download
+# these: the app's model downloader does, and fetches Ultra entries only from
+# the Models CDN with the licence (models_cdn). tests/test_catalog_ratchet.py
+# keeps this copy equal to wayfinder_main.LLM_GGUF_MODELS.
 LLM_MODELS: dict[str, dict] = {
     "google_gemma-3-1b-it-Q4_K_M": {
         "label": "Gemma 3 1B",
@@ -1174,48 +1177,6 @@ def _download_model_file_impl(
             except OSError:
                 pass
         done(False, str(e))
-
-
-def download_llm_model(
-    model_key: str,
-    log: Callable[[str], None],
-    done: Callable[[bool, str], None],
-    progress: Optional[Callable[[int, int], None]] = None,
-) -> None:
-    """
-    Download an LLM model (GGUF) from Hugging Face for post-processing.
-
-    Args:
-        model_key: Key into LLM_MODELS (e.g. "Qwen3.5-2B-Q4_K_M")
-        log: Called with status messages
-        done: Called with (success, path_or_error) when finished
-        progress: Called with (downloaded_bytes, total_bytes) during download
-    """
-    model_info = LLM_MODELS.get(model_key)
-    if not model_info:
-        done(False, f"Unknown LLM model: {model_key}")
-        return
-
-    url = model_info["url"]
-    filename = model_info["filename"]
-    # Flatpak: persistent XDG_DATA_HOME. Windows: the folder config.py's Windows
-    # default and the in-app downloader use. Everywhere else (macOS included)
-    # the wizard keeps the dir it has always used.
-    if IS_FLATPAK:
-        model_dir = get_user_llm_models_dir(flatpak=True)
-    elif sys.platform == "win32":
-        model_dir = Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
-    else:
-        model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
-    target = model_dir / filename
-
-    def _run():
-        size_label = model_info.get("size", "unknown size")
-        _download_model_file(url, target, ".gguf.part", size_label, log, done, progress,
-                             min_bytes=100_000_000, sha256=model_info.get("sha256"),
-                             expected_bytes=model_info.get("bytes"))
-
-    threading.Thread(target=_run, daemon=True).start()
 
 
 # ─── Dependency List Builder ─────────────────────────────────────

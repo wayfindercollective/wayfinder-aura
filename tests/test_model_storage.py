@@ -248,23 +248,16 @@ def test_host_setup_wizard_preserves_platform_storage(host_home, monkeypatch, pl
     base = home / "whisper.cpp" / "models" / "ggml-base.en.bin"
     base.parent.mkdir(parents=True)
     base.write_bytes(b"x" * 10)
-    gemma_key = "google_gemma-3-1b-it-Q4_K_M"
 
     with monkeypatch.context() as m:
         m.setattr(sys, "platform", platform)
         setup.download_whisper_model("base.en", lambda _m: None, lambda _ok, _d: None)
-        setup.download_llm_model(gemma_key, lambda _m: None, lambda _ok, _d: None)
     # Outside the platform patch: the licence check behind it is platform-aware.
     status = setup.check_whisper_model({"model_path": str(home / "gone" / "ggml-base.en.bin")})
 
     assert targets == [
         (home / "AppData" / "Local" / "wayfinder-aura" / "whisper-models"
          if platform == "win32" else home / "whisper.cpp" / "models") / "ggml-base.en.bin",
-        # The wizard's GGUF dir: ~/.local/share (macOS included); Windows uses
-        # AppData\\Local like its config default and the in-app downloader.
-        (home / "AppData" / "Local" if platform == "win32" else home / ".local" / "share")
-        / "wayfinder-aura" / "llm-models"
-        / setup.LLM_MODELS[gemma_key]["filename"],
     ]
     assert status.installed and "ggml-base.en.bin" in status.detail
 
