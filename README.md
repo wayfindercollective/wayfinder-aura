@@ -76,7 +76,15 @@ Keys activate online once and keep working offline.
 
 ## Install
 
-### Download (recommended)
+Every download, for each platform and for both channels, is on
+**[wayfindercollective.io/aura/download](https://wayfindercollective.io/aura/download)**.
+**Stable** is the default. **Beta** builds are newer, released as often as
+daily, and may have bugs; switch channels any time in Settings → System →
+Updates. All builds are also on the
+[Releases page](https://github.com/wayfindercollective/wayfinder-aura/releases)
+(betas are marked Pre-release).
+
+### Linux: download (recommended)
 
 **[⬇ Download the latest AppImage](https://github.com/wayfindercollective/wayfinder-aura/releases/latest)** — one file, everything bundled: GPU (Vulkan) + CPU speech engines, text-injection tools, the works.
 
@@ -88,7 +96,10 @@ Keys activate online once and keep working offline.
    That's it — press **Ctrl+Alt+Space** and start talking.
 
 Works on Linux distributions from 2022 onward — Ubuntu 22.04+, Debian 12+,
-Fedora 35+, Bazzite, and the Steam Deck. Wayland and X11.
+Fedora 35+, Bazzite, and the Steam Deck. Wayland and X11. Each release also
+carries a Flatpak bundle (`io.wayfindercollective.WayfinderAura.flatpak`). For
+the beta, pick the newest Pre-release on the
+[Releases page](https://github.com/wayfindercollective/wayfinder-aura/releases).
 
 ### Flathub (coming soon)
 
@@ -99,7 +110,9 @@ Flatpak locally from `flatpak/io.wayfindercollective.WayfinderAura.yml` with
 
 ### macOS (public preview)
 
-**[⬇ Download the Mac preview](https://github.com/wayfindercollective/wayfinder-aura/releases/tag/macos-preview-2)**:
+**[⬇ Download for Mac](https://wayfindercollective.io/aura/download/mac)**
+(always the newest signed Stable DMG) ·
+**[Beta for Mac](https://wayfindercollective.io/aura/download/mac?channel=beta)**:
 `Wayfinder_Aura-*-macOS-arm64.dmg`, for Apple Silicon Macs on macOS 14 or
 later. It is signed with Developer ID and notarized by Apple, so it opens
 without warnings. (The "latest AppImage" link above is the Linux app.)
