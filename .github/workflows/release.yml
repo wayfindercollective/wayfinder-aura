@@ -118,6 +118,9 @@ jobs:
         # font families, its sign of a working Xft Tk; the bare jammy
         # container has only DejaVu (3), so v1.2.0-beta.2 stopped there. They
         # are build-time only: the AppImage bundles its own product fonts.
+        # fonts-dejavu-core must be named: it only came in as fontconfig's
+        # default font, and with other fonts listed apt picks one of those
+        # instead, so "DejaVu Sans" resolved to Nimbus Sans (v1.2.0-beta.3).
         # wget: build-appimage.sh fetches its pinned appimagetool with it.
         run: |
           # sudo resets the environment: pass the non-interactive frontend on.
@@ -130,7 +133,7 @@ jobs:
             wtype \
             xvfb libxft2 pulseaudio libasound2-plugins \
             libfuse2 desktop-file-utils appstream \
-            fonts-liberation fonts-freefont-ttf fonts-urw-base35 wget
+            fonts-dejavu-core fonts-liberation fonts-freefont-ttf fonts-urw-base35 wget
 
       - name: Install glslc for Vulkan builds
         # glslc from shaderc; glslangValidator from apt glslang-tools (required by

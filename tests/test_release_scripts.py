@@ -433,7 +433,10 @@ class TestWorkflows:
         text = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         job = text.split("  build-appimage:", 1)[1].split("\n  build-flatpak:", 1)[0]
         deps = job.split("Install system dependencies", 1)[1].split("- name:", 1)[0]
-        for package in ("fonts-liberation", "fonts-freefont-ttf", "fonts-urw-base35"):
+        # DejaVu explicitly: the probe resolves "DejaVu Sans", and apt drops
+        # fontconfig's default DejaVu once other fonts satisfy it (beta.3).
+        for package in ("fonts-dejavu-core", "fonts-liberation", "fonts-freefont-ttf",
+                        "fonts-urw-base35"):
             assert package in deps
         # build-appimage.sh downloads its pinned appimagetool with wget.
         assert "wget -q -O" in (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")

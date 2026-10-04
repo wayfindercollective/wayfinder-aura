@@ -274,10 +274,15 @@ class TestListenerEndToEnd:
         import time
         press, release, drain, _ = listener
         press(pl.Key.alt_r)
-        time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+        # The hold threshold fires from a timer thread, which a busy CI host
+        # can run well after SOLO_HOLD_SECONDS: release once the hold began.
+        started, deadline = [], time.monotonic() + 5
+        while not started and time.monotonic() < deadline:
+            time.sleep(0.05)
+            started = drain()
         release(pl.Key.alt_r)
-        assert drain() == [(pl.EventType.HOTKEY_PRESSED, HOLD_START),
-                           (pl.EventType.HOTKEY_PRESSED, HOLD_END)]
+        assert started + drain() == [(pl.EventType.HOTKEY_PRESSED, HOLD_START),
+                                     (pl.EventType.HOTKEY_PRESSED, HOLD_END)]
 
     def test_option_accent_does_not_record(self, listener):
         press, release, drain, _ = listener
