@@ -23728,13 +23728,22 @@ class WayfinderApp(ctk.CTk):
         clipboard + Ctrl+V the profiled games use, never keystroke typing - in a
         game, typed letters are keybinds. A paste that fails or is stopped
         raises (-> INJECTION_ERROR); the text stays in History."""
+        _game_chat_module().ensure_game_focus(window_id)
+        self._linux_paste_into_game(text, window_id, gen)
+        return True
+
+    def _linux_paste_into_game(self, text: str, window_id, gen=None) -> None:
+        """Clipboard + Ctrl+V into the game in front (Linux). Setting the
+        clipboard waits on the Tk thread and a held modifier can hold the keys
+        back for seconds; the user may Alt+Tab away or reset meanwhile. So wait
+        for the modifiers first, then check that this dictation and this game
+        are still current, then press Ctrl+V at once."""
+        from wayfinder.core.injector import _require_modifier_release
+
         game_chat = _game_chat_module()
-        game_chat.ensure_game_focus(window_id)
         if not self._set_clipboard_from_worker(text):
             raise InjectionError("Could not set the clipboard for the game paste")
-        # Setting the clipboard waits on the Tk thread: the user may have
-        # Alt+Tabbed away or reset meanwhile. Paste only this dictation, and
-        # only into the same game.
+        _require_modifier_release()
         if gen is not None and gen != self.session_generation:
             raise InjectionError("Game paste stopped: the dictation was reset. "
                                  "Your text is in History.")
@@ -23742,7 +23751,6 @@ class WayfinderApp(ctk.CTk):
             raise InjectionError("Game paste stopped: the game left the front. "
                                  "Your text is in History.")
         game_chat.paste_clipboard()
-        return True
 
     def _set_clipboard_from_worker(self, text: str, timeout: float = 2.0) -> bool:
         """Set the clipboard on the Tk thread and wait (Linux game paste).
@@ -23812,7 +23820,9 @@ class WayfinderApp(ctk.CTk):
                 # Linux: only a Steam game is surely a game. Any Wine window
                 # (Notepad, a launcher) has an .exe class, so those keep the
                 # normal typing path, Auto-Enter included.
-                steam_game = str(bundle_id or "").lower().startswith("steam_app_")
+                is_steam = getattr(game_chat, "is_steam_game", None)
+                steam_game = (is_steam(pid, bundle_id) if callable(is_steam)
+                              else str(bundle_id or "").lower().startswith("steam_app_"))
                 if linux and not steam_game:
                     self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been "
                              "tested with; typing as usual. See the Games tab.")
@@ -23857,9 +23867,7 @@ class WayfinderApp(ctk.CTk):
                 paste = game_chat.type_text
             else:
                 def paste(message):
-                    if not self._set_clipboard_from_worker(message):
-                        raise InjectionError("Could not set the clipboard for the game paste")
-                    game_chat.paste_clipboard()
+                    self._linux_paste_into_game(message, pid, gen)
         elif IS_WINDOWS and not IS_MACOS:
             # Ctrl+V only: never the SendInput typing fallback in a game,
             # where letters are keybinds.

@@ -244,6 +244,8 @@ def _front_window() -> tuple[Optional[int], Optional[str], Optional[str]]:
         for _ in range(8):
             cls, title, appid = _window_facts(win)
             if cls or appid:
+                if appid:
+                    _remember_steam_window(int(win.id), appid)
                 if appid and not (cls or "").lower().startswith("steam_app_"):
                     if not (cls or "").lower().endswith(".exe"):
                         cls = f"steam_app_{appid}"
@@ -260,6 +262,26 @@ def _front_window() -> tuple[Optional[int], Optional[str], Optional[str]]:
             disp.close()
         except Exception:
             pass
+
+
+# Window ids that carried STEAM_GAME when last seen in front. A Proton game can
+# keep its Windows exe name as the class (so exe profiles still match); this
+# keeps it known as a Steam game for the paste-only decision.
+_STEAM_WINDOWS: dict[int, str] = {}
+
+
+def _remember_steam_window(window_id: int, appid: str) -> None:
+    if len(_STEAM_WINDOWS) > 64:
+        _STEAM_WINDOWS.clear()
+    _STEAM_WINDOWS[window_id] = appid
+
+
+def is_steam_game(window_id: Optional[int], window_class: Optional[str]) -> bool:
+    """True for a window Steam identifies: a steam_app_<id> class, or a window
+    that carried gamescope's STEAM_GAME tag (whatever its class)."""
+    if str(window_class or "").lower().startswith("steam_app_"):
+        return True
+    return window_id is not None and window_id in _STEAM_WINDOWS
 
 
 def frontmost_app() -> tuple[Optional[int], Optional[str], Optional[str]]:

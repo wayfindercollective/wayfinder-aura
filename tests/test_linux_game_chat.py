@@ -109,12 +109,17 @@ def _linux_app(monkeypatch, frontmost):
     calls, logs = [], []
     monkeypatch.setattr(gc, "paste_clipboard", lambda: calls.append(("ctrl+v",)))
     monkeypatch.setattr(injector, "inject_text", lambda *a, **k: calls.append(("typed",) + a))
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(gc, "_STEAM_WINDOWS", {})
     app = SimpleNamespace(config={}, session_generation=1, log=logs.append)
     app._set_clipboard_from_worker = (
         lambda text, timeout=2.0: calls.append(("clipboard", text)) or True)
     app._linux_game_paste_only = (
         lambda text, window_id, gen=None:
         wm.WayfinderApp._linux_game_paste_only(app, text, window_id, gen))
+    app._linux_paste_into_game = (
+        lambda text, window_id, gen=None:
+        wm.WayfinderApp._linux_paste_into_game(app, text, window_id, gen))
     return wm, app, calls, logs
 
 
@@ -236,3 +241,28 @@ def test_type_text_without_the_portal_uses_the_hardened_xdotool_command(monkeypa
     seen.clear()
     gc.type_text("x" * 2000)  # ~24 s of typing at 12 ms per key
     assert seen[0][1] > 2000 * gc.TYPE_DELAY_MS / 1000
+
+
+
+def test_game_paste_rechecks_after_waiting_for_held_keys(monkeypatch):
+    """A held modifier delays the keys by up to seconds; an Alt+Tab during that
+    wait must not send the paste to the other app."""
+    from wayfinder.core import injector
+    wm, app, calls, _ = _linux_app(monkeypatch, (5, "steam_app_1091500", "Cyberpunk 2077"))
+    front = {"now": (5, "steam_app_1091500", "Cyberpunk 2077")}
+    monkeypatch.setattr(gc, "frontmost_app", lambda: front["now"])
+    monkeypatch.setattr(injector, "_require_modifier_release",
+                        lambda: front.update(now=(9, "firefox", "Mail")))
+    with pytest.raises(wm.InjectionError, match="left the front"):
+        wm.WayfinderApp._inject_into_game_chat(app, "secret plan", 1)
+    assert ("ctrl+v",) not in calls
+
+
+def test_a_proton_game_with_an_exe_class_is_still_a_steam_game(monkeypatch):
+    """gamescope's STEAM_GAME tag marks the window even when the class keeps
+    the Windows exe name; Notepad under Wine carries no such tag."""
+    wm, app, calls, _ = _linux_app(monkeypatch, (6, "sekiro.exe", "Sekiro"))
+    gc._remember_steam_window(6, "814380")
+    assert wm.WayfinderApp._inject_into_game_chat(app, "gg", 1) is True
+    assert calls == [("clipboard", "gg"), ("ctrl+v",)]
+    assert gc.is_steam_game(6, "sekiro.exe") and not gc.is_steam_game(7, "notepad.exe")
