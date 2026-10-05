@@ -277,7 +277,7 @@ macOS uses `~/Library/Application Support/wayfinder-aura/config.json`.
 | `style_toggle_key` + `style_toggle_modifiers` | Fn+Enter on macOS; Ctrl+Alt+Enter elsewhere | Style cycle |
 | `audio_device` / `audio_device_name` | auto | Microphone (saved by name — index-proof) |
 | `typing_speed` | instant | instant, fast, normal, slow, very_slow |
-| `post_processing_enabled` | false | Optional local LLM cleanup; existing installs keep their saved choice |
+| `post_processing_enabled` | true | Normal cleanup (instant um/uh removal, no model); styles use the local cleanup model; existing installs keep their saved choice |
 | `chunked_mode` | Auto for Ultra; Off for Free | Under 30s stays one-shot in Auto; Off and On are selectable |
 | `press_enter_after_dictation` | false | Automatically submits after injection; review terminal/AI text before enabling |
 | `ui_scale` | Auto: matches your display on first run | 0.7–2.5, or Ctrl +/- in app |

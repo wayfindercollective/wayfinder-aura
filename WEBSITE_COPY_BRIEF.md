@@ -4,7 +4,7 @@ _Source of truth for public product copy. Keep in sync with `README.md` Free vs 
 
 ## Product Summary
 
-**Wayfinder Aura** is local-first voice dictation for Linux. Press a hotkey, speak, and your words are typed wherever your cursor is. By default, transcription runs on *your* machine with whisper.cpp — offline, in any app. Optional local cleanup, Ultra GPU acceleration, and cloud backends are opt-in.
+**Wayfinder Aura** is local-first voice dictation for Linux. Press a hotkey, speak, and your words are typed wherever your cursor is. By default, transcription runs on *your* machine with whisper.cpp — offline, in any app — and the Normal style removes um/uh instantly, with no model. Model-based cleanup styles, Ultra GPU acceleration, and cloud backends are opt-in.
 
 ## Hero statements (pick one)
 
@@ -25,7 +25,7 @@ _Source of truth for public product copy. Keep in sync with `README.md` Free vs 
 - Chunked recording (Ultra) for long dictations with live feedback
 
 ### 3. Writes like you, only cleaner
-- Optional local LLM cleanup (off by default; Gemma 3 1B when enabled): strip ums, fix punctuation, match tone
+- Normal cleanup on by default: strips um/uh instantly, no model. Optional local LLM cleanup (Gemma 3 1B) fixes punctuation and matches tone
 - Output styles: Minimal, Professional, Casual, Dev, Personal
 - Cycle styles with Super+F3
 

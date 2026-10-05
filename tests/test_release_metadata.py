@@ -503,7 +503,8 @@ def test_public_tier_copy_matches_runtime_gpu_and_model_gates():
     assert "free tier included" not in readme.lower()
     assert "free tier runs Base/Base.en on CPU" in support
     assert "| Additional speech models | — | ✅ |" in website_brief
-    assert "Optional local cleanup, Ultra GPU acceleration" in website_brief
+    assert "Model-based cleanup styles, Ultra GPU acceleration" in website_brief
+    assert "| `post_processing_enabled` | true |" in readme
     assert "Cleanup: **Normal** by default" in website_brief
     assert "Standard models (tiny / base / small)" not in marketing_handoff
     assert "| Base/Base.en speech model | Tiny, Small, Medium, Turbo, and Large speech models |" in marketing_handoff
