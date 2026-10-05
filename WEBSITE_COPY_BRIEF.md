@@ -58,11 +58,12 @@ Ultra is one-time — no subscription. Activate a key in-app; works offline afte
 
 ## Defaults to advertise
 
-- Hotkey: **Super+F2** (start/stop)
-- Style cycle: **Super+F3**
+- Hotkey (Linux): **Ctrl+Alt+Space** (start/stop); Right Option on macOS,
+  Right Alt on Windows
+- Style cycle (Linux): **Ctrl+Alt+Enter**; Fn+Enter on macOS
 - Free default model (Flatpak): **base.en**
 - Processing: **Local** by default
-- Post-processing: **Off** by default
+- Cleanup: **Normal** by default (instant um/uh removal, no model)
 - Ultra chunk processing: **Auto** by default; Free remains one-shot
 - Auto press Enter: **Off** by default
 

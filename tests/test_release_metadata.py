@@ -504,7 +504,7 @@ def test_public_tier_copy_matches_runtime_gpu_and_model_gates():
     assert "free tier runs Base/Base.en on CPU" in support
     assert "| Additional speech models | — | ✅ |" in website_brief
     assert "Optional local cleanup, Ultra GPU acceleration" in website_brief
-    assert "Post-processing: **Off** by default" in website_brief
+    assert "Cleanup: **Normal** by default" in website_brief
     assert "Standard models (tiny / base / small)" not in marketing_handoff
     assert "| Base/Base.en speech model | Tiny, Small, Medium, Turbo, and Large speech models |" in marketing_handoff
 
@@ -515,7 +515,13 @@ def test_documented_dictation_defaults_and_auto_enter_warning_match_runtime():
     main = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
     normalized_docs = [" ".join(text.split()) for text in (readme, support, main)]
 
-    assert "Post-processing starts off on new installs" in readme
+    sys.path.insert(0, str(REPO / "src"))
+    from wayfinder.config import DEFAULT_CONFIG
+
+    # Normal ("minimal" in config) with cleanup on is what a new install gets.
+    assert DEFAULT_CONFIG["post_processing_enabled"] is True
+    assert DEFAULT_CONFIG["output_tone"] == "minimal"
+    assert "Cleanup starts on Normal for new installs" in readme
     assert "Ultra Chunk Processing defaults to Auto" in readme
     assert "Auto press Enter starts off" in readme
     for warning_term in ("terminal commands", "AI prompts"):
