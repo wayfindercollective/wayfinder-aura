@@ -990,11 +990,12 @@ def main():
 
             frozen = getattr(sys, 'frozen', False)
             frozen_runtime_ready = True
-            if frozen and sys.platform in ("darwin", "win32"):
+            if frozen:
                 # Native dependencies are bundled, but speech-model weights are
                 # intentionally downloaded after install. Do not send a clean
-                # Mac (or PC: the Windows installer bundles no model either)
-                # into the live-dictation Welcome step until one exists.
+                # Mac, PC or AppImage install (none bundles a model; the
+                # Flatpak, which does, is not a frozen build) into the
+                # live-dictation Welcome step until one exists.
                 frozen_runtime_ready = app._has_usable_whisper_model()
                 # Keep a genuinely clean install marked incomplete until the
                 # required model exists. Existing packaged users who already
@@ -1002,11 +1003,6 @@ def main():
                 if frozen_runtime_ready:
                     app.config["setup_completed"] = True
                 save_config(app.config)
-            elif frozen:
-                # Linux frozen builds (as on main): keep the flag in
-                # WayfinderApp's live config so later save_config() calls persist
-                # it (frozen builds never run the setup pane).
-                app.config["setup_completed"] = True
 
             plan = first_run_plan(
                 setup_completed=app.config.get("setup_completed", False),

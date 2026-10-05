@@ -489,7 +489,9 @@ def test_windows_first_run_waits_for_a_speech_model():
     from pathlib import Path
 
     src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
-    assert 'if frozen and sys.platform in ("darwin", "win32"):' in src
+    # Every frozen build (Mac, PC and the Linux AppImage) waits for a model.
+    assert "            if frozen:\n" in src
+    assert "frozen_runtime_ready = app._has_usable_whisper_model()" in src
 
 
 # --- Window look: content-sized first run, work-area tooltips ------------------

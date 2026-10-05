@@ -5,6 +5,8 @@ Covers the pure ``WelcomeFlow`` state machine and confirms the module imports
 headlessly (WelcomeFlow available without touching Tk / creating windows).
 """
 
+import pytest
+
 
 class TestWelcomeFlow:
     """State-machine transitions for the 3-step tour."""
@@ -355,3 +357,13 @@ class TestMacPermissionRecovery:
             _, actions = permission_row_plan(
                 name, "why", ready, set(), always_open_settings=True)
             assert actions == ("settings",)
+
+
+
+@pytest.mark.parametrize("platform_name, noun", [
+    ("darwin", "Mac"), ("win32", "PC"), ("linux", "computer")])
+def test_welcome_names_the_computer_per_platform(monkeypatch, platform_name, noun):
+    """The AppImage tour's model card said "runs entirely on this Mac" on Linux."""
+    from wayfinder.ui import welcome
+    monkeypatch.setattr(welcome.sys, "platform", platform_name)
+    assert welcome._device_noun() == noun

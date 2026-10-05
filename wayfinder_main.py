@@ -115,7 +115,7 @@ def _game_chat_module():
 
 def _device_noun() -> str:
     """How user-facing copy names this computer."""
-    return "PC" if IS_WINDOWS else "Mac"
+    return "PC" if IS_WINDOWS else "Mac" if IS_MACOS else "computer"
 
 
 def _footer_tagline(is_macos: bool | None = None, is_windows: bool | None = None) -> str:
