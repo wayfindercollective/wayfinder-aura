@@ -467,6 +467,29 @@ def test_successful_activation_replaces_form_with_active_state():
     assert "breadcrumb" in events
 
 
+def test_upgrade_panel_key_uses_its_own_entry_and_feedback():
+    panel_entry = _Entry("  wv-new-key  ")
+    panel_feedback = _Label()
+    settings_feedback = _Label()
+    app = SimpleNamespace(
+        _license_key_entry=_Entry("wv-old-key"),
+        _license_feedback=settings_feedback,
+        update_idletasks=lambda: None,
+        _write_status_breadcrumb=lambda: None,
+    )
+    result = SimpleNamespace(is_valid=False, error_message="Invalid license key")
+    gate = SimpleNamespace(is_premium=False)
+
+    with patch("wayfinder.license.store_license", return_value=result) as store, patch(
+        "wayfinder.license.get_feature_gate", return_value=gate
+    ):
+        wayfinder_main.WayfinderApp._activate_license(app, panel_entry, panel_feedback)
+
+    store.assert_called_once_with("WV-NEW-KEY")
+    assert panel_feedback.options["text"] == "Invalid license key"
+    assert settings_feedback.options == {}
+
+
 class _SyncThread:
     def __init__(self, target, daemon=None, name=None):
         self._target = target
