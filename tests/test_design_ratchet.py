@@ -262,19 +262,18 @@ def test_no_new_sub100_self_rearming_timers():
     assert {name for name, _ in rearms}, "timer lint found zero self-rearms — regex likely broke"
 
 
-def test_animation_cadence_helpers_never_drop_below_their_floor():
+def test_animation_cadences_are_pinned():
     """The hero and tray loops take their interval from helpers, which the
-    literal-interval lint above cannot see. Pin the floors instead, so a faster
-    loop still has to be a deliberate, reviewed change (rules 1 and 9)."""
+    literal-interval lint above cannot see. Pin the exact cadences (CLAUDE.md
+    rules 1 and 9): faster costs CPU, slower degrades the animation, so either
+    is a reviewed change."""
     import wayfinder_main as wm
 
-    floors = {"idle": 33, "active": 33, "tray": 50}
     for platform_name in ("linux", "darwin", "win32"):
-        assert wm._hero_idle_interval_ms(platform_name) >= floors["idle"]
-        assert wm._tray_pulse_interval_ms(platform_name) >= floors["tray"]
-        for steam in (None, "deck"):
-            assert wm._hero_active_interval_ms(platform_name, steam) >= floors["active"]
-    assert wm._hero_active_interval_ms("linux", "deck") == 66  # Steam keeps 15 fps
+        assert wm._hero_idle_interval_ms(platform_name) == 33          # 30 fps idle
+        assert wm._tray_pulse_interval_ms(platform_name) == 50
+        assert wm._hero_active_interval_ms(platform_name, None) == 33  # 30 fps on desktops
+    assert wm._hero_active_interval_ms("linux", "deck") == 66          # 15 fps on Steam hardware
 
 
 # ---------------------------------------------------------------------------

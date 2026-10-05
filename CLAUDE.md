@@ -53,7 +53,7 @@ State transitions (RECORDING -> PROCESSING) can complete in milliseconds. Users 
 `SmoothScrollableFrame`, custom button wrappers, and fancy subclasses were all replaced with standard `CTkScrollableFrame`, `CTkFrame`, `CTkButton`. Custom widgets introduce subtle bugs (bind parameter issues, constructor incompatibilities). Use the framework as-is.
 
 ### 9. Performance optimizations must preserve visual quality
-One render optimization was reverted because it degraded overlay animations. When batching canvas operations or reducing frame rates, visually confirm animations still look smooth. The hero waveform renders at 30fps idle and 30fps active on desktops (15fps active on Steam hardware, where it shares the CPU with transcription), and the overlay at 15fps — don't reduce these. `test_animation_cadence_helpers_never_drop_below_their_floor` in `tests/test_design_ratchet.py` pins these cadences.
+One render optimization was reverted because it degraded overlay animations. When batching canvas operations or reducing frame rates, visually confirm animations still look smooth. The hero waveform renders at 30fps idle and 30fps active on desktops (15fps active on Steam hardware, where it shares the CPU with transcription), and the overlay at 15fps — don't reduce these. `test_animation_cadences_are_pinned` in `tests/test_design_ratchet.py` pins these cadences.
 
 ### 10. Wrap all Tk canvas operations in try/except
 Tk 9.0 throws unexpected exceptions during rapid canvas redraws and window destruction. All `canvas.create_*`, `canvas.delete`, and `canvas.itemconfig` calls must be wrapped to prevent app crashes.
