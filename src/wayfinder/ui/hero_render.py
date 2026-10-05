@@ -143,8 +143,10 @@ def render_hero_wave(w, h, t, level, morph, state_color_rgb, bg_rgb=BG_CARD, *,
                      caches=None, stardust=False, stroke_scale=1.0):
     """Liquid-ribbon waveform onto a w x h RGB strip (``PIL.Image`` mode RGB).
 
-    Linux renders the USER-APPROVED reference (pre-blended opaque strokes plus
-    the 1px top highlight) exactly as on main. macOS renders the Aqua variant
+    Linux renders the Mac's shader ribbon (below) by default; the
+    USER-APPROVED reference (pre-blended opaque strokes plus the 1px top
+    highlight, as on main) remains with WAYFINDER_LINUX_MAC_LOOK=0 and as the
+    fallback if the shader port fails. macOS renders the Aqua variant
     (RGBA strokes, blurred glow, ``stroke_scale`` for the unscaled raw Tk
     canvas); it is also the non-Metal fallback behind the native hero layer.
     Windows renders the Mac's Metal hero shader, ported to NumPy

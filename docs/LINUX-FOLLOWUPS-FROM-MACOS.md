@@ -1,6 +1,10 @@
 # Linux follow-ups found during the macOS pass
 
-Written on the `macos` branch (2026-09-23). **Nothing here was changed on Linux.**
+Written on the `macos` branch (2026-09-23). **Nothing here was changed on Linux**
+at the time. Since then the integration branch has brought several Mac changes to
+Linux on purpose (the Mac shader ribbon and glass palette, the 30 fps recording
+ribbon on desktops, the header mark, the hairline mic button), and items marked
+"Linux: done" below were fixed in the 2026-10-04 audit.
 Every macOS change on this branch is behind a `darwin` check or lives in a
 macOS-only module; Linux/Windows behaviour matches `main` (the hero ribbon and
 overlay wave renderers were verified byte-for-byte). Each item below was

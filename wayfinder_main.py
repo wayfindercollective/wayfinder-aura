@@ -8068,9 +8068,9 @@ class WayfinderApp(ctk.CTk):
     def _render_mic_button_photo(self, color: str, pressed: bool = False,
                                  is_active: bool = False, pulse: float | None = None,
                                  hover: bool = False):
-        """Render the mic button (``wayfinder.ui.mic_button``: a lit glass disc
-        with a state-colour glow, top-lit rim and a filled mic glyph; recording
-        shows a stop square and a breathing glow).
+        """Render the mic button (``wayfinder.ui.mic_button``: a quiet hairline
+        chip with a line mic glyph; recording shows a solid state-colour disc,
+        a stop square and an expanding ring).
 
         Results are cached per (color, state, quantized pulse, size) so a state
         change renders once and the recording pulse is a dict hit + itemconfig.
