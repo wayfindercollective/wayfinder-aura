@@ -12715,14 +12715,36 @@ class WayfinderApp(ctk.CTk):
                      "Wayland and X11)")
         elif state == _PK.DECLINED:
             self.log("⌨️ Desktop portal typing not allowed: Aura types into X11 apps "
-                     "and games only. Turn 'Type into every app' off and on in Settings "
-                     "to ask again.")
+                     "and games only. Turn on 'Type into every app' in Settings to ask again.")
+            self.event_queue.put((EventType.UI_CALLBACK, self._after_portal_declined))
         elif state == _PK.FAILED:
             self.log(f"⚠️ Desktop portal typing unavailable ({detail}): using the other "
                      "typing tools; turn 'Type into every app' off and on to retry")
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: self._show_error_banner(
+                "Typing into every app is unavailable right now, so text may reach X11 "
+                "apps only. Turn Settings → System → Type into every app off and on to retry.")))
         elif state == _PK.CLOSED:
             self.log(f"⚠️ Desktop portal typing ended ({detail}): using xdotool until "
                      "Aura restarts")
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: self._show_error_banner(
+                "Your desktop ended Aura's typing session, so text may reach X11 apps only. "
+                "Turn Settings → System → Type into every app off and on to start it again.")))
+
+    def _after_portal_declined(self) -> None:
+        """The desktop's remote-control request was declined (Esc counts). Say so
+        where the user looks, and turn the switch off so that turning it back on
+        asks again (it was left on, which read as "already allowed"). Tk thread."""
+        self.config["linux_portal_typing"] = False
+        save_config(self.config)
+        var = getattr(self, "_portal_typing_var", None)
+        if var is not None:
+            try:
+                var.set(False)
+            except Exception:
+                pass
+        self._show_error_banner(
+            "Aura types into X11 apps and games only: the desktop's remote-control request "
+            "was declined. Turn on Settings → System → Type into every app to be asked again.")
 
     def _on_portal_typing_toggled(self) -> None:
         """Settings switch: type through the desktop portal (Wayland)."""

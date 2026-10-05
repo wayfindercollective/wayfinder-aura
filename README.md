@@ -235,8 +235,8 @@ macOS uses `~/Library/Application Support/wayfinder-aura/config.json`.
   expected to work, not yet verified) Aura types through the desktop's
   RemoteDesktop portal. Approve the remote-control prompt (the activity log
   says "Your desktop is asking whether Aura may type in every app"); if you
-  declined, turn **Settings → System → Type into every app** off and on to be
-  asked again. Text goes to whatever window has keyboard focus. X11 sessions
+  declined, Aura says so and turns **Settings → System → Type into every app**
+  off; turn it back on to be asked again. Text goes to whatever window has keyboard focus. X11 sessions
   and SteamOS Game Mode use xdotool; `ydotool` and `wtype` are only fallbacks
   for AppImage and from-source installs when the portal is unavailable.
 - **"No input devices found" (AppImage and from-source installs)** —

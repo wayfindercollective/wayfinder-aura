@@ -809,3 +809,41 @@ def test_wtype_primer_waits_while_the_portal_is_in_play(monkeypatch):
     app._portal_not_offered = True
     monkeypatch.setattr(pk, "keyboard", lambda: SimpleNamespace(state=pk.PortalKeyboard.IDLE))
     assert wm.WayfinderApp._portal_typing_in_play(app) is False
+
+
+def test_a_decline_is_shown_and_the_switch_turns_off(monkeypatch, tmp_path):
+    """Esc on the desktop's dialog counts as a decline: the Dictate tab says so
+    and the switch goes off, so turning it on asks again."""
+    from queue import Queue
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    saved, banners, logs = [], [], []
+    monkeypatch.setattr(wm, "save_config", lambda cfg: saved.append(dict(cfg)))
+    var = SimpleNamespace(value=True)
+    var.set = lambda v: setattr(var, "value", v)
+    app = SimpleNamespace(config={"linux_portal_typing": True}, event_queue=Queue(),
+                          log=logs.append, _portal_typing_var=var,
+                          _show_error_banner=banners.append)
+    app._after_portal_declined = lambda: wm.WayfinderApp._after_portal_declined(app)
+    wm.WayfinderApp._on_portal_keyboard_state(app, pk.PortalKeyboard.DECLINED, "declined")
+    kind, callback = app.event_queue.get_nowait()
+    assert kind == wm.EventType.UI_CALLBACK
+    callback()                                   # runs on the Tk thread in the app
+    assert app.config["linux_portal_typing"] is False and saved
+    assert var.value is False
+    assert "declined" in banners[0] and "Type into every app" in banners[0]
+
+
+def test_a_failed_or_closed_session_is_shown(monkeypatch):
+    from queue import Queue
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    banners = []
+    app = SimpleNamespace(config={}, event_queue=Queue(), log=lambda m: None,
+                          _show_error_banner=banners.append)
+    for state in (pk.PortalKeyboard.FAILED, pk.PortalKeyboard.CLOSED):
+        wm.WayfinderApp._on_portal_keyboard_state(app, state, "gone")
+        app.event_queue.get_nowait()[1]()
+    assert len(banners) == 2 and all("Type into every app" in b for b in banners)

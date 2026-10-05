@@ -180,8 +180,9 @@ Try these before filing an issue — they cover the most common problems.
   were in when recording started (that only works with X11 + xdotool).
 - **Approve the portal prompt.** The first time, the desktop asks whether Aura
   may type in every app (the activity log says so, then shows
-  “✓ Text injection: desktop portal”). If you declined, turn **Settings →
-  System → Type into every app** off and on to be asked again. KDE shows a
+  “✓ Text injection: desktop portal”). If you declined, Aura says so on the Dictate tab and
+  turns **Settings → System → Type into every app** off: turn it back on to be
+  asked again. KDE shows a
   “Remote Control” icon in the tray while Aura runs; that is the portal's own
   indicator. Without the approval the Flatpak types with xdotool, which
   reaches X11/XWayland apps and games only.

@@ -19,8 +19,9 @@ listed here.
   is expected to work but is not yet verified) the desktop's remote-control
   (RemoteDesktop) portal delivers the keys, so native Wayland apps receive
   dictation too, not only X11/XWayland windows. The desktop asks once;
-  Settings → System → "Type into every app" turns it off (turn it off and on
-  again to be asked after a decline). X11 sessions and SteamOS Game Mode keep
+  Settings → System → "Type into every app" turns it off; a decline (Esc
+  included) is shown on the Dictate tab and turns the switch off, so turning it
+  back on asks again. X11 sessions and SteamOS Game Mode keep
   xdotool; ydotool and wtype remain fallbacks for AppImage and source installs
   when the portal is unavailable.
 - **Gamer mode on Linux.** The Games tab and game-chat dictation now run on
