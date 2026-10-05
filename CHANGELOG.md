@@ -36,10 +36,13 @@ listed here.
 
 ### Changed
 
-- **The macOS design on Linux:** header brand mark, a quiet hairline mic
-  button, labels that fit at any zoom, a smoother benchmark bar. Zoom
-  defaults to the desktop's own scale and rescales in one frame; the idle
-  ribbon drifts slowly while another app has focus and stops when hidden.
+- **The macOS design on Linux:** the Mac's shader ribbon and glass palette
+  (the previous ribbon remains with `WAYFINDER_LINUX_MAC_LOOK=0`), header brand
+  mark, a quiet hairline mic button, labels that fit at any zoom, a smoother
+  benchmark bar. The recording ribbon runs at 30 fps on desktops (15 fps on
+  Steam hardware). Zoom defaults to the desktop's own scale and rescales in one
+  frame; the idle ribbon drifts slowly while another app has focus and stops
+  when hidden.
 - **Get Update on Linux downloads the new Flatpak bundle (or AppImage);**
   open the file to install it. The banner no longer points at a software
   center that cannot update a GitHub install.
@@ -94,6 +97,10 @@ listed here.
 - **The GameMode pause says so.** While a game is registered with GameMode
   (Lutris and Proton register automatically; AppImage and source installs) the
   record and style shortcuts are ignored; the first ignored press now logs why.
+- **The Style tab icon follows a license change** (the padlock stayed after
+  activating Ultra until a restart), **the recording hint promises Esc only
+  when something listens for it**, and **the pill no longer clips its right end**
+  after switching to the wider Normal badge.
 - **The cancel shortcut never grabs a bare Escape.** A config with no cancel
   modifiers leaves the portal trigger empty for the desktop's shortcut editor
   instead of binding Escape in every app.
