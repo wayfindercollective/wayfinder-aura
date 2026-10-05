@@ -806,10 +806,15 @@ def test_a_desktop_without_the_portal_settles_for_xdotool(monkeypatch):
 
 # ── Setup and the startup primer leave typing to the portal ─────────────────
 
-def _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.WAITING, offered=True):
+def _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.WAITING, offered=True,
+                               typing_switch=True):
+    """Setup on a faked portal desktop. ``typing_switch`` stubs the saved
+    "Type into every app" switch (None: read the real CONFIG_FILE the test set)."""
     from types import SimpleNamespace
     from wayfinder.core import setup
     monkeypatch.setattr(setup, "_PORTAL_OFFERED", {})
+    if typing_switch is not None:
+        monkeypatch.setattr(setup, "_portal_typing_enabled", lambda: typing_switch)
     monkeypatch.setattr(pk, "host_is_wayland_desktop", lambda: True)
     monkeypatch.setattr(pk, "keyboard", lambda: SimpleNamespace(state=state))
     monkeypatch.setattr(pk, "ready", lambda: state == pk.PortalKeyboard.READY)
@@ -842,7 +847,8 @@ def test_setup_offers_ydotool_where_no_portal_keyboard_exists(monkeypatch):
 def test_setup_offers_ydotool_when_typing_into_every_app_is_off(monkeypatch, tmp_path):
     import json
     import wayfinder.config as config_module
-    setup = _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.IDLE)
+    setup = _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.IDLE,
+                                       typing_switch=None)
     monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
     (tmp_path / "config.json").write_text(json.dumps({"linux_portal_typing": False}))
     assert "ydotool" in setup.get_missing_system_packages()
