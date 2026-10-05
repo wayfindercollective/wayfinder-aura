@@ -535,6 +535,15 @@ jobs:
           name: wayfinder-aura-flatpak
           path: dist/
 
+      # Published beside the packages so users and release QA can check the
+      # exact downloaded files (the in-app Get Update opens them unverified).
+      - name: Checksum the Linux packages
+        run: |
+          set -o pipefail
+          cd dist
+          sha256sum Wayfinder_Aura-*.AppImage io.wayfindercollective.WayfinderAura.flatpak \
+            | tee SHA256SUMS-linux.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
@@ -542,6 +551,7 @@ jobs:
             dist/Wayfinder_Aura-*.AppImage
             dist/Wayfinder_Aura-*.AppImage.zsync
             dist/io.wayfindercollective.WayfinderAura.flatpak
+            dist/SHA256SUMS-linux.txt
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
