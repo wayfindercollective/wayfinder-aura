@@ -8357,8 +8357,8 @@ class WayfinderApp(ctk.CTk):
     
     @staticmethod
     def _style_tab_icon_and_label(unlocked: bool) -> tuple[str, str]:
-        """Style tab icon + label. macOS shows a line-icon lock in place of the
-        pen instead of an emoji suffix (rule 11: no emoji as UI chrome)."""
+        """Style tab icon + label: a line-icon lock in place of the pen instead
+        of an emoji suffix (rule 11: no emoji as UI chrome)."""
         if unlocked:
             return "pen-line", "Style"
         return "lock", "Style"
@@ -18197,13 +18197,12 @@ class WayfinderApp(ctk.CTk):
             style_btn = self.tab_buttons.get("style")
             if style_btn is not None:
                 icon_name, label = self._style_tab_icon_and_label(style_unlocked)
-                if IS_MACOS:
-                    style_btn.configure(
-                        text=label,
-                        image=get_icon(icon_name, 18, COLORS["text_secondary"]),
-                    )
-                else:
-                    style_btn.configure(text=label)
+                # Every platform builds the tab with this icon (lock / pen), so
+                # an activation or a lost license must swap it everywhere.
+                style_btn.configure(
+                    text=label,
+                    image=get_icon(icon_name, 18, COLORS["text_secondary"]),
+                )
         except Exception:
             pass
         try:

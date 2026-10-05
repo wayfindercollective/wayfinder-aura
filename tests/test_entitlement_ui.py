@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 import wayfinder_main
 
 
@@ -702,3 +704,23 @@ def test_rebuild_header_survives_settings_page_not_built_yet():
     )
 
     wayfinder_main.WayfinderApp._rebuild_header(app)  # must not raise
+
+
+@pytest.mark.parametrize("unlocked, icon", [(True, "pen-line"), (False, "lock")])
+def test_style_tab_icon_follows_the_license_on_every_platform(monkeypatch, unlocked, icon):
+    """Linux built the lock icon but only macOS swapped it on activation, so
+    the Style tab kept its padlock until a restart."""
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    asked, configured = [], []
+    monkeypatch.setattr(wayfinder_main, "get_icon",
+                        lambda name, size, color: asked.append(name) or f"img:{name}")
+    style_btn = SimpleNamespace(configure=lambda **k: configured.append(k))
+    app = SimpleNamespace(
+        feature_gate=SimpleNamespace(has_feature=lambda _f: unlocked, is_premium=unlocked),
+        tab_buttons={"style": style_btn},
+        _hide_gpu_nudge=lambda: None,
+        _premium_banner=None,
+        _style_tab_icon_and_label=wayfinder_main.WayfinderApp._style_tab_icon_and_label,
+    )
+    wayfinder_main.WayfinderApp._refresh_entitlement_ui(app)
+    assert configured[0] == {"text": "Style", "image": f"img:{icon}"}
