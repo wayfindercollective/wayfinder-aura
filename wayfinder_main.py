@@ -15238,7 +15238,7 @@ class WayfinderApp(ctk.CTk):
                 # grab Wayland never delivers) (Codex review).
                 flatpak_backend = resolve_hotkey_backend(
                     sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
-                    os.environ.get("XDG_SESSION_TYPE", ""),
+                    self._hotkey_session_type(),
                 ) if IS_FLATPAK else None
                 if flatpak_backend == "portal":
                     if (not getattr(self, '_portal_listener_started', False)
@@ -18781,7 +18781,7 @@ class WayfinderApp(ctk.CTk):
         try:
             if IS_FLATPAK and resolve_hotkey_backend(
                     sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
-                    os.environ.get("XDG_SESSION_TYPE", "")) == "portal":
+                    self._hotkey_session_type()) == "portal":
                 self.log(
                     f"ℹ️ Your desktop manages global shortcuts for sandboxed "
                     f"apps — if {display} doesn't trigger dictation, set it "
@@ -21990,6 +21990,21 @@ class WayfinderApp(ctk.CTk):
 
     # === Hotkey & Events ===
     
+    @staticmethod
+    def _hotkey_session_type() -> str:
+        """The session type for the hotkey decision. The Flatpak manifest forces
+        XDG_SESSION_TYPE=x11, so there the X server answers: XWayland means a
+        Wayland compositor, where an X11 listener only hears X11 windows."""
+        session = os.environ.get("XDG_SESSION_TYPE", "")
+        if IS_FLATPAK and session.lower() != "wayland":
+            try:
+                from wayfinder.core.injector import _running_under_xwayland
+                if _running_under_xwayland():
+                    return "wayland"
+            except Exception:
+                pass
+        return session
+
     def _flatpak_portal_hotkeys(self) -> bool:
         """The Flatpak can use the GlobalShortcuts portal: PyGObject imports AND
         the desktop's portal implements it (GNOME before 48, Cinnamon, XFCE,
@@ -22044,7 +22059,7 @@ class WayfinderApp(ctk.CTk):
         # evdev + the 'input' group, identically on X11 and Wayland.
         backend = resolve_hotkey_backend(
             sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
-            os.environ.get("XDG_SESSION_TYPE", ""),
+            self._hotkey_session_type(),
         )
         self._hotkey_backend = backend
         no_shortcuts_portal = getattr(self, "_portal_shortcuts_missing", False)
@@ -22060,6 +22075,9 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"🖥️ {msg}")
                 print(f"[Hotkeys] {msg}", flush=True)
             self._start_pynput_listener()
+            return
+        if backend == "unavailable" and getattr(self, "_game_mode", False):
+            self.log("🎮 Game Mode — the shortcut comes from the Steam trigger service")
             return
         if backend == "unavailable":
             msg = ("This desktop offers apps no global shortcuts (GNOME before 48, Sway): "

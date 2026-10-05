@@ -897,3 +897,19 @@ def test_flatpak_falls_back_when_the_portal_has_no_global_shortcuts(
     monkeypatch.setattr(portal, "global_shortcuts_offered",
                         lambda *a, **k: pytest.fail("probed twice"))
     assert wm.WayfinderApp._flatpak_portal_hotkeys(app) is usable
+
+
+@pytest.mark.parametrize("flatpak, env, xwayland, expected", [
+    (True, "x11", True, "wayland"),    # the manifest forces x11; XWayland tells the truth
+    (True, "x11", False, "x11"),       # a real X11 desktop (Cinnamon, XFCE)
+    (False, "x11", True, "x11"),       # native installs trust the session
+    (False, "wayland", False, "wayland"),
+])
+def test_hotkey_session_type_sees_through_the_flatpak_env(monkeypatch, flatpak, env, xwayland, expected):
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+
+    monkeypatch.setattr(wm, "IS_FLATPAK", flatpak)
+    monkeypatch.setenv("XDG_SESSION_TYPE", env)
+    monkeypatch.setattr(injector, "_running_under_xwayland", lambda: xwayland)
+    assert wm.WayfinderApp._hotkey_session_type() == expected
