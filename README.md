@@ -4,9 +4,10 @@
 
 Wayfinder Aura is local-first voice dictation for Linux and macOS. By default,
 transcription runs on *your* machine with whisper.cpp, offline. Text lands in
-any X11/XWayland app — which is most Linux apps today; on Wayland, native
-windows need a from-source/AppImage install with ydotool or wtype (see
-Troubleshooting).
+any app: on KDE Plasma Wayland (GNOME 45+ is expected to work but is not yet
+verified) Aura types through the desktop's RemoteDesktop portal after a
+one-time approval, so native Wayland windows work too; X11 sessions and SteamOS
+Game Mode use xdotool (see Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
@@ -22,7 +23,8 @@ does not regress the Linux app.
 - **Local by default.** Out of the box, speech-to-text runs locally — no audio
   uploads. Optional cleanup also runs locally when enabled. Cloud backends
   (OpenAI/Groq/Anthropic) are opt-in and off by default. The app checks online
-  for model updates weekly (toggleable), and activating a license contacts the
+  for model updates weekly (off via `check_for_model_updates` in `config.json`)
+  and fetches the model catalog at launch, and activating a license contacts the
   activation server.
 - **Reliable where it counts.** Free runs the broadly compatible Base model on
   CPU. Ultra unlocks Vulkan acceleration on supported AMD, Intel, and NVIDIA
@@ -31,8 +33,10 @@ does not regress the Linux app.
   punctuation. Ultra adds larger cleanup models and selectable tones, from
   boardroom-professional to commit-message-dev.
 - **Made for Linux, including the weird parts.** Targets Wayland and X11, KDE
-  and GNOME, desktop PCs and Steam Deck workflows. Hotkeys pause automatically
-  while a game is running so your push-to-talk key stays yours.
+  and GNOME, desktop PCs and Steam Deck workflows. On AppImage and source
+  installs, hotkeys pause automatically while a game is registered with GameMode
+  so your push-to-talk key stays yours (Aura logs it the first time a shortcut
+  is ignored). The Flatpak cannot see GameMode.
 
 ## Features
 
@@ -42,7 +46,7 @@ does not regress the Linux app.
 | 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
 | 🎨 **Tone presets (Ultra)** | Normal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
-| 🎮 **Game-aware** | Hotkeys pause while a GameMode game is registered (Lutris/Steam) |
+| 🎮 **Game-aware** | Hotkeys pause while a GameMode game is registered (Lutris/Steam; AppImage and source installs) |
 | 🖥️ **Glassmorphic overlay** | Always-visible recording status, designed for Wayland |
 | 🎧 **Smart mic handling** | Picker shows exactly the mics your OS sees; selections survive device renumbering |
 | 🕹️ **Steam Deck workflow** | Trigger dictation from a back button with the bundled host helper |
@@ -67,7 +71,7 @@ watermarked demo. Ultra adds speed, model choice, long-form tools, and styles.
 | Unlimited-length chunked recording | — | ✅ |
 | Tone presets & voice profiles | — | ✅ |
 | Custom vocabulary | — | ✅ |
-| Accuracy controls & audio preprocessing | ✅ | ✅ |
+| Audio preprocessing | ✅ | ✅ |
 
 Ultra is a one-time purchase — no subscription, ever. It's $60, and **$29.99
 during launch**. Hit **Get Ultra** in the app, enter your license key, done.
@@ -77,7 +81,7 @@ Keys activate online once and keep working offline.
 
 ### Download (recommended)
 
-**[⬇ Download the latest AppImage](https://github.com/wayfindercollective/wayfinder-aura/releases/latest)** — one file, everything bundled: GPU (Vulkan) + CPU speech engines, text-injection tools, the works.
+**[⬇ Download the latest AppImage](https://github.com/wayfindercollective/wayfinder-aura/releases/latest)** — one file with the CPU and GPU (Vulkan, Ultra) speech engines and wtype bundled. On X11 sessions, install xdotool from your distribution (the AppImage does not include it).
 
 1. Download `Wayfinder_Aura-*-x86_64.AppImage` from the link above.
 2. Make it executable: right-click → **Properties** → check **"Executable as
@@ -135,7 +139,10 @@ python main.py
 ## Quick start
 
 1. Launch Wayfinder Aura — it lives in your system tray.
-2. Press **Ctrl+Alt+Space**, speak, press **Ctrl+Alt+Space** again.
+2. Press **Ctrl+Alt+Space**, speak, press **Ctrl+Alt+Space** again. To discard a
+   recording instead, press **Shift+Esc** in the Flatpak (rebindable in your
+   desktop's shortcut settings) or a bare **Esc** on AppImage and source
+   installs; nothing is typed.
 3. Your raw transcript is typed at the cursor. Enable local LLM cleanup in
    Settings when you want filler removal, punctuation cleanup, or styles.
 4. With Ultra, press **Ctrl+Alt+Enter** to cycle output styles (Normal →
@@ -159,9 +166,10 @@ most machines, and hotkeys are fully rebindable in Settings.
 
 ## Output styles (Ultra)
 
-The local LLM guides your transcript without rewriting it:
+Normal needs no model; the other styles use the local LLM to guide your
+transcript without rewriting it:
 
-- **Minimal** — strips um/uh, fixes punctuation. Fastest.
+- **Normal** — instantly removes um/uh and doubled small words, no model needed.
 - **Professional** — clean, business-appropriate phrasing.
 - **Casual** — relaxed, texting-style.
 - **Dev** — understands git, code terms, and technical phrasing.
@@ -198,8 +206,9 @@ update options.
 ## Configuration
 
 Settings live in the app. Linux stores them at
-`~/.config/wayfinder-aura/config.json`; macOS uses
-`~/Library/Application Support/wayfinder-aura/config.json`.
+`~/.config/wayfinder-aura/config.json` (Flatpak:
+`~/.var/app/io.wayfindercollective.WayfinderAura/config/wayfinder-aura/config.json`);
+macOS uses `~/Library/Application Support/wayfinder-aura/config.json`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -210,7 +219,7 @@ Settings live in the app. Linux stores them at
 | `post_processing_enabled` | false | Optional local LLM cleanup; existing installs keep their saved choice |
 | `chunked_mode` | Auto for Ultra; Off for Free | Under 30s stays one-shot in Auto; Off and On are selectable |
 | `press_enter_after_dictation` | false | Automatically submits after injection; review terminal/AI text before enabling |
-| `ui_scale` | 1.0 | 0.7–2.5, or Ctrl +/- in app |
+| `ui_scale` | Auto: matches your display on first run | 0.7–2.5, or Ctrl +/- in app |
 | `start_minimized` | false | Start hidden when enabled |
 
 ## Troubleshooting
@@ -222,13 +231,17 @@ Settings live in the app. Linux stores them at
   desktop, or bind it in System Settings → Shortcuts. From-source and
   AppImage installs don't use the portal — they read input devices directly
   (evdev), so see the input-devices item below instead.
-- **Text doesn't appear in native Wayland apps** — the Flatpak types through
-  X11/XWayland, which covers most Linux apps. For native-Wayland windows,
-  use the from-source or AppImage build with `ydotool` installed (and its
-  `ydotoold` daemon running) or `wtype` — the app selects them
-  automatically on Wayland sessions.
-- **"No input devices found" (from-source installs)** —
-  `sudo usermod -aG input $USER`, then log out and back in.
+- **Text doesn't appear in native Wayland apps** — on KDE Plasma (GNOME 45+ is
+  expected to work, not yet verified) Aura types through the desktop's
+  RemoteDesktop portal. Approve the remote-control prompt (the activity log
+  says "Your desktop is asking whether Aura may type in every app"); if you
+  declined, turn **Settings → System → Type into every app** off and on to be
+  asked again. Text goes to whatever window has keyboard focus. X11 sessions
+  and SteamOS Game Mode use xdotool; `ydotool` and `wtype` are only fallbacks
+  for AppImage and from-source installs when the portal is unavailable.
+- **"No input devices found" (AppImage and from-source installs)** —
+  `sudo usermod -aG input $USER`, then log out and back in. This is for the
+  hotkey listener (evdev), not for typing.
 - **UI too small on 4K** — Ctrl+Plus, or Settings → UI Scale.
 
 ## For developers

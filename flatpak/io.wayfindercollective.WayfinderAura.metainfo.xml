@@ -24,7 +24,7 @@
       offline on your device with whisper.cpp — in local mode your voice never leaves your
       computer.
       Optional cloud transcription backends are available if you choose to enable them, and the
-      app checks online for model updates (toggleable).
+      app checks online for model updates (this can be turned off in config.json).
     </p>
     <p>
       Free tier includes Base/Base.en transcription on CPU, local minimal cleanup, hotkeys,
@@ -43,7 +43,6 @@
       <li>System Tray Integration — Runs quietly in the background</li>
       <li>Base Dictation — Free local CPU transcription with optional minimal cleanup</li>
       <li>Ultra Acceleration — GPU inference, additional models, styles, and long-form chunking</li>
-      <li>Game Aware — Hotkeys pause automatically while a game is running</li>
       <li>Configurable Typing Speed — Instant paste or simulated typing</li>
     </ul>
     <p>
@@ -68,7 +67,7 @@
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/overlay.png</image>
     </screenshot>
     <screenshot>
-      <caption>Ultra tone-aware cleanup — Minimal, Professional, Casual, Dev, and more</caption>
+      <caption>Ultra tone-aware cleanup — Normal, Professional, Casual, Dev, and more</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/style.png</image>
     </screenshot>
     <screenshot>

@@ -2,14 +2,17 @@
 
 Quick setup guide for running Wayfinder Aura on Ubuntu with an NVIDIA GPU.
 
+> GPU acceleration and every speech model other than Base/Base.en are Ultra
+> features. Free runs Base/Base.en on CPU.
+
 ---
 
 ## 1. Run the AppImage
 
 ```bash
-# Make it executable and run
-chmod +x Wayfinder_Aura-1.0.0-x86_64.AppImage
-./Wayfinder_Aura-1.0.0-x86_64.AppImage
+# Make it executable and run (the file name carries the version)
+chmod +x Wayfinder_Aura-*-x86_64.AppImage
+./Wayfinder_Aura-*-x86_64.AppImage
 ```
 
 The app will launch, but you need the dependencies below for full functionality.
@@ -25,16 +28,29 @@ sudo apt update && sudo apt upgrade -y
 # Audio (required for recording)
 sudo apt install -y portaudio19-dev python3-dev
 
-# ydotool (required for text injection - typing text at cursor)
-sudo apt install -y ydotool
-
-# Start ydotool daemon (needs to run in background)
-sudo systemctl enable ydotoold
-sudo systemctl start ydotoold
-
-# Add yourself to the input group (for ydotool without sudo)
+# Add yourself to the input group (for the hotkey listener, not for typing)
 sudo usermod -aG input $USER
 # NOTE: Log out and back in for group change to take effect
+```
+
+### Typing text at the cursor
+
+- **Wayland session, KDE Plasma:** nothing to install. Aura types through the
+  desktop's RemoteDesktop portal after you approve its prompt once. GNOME 45+
+  is expected to work the same way but is not yet verified.
+- **X11 session:** install xdotool. The AppImage bundles only `wtype`, not
+  xdotool.
+- **Fallback only** (AppImage or source, when the portal is unavailable):
+  `ydotool` with its daemon running, or `wtype`.
+
+```bash
+# X11 sessions
+sudo apt install -y xdotool
+
+# Fallback only: ydotool and its background daemon
+sudo apt install -y ydotool
+sudo systemctl enable ydotoold
+sudo systemctl start ydotoold
 ```
 
 ---
@@ -119,6 +135,8 @@ bash download-ggml-model.sh large-v3-turbo
 | `large-v3` | 3.1 GB | Slower | Best | Maximum accuracy |
 
 With a 3090 (24GB VRAM), you can easily run `large-v3-turbo` or even `large-v3`.
+Free installs are limited to Base/Base.en on CPU: GPU acceleration and every
+other speech model above are Ultra.
 
 ---
 
@@ -136,7 +154,7 @@ pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-c
 # Visit: https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF
 # Download the Q4_K_M variant (~806 MB)
 # Roomier alternative: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF (1.3 GB)
-mkdir -p ~/.local/share/wayfinder-aura/models
+mkdir -p ~/.local/share/wayfinder-aura/llm-models
 # Place the .gguf file in the directory above
 ```
 
@@ -152,28 +170,35 @@ Configure the backend in the app's Settings tab.
 
 ## 6. Configure Wayfinder Aura
 
+Aura finds whisper.cpp and your models on its own: by default
+`~/whisper.cpp/build/bin/whisper-cli` (unless the AppImage bundles its own) and
+the models in `~/whisper.cpp/models/`. Settings has no fields for these paths;
+if yours live elsewhere, set `whisper_binary` and `model_path` in
+`~/.config/wayfinder-aura/config.json`.
+
 Launch the app and go to Settings:
 
-1. **Whisper Binary**: Set to `~/whisper.cpp/build/bin/whisper-cli`
-2. **Model Path**: Set to `~/whisper.cpp/models/ggml-large-v3-turbo.bin`
-3. **GPU**: Enable GPU acceleration (should auto-detect your 3090)
-4. **Hotkey**: Default is Super+F2 to start/stop recording
+1. **Whisper Model** (Settings → Processing Mode): open it to pick the model you
+   downloaded. Models above Base are Ultra.
+2. **GPU Acceleration**: Ultra. With a license, turn it on (should auto-detect
+   your 3090).
+3. **Hotkey**: Default is Ctrl+Alt+Space to start/stop recording.
 
 ---
 
 ## 7. Test It
 
 1. Open any text editor or browser
-2. Press Super+F2 to start recording
+2. Press Ctrl+Alt+Space to start recording
 3. Speak naturally
-4. Press Super+F2 again to stop
+4. Press Ctrl+Alt+Space again to stop
 5. Your transcribed text appears at the cursor
 
 ---
 
 ## Troubleshooting
 
-### "ydotool: Permission denied"
+### "ydotool: Permission denied" (only if you use the ydotool fallback)
 ```bash
 # Make sure ydotoold is running
 sudo systemctl status ydotoold
@@ -224,6 +249,6 @@ sudo apt install -y libfuse2  # Required for AppImage on Ubuntu 22.04+
 | App config | `~/.config/wayfinder-aura/config.json` |
 | whisper.cpp | `~/whisper.cpp/build/bin/whisper-cli` |
 | Models | `~/whisper.cpp/models/` |
-| ydotool socket | `/run/ydotool/ydotool.sock` |
-| Hotkey | Super+F2 (toggle recording) |
-| Style toggle | Super+F3 (cycle output styles) |
+| ydotool socket (fallback only) | `/run/ydotool/ydotool.sock` |
+| Hotkey | Ctrl+Alt+Space (toggle recording) |
+| Style toggle | Ctrl+Alt+Enter (cycle output styles) |

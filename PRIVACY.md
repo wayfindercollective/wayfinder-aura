@@ -46,12 +46,15 @@ transcription or cleanup service.
 ## Secrets stored on your machine
 
 Your settings — including any cloud API keys — live in
-`~/.config/wayfinder-aura/config.json` on Linux,
+`~/.config/wayfinder-aura/config.json` on Linux (in the Flatpak:
+`~/.var/app/io.wayfindercollective.WayfinderAura/config/wayfinder-aura/config.json`),
 `~/Library/Application Support/wayfinder-aura/config.json` on macOS, or
 `%APPDATA%\wayfinder-aura\config.json` on Windows. Your license token (if you
-buy Ultra) lives beside it as `license.json`.
+buy Ultra) lives beside it as `license.json`. On Wayland desktops, the one-time
+approval for typing into every app is remembered as a restore token in
+`portal-keyboard.json`, also beside it.
 
-These files are stored **in plaintext**, but both are written with file
+These files are stored **in plaintext**, but all are written with file
 permissions `0600` (`os.chmod(..., 0o600)`), meaning only your user account can
 read them. The same owner-only mode is applied to `voice_profile.json`
 (transcription history used for Personal tone learning), structured app logs
@@ -79,13 +82,14 @@ or catch a refund/revocation.
 By default the app checks online (the Hugging Face API) about **once a week**
 to see whether newer transcription/cleanup models are available, and offers them
 for download. This is a simple version check — no audio or transcript is
-involved. You can turn it off with the **Check for model updates** setting
-(`check_for_model_updates: false`).
+involved. There is no switch for it in Settings; to turn it off, set
+`check_for_model_updates` to `false` in `config.json`.
 
 ## Local diagnostic log
 
 For troubleshooting, the app keeps a local activity log at
-`~/.cache/wayfinder-aura/activity.log` on Linux or
+`~/.cache/wayfinder-aura/activity.log` on Linux (in the Flatpak:
+`~/.var/app/io.wayfindercollective.WayfinderAura/cache/wayfinder-aura/activity.log`) or
 `~/Library/Caches/wayfinder-aura/activity.log` on macOS. Be aware:
 
 - It **may contain transcribed text**, so treat it as sensitive.
@@ -95,15 +99,54 @@ For troubleshooting, the app keeps a local activity log at
 
 You can delete it at any time; the app recreates it as needed.
 
+## Clipboard (Linux)
+
+Aura normally types your dictation as keystrokes. When it types through the
+desktop portal and your keyboard layout has no key for a character (for example
+é on a US layout, or an emoji), it pastes the dictation through the clipboard
+instead, then puts the text that was on your clipboard back afterwards. Gamer
+mode pastes your dictation into a game's chat through the clipboard too, but
+does not restore it, so the dictation stays on the clipboard. Aura also pastes
+as a fallback when typing fails in SteamOS Game Mode, and in an off-by-default
+advanced option (`desktop_paste_on_focus_drift`); both restore the clipboard on
+a best-effort basis. Clipboard managers (Klipper, CopyQ, and similar) may record
+what Aura puts there.
+
+## Window detection (Linux)
+
+Gamer mode (on by default) reads the active X11 window's class, title, and
+`STEAM_GAME` property at each dictation to tell whether a game is in front.
+This stays on your machine: nothing is sent, and the only trace is an
+activity-log line naming the game when one is recognized.
+
 ## No analytics, no telemetry
 
 Wayfinder Aura contains no analytics or usage telemetry. It does not track how
-you use the app. The only network activity is the three things named above,
-each of which you control:
+you use the app. The network activity is exactly the following; none of it
+carries your audio or transcripts unless you enable a cloud backend (item 6):
 
-1. The weekly model-update check and daily app-release check (toggleable).
-2. Cloud transcription/cleanup backends (off by default; your own keys).
-3. License activation (only if you activate an Ultra license).
+1. **Model catalog, at every launch.** Aura fetches the list of downloadable
+   models from the Wayfinder Models CDN and keeps a copy for 6 hours. The
+   request carries no license data, audio, or text. There is no Settings
+   switch for it.
+2. **Model-update check, weekly** (Hugging Face API). Off with
+   `check_for_model_updates: false` in `config.json`.
+3. **App-release check, daily** (GitHub Releases API), which shows an "Update
+   available" banner. Off with `check_for_app_updates: false` in `config.json`.
+   **Get Update** opens the release's download link in your browser; Aura does
+   not download the file itself.
+4. **Model downloads, when you ask for them,** from Hugging Face or the
+   Wayfinder Models CDN, depending on the model. Ultra models are served only
+   by the CDN, and those requests carry your signed license token as a
+   `Bearer` header. The token is never sent to Hugging Face.
+5. **The feedback form, only when you press Send feedback.** It sends your
+   message, your email address if you typed one, the app version, your plan
+   (free or ultra), and your operating system description to the Wayfinder
+   feedback service. Delivery is not guaranteed; if the form cannot send, it
+   says so.
+6. **Cloud transcription/cleanup backends** (off by default; your own keys).
+7. **License activation** (only if you activate an Ultra license), as
+   described above.
 
 ## Questions
 

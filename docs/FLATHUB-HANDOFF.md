@@ -107,7 +107,8 @@ Handoff files for the Flathub fork root:
 
 | Permission | Why |
 |------------|-----|
-| x11 / ipc | CustomTkinter UI, PyQt overlay, and xdotool injection through XWayland |
+| x11 / ipc | CustomTkinter UI, PyQt overlay, and xdotool injection through XWayland (the fallback; see the next row) |
+| (none: runtime portal) | Wayland typing uses the `org.freedesktop.portal.RemoteDesktop` portal, approved once by the user; it needs no static finish-arg |
 | pulseaudio | Microphone |
 | dri + GGML_VK_DISABLE_COOPMAT | GPU whisper (Deck-safe) |
 | network | License activate, model updates, optional cloud STT (off by default) |

@@ -53,6 +53,15 @@ A good report gets a fast fix. Please include:
 ~/.cache/wayfinder-aura/activity.log
 ```
 
+In the Flatpak the log (and the config) live inside the app's own folder under
+`~/.var/app/`; every other `~/.cache/wayfinder-aura/` path on this page moves
+there too:
+
+```
+~/.var/app/io.wayfindercollective.WayfinderAura/cache/wayfinder-aura/activity.log
+~/.var/app/io.wayfindercollective.WayfinderAura/config/wayfinder-aura/config.json
+```
+
 On macOS the log is:
 
 ```
@@ -116,11 +125,13 @@ Try these before filing an issue — they cover the most common problems.
 - **Flatpak installs:** the app registers its hotkeys through the
   GlobalShortcuts portal. Approve the prompt from your desktop, or bind them
   in **System Settings → Shortcuts**. The defaults are **Ctrl+Alt+Space**
-  (start/stop) and **Ctrl+Alt+Enter** (cycle style). AppImage and
-  from-source installs don't use the portal — they read input devices
-  directly (evdev, next item).
-- **"No input devices found" (from-source installs):** add yourself to the
-  `input` group, then log out and back in:
+  (start/stop), **Ctrl+Alt+Enter** (cycle style) and **Shift+Esc** (cancel a
+  recording; nothing is typed). AppImage and from-source installs don't use
+  the portal — they read input devices directly (evdev, next item), and a bare
+  **Esc** cancels a recording there.
+- **"No input devices found" (AppImage and from-source installs):** add
+  yourself to the `input` group, then log out and back in. This is for the
+  hotkey listener, not for typing:
   ```sh
   sudo usermod -aG input $USER
   ```
@@ -161,9 +172,19 @@ Try these before filing an issue — they cover the most common problems.
 
 ### Text typed into the wrong place (or nowhere) on Wayland
 
-- **Wayland cannot retarget a window.** ydotool/wtype type into whatever
-  surface currently has keyboard focus. Aura cannot “click back” into the
-  field you were in when recording started (that only works with X11 + xdotool).
+- **Wayland cannot retarget a window.** Aura types into whatever surface
+  currently has keyboard focus: through the desktop's RemoteDesktop portal on
+  KDE Plasma (GNOME 45+ is expected to work, not yet verified), or with
+  ydotool/wtype, which are only fallbacks on AppImage and from-source installs
+  when the portal is unavailable. Aura cannot “click back” into the field you
+  were in when recording started (that only works with X11 + xdotool).
+- **Approve the portal prompt.** The first time, the desktop asks whether Aura
+  may type in every app (the activity log says so, then shows
+  “✓ Text injection: desktop portal”). If you declined, turn **Settings →
+  System → Type into every app** off and on to be asked again. KDE shows a
+  “Remote Control” icon in the tray while Aura runs; that is the portal's own
+  indicator. Without the approval the Flatpak types with xdotool, which
+  reaches X11/XWayland apps and games only.
 - **Keep focus in the text field** while you dictate and until text appears.
 - Aura’s overlay uses a **soft update** path so leaving “Listening…” does not
   recycle the pill/tray every dictation (that used to steal KDE focus).
