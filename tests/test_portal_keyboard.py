@@ -455,6 +455,7 @@ def portal_ready(monkeypatch):
     monkeypatch.setattr(pk, "X11Layout", lambda: _Layout(set()))
     monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", None)
     monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", None)
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_RESTORE", None)
     monkeypatch.setattr("sys.platform", "linux")
     return kb
 
@@ -726,6 +727,15 @@ class _TkLike:
             raise self._error
         return self._clipboard
 
+    def clipboard_clear(self):
+        self._clipboard = ""
+
+    def clipboard_append(self, text):
+        self._clipboard += text
+
+    def update_idletasks(self):
+        pass
+
 
 def test_app_clipboard_reader_runs_on_the_tk_side():
     import wayfinder_main as wm
@@ -751,7 +761,7 @@ def _start_portal(monkeypatch, offered):
     monkeypatch.setattr(pk, "keyboard", lambda: kb)
     monkeypatch.setattr(pk, "portal_keyboard_offered", lambda: next(answers))
     monkeypatch.setattr(injector, "set_portal_clipboard_hooks",
-                        lambda write, read=None: hooks.append((write, read)))
+                        lambda write, read=None, restore=None: hooks.append((write, read, restore)))
     monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
 
     class _Inline:
@@ -767,6 +777,7 @@ def _start_portal(monkeypatch, offered):
                           wm_frame=lambda: "0x1", _portal_listener_added=True,
                           _set_clipboard_from_worker=lambda t: True,
                           _get_clipboard_from_worker=lambda: "old",
+                          _restore_clipboard_from_worker=lambda pasted, previous: True,
                           event_queue=Queue(), app_state=wm.AppState.IDLE,
                           after=lambda ms, fn: None)
     app._start_portal_session_when_idle = (
@@ -779,7 +790,7 @@ def _start_portal(monkeypatch, offered):
 
 def test_app_wires_both_clipboard_hooks_so_the_paste_restores(monkeypatch):
     hooks, starts, _ = _start_portal(monkeypatch, [True])
-    assert len(hooks) == 1 and hooks[0][1] is not None
+    assert len(hooks) == 1 and hooks[0][1] is not None and hooks[0][2] is not None
     assert len(starts) == 1
 
 
@@ -911,3 +922,26 @@ def test_the_approval_dialog_never_opens_mid_dictation(monkeypatch):
     app.app_state = wm.AppState.IDLE
     wm.WayfinderApp._start_portal_session_when_idle(app, kb, "x11:1", False)
     assert len(starts) == 1
+
+
+
+def test_app_restores_the_clipboard_only_while_it_holds_the_dictation():
+    import wayfinder_main as wm
+    restore = wm.WayfinderApp._restore_clipboard_from_worker
+    tk = _TkLike("café")
+    assert restore(tk, "café", "user's url") is True and tk._clipboard == "user's url"
+    tk = _TkLike("copied meanwhile")
+    assert restore(tk, "café", "user's url") is False and tk._clipboard == "copied meanwhile"
+
+
+def test_the_portal_paste_uses_the_one_step_restorer(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    restored = []
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", lambda: "user's url")
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", lambda t: True)
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_RESTORE",
+                        lambda pasted, previous: restored.append((pasted, previous)))
+    monkeypatch.setattr(injector, "_PORTAL_PASTE_SETTLE_S", 0)
+    monkeypatch.setattr(injector, "_PORTAL_RESTORE_AFTER_S", 0)
+    injector._inject_text_type_linux("café")
+    assert restored == [("café", "user's url")]

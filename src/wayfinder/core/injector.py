@@ -1288,14 +1288,18 @@ def prime_wayland_injection() -> "tuple[bool, str]":
 # apps; then the portal presses Ctrl+V. The app registers the clipboard hooks.
 _PORTAL_CLIPBOARD_WRITE = None   # Callable[[str], bool], set by the app
 _PORTAL_CLIPBOARD_READ = None    # Callable[[], "str | None"], set by the app
+# Callable[[str, str], None]: put ``previous`` back only if the clipboard still
+# holds ``pasted``, compared and written in one step on the app's Tk thread.
+_PORTAL_CLIPBOARD_RESTORE = None
 _PORTAL_PASTE_SETTLE_S = 0.05
 _PORTAL_RESTORE_AFTER_S = 0.4
 
 
-def set_portal_clipboard_hooks(write, read=None) -> None:
-    """The app's clipboard writer/reader for the portal paste fallback."""
-    global _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ
+def set_portal_clipboard_hooks(write, read=None, restore=None) -> None:
+    """The app's clipboard writer/reader/restorer for the portal paste fallback."""
+    global _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ, _PORTAL_CLIPBOARD_RESTORE
     _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ = write, read
+    _PORTAL_CLIPBOARD_RESTORE = restore
 
 
 def _portal_fallback_tool() -> str:
@@ -1358,8 +1362,11 @@ def _portal_paste(text: str) -> None:
         time.sleep(_PORTAL_RESTORE_AFTER_S)
         try:
             # Only if the clipboard still holds the dictation: the user may
-            # have copied something new meanwhile.
-            if _PORTAL_CLIPBOARD_READ() == text:
+            # have copied something new meanwhile. The app's restorer compares
+            # and writes in one Tk step, so no copy can slip in between.
+            if _PORTAL_CLIPBOARD_RESTORE is not None:
+                _PORTAL_CLIPBOARD_RESTORE(text, previous)
+            elif _PORTAL_CLIPBOARD_READ() == text:
                 _PORTAL_CLIPBOARD_WRITE(previous)
         except Exception:
             pass

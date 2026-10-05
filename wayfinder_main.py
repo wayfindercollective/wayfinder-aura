@@ -12649,7 +12649,8 @@ class WayfinderApp(ctk.CTk):
         # the clipboard (the Flatpak has no clipboard tools). The reader lets
         # the paste put the user's clipboard back afterwards.
         set_portal_clipboard_hooks(self._set_clipboard_from_worker,
-                                   self._get_clipboard_from_worker)
+                                   self._get_clipboard_from_worker,
+                                   self._restore_clipboard_from_worker)
         try:
             parent = f"x11:{int(self.wm_frame(), 16):x}"
         except Exception:
@@ -23799,6 +23800,33 @@ class WayfinderApp(ctk.CTk):
             return None
         done.wait(timeout)
         return value[0] if isinstance(value[0], str) else None
+
+    def _restore_clipboard_from_worker(self, pasted: str, previous: str,
+                                       timeout: float = 1.0) -> bool:
+        """Put ``previous`` back on the clipboard if it still holds ``pasted``.
+        Compared and written in one Tk callback, so a copy the user makes in
+        between is never overwritten. True when it restored."""
+        done = threading.Event()
+        restored = [False]
+
+        def _restore():
+            try:
+                if self.clipboard_get() == pasted:
+                    self.clipboard_clear()
+                    self.clipboard_append(previous)
+                    self.update_idletasks()
+                    restored[0] = True
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        try:
+            self.after(0, _restore)
+        except Exception:
+            return False
+        done.wait(timeout)
+        return restored[0]
 
     def _inject_into_game_chat(self, text: str, gen=None) -> bool:
         """Gamer mode: dictate into a supported game's chat. False = not a game.
