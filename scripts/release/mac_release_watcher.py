@@ -542,9 +542,11 @@ def watch() -> int:
         tries = state.setdefault("tries", {})
         missing = releases_missing_a_dmg(releases, datetime.now(timezone.utc))
         prune_built_ahead()
+        attached_now = set()
         for tag in list(missing):  # step 1: no build, so no admission or hold needed
             if attach_built_ahead(tag, env):
                 missing.remove(tag)
+                attached_now.add(tag)
                 note_attached(state, tag)
                 save_state(state)
                 log(f"Attached the Mac DMG built ahead to {tag}.")
@@ -556,8 +558,13 @@ def watch() -> int:
             ["gh", "api", f"repos/{REPO}/actions/workflows/release.yml/runs?per_page=20",
              "--jq", ".workflow_runs"], capture_output=True, text=True, env=env)
         try:
+            # A tag attached a moment ago still looks unfinished in the listing
+            # taken before step 1 (its Release run may still be publishing):
+            # never build it again.
             ahead = [t for t in tags_being_released(json.loads(runs.stdout or "[]"), releases)
-                     if t not in missing and not built_ahead(t).is_file()]
+                     if t not in missing and t not in attached_now
+                     and t not in state.get("attached", [])
+                     and not built_ahead(t).is_file()]
         except ValueError:
             ahead = []
         # A DMG already built ahead is never rebuilt: its upload is retried next run.

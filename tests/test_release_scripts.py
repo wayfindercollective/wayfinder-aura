@@ -537,6 +537,15 @@ class TestMacReleaseWatcher:
         assert watcher.attach_built_ahead("v1.2.0-beta.7", {}) is False
         assert not dmg.exists() and uploads == []
 
+    def test_a_tag_attached_this_run_is_never_built_again(self):
+        # v1.2.0-beta.8: attached at 14:38:27, then judged "ahead" again from
+        # the listing taken before the attach (only admission stopped a rebuild).
+        source = (REPO / "scripts" / "release" / "mac_release_watcher.py").read_text(encoding="utf-8")
+        ahead = source[source.index("ahead = [t for t in tags_being_released("):]
+        ahead = ahead[:ahead.index("]") + 200]
+        assert "t not in attached_now" in ahead
+        assert 't not in state.get("attached", [])' in ahead
+
     def test_old_dmgs_built_ahead_are_pruned(self, monkeypatch, tmp_path):
         monkeypatch.setattr(watcher, "DMG_CACHE", tmp_path)
         old, new = tmp_path / "a.dmg", tmp_path / "b.dmg"
