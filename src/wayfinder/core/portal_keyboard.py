@@ -403,11 +403,14 @@ class PortalKeyboard:
             self._set(self.STARTING)
             self._thread = threading.Thread(
                 target=self._run,
-                args=(parent_window, remembered.get("restore_token") or "", log, may_ask),
+                args=(parent_window, remembered.get("restore_token") or "", log, may_ask,
+                      closes),
                 name="wayfinder-portal-keyboard", daemon=True)
             self._thread.start()
-        if self._close_count != closes:
-            self._stop.set()  # a close() raced the launch: the worker stops at its next check
+            # Still under the lock: a close() during the state read cancels this
+            # worker, and only this one (a later start cannot slip in between).
+            if self._close_count != closes:
+                self._stop.set()
         return True
 
     def close(self) -> None:
@@ -436,7 +439,8 @@ class PortalKeyboard:
 
     def _run(self, parent_window: str, restore_token: str,
              log: Optional[Callable[[str], None]],
-             may_ask: Optional[Callable[[], bool]] = None) -> None:
+             may_ask: Optional[Callable[[], bool]] = None,
+             closes: Optional[int] = None) -> None:
         def say(msg: str) -> None:
             if log:
                 try:
@@ -567,10 +571,16 @@ class PortalKeyboard:
                 self._set(self.FAILED, "the desktop refused a keyboard")
                 return
 
-            # Start can show the desktop's approval dialog: never mid-dictation.
+            def closed_since_start() -> bool:
+                return closes is not None and self._close_count != closes
+
+            # Start can show the desktop's approval dialog: never mid-dictation,
+            # and never after the user switched typing off.
             while may_ask is not None and not may_ask():
-                if self._stop.wait(0.5):
+                if self._stop.wait(0.5) or closed_since_start():
                     return
+            if self._stop.is_set() or closed_since_start():
+                return
             self._set(self.WAITING)
             if not restore_token:
                 say("⌨️ Your desktop is asking whether Aura may type in every app: "

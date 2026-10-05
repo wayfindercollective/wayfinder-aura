@@ -288,3 +288,91 @@ def test_a_reused_window_id_without_the_steam_tag_is_not_a_game(monkeypatch):
     assert gc.is_steam_game(6, "sekiro.exe")
     gc._note_steam_tag(6, None)            # fresh sighting: no STEAM_GAME
     assert not gc.is_steam_game(6, "notepad.exe")
+
+
+
+class _XWindow:
+    def __init__(self, display, wid, wm_class=None, steam=None, title=None, parent=None):
+        self.display, self.id = display, wid
+        self._class, self._steam, self._title, self._parent = wm_class, steam, title, parent
+
+    def get_wm_class(self):
+        return (self._class, self._class) if self._class else None
+
+    def get_full_property(self, atom, kind):
+        from types import SimpleNamespace
+        if atom == "STEAM_GAME" and self._steam:
+            return SimpleNamespace(value=[int(self._steam)])
+        if atom == "_NET_WM_NAME" and self._title:
+            return SimpleNamespace(value=self._title.encode())
+        return None
+
+    def get_wm_name(self):
+        return self._title
+
+    def query_tree(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(parent=self._parent)
+
+
+class _XDisplay:
+    def __init__(self):
+        from types import SimpleNamespace
+        self.windows, self.active = {}, 0
+        display = self
+
+        class _Root:
+            id = 1
+
+            def get_full_property(self, atom, kind):
+                if atom == "_NET_SUPPORTING_WM_CHECK":
+                    return SimpleNamespace(value=[1])
+                if atom == "_NET_ACTIVE_WINDOW":
+                    return SimpleNamespace(value=[display.active])
+                return None
+
+        self.root = _Root()
+
+    def intern_atom(self, name):
+        return name
+
+    def screen(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(root=self.root)
+
+    def create_resource_object(self, kind, wid):
+        return self.windows[wid]
+
+    def close(self):
+        pass
+
+
+def _fake_xlib(monkeypatch, display):
+    import sys
+    import types
+    xlib = types.ModuleType("Xlib")
+    xlib.X = types.SimpleNamespace(AnyPropertyType=0, NONE=0, PointerRoot=1)
+    xlib.display = types.SimpleNamespace(Display=lambda: display)
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setattr(gc.sys, "platform", "linux")
+
+
+@pytest.mark.parametrize("next_window", [
+    {"wm_class": "notepad.exe", "title": "Untitled - Notepad"},   # reused id, untagged
+    {"wm_class": None, "title": "Notepad"},                         # classless sighting
+])
+def test_the_front_window_refreshes_the_steam_tag(monkeypatch, next_window):
+    """X window ids are reused: what the window in front says now decides,
+    through _front_window itself (classless windows included)."""
+    monkeypatch.setattr(gc, "_STEAM_WINDOWS", {})
+    disp = _XDisplay()
+    _fake_xlib(monkeypatch, disp)
+    disp.windows[6] = _XWindow(disp, 6, "sekiro.exe", steam="814380", title="Sekiro",
+                               parent=disp.root)
+    disp.active = 6
+    wid, cls, _title = gc.frontmost_app()
+    assert (wid, cls) == (6, "sekiro.exe") and gc.is_steam_game(wid, cls)
+
+    disp.windows[6] = _XWindow(disp, 6, parent=disp.root, **next_window)
+    wid, cls, _title = gc.frontmost_app()
+    assert wid == 6 and not gc.is_steam_game(wid, cls)

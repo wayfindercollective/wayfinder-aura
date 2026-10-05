@@ -243,10 +243,10 @@ def _front_window() -> tuple[Optional[int], Optional[str], Optional[str]]:
         # Walk up to the first window that names itself (class or STEAM_GAME).
         for _ in range(8):
             cls, title, appid = _window_facts(win)
+            # Fresh facts win: an untagged window clears a stale entry for its
+            # id (X window ids are reused), classless windows included.
+            _note_steam_tag(int(win.id), appid)
             if cls or appid:
-                # Fresh facts win: an untagged window clears a stale entry for
-                # its id (X window ids are reused).
-                _note_steam_tag(int(win.id), appid)
                 if appid and not (cls or "").lower().startswith("steam_app_"):
                     if not (cls or "").lower().endswith(".exe"):
                         cls = f"steam_app_{appid}"

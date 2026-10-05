@@ -994,23 +994,65 @@ def test_a_start_asked_for_before_a_switch_off_does_nothing(monkeypatch, tmp_pat
 
 
 def test_concurrent_starters_launch_one_worker(monkeypatch, tmp_path):
-    """Startup and a switch retry can both reach start(); only one worker runs."""
+    """Startup and a switch retry can both reach start(); only one worker runs.
+    The first starter is held inside start() (reading the state file) while the
+    second one tries: without serialization both would launch."""
     import threading as _threading
     bus = _FakeBus()
     kb, _path = _session(monkeypatch, tmp_path, bus)
+    real_load = pk.load_state
+    entered, proceed = _threading.Event(), _threading.Event()
+    calls = {"n": 0}
+
+    def slow_first_load(path=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            entered.set()
+            proceed.wait(2)
+        return real_load(path)
+
+    monkeypatch.setattr(pk, "load_state", slow_first_load)
     results = []
-    barrier = _threading.Barrier(2)
-
-    def starter():
-        barrier.wait()
-        results.append(kb.start(may_ask=lambda: False))   # hold before Start
-
-    threads = [_threading.Thread(target=starter) for _ in range(2)]
+    first = _threading.Thread(target=lambda: results.append(kb.start(may_ask=lambda: False)))
+    second = _threading.Thread(target=lambda: results.append(kb.start(may_ask=lambda: False)))
     try:
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(3)
+        first.start()
+        assert entered.wait(2)
+        second.start()
+        time.sleep(0.2)            # the second starter is now inside start() too
+        proceed.set()
+        first.join(3)
+        second.join(3)
         assert sorted(results) == [False, True]
+    finally:
+        kb.close()
+
+
+def test_a_close_during_start_never_reaches_the_dialog(monkeypatch, tmp_path):
+    """A switch-off that lands while start() reads its state cancels the new
+    worker before its Start request (the one that can show the dialog)."""
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    real_load = pk.load_state
+
+    def load_then_close(path=None):
+        state = real_load(path)
+        kb.close()                 # the user switched typing off right now
+        return state
+
+    monkeypatch.setattr(pk, "load_state", load_then_close)
+    kb.start()
+    time.sleep(0.3)
+    assert not any(m == "Start" for _i, m, _f, _b in bus.calls)
+
+
+def test_a_stale_start_leaves_the_running_session_alone(monkeypatch, tmp_path):
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    try:
+        stale = kb.close_count - 1           # asked for before a close
+        assert kb.start(may_ask=lambda: False)
+        assert kb.start(after_closes=stale) is False
+        assert not kb._stop.is_set()          # the running worker was not cancelled
     finally:
         kb.close()
