@@ -22407,16 +22407,6 @@ class WayfinderApp(ctk.CTk):
         if not HAS_EVDEV:
             self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
             return
-        if self._x11_without_input_devices():
-            # AppImage/source on X11 without the 'input' group: the record
-            # shortcut was dead (only a log line said why). XRecord works.
-            if not getattr(self, "_pynput_listener_started", False):
-                self.log("🖥️ X11 — input devices are not readable (not in the 'input' "
-                         "group); using the X11 global listener instead")
-                self._hotkey_backend = "pynput"
-                self._start_pynput_listener()
-            return
-
         # Defer to the compositor when KDE owns the record hotkey: binding it here
         # too would double-fire and, worse, leak the key (F3) to the focused window
         # because a passive evdev read can't consume it — that's the dictation
@@ -22430,6 +22420,24 @@ class WayfinderApp(ctk.CTk):
                 self._evdev_stop_event.set()
                 old_thread.join(timeout=2.5)
                 self._hotkey_thread = None
+            if (getattr(self, "_hotkey_backend", None) == "pynput"
+                    and getattr(self, "_pynput_listener_started", False)):
+                # The X11 fallback cannot be stopped on its own: one press
+                # would reach Aura twice until it restarts.
+                self.log("⚠️ KDE now owns the shortcut too: restart Aura so it is "
+                         "handled once")
+            return
+
+        if self._x11_without_input_devices():
+            # AppImage/source on X11 without the 'input' group: the record
+            # shortcut was dead (only a log line said why). XRecord works.
+            # Checked after KDE ownership: a KDE-bound shortcut already reaches
+            # Aura through the socket, and a second listener would toggle twice.
+            if not getattr(self, "_pynput_listener_started", False):
+                self.log("🖥️ X11 — input devices are not readable (not in the 'input' "
+                         "group); using the X11 global listener instead")
+                self._hotkey_backend = "pynput"
+                self._start_pynput_listener()
             return
 
         hotkey_key = self.config.get("hotkey_key", 67)

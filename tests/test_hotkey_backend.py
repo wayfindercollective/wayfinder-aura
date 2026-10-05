@@ -128,10 +128,26 @@ def test_x11_without_the_input_group_uses_the_x11_listener(monkeypatch):
     started, logs = [], []
     app = SimpleNamespace(log=logs.append, _hotkey_backend="evdev",
                           _x11_without_input_devices=wm.WayfinderApp._x11_without_input_devices,
-                          _compositor_owns_hotkeys=lambda: pytest.fail("evdev path taken"))
+                          _compositor_owns_hotkeys=lambda: False)
     app._start_pynput_listener = lambda: started.append(True) or setattr(
         app, "_pynput_listener_started", True)
     wm.WayfinderApp._start_evdev_listener(app)
     wm.WayfinderApp._start_evdev_listener(app)   # a config-change restart: no second listener
     assert started == [True] and app._hotkey_backend == "pynput"
     assert "'input' group" in logs[0]
+
+
+
+def test_a_kde_owned_shortcut_gets_no_second_x11_listener(monkeypatch):
+    """KDE delivers its binding through the socket; an extra X11 listener
+    would see the same press and toggle the recording twice."""
+    from types import SimpleNamespace
+    wm = _x11(monkeypatch, readable=False)
+    monkeypatch.setattr(wm, "HAS_EVDEV", True)
+    logs = []
+    app = SimpleNamespace(log=logs.append, _hotkey_backend="evdev", _hotkey_thread=None,
+                          _x11_without_input_devices=wm.WayfinderApp._x11_without_input_devices,
+                          _compositor_owns_hotkeys=lambda: True,
+                          _start_pynput_listener=lambda: pytest.fail("second listener"))
+    wm.WayfinderApp._start_evdev_listener(app)
+    assert app._hotkey_backend == "evdev" and "KDE" in logs[0]
