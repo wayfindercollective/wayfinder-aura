@@ -83,3 +83,81 @@ def test_linux_uses_the_linux_backend(monkeypatch):
     monkeypatch.setattr(wm, "IS_WINDOWS", False)
     monkeypatch.setattr(wm, "_IS_LINUX", True)
     assert wm._game_chat_module() is gc
+
+
+def _ok(argv=None, **_kwargs):
+    from types import SimpleNamespace
+    return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+
+def test_xdotool_failures_never_carry_the_dictated_text(monkeypatch):
+    import subprocess
+
+    from wayfinder.core.injector import InjectionError
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(gc.subprocess, "run", missing)
+    with pytest.raises(InjectionError, match="xdotool not found"):
+        gc._xdotool("type", "--", "secret words")
+
+    def slow(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(gc.subprocess, "run", slow)
+    with pytest.raises(InjectionError, match="timed out") as exc:
+        gc._xdotool("type", "--", "secret words")
+    assert "secret" not in str(exc.value)
+
+
+def test_xdotool_runs_with_the_host_environment(monkeypatch):
+    from wayfinder.utils import hostexec
+
+    seen = {}
+    monkeypatch.setattr(hostexec, "host_env", lambda: {"MARK": "host"})
+    monkeypatch.setattr(gc.subprocess, "run", lambda argv, **k: seen.update(k) or _ok())
+    gc._xdotool("key", "Return")
+    assert seen["env"] == {"MARK": "host"}
+
+
+def test_press_held_releases_the_key_when_the_first_keyup_fails(monkeypatch):
+    from types import SimpleNamespace
+
+    from wayfinder.core import injector
+
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(gc, "_portal", lambda: None)
+    monkeypatch.setattr(gc.time, "sleep", lambda _s: None)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv[1])
+        first_keyup = argv[1] == "keyup" and calls.count("keyup") == 1
+        return SimpleNamespace(returncode=1 if first_keyup else 0,
+                               stderr="BadWindow" if first_keyup else "")
+
+    monkeypatch.setattr(gc.subprocess, "run", run)
+    gc.press_held("Return", 0)
+    assert calls == ["keydown", "keyup", "keyup"]
+
+
+def test_type_text_without_the_portal_uses_the_hardened_xdotool_command(monkeypatch):
+    from wayfinder.core import injector
+
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_running_under_xwayland", lambda: True)
+    monkeypatch.setattr(gc, "_portal", lambda: None)
+    seen = []
+    monkeypatch.setattr(gc.subprocess, "run",
+                        lambda argv, **k: seen.append((argv, k["timeout"])) or _ok())
+    text = "RvR “inc” at Emain… GO"
+    gc.type_text(text)
+    argv, timeout = seen[0]
+    folded = injector.fold_typography_for_typing(text)
+    assert argv == injector.build_xdotool_type_command(folded, gc.TYPE_DELAY_MS, warmup=True)
+    assert timeout >= 10
+
+    seen.clear()
+    gc.type_text("x" * 2000)  # ~24 s of typing at 12 ms per key
+    assert seen[0][1] > 2000 * gc.TYPE_DELAY_MS / 1000

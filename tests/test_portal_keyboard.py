@@ -522,10 +522,11 @@ def test_game_keys_use_xdotool_without_the_portal(monkeypatch):
     from wayfinder.core import linux_game_chat as gc
     monkeypatch.setattr(pk, "ready", lambda: False)
     monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
     sent = []
-    monkeypatch.setattr(gc, "_xdotool", lambda *a: sent.append(a))
+    monkeypatch.setattr(gc, "_xdotool", lambda *a, **k: sent.append(a))
     gc.type_text("inc")
-    assert sent == [("type", "--clearmodifiers", "--delay", str(gc.TYPE_DELAY_MS), "--", "inc")]
+    assert sent == [tuple(injector.build_xdotool_type_command("inc", gc.TYPE_DELAY_MS)[1:])]
 
 
 class _Win:

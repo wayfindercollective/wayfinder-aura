@@ -322,10 +322,23 @@ def _portal():
         return None
 
 
-def _xdotool(*args: str) -> None:
-    result = subprocess.run(["xdotool", *args], capture_output=True, text=True, timeout=10)
+def _xdotool(*args: str, timeout: float = 10) -> None:
+    """Run the host's xdotool. Every failure is an InjectionError whose message
+    never carries the argv (it can hold the dictated text)."""
+    from ..utils.hostexec import host_env
+    from .injector import InjectionError
+
+    try:
+        # A host binary: never hand it the bundle's library path.
+        result = subprocess.run(["xdotool", *args], capture_output=True, text=True,
+                                timeout=timeout, env=host_env())
+    except FileNotFoundError:
+        raise InjectionError(
+            "xdotool not found: install xdotool, or let Aura type through the desktop "
+            "(Settings → System → Type into every app)") from None
+    except subprocess.TimeoutExpired:
+        raise InjectionError(f"xdotool {args[0]} timed out after {timeout:.0f}s") from None
     if result.returncode != 0:
-        from .injector import InjectionError
         raise InjectionError(f"xdotool {' '.join(args[:2])} failed: {result.stderr.strip()}")
 
 
@@ -346,8 +359,14 @@ def press_held(keys: str, hold_s: float = KEY_HOLD_S) -> None:
         finally:
             layout.close()
     _xdotool("keydown", "--clearmodifiers", keys)
-    time.sleep(max(0.0, hold_s))
-    _xdotool("keyup", "--clearmodifiers", keys)
+    try:
+        time.sleep(max(0.0, hold_s))
+    finally:
+        try:
+            _xdotool("keyup", "--clearmodifiers", keys)
+        except InjectionError:
+            # A key left down autorepeats (a held Return keeps sending): once more.
+            _xdotool("keyup", keys)
 
 
 def press_return() -> None:
@@ -381,4 +400,11 @@ def type_text(text: str) -> None:
             raise InjectionError(f"{e} (typed {getattr(e, 'typed', 0)} characters)") from e
         finally:
             layout.close()
-    _xdotool("type", "--clearmodifiers", "--delay", str(TYPE_DELAY_MS), "--", text)
+    from .injector import _running_under_xwayland, build_xdotool_type_command
+
+    # The injector's hardening: a warm-up key under XWayland (its first synthetic
+    # key is dropped) and Shift released again after shifted runs.
+    text = fold_typography_for_typing(text)
+    argv = build_xdotool_type_command(text, TYPE_DELAY_MS, warmup=_running_under_xwayland())
+    # Never cut a long message off mid-chat: allow twice the typing time.
+    _xdotool(*argv[1:], timeout=10 + 2 * len(text) * TYPE_DELAY_MS / 1000)
