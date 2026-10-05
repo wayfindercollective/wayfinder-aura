@@ -127,6 +127,58 @@
   </supports>
 
   <releases>
+    <release version="1.2.0-beta.8" date="2026-10-05" type="development">
+      <description>
+        <p>Beta built from main on 2026-10-05. Changes since the last stable release:</p>
+        <ul>
+          <li>Windows downloads.</li>
+          <li>Choose Stable or Beta updates</li>
+          <li>Install Update installs it for you.</li>
+          <li>Crash reports from Beta.</li>
+          <li>Aura types into every app on Wayland desktops.</li>
+          <li>Gamer mode on Linux.</li>
+          <li>Cancel a recording from any app</li>
+          <li>Vocabulary card (Ultra).</li>
+          <li>Vocabulary fixes near-misses of your words (Ultra).</li>
+          <li>Ultra switches on its recommended setup once.</li>
+          <li>Setup recommends Large v3 Turbo Q5 for Ultra on a GPU</li>
+          <li>Free removes um/uh out of the box.</li>
+          <li>The macOS design on Linux:</li>
+          <li>Get Update on the Linux Flatpak downloads the new bundle;</li>
+          <li>Minimal is now Normal.</li>
+          <li>A model you download becomes the active model at once</li>
+          <li>The Accuracy Mode control is gone.</li>
+          <li>The cleanup model stays loaded only when the style needs it.</li>
+          <li>Mac: Aura idles at about 0.5% CPU on every tab.</li>
+          <li>Windows: pasting into VS Code and other Electron apps pastes the dictation, not your old clipboard.</li>
+          <li>Windows: a slow microphone release no longer forces a restart.</li>
+          <li>A muted or switched-off mic is named as the problem.</li>
+          <li>Aura uses about a sixth of the CPU while it waits.</li>
+          <li>Mac: the hotkey works as soon as macOS allows it, and Aura says when it can't.</li>
+          <li>Long chunked dictations keep their words at the chunk boundaries.</li>
+          <li>Flatpak model downloads persist across restarts.</li>
+          <li>Audio ducking is more reliable in the Flatpak,</li>
+          <li>XWayland dictation no longer comes out in ALL CAPS or loses its first letter,</li>
+          <li>Typing stops with a clear message when a modifier key is still held</li>
+          <li>A dead portal session no longer swallows dictation.</li>
+          <li>The portal paste restores your clipboard.</li>
+          <li>Setup recognises the portal</li>
+          <li>Gamer mode pastes into Steam games it does not list.</li>
+          <li>Gamer mode's xdotool typing is hardened</li>
+          <li>Gamer mode works while a GameMode game runs.</li>
+          <li>The AppImage tour downloads the free Base model first.</li>
+          <li>The Style tab icon follows a license change</li>
+          <li>The cancel shortcut never grabs a bare Escape.</li>
+          <li>Get Update links are pinned to this repository</li>
+          <li>Linux cloud cleanup uses current models.</li>
+          <li>Loopback requests to Aura's own servers bypass HTTP proxies.</li>
+          <li>The resident cleanup server (llama-server) is keyed per launch and hides `/slots` on Linux,</li>
+          <li>Keys typed into games through Wine arrive intact:</li>
+          <li>Wine focus left on a launcher window after Alt+Tab</li>
+          <li>A stale Alt/Shift state from XWayland no longer blocks or shifts a dictation</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.8" date="2026-08-26">
       <description>
         <p>Faster local dictation, dependable sandbox integration, and clearer update behavior:</p>
