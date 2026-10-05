@@ -151,3 +151,21 @@ def test_a_kde_owned_shortcut_gets_no_second_x11_listener(monkeypatch):
                           _start_pynput_listener=lambda: pytest.fail("second listener"))
     wm.WayfinderApp._start_evdev_listener(app)
     assert app._hotkey_backend == "evdev" and "KDE" in logs[0]
+
+
+
+def test_kde_taking_over_stops_the_x11_fallback(monkeypatch):
+    """A running X11 fallback would see the press KDE also delivers through
+    the socket; it is stopped (its own restart event) and not restarted."""
+    import threading
+    from types import SimpleNamespace
+    wm = _x11(monkeypatch, readable=False)
+    monkeypatch.setattr(wm, "HAS_EVDEV", True)
+    stop_this = threading.Event()
+    app = SimpleNamespace(log=lambda m: None, _hotkey_backend="pynput", _hotkey_thread=None,
+                          _pynput_listener_started=True, _pynput_restart_event=stop_this,
+                          _x11_without_input_devices=wm.WayfinderApp._x11_without_input_devices,
+                          _compositor_owns_hotkeys=lambda: True,
+                          _start_pynput_listener=lambda: pytest.fail("restarted"))
+    wm.WayfinderApp._start_evdev_listener(app)
+    assert stop_this.is_set() and app._hotkey_backend == "evdev"

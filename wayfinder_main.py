@@ -22294,9 +22294,12 @@ class WayfinderApp(ctk.CTk):
         self.log(f"🖥️ {platform_label} — using pynput (global keyboard listener)")
         self._pynput_listener_started = True
         # macOS: a per-listener restart event lets a permission grant re-create
-        # the event tap live (see _restart_pynput_listener). Elsewhere None, so
-        # the listener behaves exactly as before.
-        restart_event = threading.Event() if IS_MACOS else None
+        # the event tap live (see _restart_pynput_listener). Native Linux (the
+        # X11 no-input-group fallback): it lets a KDE-owned shortcut stop this
+        # listener. Elsewhere None, so the listener behaves exactly as before.
+        restart_event = (threading.Event()
+                         if IS_MACOS or (_IS_LINUX and not IS_FLATPAK and not IS_WINDOWS)
+                         else None)
         self._pynput_restart_event = restart_event
 
         def _pynput_wrapper():
@@ -22433,12 +22436,15 @@ class WayfinderApp(ctk.CTk):
                 self._evdev_stop_event.set()
                 old_thread.join(timeout=2.5)
                 self._hotkey_thread = None
-            if (getattr(self, "_hotkey_backend", None) == "pynput"
-                    and getattr(self, "_pynput_listener_started", False)):
-                # The X11 fallback cannot be stopped on its own: one press
-                # would reach Aura twice until it restarts.
-                self.log("⚠️ KDE now owns the shortcut too: restart Aura so it is "
-                         "handled once")
+            if getattr(self, "_hotkey_backend", None) == "pynput":
+                # The X11 fallback would see the same press KDE delivers through
+                # the socket and toggle twice: stop just that listener, and keep
+                # the supervisor from restarting it.
+                self._hotkey_backend = "evdev"
+                restart_event = getattr(self, "_pynput_restart_event", None)
+                if restart_event is not None:
+                    restart_event.set()
+                self.log("⌨️ KDE owns the shortcut: X11 listener stopped")
             return
 
         if self._x11_without_input_devices():
