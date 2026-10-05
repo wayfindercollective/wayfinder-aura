@@ -15235,7 +15235,7 @@ class WayfinderApp(ctk.CTk):
                 # "unavailable" at startup; starting pynput there burns a thread on an XRecord
                 # grab Wayland never delivers) (Codex review).
                 flatpak_backend = resolve_hotkey_backend(
-                    sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
+                    sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
                     os.environ.get("XDG_SESSION_TYPE", ""),
                 ) if IS_FLATPAK else None
                 if flatpak_backend == "portal":
@@ -18777,7 +18777,7 @@ class WayfinderApp(ctk.CTk):
         # key silently doesn't work.
         try:
             if IS_FLATPAK and resolve_hotkey_backend(
-                    sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
+                    sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
                     os.environ.get("XDG_SESSION_TYPE", "")) == "portal":
                 self.log(
                     f"ℹ️ Your desktop manages global shortcuts for sandboxed "
@@ -21987,6 +21987,26 @@ class WayfinderApp(ctk.CTk):
 
     # === Hotkey & Events ===
     
+    def _flatpak_portal_hotkeys(self) -> bool:
+        """The Flatpak can use the GlobalShortcuts portal: PyGObject imports AND
+        the desktop's portal implements it (GNOME before 48, Cinnamon, XFCE,
+        MATE and Sway do not, and their hotkey was simply dead). Probed once; an
+        unanswered probe keeps the portal path and its retry loop."""
+        cached = getattr(self, "_portal_hotkeys_ok", None)
+        if cached is not None:
+            return cached
+        ok = PORTAL_HOTKEYS_AVAILABLE
+        if ok and IS_FLATPAK:
+            try:
+                from wayfinder.hotkeys.dbus import global_shortcuts_offered
+                if global_shortcuts_offered() is False:
+                    ok = False
+                    self._portal_shortcuts_missing = True
+            except Exception:
+                pass
+        self._portal_hotkeys_ok = ok
+        return ok
+
     def start_hotkey_listener(self):
         # Socket listener stays up for the app's lifetime (config changes restart only the
         # keyboard listener — see restart_evdev_listener). Liveness-based so it self-heals.
@@ -22020,23 +22040,30 @@ class WayfinderApp(ctk.CTk):
         # Flatpak build while the socket path masked it). Non-sandboxed installs use
         # evdev + the 'input' group, identically on X11 and Wayland.
         backend = resolve_hotkey_backend(
-            sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
+            sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
             os.environ.get("XDG_SESSION_TYPE", ""),
         )
         self._hotkey_backend = backend
+        no_shortcuts_portal = getattr(self, "_portal_shortcuts_missing", False)
         if backend == "portal":
             self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
             self._start_portal_listener()
             return
         if backend == "pynput":
             if IS_FLATPAK:  # macOS uses pynput silently; the Flatpak-X11 fallback logs why
-                msg = "Flatpak X11 — PyGObject missing, portal unavailable; using pynput global listener"
+                msg = ("Flatpak X11 — this desktop has no GlobalShortcuts portal; using the "
+                       "pynput global listener" if no_shortcuts_portal else
+                       "Flatpak X11 — PyGObject missing, portal unavailable; using pynput global listener")
                 self.log(f"🖥️ {msg}")
                 print(f"[Hotkeys] {msg}", flush=True)
             self._start_pynput_listener()
             return
         if backend == "unavailable":
-            msg = ("Flatpak Wayland without PyGObject — global hotkeys UNAVAILABLE "
+            msg = ("This desktop offers apps no global shortcuts (GNOME before 48, Sway): "
+                   "add a keyboard shortcut in your desktop's settings that runs "
+                   "'flatpak run io.wayfindercollective.WayfinderAura --toggle'"
+                   if no_shortcuts_portal else
+                   "Flatpak Wayland without PyGObject — global hotkeys UNAVAILABLE "
                    "(socket trigger still works)")
             self.log(f"⚠️ {msg}")
             print(f"[Hotkeys] {msg}", flush=True)

@@ -71,6 +71,44 @@ def portal_shortcuts_available() -> bool:
     return _GI_PROBE["available"]
 
 
+# D-Bus errors that mean "this portal has no GlobalShortcuts" (as opposed to
+# "could not ask right now"): the interface or the portal itself is missing.
+_NOT_OFFERED_ERRORS = (
+    "org.freedesktop.DBus.Error.InvalidArgs",       # "No such interface"
+    "org.freedesktop.DBus.Error.UnknownInterface",
+    "org.freedesktop.DBus.Error.UnknownProperty",
+    "org.freedesktop.DBus.Error.UnknownMethod",
+    "org.freedesktop.DBus.Error.ServiceUnknown",     # no xdg-desktop-portal at all
+)
+
+
+def global_shortcuts_offered(bus=None, timeout_ms: int = 3000) -> "bool | None":
+    """Whether the desktop's portal implements GlobalShortcuts.
+
+    A read of its ``version`` property: no dialog, no session. GNOME before 48,
+    Cinnamon, XFCE, MATE and Sway answer "no such interface" (False). None when
+    the question could not be asked (no PyGObject or session bus, a timeout while
+    the portal starts at login): callers keep the portal path and its retries.
+    """
+    if not portal_shortcuts_available():
+        return None
+    try:
+        from gi.repository import Gio, GLib
+        if bus is None:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.call_sync(
+            _PORTAL_DEST, _PORTAL_PATH, "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", (_SHORTCUTS_IFACE, "version")),
+            GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, timeout_ms, None,
+        )
+        return True
+    except Exception as exc:
+        text = str(exc)
+        if any(marker in text for marker in _NOT_OFFERED_ERRORS):
+            return False
+        return None
+
+
 def portal_unavailable_detail() -> str:
     """Why the probe failed ("" when it succeeded or hasn't run)."""
     portal_shortcuts_available()
