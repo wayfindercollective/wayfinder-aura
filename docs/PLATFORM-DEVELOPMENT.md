@@ -62,13 +62,14 @@ although 174 of its 179 commits were already on `main`.
   [CI.md](CI.md#user-update-contract)). To patch a shipped release, cut
   `release/<version>` from its tag: one branch for all operating systems, never
   one per OS. Carry fixes from `main` into it, never the other way.
-- **One parked branch.** `release/windows-public-pending-signoff` keeps the
-  release workflow from before the 2026-09-21 decision, which attached the
-  Windows installer. Its change was redone from `main` when Windows went
-  public (2026-10-04, `publish-windows`); do not merge the parked branch.
-- **Retired branches.** `macos`, `windows`, `develop` and
-  `feat/premium-feel-polish` are retired: do not commit to or recreate them.
-  Their tips are kept as `archive/<name>` tags. A machine with unpushed work on
+- **Task branches are deleted once merged** (2026-10-05: 19 merged branches
+  removed). Work that never merged is kept as an `archive/<name>` tag first.
+- **Retired branches.** `macos`, `windows`, `develop`,
+  `feat/premium-feel-polish` and `release/windows-public-pending-signoff` are
+  retired: do not commit to or recreate them. Their tips are kept as
+  `archive/<name>` tags. The last one held the release workflow from before
+  the 2026-09-21 decision; its change was redone from `main` when Windows went
+  public (2026-10-04, `publish-windows`). A machine with unpushed work on
   one of them rebases that work onto `main` in a new task branch.
 - **AI agents.** One git worktree per task, created from the latest
   `origin/main`, and a pull request back. Do not reuse another session's branch
