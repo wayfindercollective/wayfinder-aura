@@ -284,6 +284,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "macos_hotkey_defaults_v3": sys.platform == "darwin",
     "macos_overlay_anchor_defaults_v1": sys.platform == "darwin",
     "windows_hotkey_defaults_v2": sys.platform == "win32",
+    # macOS: set once Aura has asked for Accessibility / Input Monitoring, so a
+    # relaunch does not raise the system prompt again (utils/macos_permissions).
+    "macos_accessibility_request_attempted_v2": False,
+    "macos_input_monitoring_request_attempted_v2": False,
 
     # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
     # fires, so chat inputs submit hands-free. Off by default — implicitly
@@ -301,11 +305,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     # Audio settings
     "audio_device": None,
+    "audio_device_name": None,  # the chosen mic by name (indexes move between boots)
+    # Seconds the microphone stays open after a dictation so the next starts
+    # instantly. None = the platform default (macOS 5-10 s, elsewhere 30 s).
+    "mic_warm_idle_secs": None,
     "sample_rate": 16000,
     
     # Transcription settings
     "prompt": "Dictation with natural speech.",
     "threads": 4,  # Default to 4, auto-adjusted on first run based on CPU cores
+    "threads_auto_adjusted": False,  # set once the first-run CPU-core adjustment ran
     "timeout": 120,  # whisper-CLI fallback (per-dictation model load needs headroom)
     # whisper-SERVER request timeout. Keep it below the 120s processing watchdog:
     # the server can wedge its inference worker after an input overflow or resume,
@@ -400,6 +409,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "faster_whisper_cuda_device": "auto",
     "faster_whisper_vad_enabled": True,  # Silero VAD for filtering silence (tuned for dictation)
     "faster_whisper_vad_threshold": 0.3,  # VAD sensitivity (lower = more sensitive, less cutting)
+    "compression_ratio_threshold": 2.4,  # faster-whisper: drop repetitive (hallucinated) segments
+    "faster_whisper_timeout": 300.0,  # seconds per faster-whisper request
     
     # Groq Whisper API settings (ultra-fast cloud transcription)
     # Get API key from: https://console.groq.com/keys
@@ -418,6 +429,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # its chat box, paste and send (src/wayfinder/core/macos_game_chat.py).
     "gamer_mode": True,
     "game_chat_send": True,
+    # Chat slang that primes Whisper for the game in front; Gamer mode fills it
+    # in for one dictation (core/macos_game_chat.py), empty otherwise.
+    "gamer_vocabulary": [],
     # SteamOS Game Mode dictation (audio cues + rumble, no overlay). This module is the
     # single source of DEFAULT_CONFIG — wayfinder_main.py imports it (no mirror to keep in sync).
     "game_mode_dictation": False,
@@ -538,11 +552,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "setup_completed": False,  # Set True after first-run wizard finishes (skip or complete)
     # In-window welcome tour (distinct from the dependency wizard above); shown once.
     "welcome_completed": False,  # Set True after the first-run welcome pane finishes/skips
+    # Window size and position: None until the user moves or resizes it, then
+    # {"width", "height", "x", "y"}. ui_scale None = detect from the display on
+    # the next launch.
+    "window_geometry": None,
+    "ui_scale": None,
     
     # Benchmark results - populated by running benchmark
     # Format: {"model_id": {"cpu_10s": 2.5, "gpu_10s": 0.8, "fastest": "gpu", "timestamp": 1234567890}}
     "benchmark_results": {},
     "benchmark_fastest_processor": None,  # "gpu" or "cpu" - auto-detected from benchmarks
+    "benchmark_last_asr_error": "",  # why the last speech benchmark failed, shown in Settings
 
     # Post-processing (LLM cleanup) timings per installed GGUF model
     # Format: {"gemma3-1b": {"model_name": "...", "avg_time": 1.2, "is_current": True, ...}}

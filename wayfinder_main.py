@@ -6156,7 +6156,7 @@ class WayfinderApp(ctk.CTk):
             # the ~0.5 s PipeWire cost the 30 s window exists for; 5 s still makes
             # back-to-back dictations instant while the orange mic dot clears
             # right after you finish ("uses the microphone only while you dictate").
-            idle_secs=self.config.get("mic_warm_idle_secs", 5.0 if IS_MACOS else 30.0),
+            idle_secs=self.config.get("mic_warm_idle_secs") or (5.0 if IS_MACOS else 30.0),
             preferred_name=self.config.get("audio_device_name"),
             # Called after a PortAudio rescan when every input fails: re-resolves the
             # user's saved mic BY NAME against the fresh device table. Covers the
@@ -6201,7 +6201,7 @@ class WayfinderApp(ctk.CTk):
         self.logs = []
         
         # UI scaling for high-DPI screens (saved in config)
-        self.ui_scale = self.config.get("ui_scale", 1.0)
+        self.ui_scale = self.config.get("ui_scale") or 1.0
         
         # Recording duration tracking
         self._recording_start_time: float | None = None
@@ -6626,7 +6626,7 @@ class WayfinderApp(ctk.CTk):
         self.resizable(True, True)
         
         # Check if this is first run (no saved scale) - use recommended scale
-        if "ui_scale" not in self.config:
+        if not self.config.get("ui_scale"):
             # First run: calculate optimal scale for this display
             self.ui_scale = self._get_recommended_scale()
             self.config["ui_scale"] = self.ui_scale
@@ -12621,18 +12621,6 @@ class WayfinderApp(ctk.CTk):
             else:
                 self.tab_frames["style"].pack(fill="both", expand=True)
     
-    def _on_smart_formatting_toggled(self) -> None:
-        """Handle smart formatting toggle (legacy - kept for compatibility)."""
-        enabled = self.smart_format_var.get()
-        self.config["smart_formatting"] = enabled
-        save_config(self.config)
-        
-        status = "enabled" if enabled else "disabled"
-        self.log(f"✨ Smart formatting {status}")
-        
-        # Update compatibility check
-        self._update_compatibility_banner()
-    
     def _on_strong_mode_toggled(self) -> None:
         """Handle strong mode toggle."""
         enabled = self.strong_mode_var.get()
@@ -15387,7 +15375,7 @@ class WayfinderApp(ctk.CTk):
                     self.log("💡 Install: git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp && make")
         
         # Check 2: Adjust thread count on first run
-        if "threads_auto_adjusted" not in self.config:
+        if not self.config.get("threads_auto_adjusted"):
             optimal_threads = get_optimal_thread_count()
             if self.config.get("threads", 4) != optimal_threads:
                 self.config["threads"] = optimal_threads
