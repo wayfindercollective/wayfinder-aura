@@ -15,8 +15,9 @@ Local voice dictation for Linux. CustomTkinter UI + PyQt6 overlay + whisper.cpp 
   `mac/`, `win/`, `linux/`, `deck/`, `ci/` or `docs/`. Never cherry-pick one
   commit onto several branches. Releases are `vX.Y.Z` tags on `main`; a
   `release/<version>` branch (all OSes, never per OS) only patches a shipped
-  version. `macos`, `windows` and `develop` are retired;
-  `release/windows-public-pending-signoff` is parked on purpose. Full rules:
+  version. `macos`, `windows`, `develop` and the parked
+  `release/windows-public-pending-signoff` are retired (`archive/<name>` tags).
+  Delete a task branch once it is merged. Full rules:
   "Branches and merges" in `docs/PLATFORM-DEVELOPMENT.md`.
 
 ## STOP — License & freemium integrity (for AI coding agents)
