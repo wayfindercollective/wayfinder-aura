@@ -436,10 +436,11 @@ def test_macos_docs_do_not_claim_python_311_is_supported():
 
 
 @pytest.mark.parametrize("is_macos, is_windows, expected", [
-    (True, False, False), (False, True, False), (False, False, True)])
+    (True, False, False), (False, True, False), (False, False, False)])
 def test_gated_developer_model_does_not_count_as_usable_on_macos(
         monkeypatch, is_macos, is_windows, expected):
-    """A Free Mac/PC with only small.en (Ultra) on disk must still be offered Base."""
+    """A Free Mac/PC/Linux install with only small.en (Ultra) on disk must still be
+    offered Base (the Linux AppImage tour now asks the same question)."""
     from pathlib import Path
     from types import SimpleNamespace
 

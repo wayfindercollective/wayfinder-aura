@@ -16796,15 +16796,14 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("groq_whisper", "openai_whisper", "faster_whisper"):
             return True
-        # macOS/Windows: only count a model this license may load. A Free install with
+        # Only count a model this license may load. A Free install with
         # developer models (e.g. small.en in ~/whisper.cpp/models) otherwise
-        # skipped the Base download, then every dictation failed because the
-        # config repair (correctly) never switches Free to a gated model.
+        # skipped the Base download (macOS/Windows tour, Linux AppImage tour and
+        # setup cue), then every dictation failed because the config repair
+        # (correctly) never switches Free to a gated model.
         def usable(path) -> bool:
             if path is None:
                 return False
-            if not (IS_MACOS or IS_WINDOWS):
-                return True
             try:
                 from wayfinder.license import transcription_model_allowed
 
