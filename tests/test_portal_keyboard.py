@@ -1001,7 +1001,7 @@ def test_concurrent_starters_launch_one_worker(monkeypatch, tmp_path):
     bus = _FakeBus()
     kb, _path = _session(monkeypatch, tmp_path, bus)
     real_load = pk.load_state
-    entered, proceed = _threading.Event(), _threading.Event()
+    entered, second_read, proceed = _threading.Event(), _threading.Event(), _threading.Event()
     calls = {"n": 0}
 
     def slow_first_load(path=None):
@@ -1009,6 +1009,8 @@ def test_concurrent_starters_launch_one_worker(monkeypatch, tmp_path):
         if calls["n"] == 1:
             entered.set()
             proceed.wait(2)
+        else:
+            second_read.set()     # only reachable while the first holds start()
         return real_load(path)
 
     monkeypatch.setattr(pk, "load_state", slow_first_load)
@@ -1019,7 +1021,9 @@ def test_concurrent_starters_launch_one_worker(monkeypatch, tmp_path):
         first.start()
         assert entered.wait(2)
         second.start()
-        time.sleep(0.2)            # the second starter is now inside start() too
+        # Unserialized, the second starter reaches the state read while the
+        # first is held there; serialized, it waits on the lock instead.
+        assert not second_read.wait(0.5)
         proceed.set()
         first.join(3)
         second.join(3)
@@ -1042,7 +1046,7 @@ def test_a_close_during_start_never_reaches_the_dialog(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pk, "load_state", load_then_close)
     kb.start()
-    time.sleep(0.3)
+    kb._thread.join(2)             # the worker ran to its end (or its cancellation)
     assert not any(m == "Start" for _i, m, _f, _b in bus.calls)
 
 
