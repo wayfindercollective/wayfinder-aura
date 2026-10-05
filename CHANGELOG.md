@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0-beta.1] — 2026-10-04
+
 Linux: dictation for gamers on every desktop.
 
 The macOS DMG and the internal Windows installer are built separately (see
@@ -446,6 +448,7 @@ First public release of Wayfinder Aura.
 - Tone-aware local post-processing with Gemma 3 1B as the default model.
 - System tray integration and configurable typing speeds.
 
-[Unreleased]: https://github.com/wayfindercollective/wayfinder-aura/compare/v1.1.8...HEAD
+[Unreleased]: https://github.com/wayfindercollective/wayfinder-aura/compare/v1.2.0-beta.1...HEAD
+[1.2.0-beta.1]: https://github.com/wayfindercollective/wayfinder-aura/compare/v1.1.8...v1.2.0-beta.1
 [1.1.8]: https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.8
 [1.1.0]: https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.0

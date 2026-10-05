@@ -50,14 +50,14 @@ network and not perf"`) passes on a headless node; Ruff's CI classes and
 
 ### What still blocks the Linux release
 
-1. **Version and release candidate** (plan item 6). Every version source still
-   says 1.1.8, which is already tagged: `pyproject.toml`,
-   `src/wayfinder/__init__.py`, `scripts/build-appimage.sh` `VERSION`,
-   `packaging/windows/installer.iss`, a new AppStream `<release>`, and the
-   `[Unreleased]` heading. The update check only offers a higher version, so
-   installed 1.1.8 users would never hear of a release still numbered 1.1.8.
-   Then build the candidate from the tag in CI, install it from the bundle, and
-   record hashes and self-tests.
+1. **Release candidate** (plan item 6). Version bumped to `1.2.0-beta.1` on
+   2026-10-04 (pyproject, `__init__`, `build-appimage.sh`, `installer.iss`, an
+   AppStream development release, the CHANGELOG). Next: tag `v1.2.0-beta.1` from the
+   pushed branch once merged, let CI build the AppImage and Flatpak, install
+   from the bundle, and record hashes (`SHA256SUMS-linux.txt`) and self-tests.
+   Stable 1.1.8 users are not offered a beta; promote to `1.2.0` after QA. The
+   macOS DMG puts the full version in `CFBundleVersion`; confirm notarization
+   accepts a prerelease string on the first macOS candidate.
 2. **Manual passes still open** in `docs/LINUX-SHIPPING-PLAN.md`: GNOME 45+,
    the Steam machine (desktop approval, then Game Mode), Path of Exile 2 under
    Proton (windowed and fullscreen), DAoC through the portal, and the AppImage
