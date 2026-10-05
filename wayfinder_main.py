@@ -22453,7 +22453,12 @@ class WayfinderApp(ctk.CTk):
                 # exclusive-grab-release path in the evdev listener still runs, so grabbed
                 # devices keep returning to the game.
                 if is_hotkeys_paused() and not getattr(self, "_game_mode", False):
+                    if not getattr(self, "_gamemode_pause_logged", False):
+                        self._gamemode_pause_logged = True
+                        self.log("⏸ Shortcut ignored: a game is running with GameMode, "
+                                 "which pauses Aura's shortcuts while you play.")
                     return
+                self._gamemode_pause_logged = False
         if event_type == EventType.HOTKEY_PRESSED:
             # A PortAudio open can only be bounded by abandoning its C worker. Any
             # stop presses arriving during that bounded wait sit in event_queue;

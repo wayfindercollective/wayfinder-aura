@@ -114,3 +114,21 @@ class TestDefaultsAreModifieredKeys:
             assert DEFAULT_CONFIG["hotkey_modifiers"] == ["ctrl", "alt"]
             assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["ctrl", "alt"]
         assert DEFAULT_CONFIG["style_toggle_key"] == 28  # Enter
+
+
+def test_a_shortcut_dropped_by_the_gamemode_pause_is_logged_once(monkeypatch):
+    """The pause used to drop the record shortcut without a word, which reads
+    as Gamer mode being broken while a GameMode game runs."""
+    from types import SimpleNamespace
+
+    import wayfinder_main as wm
+    from wayfinder.hotkeys.types import EventType
+
+    monkeypatch.setattr(gamemode, "is_hotkeys_paused", lambda: True)
+    monkeypatch.setitem(wm._HOTKEY_CAPTURE, "armed", False)
+    monkeypatch.setitem(wm._HOTKEY_CAPTURE, "suppress_until", 0)
+    logs = []
+    app = SimpleNamespace(log=logs.append, _game_mode=False)
+    for _ in range(3):
+        wm.WayfinderApp.handle_event(app, EventType.HOTKEY_PRESSED, None)
+    assert len(logs) == 1 and "GameMode" in logs[0]
