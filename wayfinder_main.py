@@ -3620,8 +3620,8 @@ def _macos_keep_awake(fn, key: str, reason: str):
     return run
 
 
-def _macos_cloud_models(provider: str) -> list[str]:
-    """Current cloud cleanup models (macOS panels)."""
+def _cloud_cleanup_models(provider: str) -> list[str]:
+    """Current cloud cleanup models for the Settings model menus."""
     from wayfinder.core.cloud_keys import ANTHROPIC_CLEANUP_MODELS, OPENAI_CLEANUP_MODELS
 
     return list(ANTHROPIC_CLEANUP_MODELS if provider == "anthropic" else OPENAI_CLEANUP_MODELS)
@@ -15298,7 +15298,7 @@ class WayfinderApp(ctk.CTk):
         elif backend == "anthropic":
             # API keys are read from environment variables only for security
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            model = self.config.get("anthropic_model", "claude-3-haiku-20240307")
+            model = self.config.get("anthropic_model", "claude-haiku-4-5-20251001")
             if api_key:
                 return f"{model.split('-')[1].title()}: ✓ Key set"
             return "⚠ Set ANTHROPIC_API_KEY env var"
@@ -15405,7 +15405,7 @@ class WayfinderApp(ctk.CTk):
             "openai_key": ctk.StringVar(value=self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")),
             "openai_model": ctk.StringVar(value=self.config.get("openai_model", "gpt-4o-mini")),
             "anthropic_key": ctk.StringVar(value=self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")),
-            "anthropic_model": ctk.StringVar(value=self.config.get("anthropic_model", "claude-3-haiku-20240307")),
+            "anthropic_model": ctk.StringVar(value=self.config.get("anthropic_model", "claude-haiku-4-5-20251001")),
         }
         
         def rebuild_provider_settings():
@@ -15469,11 +15469,7 @@ class WayfinderApp(ctk.CTk):
                 InlineOptionMenu(
                     api_frame,
                     variable=form_data["openai_model"],
-                    values=(
-                        _macos_cloud_models("openai")
-                        if sys.platform in ("darwin", "win32")
-                        else ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
-                    ),
+                    values=_cloud_cleanup_models("openai"),
                     font=(self.font_body[0], self.font_sizes["body"]),
                     fg_color=COLORS["bg_input"],
                     button_color=COLORS["bg_input"],
@@ -15564,16 +15560,7 @@ class WayfinderApp(ctk.CTk):
                 InlineOptionMenu(
                     api_frame,
                     variable=form_data["anthropic_model"],
-                    values=(
-                        _macos_cloud_models("anthropic")
-                        if sys.platform in ("darwin", "win32")
-                        else [
-                            "claude-3-haiku-20240307",
-                            "claude-3-5-haiku-20241022",
-                            "claude-3-sonnet-20240229",
-                            "claude-3-5-sonnet-20241022",
-                        ]
-                    ),
+                    values=_cloud_cleanup_models("anthropic"),
                     font=(self.font_body[0], self.font_sizes["body"]),
                     fg_color=COLORS["bg_input"],
                     button_color=COLORS["bg_input"],
