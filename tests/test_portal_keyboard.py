@@ -89,6 +89,23 @@ def test_state_round_trip_is_private(tmp_path):
     assert pk.load_state(tmp_path / "missing.json") == {}
 
 
+def test_a_hand_edited_token_that_is_not_text_is_ignored(tmp_path):
+    path = tmp_path / "pk.json"
+    path.write_text('{"restore_token": 123, "declined": false}')
+    assert pk.load_state(path) == {"restore_token": "", "declined": False}
+
+
+def test_state_is_written_by_the_owner_only_writer(tmp_path, monkeypatch):
+    # The restore token lets Aura type without asking: the file must never
+    # exist with group/other bits, which the shared writer guarantees (mkstemp).
+    from wayfinder.utils import fs_security
+    calls = []
+    monkeypatch.setattr(fs_security, "atomic_write_json",
+                        lambda path, data, mode=0o600: calls.append((path, data, mode)))
+    pk.save_state({"restore_token": "abc"}, tmp_path / "pk.json")
+    assert calls == [(tmp_path / "pk.json", {"restore_token": "abc"}, 0o600)]
+
+
 # ── the session against a fake bus ───────────────────────────────────────────
 
 class _Reply:

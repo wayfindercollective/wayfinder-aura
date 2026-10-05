@@ -276,9 +276,13 @@ def _state_path() -> Path:
 def load_state(path: Optional[Path] = None) -> dict:
     try:
         data = json.loads((path or _state_path()).read_text())
-        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+    if not isinstance(data, dict):
+        return {}
+    if not isinstance(data.get("restore_token", ""), str):
+        data["restore_token"] = ""  # hand-edited: ask again rather than fail every launch
+    return data
 
 
 def save_state(update: dict, path: Optional[Path] = None) -> None:
@@ -286,11 +290,9 @@ def save_state(update: dict, path: Optional[Path] = None) -> None:
     data = load_state(target)
     data.update(update)
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.chmod(0o600)
-        tmp.replace(target)
+        from ..utils.fs_security import atomic_write_json
+        # Owner-only from creation: the restore token lets Aura type without asking.
+        atomic_write_json(target, data)
     except Exception:
         pass
 
