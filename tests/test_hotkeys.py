@@ -911,6 +911,7 @@ class TestPortalModuleSurface:
             "stop_event",
             "log_callback",
             "control_queue",
+            "on_bind_settled",
         ]
 
 

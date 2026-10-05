@@ -45,6 +45,10 @@ otherwise it does nothing and tries again the next night
   with the workflow it was cut with), the next beta replaces it instead.
   After two builds that left it unfinished it is left for a person
   (Actions → Release). Promotion never picks an unfinished beta.
+- Linux releases also carry `SHA256SUMS-linux.txt` (the AppImage and
+  Flatpak checksums), from the first beta after 2026-10-05. Completeness does
+  not require it, so the betas cut before it stay promotable; check that it is
+  there when you QA a release.
 - Automated betas older than 14 days that are not among the newest 5 are
   deleted (release and tag). Stable releases and older hand-made tags are
   never touched.

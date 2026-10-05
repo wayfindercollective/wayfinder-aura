@@ -605,6 +605,18 @@ class WelcomePane:
             self._render_hotkey(body)
         elif step == "dictate":
             self._render_dictate(body)
+        if self.flow.index == 0 and not self._only_permissions:
+            self._render_desktop_approval_note(body)
+
+    def _render_desktop_approval_note(self, body) -> None:
+        """Linux: name the desktop dialogs (shortcuts, typing) that open while the
+        tour starts, so they are expected rather than a surprise."""
+        try:
+            note = self.app._desktop_approval_note()
+        except Exception:
+            note = ""
+        if note:
+            self._body_label(body, note, muted=True, pady=(SPACING["md"], 0))
 
     def _render_permissions(self, body) -> None:
         """Three live rows with a persistent route back to macOS Settings."""

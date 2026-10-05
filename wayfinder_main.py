@@ -1453,6 +1453,15 @@ def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
     return 50
 
 
+def _warm_mic_idle_secs(config: dict) -> float:
+    """How long the warm mic stays open after a dictation. None (the default)
+    is the platform's own time; an explicit 0 keeps it open (no idle close)."""
+    value = config.get("mic_warm_idle_secs")
+    if value is None:
+        return 5.0 if IS_MACOS else 30.0
+    return value
+
+
 def _update_installs_in_place() -> bool:
     """True when Install Update can swap this install itself (core/app_installer)."""
     try:
@@ -4471,7 +4480,8 @@ def socket_listener(event_queue, stop_event, log_callback=None):
 
 
 def wayland_hotkey_listener(
-    event_queue, shortcuts, stop_event, log_callback=None, control_queue=None
+    event_queue, shortcuts, stop_event, log_callback=None, control_queue=None,
+    on_bind_settled=None,
 ):
     """Delegate to the package GlobalShortcuts portal listener (single implementation).
 
@@ -4481,7 +4491,8 @@ def wayland_hotkey_listener(
     """
     from wayfinder.hotkeys.dbus import wayland_hotkey_listener as _package_portal_listener
     return _package_portal_listener(
-        event_queue, shortcuts, stop_event, log_callback, control_queue
+        event_queue, shortcuts, stop_event, log_callback, control_queue,
+        on_bind_settled=on_bind_settled,
     )
 
 
@@ -6171,7 +6182,7 @@ class WayfinderApp(ctk.CTk):
             # the ~0.5 s PipeWire cost the 30 s window exists for; 5 s still makes
             # back-to-back dictations instant while the orange mic dot clears
             # right after you finish ("uses the microphone only while you dictate").
-            idle_secs=self.config.get("mic_warm_idle_secs", 5.0 if IS_MACOS else 30.0),
+            idle_secs=_warm_mic_idle_secs(self.config),
             preferred_name=self.config.get("audio_device_name"),
             # Called after a PortAudio rescan when every input fails: re-resolves the
             # user's saved mic BY NAME against the fresh device table. Covers the
@@ -6216,7 +6227,7 @@ class WayfinderApp(ctk.CTk):
         self.logs = []
         
         # UI scaling for high-DPI screens (saved in config)
-        self.ui_scale = self.config.get("ui_scale", 1.0)
+        self.ui_scale = self.config.get("ui_scale") or 1.0
         
         # Recording duration tracking
         self._recording_start_time: float | None = None
@@ -6651,7 +6662,7 @@ class WayfinderApp(ctk.CTk):
         self.resizable(True, True)
         
         # Check if this is first run (no saved scale) - use recommended scale
-        if "ui_scale" not in self.config:
+        if not self.config.get("ui_scale"):
             # First run: calculate optimal scale for this display
             self.ui_scale = self._get_recommended_scale()
             self.config["ui_scale"] = self.ui_scale
@@ -12676,18 +12687,6 @@ class WayfinderApp(ctk.CTk):
             else:
                 self.tab_frames["style"].pack(fill="both", expand=True)
     
-    def _on_smart_formatting_toggled(self) -> None:
-        """Handle smart formatting toggle (legacy - kept for compatibility)."""
-        enabled = self.smart_format_var.get()
-        self.config["smart_formatting"] = enabled
-        save_config(self.config)
-        
-        status = "enabled" if enabled else "disabled"
-        self.log(f"✨ Smart formatting {status}")
-        
-        # Update compatibility check
-        self._update_compatibility_banner()
-    
     def _on_strong_mode_toggled(self) -> None:
         """Handle strong mode toggle."""
         enabled = self.strong_mode_var.get()
@@ -12956,9 +12955,18 @@ class WayfinderApp(ctk.CTk):
         state = "on" if self.config["press_enter_after_dictation"] else "off"
         self.log(f"↵ Auto press Enter after dictation: {state}")
 
-    def _start_portal_keyboard(self, ask_again: bool = False) -> None:
+    # A typing session that fails to start, or that a restarting portal drops,
+    # is tried again after these delays before the banner asks the user to.
+    _PORTAL_RETRY_DELAYS_S = (5, 30, 120)
+    # The typing dialog waits this long at most for the shortcut bind's dialog
+    # to be answered, so the two never share the screen.
+    _PORTAL_BIND_WAIT_S = 60.0
+
+    def _start_portal_keyboard(self, ask_again: bool = False, retry: bool = False) -> None:
         """Wayland desktops: open the RemoteDesktop portal keyboard so dictation
-        reaches native Wayland apps too (core/portal_keyboard.py). Tk thread."""
+        reaches native Wayland apps too (core/portal_keyboard.py). Tk thread.
+        ``retry``: a scheduled retry of a session that worked or was offered
+        before, so a portal that does not answer now counts as a failure."""
         if not _IS_LINUX or IS_MACOS or IS_WINDOWS:
             return
         if not self.config.get("linux_portal_typing", True):
@@ -12984,6 +12992,9 @@ class WayfinderApp(ctk.CTk):
         if not getattr(self, "_portal_listener_added", False):
             kb.on_change(self._on_portal_keyboard_state)
             self._portal_listener_added = True
+        # Seen on the Tk thread: a toggle or a working session while the probes
+        # below run makes their verdict stale.
+        gen = getattr(self, "_portal_retry_gen", 0)
 
         def _go():
             # At login the portal may still be starting (D-Bus activation):
@@ -12991,8 +13002,16 @@ class WayfinderApp(ctk.CTk):
             for delay in (0, 3, 6, 12):
                 time.sleep(delay)
                 if portal_keyboard.portal_keyboard_offered():
+                    self._portal_not_offered = False
                     break
             else:
+                if retry:
+                    # It answered before: down now, not absent. The bounded
+                    # retries go on, then the banner.
+                    self.event_queue.put((EventType.UI_CALLBACK, lambda: self._portal_session_lost(
+                        portal_keyboard.PortalKeyboard.FAILED,
+                        "the remote-control portal is not answering", gen=gen)))
+                    return
                 self._portal_not_offered = True
                 try:
                     from wayfinder.utils.platform import get_text_injector
@@ -13027,8 +13046,16 @@ class WayfinderApp(ctk.CTk):
             self.after(1000, lambda: self._start_portal_session_when_idle(kb, parent, ask_again))
             return
 
-        def idle() -> bool:  # read from the portal worker; no Tk call
-            return getattr(self, "app_state", AppState.IDLE) == AppState.IDLE
+        # One desktop dialog at a time: the Flatpak's shortcut bind asks first
+        # (start_hotkey_listener), so the typing request waits for its answer.
+        bind = getattr(self, "_portal_bind_settled", None)
+        asked_at = time.monotonic()
+
+        def may_ask() -> bool:  # read from the portal worker; no Tk call
+            if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+                return False
+            return (bind is None or bind.is_set()
+                    or time.monotonic() - asked_at > self._PORTAL_BIND_WAIT_S)
 
         # Seen here, on the Tk thread: a switch-off (close) after this point
         # makes the start below a no-op even if its thread runs late.
@@ -13036,7 +13063,7 @@ class WayfinderApp(ctk.CTk):
         # start() can wait up to 2 s for a closing session: never on the Tk thread.
         threading.Thread(
             target=lambda: kb.start(parent_window=parent, ask_again=ask_again,
-                                    log=self.log, may_ask=idle, after_closes=closes),
+                                    log=self.log, may_ask=may_ask, after_closes=closes),
             daemon=True, name="wayfinder-portal-session",
         ).start()
 
@@ -13057,6 +13084,35 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             return False
 
+    def _desktop_approval_note(self) -> str:
+        """The welcome tour's line about the desktop dialogs still to come
+        (Linux): the Flatpak's shortcut bind and the typing approval. Empty
+        when neither is pending. Tk thread."""
+        if not (_IS_LINUX and not (IS_MACOS or IS_WINDOWS)):
+            return ""
+        bind = getattr(self, "_portal_bind_settled", None)
+        shortcuts = (getattr(self, "_hotkey_backend", None) == "portal"
+                     and bind is not None and not bind.is_set())
+        typing = False
+        if self._portal_typing_in_play():
+            try:
+                from wayfinder.core.portal_keyboard import PortalKeyboard, keyboard, load_state
+                typing = (keyboard().state in (PortalKeyboard.IDLE, PortalKeyboard.STARTING,
+                                               PortalKeyboard.WAITING)
+                          and not load_state().get("restore_token"))
+            except Exception:
+                typing = False
+        if shortcuts and typing:
+            return ("your desktop asks twice: first to allow Aura's shortcuts, then whether "
+                    "Aura may type in every app. allow both.")
+        if typing:
+            return ("your desktop asks whether Aura may type in every app. allow it so "
+                    "dictation reaches every window.")
+        if shortcuts:
+            return ("your desktop asks to allow Aura's shortcuts. allow it so your shortcut "
+                    "works in every app.")
+        return ""
+
     def _on_portal_keyboard_state(self, state: str, detail: str) -> None:
         """Portal keyboard state changes (session thread; self.log is thread-safe)."""
         from wayfinder.core.portal_keyboard import PortalKeyboard as _PK
@@ -13064,22 +13120,111 @@ class WayfinderApp(ctk.CTk):
         if state == _PK.READY:
             self.log("✓ Text injection: desktop portal (types into every app, "
                      "Wayland and X11)")
+            self.event_queue.put((EventType.UI_CALLBACK, self._reset_portal_retries))
         elif state == _PK.DECLINED:
             self.log("⌨️ Desktop portal typing not allowed: Aura types into X11 apps "
                      "and games only. Turn on 'Type into every app' in Settings to ask again.")
             self.event_queue.put((EventType.UI_CALLBACK, self._after_portal_declined))
-        elif state == _PK.FAILED:
+        elif state in (_PK.FAILED, _PK.CLOSED):
+            self.event_queue.put((EventType.UI_CALLBACK,
+                                  lambda: self._portal_session_lost(state, detail)))
+
+    def _portal_session_lost(self, state: str, detail: str, gen: int | None = None) -> None:
+        """Tk thread: a failed or ended typing session is retried (bounded) when a
+        retry can help; otherwise, or once the retries are used up, the banner.
+
+        Stale reports are dropped: a session state that is no longer the
+        keyboard's (a newer session took over before this ran), or a retry
+        probe's verdict (``gen``) from before a toggle or a working session."""
+        from wayfinder.core.portal_keyboard import PortalKeyboard as _PK, keyboard
+
+        if gen is not None:
+            if (gen != getattr(self, "_portal_retry_gen", 0)
+                    or not self.config.get("linux_portal_typing", True)):
+                return
+        else:
+            try:
+                if keyboard().state != state:
+                    return
+            except Exception:
+                pass
+        if state == _PK.FAILED:
+            if self._portal_failure_retryable(detail) and self._schedule_portal_retry(detail):
+                return
             self.log(f"⚠️ Desktop portal typing unavailable ({detail}): using the other "
                      "typing tools; turn 'Type into every app' off and on to retry")
-            self.event_queue.put((EventType.UI_CALLBACK, lambda: self._show_error_banner(
+            self._show_error_banner(
                 "Typing into every app is unavailable right now, so text may reach X11 "
-                "apps only. Turn Settings → System → Type into every app off and on to retry.")))
-        elif state == _PK.CLOSED:
-            self.log(f"⚠️ Desktop portal typing ended ({detail}): using xdotool until "
-                     "Aura restarts")
-            self.event_queue.put((EventType.UI_CALLBACK, lambda: self._show_error_banner(
-                "Your desktop ended Aura's typing session, so text may reach X11 apps only. "
-                "Turn Settings → System → Type into every app off and on to start it again.")))
+                "apps only. Turn Settings → System → Type into every app off and on to retry.")
+            return
+        # A restarted portal took the session down with it; a session the
+        # desktop (or the user, revoking it) ended stays ended.
+        if (detail in ("the portal restarted", "the portal exited")
+                and self._schedule_portal_retry(detail)):
+            return
+        self.log(f"⚠️ Desktop portal typing ended ({detail}): using xdotool until "
+                 "Aura restarts")
+        self._show_error_banner(
+            "Your desktop ended Aura's typing session, so text may reach X11 apps only. "
+            "Turn Settings → System → Type into every app off and on to start it again.")
+
+    @staticmethod
+    def _portal_failure_retryable(detail: str) -> bool:
+        """Whether trying the session again can help. Not when the bundle lacks
+        PyGObject, and not after the user's own answer in the dialog: a grant
+        without a keyboard, or the dialog ended some other way (Start answered
+        neither yes nor no), which a retry would only show again."""
+        detail = str(detail or "")
+        return not (detail == "PyGObject unavailable"
+                    or detail == "the desktop granted no keyboard"
+                    or detail.startswith("the desktop answered"))
+
+    def _reset_portal_retries(self) -> None:
+        """Tk thread: a working session or a toggle starts the retry count afresh
+        and voids any retry still waiting. (A decline turns the switch off,
+        which a waiting retry checks.)"""
+        self._portal_retries = 0
+        self._portal_retry_pending = False
+        self._portal_retry_gen = getattr(self, "_portal_retry_gen", 0) + 1
+
+    def _schedule_portal_retry(self, detail: str) -> bool:
+        """Tk thread: start the typing session again after the next delay. One
+        retry waits at a time. False once the delays are used up (the caller
+        shows the banner)."""
+        if not self.config.get("linux_portal_typing", True):
+            return False
+        if getattr(self, "_portal_retry_pending", False):
+            return True  # the waiting retry covers this loss too
+        attempt = getattr(self, "_portal_retries", 0)
+        if attempt >= len(self._PORTAL_RETRY_DELAYS_S):
+            return False
+        self._portal_retries = attempt + 1
+        self._portal_retry_pending = True
+        gen = getattr(self, "_portal_retry_gen", 0)
+        delay = self._PORTAL_RETRY_DELAYS_S[attempt]
+        self.log(f"⚠️ Desktop portal typing unavailable ({detail}): trying again in {delay} s")
+        self.after(delay * 1000, lambda: self._retry_portal_keyboard(gen))
+        return True
+
+    def _retry_portal_keyboard(self, gen: int) -> None:
+        """Tk thread: the scheduled retry, unless it was voided (a working
+        session, a toggle) or typing is switched off (a decline does that)."""
+        if gen != getattr(self, "_portal_retry_gen", 0):
+            return
+        self._portal_retry_pending = False
+        if not self.config.get("linux_portal_typing", True):
+            return
+        try:
+            from wayfinder.core.portal_keyboard import PortalKeyboard, keyboard
+            kb = keyboard()
+            if kb.state not in (PortalKeyboard.FAILED, PortalKeyboard.CLOSED):
+                return
+            # A session marked failed while in use still holds its worker.
+            kb.close()
+        except Exception:
+            return
+        self.log("⌨️ Trying the desktop portal again")
+        self._start_portal_keyboard(retry=True)
 
     def _after_portal_declined(self) -> None:
         """The desktop's remote-control request was declined (Esc counts). Say so
@@ -13102,6 +13247,7 @@ class WayfinderApp(ctk.CTk):
         on = bool(self._portal_typing_var.get())
         self.config["linux_portal_typing"] = on
         save_config(self.config)
+        self._reset_portal_retries()
         if on:
             self.log("⌨️ Type into every app: on")
             self._start_portal_keyboard(ask_again=True)
@@ -15467,7 +15613,7 @@ class WayfinderApp(ctk.CTk):
                     self.log("💡 Install: git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp && make")
         
         # Check 2: Adjust thread count on first run
-        if "threads_auto_adjusted" not in self.config:
+        if not self.config.get("threads_auto_adjusted"):
             optimal_threads = get_optimal_thread_count()
             if self.config.get("threads", 4) != optimal_threads:
                 self.config["threads"] = optimal_threads
@@ -23133,6 +23279,12 @@ class WayfinderApp(ctk.CTk):
             self._hotkey_session_type(),
         )
         self._hotkey_backend = backend
+        # The Flatpak's shortcut bind can show a desktop dialog; the typing
+        # session's dialog waits for its answer (_start_portal_session_when_idle).
+        if getattr(self, "_portal_bind_settled", None) is None:
+            self._portal_bind_settled = threading.Event()
+        if backend != "portal":
+            self._portal_bind_settled.set()
         no_shortcuts_portal = getattr(self, "_portal_shortcuts_missing", False)
         if backend == "portal":
             self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
@@ -23364,6 +23516,11 @@ class WayfinderApp(ctk.CTk):
         # set with no thread running (Codex review).
         from wayfinder.hotkeys.dbus import shortcut_specs_from_config
         shortcuts = shortcut_specs_from_config(self.config)
+        settled = getattr(self, "_portal_bind_settled", None)
+        if settled is not None:
+            # A replacement listener (after a portal restart or a shortcut
+            # change) binds again and may show its dialog again.
+            settled.clear()
         self._portal_listener_started = True
 
         def _portal_wrapper():
@@ -23373,6 +23530,7 @@ class WayfinderApp(ctk.CTk):
                 clean_stop = wayland_hotkey_listener(
                     self.event_queue, shortcuts, self.stop_event, self.log,
                     self._portal_control_queue,
+                    on_bind_settled=settled.set if settled is not None else None,
                 )
             except Exception as e:
                 print(f"[Hotkey] portal listener crashed: {e}", flush=True)

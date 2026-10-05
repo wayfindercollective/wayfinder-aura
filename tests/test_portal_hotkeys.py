@@ -913,3 +913,48 @@ def test_hotkey_session_type_sees_through_the_flatpak_env(monkeypatch, flatpak, 
     monkeypatch.setenv("XDG_SESSION_TYPE", env)
     monkeypatch.setattr(injector, "_running_under_xwayland", lambda: xwayland)
     assert wm.WayfinderApp._hotkey_session_type() == expected
+
+
+# ── the bind's answer releases the typing dialog ─────────────────────────────
+
+def _settled_calls(monkeypatch, bus, **kwargs):
+    """Run the listener; record what had been called when on_bind_settled ran."""
+    _install_fake_gi(monkeypatch, bus)
+    seen, logs = [], []
+    portal.wayland_hotkey_listener(
+        Queue(), _specs(), Event(), logs.append,
+        on_bind_settled=lambda: seen.append(
+            ([e[1] for e in bus.events if e[0] == "call"],
+             any("Listening for global shortcuts" in m for m in logs))),
+        **kwargs,
+    )
+    return seen
+
+
+def test_bind_settled_runs_once_after_the_desktop_answers_the_bind(monkeypatch):
+    # Before the listening phase, which lasts until the app quits: the typing
+    # dialog must not wait for that.
+    seen = _settled_calls(monkeypatch, _FakeBus())
+    assert seen == [(["CreateSession", "BindShortcuts"], False)]
+
+
+def test_bind_settled_runs_after_a_cancelled_bind(monkeypatch):
+    seen = _settled_calls(monkeypatch, _FakeBus(bind_code=1))
+    assert seen == [(["CreateSession", "BindShortcuts"], False)]
+
+
+def test_bind_settled_runs_when_setup_fails_before_any_bind(monkeypatch):
+    # A denied session never shows a bind dialog: nothing to wait for.
+    seen = _settled_calls(monkeypatch, _FakeBus(create_code=2))
+    assert seen == [(["CreateSession"], False)]
+
+
+def test_bind_settled_runs_without_pygobject(monkeypatch):
+    monkeypatch.setattr(
+        portal, "_GI_PROBE",
+        {"checked": True, "available": False, "detail": "ImportError: nope"},
+    )
+    calls = []
+    portal.wayland_hotkey_listener(Queue(), _specs(), Event(), None,
+                                   on_bind_settled=lambda: calls.append(1))
+    assert calls == [1]
