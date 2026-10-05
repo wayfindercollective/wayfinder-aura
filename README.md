@@ -87,11 +87,36 @@ Keys activate online once and keep working offline.
 2. Make it executable: right-click → **Properties** → check **"Executable as
    Program"** (or `chmod +x Wayfinder_Aura-*.AppImage`).
 3. Run it. On first launch it **adds itself to your applications menu** with an
-   icon, walks you through a quick setup, and downloads a starter speech model.
-   That's it — press **Ctrl+Alt+Space** and start talking.
+   icon and walks you through a quick tour. The AppImage carries no speech
+   model: on the Dictate tab, **Finish Setup** opens Whisper Models, where you
+   download the free Base model (about 150 MB). Then press **Ctrl+Alt+Space**
+   and start talking.
+4. On a Wayland desktop the shortcut reads your keyboard directly, so add
+   yourself to the `input` group once: `sudo usermod -aG input $USER`, then log
+   out and back in. X11 sessions need nothing extra. The desktop also asks once
+   whether Aura may type into every app (KDE: Remote Control); allow it.
 
 Works on Linux distributions from 2022 onward — Ubuntu 22.04+, Debian 12+,
 Fedora 35+, Bazzite, and the Steam Deck. Wayland and X11.
+
+### Flatpak (GitHub release bundle)
+
+Each release also carries `io.wayfindercollective.WayfinderAura.flatpak`, which
+bundles the Base speech model. Flatpak itself must be installed first (Fedora,
+Bazzite, Mint and SteamOS have it; Ubuntu/Debian: `sudo apt install flatpak`,
+Arch: `sudo pacman -S flatpak`, openSUSE: `sudo zypper in flatpak`, then log
+out and in once). Then:
+
+```bash
+flatpak install --user --bundle ./io.wayfindercollective.WayfinderAura.flatpak
+```
+
+Flatpak fetches the KDE runtime from Flathub, offering to add the Flathub remote if it
+is missing. KDE Discover, GNOME Software and Warehouse also open the file. The
+desktop asks once for the global shortcut and once whether Aura may type into
+every app; allow both. On desktops whose portal has no global shortcuts (GNOME
+before 48, Sway), bind a keyboard shortcut in your desktop settings to
+`flatpak run io.wayfindercollective.WayfinderAura --toggle`.
 
 ### Flathub (coming soon)
 

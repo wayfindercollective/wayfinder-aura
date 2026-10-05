@@ -35,22 +35,19 @@ sudo usermod -aG input $USER
 
 ### Typing text at the cursor
 
-- **Wayland session, KDE Plasma:** nothing to install. Aura types through the
-  desktop's RemoteDesktop portal after you approve its prompt once. GNOME 45+
-  is expected to work the same way but is not yet verified.
+- **Wayland session (Ubuntu's default GNOME, or KDE Plasma):** nothing to
+  install. Aura types through the desktop's RemoteDesktop portal after you
+  approve its prompt once (verified on KDE Plasma; GNOME 45+, which Ubuntu
+  24.04 ships, is expected to work the same way but is not yet verified).
 - **X11 session:** install xdotool. The AppImage bundles only `wtype`, not
   xdotool.
-- **Fallback only** (AppImage or source, when the portal is unavailable):
-  `ydotool` with its daemon running, or `wtype`.
+- **ydotool is not an option on Ubuntu 22.04/24.04:** their `ydotool` package
+  is version 0.1.8, which Aura cannot use (it needs 1.x, packaged from Ubuntu
+  26.04). Use the portal or xdotool instead.
 
 ```bash
 # X11 sessions
 sudo apt install -y xdotool
-
-# Fallback only: ydotool and its background daemon
-sudo apt install -y ydotool
-sudo systemctl enable ydotoold
-sudo systemctl start ydotoold
 ```
 
 ---
