@@ -3,8 +3,9 @@
 #
 # Copies FIXED versions of mac_release_watcher.py and attach_mac_dmg.sh from
 # this checkout into ~/Library/Application Support/wayfinder-aura-release (the
-# job never runs code it fetches), then checks hourly with launchd. Each check
-# is one GitHub API call; a build (about once a day, after the nightly beta)
+# job never runs code it fetches), then checks every 10 minutes with launchd.
+# Each check is two GitHub API calls; a build (about once a day, as soon as the
+# nightly beta is tagged)
 # runs at background priority on the efficiency cores, only when Fox Grid's
 # Mac admission rule leaves room for it and the Mac CI queue is not held by
 # someone else (mac_release_watcher.py).
@@ -58,7 +59,7 @@ cat > "$PLIST" <<EOF
     <key>AURA_REPO</key><string>$AURA_REPO</string>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
-  <key>StartInterval</key><integer>3600</integer>
+  <key>StartInterval</key><integer>600</integer>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
@@ -75,4 +76,4 @@ EOF
 
 unload
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "Installed $LABEL (hourly check). Log: $LOG"
+echo "Installed $LABEL (checks every 10 minutes). Log: $LOG"
