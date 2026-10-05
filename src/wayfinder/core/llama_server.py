@@ -115,8 +115,8 @@ class LlamaServerManager:
     # thrash a multi-GB model load on a one-off blip; this bounds both.
     _consecutive_failures: int = 0
     MAX_CONSECUTIVE_FAILURES = 3
-    # macOS only: a fresh random key per spawn, handed to the child through its
-    # environment (not argv, which any local process can read with ps). The
+    # macOS and Linux: a fresh random key per spawn, handed to the child through
+    # its environment (not argv, which any local process can read with ps). The
     # server accepts CORS from every origin, so without a key any web page could
     # drive the resident model over loopback. /health stays public.
     _api_key: Optional[str] = None
@@ -149,7 +149,7 @@ class LlamaServerManager:
 
     @classmethod
     def _auth_headers(cls) -> dict:
-        """Authorization for a keyed (macOS) server; empty elsewhere."""
+        """Authorization for a keyed (macOS/Linux) server; empty on Windows."""
         key = cls._api_key
         return {"Authorization": f"Bearer {key}"} if key else {}
 
@@ -345,7 +345,7 @@ class LlamaServerManager:
             "--parallel", "1",   # one dictation at a time; keeps the KV cache whole
             "--no-webui",        # no reason to serve a UI from a dictation app
         ]
-        if sys.platform == "darwin":
+        if sys.platform != "win32":
             # /slots would expose the cached prompt (the last dictation).
             base.append("--no-slots")
         attempts = [[binary] + base + ["-ngl", str(n_gpu_layers)]]
@@ -358,17 +358,21 @@ class LlamaServerManager:
 
     @classmethod
     def _spawn_env_overrides(cls) -> Optional[dict]:
-        """Per-spawn environment. None (inherit unchanged) off macOS.
+        """Per-spawn environment. None (inherit unchanged) on Windows.
 
-        macOS: a new API key per spawn (see _api_key), and no Metal residency
-        heartbeat, which otherwise wakes an idle resident server ~170x/s. The
-        Metal device itself stays registered: Free's -ngl 0 still offloads
-        prompt processing to the GPU, which is intended.
+        macOS and Linux: a new API key per spawn (see _api_key). macOS also
+        drops the Metal residency heartbeat, which otherwise wakes an idle
+        resident server ~170x/s. The Metal device itself stays registered:
+        Free's -ngl 0 still offloads prompt processing to the GPU, which is
+        intended.
         """
-        if sys.platform != "darwin":
+        if sys.platform == "win32":
             return None
         cls._api_key = secrets.token_urlsafe(24)
-        return {"LLAMA_API_KEY": cls._api_key, "GGML_METAL_NO_RESIDENCY": "1"}
+        env = {"LLAMA_API_KEY": cls._api_key}
+        if sys.platform == "darwin":
+            env["GGML_METAL_NO_RESIDENCY"] = "1"
+        return env
 
     @classmethod
     def _wait_ready(cls, proc: subprocess.Popen, port: int, deadline: float) -> bool:

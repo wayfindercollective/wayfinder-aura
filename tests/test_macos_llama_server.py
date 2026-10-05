@@ -1,7 +1,8 @@
-"""macOS resident llama-server: kernel ownership proof, per-spawn key, env.
+"""Resident llama-server: kernel ownership proof, per-spawn key, env.
 
-Linux keeps main's behaviour byte-for-byte (no key, no extra argv, inherited
-environment); those assertions run on every platform by faking sys.platform.
+macOS and Linux spawn the server with a per-spawn key and without /slots.
+Windows keeps main's behaviour (no key, no extra argv, inherited environment).
+Platform assertions run everywhere by faking sys.platform.
 """
 import json
 import socket
@@ -41,8 +42,11 @@ class TestSpawnShape:
     def test_macos_hides_the_slots_endpoint(self):
         assert all("--no-slots" in cmd for cmd in _cmd("darwin"))
 
-    def test_linux_argv_is_unchanged(self):
-        assert all("--no-slots" not in cmd for cmd in _cmd("linux"))
+    def test_linux_hides_the_slots_endpoint(self):
+        assert all("--no-slots" in cmd for cmd in _cmd("linux"))
+
+    def test_windows_argv_is_unchanged(self):
+        assert all("--no-slots" not in cmd for cmd in _cmd("win32"))
 
     def test_macos_env_carries_a_fresh_key_and_no_residency(self):
         with patch.object(ls.sys, "platform", "darwin"):
@@ -61,8 +65,24 @@ class TestSpawnShape:
                 "/b/llama-server", "/m/x.gguf", 2048, 8, 99, 8179)
         assert all(env["LLAMA_API_KEY"] not in " ".join(cmd) for cmd in cmds)
 
-    def test_linux_inherits_the_environment_unchanged(self):
+    def test_linux_env_carries_a_fresh_key_without_metal_flags(self):
         with patch.object(ls.sys, "platform", "linux"):
+            first = LlamaServerManager._spawn_env_overrides()
+            second = LlamaServerManager._spawn_env_overrides()
+        assert set(first) == {"LLAMA_API_KEY"}
+        assert len(first["LLAMA_API_KEY"]) >= 24
+        assert first["LLAMA_API_KEY"] != second["LLAMA_API_KEY"]
+        assert LlamaServerManager._api_key == second["LLAMA_API_KEY"]
+
+    def test_linux_key_never_appears_in_argv(self):
+        with patch.object(ls.sys, "platform", "linux"):
+            env = LlamaServerManager._spawn_env_overrides()
+            cmds = LlamaServerManager._spawn_attempts(
+                "/b/llama-server", "/m/x.gguf", 2048, 8, 99, 8179)
+        assert all(env["LLAMA_API_KEY"] not in " ".join(cmd) for cmd in cmds)
+
+    def test_windows_inherits_the_environment_unchanged(self):
+        with patch.object(ls.sys, "platform", "win32"):
             assert LlamaServerManager._spawn_env_overrides() is None
         assert LlamaServerManager._api_key is None
 
