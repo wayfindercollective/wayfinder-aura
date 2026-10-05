@@ -66,9 +66,10 @@ network and not perf"`) passes on a headless node; Ruff's CI classes and
    Also confirm on the Steam machine that an unlisted game now gets a paste
    (Ctrl+V) rather than typed keys, as the Games tab promises.
 3. **Fixed 2026-10-05** (was a known issue): the two Flatpak dialogs
-   (shortcut bind, typing approval) come one at a time, and the tour's first
-   card names them (`docs/PERMISSIONS-AND-FIRST-RUN.md`). The AppImage tour
-   downloads the Base model first.
+   (shortcut bind, typing approval) come one at a time unless the shortcut
+   dialog is left unanswered for a minute, and the tour's first card names
+   them (`docs/PERMISSIONS-AND-FIRST-RUN.md`). The AppImage tour downloads the
+   Base model first.
 4. **Server and storefront items outside this repo**: the feedback endpoint is
    live in production (checked 2026-10-05) and stores messages, but no Slack
    webhook is set on the deployment (`AURA_FEEDBACK_SLACK_WEBHOOK_URL`;

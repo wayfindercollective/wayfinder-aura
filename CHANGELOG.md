@@ -103,8 +103,8 @@ Linux: dictation for gamers on every desktop.
 
 - **The desktop asks one question at a time on first run, and the tour says
   what is coming.** The Flatpak's shortcut request is answered first; the
-  question whether Aura may type in every app waits for it. The tour's first
-  card names the questions still to come.
+  question whether Aura may type in every app waits for it (up to a minute).
+  The tour's first card names the questions still to come.
 - **Typing into every app recovers by itself.** When the desktop's
   remote-control session fails to start, or a restarting portal drops it, Aura
   tries again after 5, 30 and 120 seconds before asking you to switch it off

@@ -25,10 +25,10 @@ autostart on Linux except the Steam Deck service.
 1. At launch the global-shortcut binding is requested (KDE, GNOME 48+). On
    desktops without the portal Aura picks the X11 listener (X11) or logs the
    `--toggle` advice (Wayland) instead of retrying a portal that cannot work.
-2. Once the desktop has answered the shortcut request (Aura waits at most a
-   minute), it asks whether Aura may control input devices (Wayland
-   KDE/GNOME). The two dialogs never share the screen, and the tour's first
-   card names the ones still to come.
+2. Once the desktop has answered the shortcut request, it asks whether Aura
+   may control input devices (Wayland KDE/GNOME). The two dialogs only share
+   the screen if the shortcut dialog is left unanswered for a minute (Aura
+   then asks anyway). The tour's first card names the ones still to come.
 3. Setup finds everything bundled (engines, Base model) and hands over to the
    tour: mic test, shortcut, a test dictation into the card.
 
