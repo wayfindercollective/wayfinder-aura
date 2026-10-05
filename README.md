@@ -34,9 +34,10 @@ does not regress the Linux app.
   boardroom-professional to commit-message-dev.
 - **Made for Linux, including the weird parts.** Targets Wayland and X11, KDE
   and GNOME, desktop PCs and Steam Deck workflows. On AppImage and source
-  installs, hotkeys pause automatically while a game is registered with GameMode
-  so your push-to-talk key stays yours (Aura logs it the first time a shortcut
-  is ignored). The Flatpak cannot see GameMode.
+  installs, a single-key shortcut (such as F3) pauses while a game is registered
+  with GameMode, so it cannot collide with an in-game bind; with Gamer mode on,
+  a Ctrl/Alt shortcut such as the default keeps working. The Flatpak cannot see
+  GameMode.
 
 ## Features
 
@@ -46,7 +47,7 @@ does not regress the Linux app.
 | 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
 | 🎨 **Tone presets (Ultra)** | Normal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
-| 🎮 **Game-aware** | Hotkeys pause while a GameMode game is registered (Lutris/Steam; AppImage and source installs) |
+| 🎮 **Game-aware** | Single-key hotkeys pause while a GameMode game is registered (Lutris/Steam; AppImage and source installs); Gamer mode keeps Ctrl/Alt shortcuts working |
 | 🖥️ **Glassmorphic overlay** | Always-visible recording status, designed for Wayland |
 | 🎧 **Smart mic handling** | Picker shows exactly the mics your OS sees; selections survive device renumbering |
 | 🕹️ **Steam Deck workflow** | Trigger dictation from a back button with the bundled host helper |
@@ -87,10 +88,9 @@ Keys activate online once and keep working offline.
 2. Make it executable: right-click → **Properties** → check **"Executable as
    Program"** (or `chmod +x Wayfinder_Aura-*.AppImage`).
 3. Run it. On first launch it **adds itself to your applications menu** with an
-   icon and walks you through a quick tour. The AppImage carries no speech
-   model: on the Dictate tab, **Finish Setup** opens Whisper Models, where you
-   download the free Base model (about 150 MB). Then press **Ctrl+Alt+Space**
-   and start talking.
+   icon and walks you through a quick tour, whose first step downloads the free
+   Base speech model (about 150 MB; the AppImage carries none). Then press
+   **Ctrl+Alt+Space** and start talking.
 4. On a Wayland desktop the shortcut reads your keyboard directly, so add
    yourself to the `input` group once: `sudo usermod -aG input $USER`, then log
    out and back in. X11 sessions need nothing extra. The desktop also asks once

@@ -33,10 +33,9 @@ autostart on Linux except the Steam Deck service.
 
 **AppImage** (no Setup, tour only):
 1. Adds a menu entry. On Wayland the typing dialog appears as above.
-2. Tour. The AppImage carries no speech model: the test dictation reports
-   "No speech model yet"; Finish Setup on the Dictate tab opens Whisper Models
-   for the free Base model (open item: the tour's model step exists on macOS
-   and Windows only).
+2. Tour. The AppImage carries no speech model, so the tour's first step after
+   the mic test downloads the free Base model (as on macOS and Windows); a user
+   who skipped the tour gets the model panel at the next launch.
 3. Shortcut: evdev with the `input` group; on X11 without it, the X11 listener.
 
 **Source**: Setup checks packages (per-distro commands, rpm-ostree on
@@ -51,7 +50,7 @@ Bazzite/Silverblue, zypper on openSUSE), builds whisper.cpp, then the tour.
 | Portal stops taking keys mid-session | log line, then the normal tools (ydotool/wtype/xdotool) type | Turn the switch off and on |
 | No global-shortcut portal (Wayland) | activity log names the `--toggle` command | bind a desktop shortcut to it |
 | No `input` group (AppImage/source, Wayland) | activity log | `usermod -aG input $USER` as root, log out and in |
-| GameMode game running (AppImage/source) | first ignored shortcut is logged | quit the game or use the tray (policy open) |
+| GameMode game running (AppImage/source) | single-key shortcuts pause, first ignored press logged; Ctrl/Alt shortcuts keep working with Gamer mode on | use a Ctrl/Alt shortcut (the default) or the tray |
 
 ## Distros
 
@@ -87,14 +86,12 @@ detected before pasting.
 
 1. Sequence the two Flatpak dialogs and announce them in the tour (one line
    before they fire, start the typing session after the shortcut bind).
+   Decided 2026-10-04: ships as a known issue in 1.2.0-beta.1.
 2. AppImage: register a host app id with the portal (`org.freedesktop.host.portal.Registry`)
-   and confirm the restore token survives a restart; add the tour's model step
-   for the AppImage.
+   and confirm the restore token survives a restart.
 3. Retry a typing session that failed to start (not only the probe).
 4. Steam Deck installer: fail with a clear message when `/dev/input` is not
    readable; make the Scimitar grab and the R3 trigger opt-in.
-5. GameMode pause vs Gamer mode (AppImage/source): decide whether Gamer mode
-   overrides the pause.
 
 ## Live checks still needed
 

@@ -95,9 +95,15 @@ listed here.
   or a declined portal): a warm-up key and Shift release under XWayland, a
   timeout that scales with the message instead of cutting off long ones, Return
   and Ctrl+V always released, and errors that no longer carry the dictated text.
-- **The GameMode pause says so.** While a game is registered with GameMode
-  (Lutris and Proton register automatically; AppImage and source installs) the
-  record and style shortcuts are ignored; the first ignored press now logs why.
+- **Gamer mode works while a GameMode game runs.** On AppImage and source
+  installs the GameMode pause (Lutris and Proton register games automatically)
+  swallowed the record shortcut in exactly the games Gamer mode is for. With
+  Gamer mode on, a Ctrl/Alt shortcut (the default Ctrl+Alt+Space) now goes
+  through; single-key shortcuts such as F3 still pause, and the first ignored
+  press logs why.
+- **The AppImage tour downloads the free Base model first.** The AppImage
+  carries no speech model, so a clean install's test dictation failed; the
+  tour now offers the download, as on macOS and Windows.
 - **The Style tab icon follows a license change** (the padlock stayed after
   activating Ultra until a restart), **the recording hint promises Esc only
   when something listens for it**, and **the pill no longer clips its right end**

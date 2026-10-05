@@ -64,11 +64,10 @@ network and not perf"`) passes on a headless node; Ruff's CI classes and
    on KDE Wayland (portal typing and whether its restore token persists).
    Also confirm on the Steam machine that an unlisted game now gets a paste
    (Ctrl+V) rather than typed keys, as the Games tab promises.
-3. **First-run gaps from the permissions pass** (`docs/PERMISSIONS-AND-FIRST-RUN.md`):
-   the AppImage carries no speech model and its tour has no model step (users
-   must use Finish Setup on the Dictate tab, as the README now says), and the
-   two Flatpak dialogs are neither sequenced nor announced. Decide before the
-   release whether to ship these as known issues.
+3. **Known issue, decided 2026-10-04**: the two Flatpak dialogs (shortcut
+   bind, typing approval) are neither sequenced nor announced in the tour; it
+   ships as a known issue (`docs/PERMISSIONS-AND-FIRST-RUN.md`). The AppImage
+   tour now downloads the Base model first.
 4. **Server and storefront items outside this repo**: the feedback endpoint
    (`docs/LINUX-FOLLOWUPS-FROM-MACOS.md` 5.5) and the store screenshots, which
    still show Super+F2 and "Minimal" (recapture with
@@ -82,8 +81,8 @@ network and not perf"`) passes on a headless node; Ruff's CI classes and
   terminals ignore (they paste on Ctrl+Shift+V).
 - Cancel works only while recording; Shift+Esc after the stop press does not
   stop typing.
-- The GameMode pause (AppImage/source) still ignores shortcuts while a
-  GameMode game runs, which conflicts with Gamer mode; now logged, policy open.
+- Decided 2026-10-04: with Gamer mode on, Ctrl/Alt shortcuts go through the
+  GameMode pause; single-key shortcuts still pause (AppImage/source).
 - Get Update hands the browser an unverified file (no in-app checksum or
   signature check), and Flathub installs are not yet told apart from bundle
   installs.
