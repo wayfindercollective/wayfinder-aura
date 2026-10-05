@@ -5,6 +5,8 @@ import pytest
 
 from wayfinder.core import linux_game_chat as gc
 
+_REAL_PASTE_CLIPBOARD = gc.paste_clipboard
+
 
 @pytest.mark.parametrize("cls, title, key", [
     ("eden_2gb.dll", None, "daoc"),                          # Eden's client, as seen live
@@ -107,7 +109,12 @@ def _linux_app(monkeypatch, frontmost):
     monkeypatch.setattr(gc, "frontmost_app", lambda: frontmost)
     monkeypatch.setattr(gc, "ensure_game_focus", lambda window_id: False)
     calls, logs = [], []
-    monkeypatch.setattr(gc, "paste_clipboard", lambda: calls.append(("ctrl+v",)))
+    def fake_paste(guard=None):
+        if guard is not None:
+            guard()                       # raises to stop the paste
+        calls.append(("ctrl+v",))
+
+    monkeypatch.setattr(gc, "paste_clipboard", fake_paste)
     monkeypatch.setattr(injector, "inject_text", lambda *a, **k: calls.append(("typed",) + a))
     monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
     monkeypatch.setattr(gc, "_STEAM_WINDOWS", {})
@@ -245,24 +252,39 @@ def test_type_text_without_the_portal_uses_the_hardened_xdotool_command(monkeypa
 
 
 def test_game_paste_rechecks_after_waiting_for_held_keys(monkeypatch):
-    """A held modifier delays the keys by up to seconds; an Alt+Tab during that
-    wait must not send the paste to the other app."""
+    """A held modifier delays the keys by up to seconds (inside press_held);
+    an Alt+Tab during that wait must not send the paste to the other app."""
     from wayfinder.core import injector
     wm, app, calls, _ = _linux_app(monkeypatch, (5, "steam_app_1091500", "Cyberpunk 2077"))
+    monkeypatch.setattr(gc, "paste_clipboard", _REAL_PASTE_CLIPBOARD)   # the real wait
+    monkeypatch.setattr(gc, "_portal", lambda: None)
+    sent = []
+    monkeypatch.setattr(gc, "_xdotool", lambda *a, **k: sent.append(a))
     front = {"now": (5, "steam_app_1091500", "Cyberpunk 2077")}
     monkeypatch.setattr(gc, "frontmost_app", lambda: front["now"])
     monkeypatch.setattr(injector, "_require_modifier_release",
                         lambda: front.update(now=(9, "firefox", "Mail")))
     with pytest.raises(wm.InjectionError, match="left the front"):
         wm.WayfinderApp._inject_into_game_chat(app, "secret plan", 1)
-    assert ("ctrl+v",) not in calls
+    assert sent == []                     # no keydown went out
 
 
 def test_a_proton_game_with_an_exe_class_is_still_a_steam_game(monkeypatch):
     """gamescope's STEAM_GAME tag marks the window even when the class keeps
     the Windows exe name; Notepad under Wine carries no such tag."""
     wm, app, calls, _ = _linux_app(monkeypatch, (6, "sekiro.exe", "Sekiro"))
-    gc._remember_steam_window(6, "814380")
+    gc._note_steam_tag(6, "814380")
     assert wm.WayfinderApp._inject_into_game_chat(app, "gg", 1) is True
     assert calls == [("clipboard", "gg"), ("ctrl+v",)]
     assert gc.is_steam_game(6, "sekiro.exe") and not gc.is_steam_game(7, "notepad.exe")
+
+
+
+def test_a_reused_window_id_without_the_steam_tag_is_not_a_game(monkeypatch):
+    """X window ids are reused: once the id shows up untagged (Wine Notepad),
+    the cached Steam entry must not route it to game paste."""
+    monkeypatch.setattr(gc, "_STEAM_WINDOWS", {})
+    gc._note_steam_tag(6, "814380")
+    assert gc.is_steam_game(6, "sekiro.exe")
+    gc._note_steam_tag(6, None)            # fresh sighting: no STEAM_GAME
+    assert not gc.is_steam_game(6, "notepad.exe")

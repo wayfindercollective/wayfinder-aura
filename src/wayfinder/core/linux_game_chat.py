@@ -244,8 +244,9 @@ def _front_window() -> tuple[Optional[int], Optional[str], Optional[str]]:
         for _ in range(8):
             cls, title, appid = _window_facts(win)
             if cls or appid:
-                if appid:
-                    _remember_steam_window(int(win.id), appid)
+                # Fresh facts win: an untagged window clears a stale entry for
+                # its id (X window ids are reused).
+                _note_steam_tag(int(win.id), appid)
                 if appid and not (cls or "").lower().startswith("steam_app_"):
                     if not (cls or "").lower().endswith(".exe"):
                         cls = f"steam_app_{appid}"
@@ -270,7 +271,11 @@ def _front_window() -> tuple[Optional[int], Optional[str], Optional[str]]:
 _STEAM_WINDOWS: dict[int, str] = {}
 
 
-def _remember_steam_window(window_id: int, appid: str) -> None:
+def _note_steam_tag(window_id: int, appid: Optional[str]) -> None:
+    """Record what the window says right now: its STEAM_GAME id, or none."""
+    if not appid:
+        _STEAM_WINDOWS.pop(window_id, None)
+        return
     if len(_STEAM_WINDOWS) > 64:
         _STEAM_WINDOWS.clear()
     _STEAM_WINDOWS[window_id] = appid
@@ -374,11 +379,17 @@ def _xdotool(*args: str, timeout: float = 10) -> None:
         raise InjectionError(f"xdotool {' '.join(args[:2])} failed: {result.stderr.strip()}")
 
 
-def press_held(keys: str, hold_s: float = KEY_HOLD_S) -> None:
-    """Press ``keys`` (e.g. "Return", "ctrl+v") down for ``hold_s``, then release."""
+def press_held(keys: str, hold_s: float = KEY_HOLD_S, guard=None) -> None:
+    """Press ``keys`` (e.g. "Return", "ctrl+v") down for ``hold_s``, then release.
+
+    ``guard`` (raises to abort) runs after the wait for held modifiers, which
+    can take seconds, immediately before the keys go out.
+    """
     from .injector import InjectionError, _require_modifier_release
 
     _require_modifier_release()
+    if guard is not None:
+        guard()
     kb = _portal()
     if kb is not None:
         from .portal_keyboard import PortalKeyboardError, X11Layout
@@ -405,9 +416,9 @@ def press_return() -> None:
     press_held("Return")
 
 
-def paste_clipboard() -> None:
+def paste_clipboard(guard=None) -> None:
     """Ctrl+V into the game (the caller has already set the clipboard)."""
-    press_held("ctrl+v")
+    press_held("ctrl+v", guard=guard)
 
 
 def type_text(text: str) -> None:

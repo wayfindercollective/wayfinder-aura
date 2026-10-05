@@ -23751,22 +23751,22 @@ class WayfinderApp(ctk.CTk):
     def _linux_paste_into_game(self, text: str, window_id, gen=None) -> None:
         """Clipboard + Ctrl+V into the game in front (Linux). Setting the
         clipboard waits on the Tk thread and a held modifier can hold the keys
-        back for seconds; the user may Alt+Tab away or reset meanwhile. So wait
-        for the modifiers first, then check that this dictation and this game
-        are still current, then press Ctrl+V at once."""
-        from wayfinder.core.injector import _require_modifier_release
-
+        back for seconds; the user may Alt+Tab away or reset meanwhile. The
+        guard runs after that wait, immediately before Ctrl+V, and stops the
+        paste unless this dictation and this game are still current."""
         game_chat = _game_chat_module()
         if not self._set_clipboard_from_worker(text):
             raise InjectionError("Could not set the clipboard for the game paste")
-        _require_modifier_release()
-        if gen is not None and gen != self.session_generation:
-            raise InjectionError("Game paste stopped: the dictation was reset. "
-                                 "Your text is in History.")
-        if game_chat.frontmost_app()[0] != window_id:
-            raise InjectionError("Game paste stopped: the game left the front. "
-                                 "Your text is in History.")
-        game_chat.paste_clipboard()
+
+        def still_this_game() -> None:
+            if gen is not None and gen != self.session_generation:
+                raise InjectionError("Game paste stopped: the dictation was reset. "
+                                     "Your text is in History.")
+            if game_chat.frontmost_app()[0] != window_id:
+                raise InjectionError("Game paste stopped: the game left the front. "
+                                     "Your text is in History.")
+
+        game_chat.paste_clipboard(guard=still_this_game)
 
     def _set_clipboard_from_worker(self, text: str, timeout: float = 2.0) -> bool:
         """Set the clipboard on the Tk thread and wait (Linux game paste).
