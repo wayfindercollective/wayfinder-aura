@@ -85,6 +85,56 @@ def test_linux_uses_the_linux_backend(monkeypatch):
     assert wm._game_chat_module() is gc
 
 
+def test_games_tab_tells_daoc_players_to_open_chat_first():
+    entries = {e.name: e for e in gc.game_list()}
+    daoc = entries["Dark Age of Camelot"]
+    assert daoc.note == gc.DAOC.note
+    assert "Press Enter to open chat" in daoc.note and "UseTakeFocus=N" in daoc.note
+    assert "Don't press Enter first" not in daoc.note
+    # Pasted games keep the shared wording.
+    assert "pastes" in entries["World of Warcraft"].note
+
+
+def _linux_app(monkeypatch, frontmost):
+    from types import SimpleNamespace
+
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+
+    monkeypatch.setattr(wm, "IS_MACOS", False)
+    monkeypatch.setattr(wm, "IS_WINDOWS", False)
+    monkeypatch.setattr(wm, "_IS_LINUX", True)
+    monkeypatch.setattr(gc, "frontmost_app", lambda: frontmost)
+    monkeypatch.setattr(gc, "ensure_game_focus", lambda window_id: False)
+    calls, logs = [], []
+    monkeypatch.setattr(gc, "paste_clipboard", lambda: calls.append(("ctrl+v",)))
+    monkeypatch.setattr(injector, "inject_text", lambda *a, **k: calls.append(("typed",) + a))
+    app = SimpleNamespace(config={}, session_generation=1, log=logs.append)
+    app._set_clipboard_from_worker = (
+        lambda text, timeout=2.0: calls.append(("clipboard", text)) or True)
+    app._linux_game_paste_only = (
+        lambda text, window_id: wm.WayfinderApp._linux_game_paste_only(app, text, window_id))
+    return wm, app, calls, logs
+
+
+@pytest.mark.parametrize("frontmost", [
+    (5, "steam_app_1091500", "Cyberpunk 2077"),   # unlisted Proton game
+    (6, "sekiro.exe", "Sekiro"),                  # unlisted Wine game
+    (7, "steam_app_1343400", "RuneScape"),        # a not-recommended profile
+])
+def test_games_without_a_chat_profile_paste_and_never_type(monkeypatch, frontmost):
+    wm, app, calls, logs = _linux_app(monkeypatch, frontmost)
+    assert wm.WayfinderApp._inject_into_game_chat(app, "hello there", 1) is True
+    assert calls == [("clipboard", "hello there"), ("ctrl+v",)]
+    assert any("pasting normally" in line.lower() for line in logs)
+
+
+def test_ordinary_apps_keep_the_normal_injection(monkeypatch):
+    wm, app, calls, _ = _linux_app(monkeypatch, (8, "konsole", "Konsole"))
+    assert wm.WayfinderApp._inject_into_game_chat(app, "ls", 1) is False
+    assert calls == []
+
+
 def _ok(argv=None, **_kwargs):
     from types import SimpleNamespace
     return SimpleNamespace(returncode=0, stderr="", stdout="")

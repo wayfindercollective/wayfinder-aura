@@ -1537,6 +1537,11 @@ SETTING_TOOLTIPS = {
         "Also set up for Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings "
         "Online, Albion Online, RuneScape and EVE Online. In games Aura only pastes, "
         "never types keys, so dictation can't trigger a keybind."
+        + (
+            "\nDark Age of Camelot (Linux) has no paste: press Enter to open chat "
+            "first, then dictate, and Aura types it into the chat box."
+            if _IS_LINUX and not (IS_MACOS or IS_WINDOWS) else ""
+        )
     ),
     "game_chat_send": (
         "On: Aura presses Enter to send each message.\n"
@@ -12985,13 +12990,17 @@ class WayfinderApp(ctk.CTk):
         # --- Gamer mode ----------------------------------------------------------
         mode = tile("GAMER MODE")
         self._create_game_chat_rows(mode)
+        _linux_tab = _IS_LINUX and not (IS_MACOS or IS_WINDOWS)
         for line in (
             "In a supported game, don't press Enter first: tap your shortcut, speak, tap again.",
             "Aura hears gamer talk (inc, pull, LFG, M+...) and keeps your words as said.",
             "One message per dictation: if it's too long, the next part waits in chat for your "
             "Enter. Send it before dictating again.",
             "In games Aura only pastes, never types keys, so dictation can't trigger a keybind.",
-        ):
+        ) + ((
+            "Dark Age of Camelot has no paste: press Enter to open chat first, then dictate. "
+            "Aura types it into the chat box.",
+        ) if _linux_tab else ()):
             note(mode, "•  " + line, color=COLORS["text_secondary"])
         ctk.CTkFrame(mode, fg_color="transparent", height=SPACING["tile_pad_y"]).pack()
 
@@ -23522,6 +23531,18 @@ class WayfinderApp(ctk.CTk):
         inject_text_paste_windows(text)
         return True
 
+    def _linux_game_paste_only(self, text: str, window_id) -> bool:
+        """Linux, an unlisted or not-recommended game in front: the clipboard +
+        Ctrl+V the profiled games use, never keystroke typing - in a game,
+        typed letters are keybinds. A paste that fails raises
+        (-> INJECTION_ERROR); the text stays in History."""
+        game_chat = _game_chat_module()
+        game_chat.ensure_game_focus(window_id)
+        if not self._set_clipboard_from_worker(text):
+            raise InjectionError("Could not set the clipboard for the game paste")
+        game_chat.paste_clipboard()
+        return True
+
     def _set_clipboard_from_worker(self, text: str, timeout: float = 2.0) -> bool:
         """Set the clipboard on the Tk thread and wait (Linux game paste).
 
@@ -23569,6 +23590,8 @@ class WayfinderApp(ctk.CTk):
                          "with; pasting normally. See the Games tab.")
                 if IS_WINDOWS and not IS_MACOS:
                     return self._windows_game_paste_only(text)
+                if _IS_LINUX and not IS_MACOS:
+                    return self._linux_game_paste_only(text, pid)
             return False
         if profile.caution:
             # Not recommended, but not restricted: the normal paste, with a heads-up.
@@ -23576,12 +23599,14 @@ class WayfinderApp(ctk.CTk):
                      "see the Games tab.")
             if IS_WINDOWS and not IS_MACOS:
                 return self._windows_game_paste_only(text)
+            if _IS_LINUX and not IS_MACOS:
+                return self._linux_game_paste_only(text, pid)
             return False
         send = bool(self.config.get("game_chat_send", True)) and profile.auto_send
         typed = profile.key in getattr(game_chat, "TYPE_PROFILES", ())
         if typed:
             self.log(f"🎮 {profile.name} chat: typing into the chat box you opened "
-                     "(press Enter first; you press Enter to send)")
+                     f"(press Enter first; {'Aura sends it' if send else 'you press Enter to send'})")
         else:
             self.log(
                 f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"

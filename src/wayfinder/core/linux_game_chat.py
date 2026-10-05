@@ -114,10 +114,20 @@ def game_list() -> list[GameEntry]:
     facts don't hold; the Windows ones do under Wine/Proton)."""
     from .windows_game_chat import _researched
 
-    entries = [profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
+    entries = [_linux_profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
     names = {e.name.lower() for e in entries}
     entries += [e for e in _researched() if e.name.lower() not in names]
     return sorted(entries, key=lambda e: e.name.lower())
+
+
+def _linux_profile_entry(profile: GameProfile) -> GameEntry:
+    """The shared Games tab row, except that a typed chat shows its own note:
+    the shared "opens chat, pastes and sends; don't press Enter first" is the
+    opposite of what a player must do in Dark Age of Camelot."""
+    entry = profile_entry(profile)
+    if profile.key in TYPE_PROFILES and profile.note:
+        return GameEntry(entry.name, entry.status, profile.note, entry.aliases)
+    return entry
 
 
 def search_games(query: str) -> list[GameEntry]:
