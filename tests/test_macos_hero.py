@@ -76,7 +76,18 @@ def test_metal_overlay_shader_compiles_on_the_release_device():
 
 
 def test_metal_overlay_frame_preserves_qt_wave_overflow():
-    # Qt's (10, 20, 80, 24) wave box maps to y=56 in a 100px-tall native
-    # content view. Metal expands four pixels on every edge, so the glow can
-    # breathe outside that layout box exactly as the QPainter pen did.
-    assert _expanded_wave_frame(10, 20, 80, 24, 100) == (6.0, 52.0, 88, 32)
+    # Qt's QContainerLayer is geometry-flipped: its sublayers use a top-left
+    # origin, like the Qt wave box. A standalone unflipped layer uses AppKit's
+    # bottom-left origin. Metal still expands four pixels for the soft glow.
+    assert _expanded_wave_frame(
+        10, 20, 80, 24, 100, geometry_flipped=True
+    ) == (6.0, 16.0, 88, 32)
+    assert _expanded_wave_frame(
+        10, 20, 80, 24, 100, geometry_flipped=False
+    ) == (6.0, 52.0, 88, 32)
+    # Reserving 15px above the pill for the cancel hint moves both Qt and
+    # Metal wave frames down 15px inside the enlarged window. With the old
+    # unflipped formula, Metal stayed at y=18 and floated above the pill.
+    plain = _expanded_wave_frame(10, 20, 80, 16, 60, geometry_flipped=True)
+    hinted = _expanded_wave_frame(10, 35, 80, 16, 75, geometry_flipped=True)
+    assert hinted[1] - plain[1] == 15
