@@ -98,3 +98,79 @@ def test_collect_preflight_pings_socket_on_host_when_in_foreign_flatpak(monkeypa
     report = preflight.collect_preflight()
 
     assert report["wayfinder_socket"]["ping"].startswith("host:")
+
+
+def test_parse_portal_device_types_reads_the_gdbus_reply():
+    preflight = _load_preflight()
+
+    assert preflight.parse_portal_device_types("(<uint32 7>,)\n") == 7
+    assert preflight.parse_portal_device_types("") is None
+    assert preflight.parse_portal_device_types("Error: GDBus.Error:org.freedesktop.DBus.Error.UnknownProperty") is None
+
+
+def test_portal_approval_reads_state_without_revealing_the_token(tmp_path):
+    preflight = _load_preflight()
+    approved = tmp_path / "approved.json"
+    approved.write_text('{"declined": false, "restore_token": "secret-token"}')
+    declined = tmp_path / "declined.json"
+    declined.write_text('{"declined": true, "restore_token": ""}')
+
+    assert preflight.portal_approval([tmp_path / "missing.json"]) == "not asked yet"
+    assert preflight.portal_approval([declined]) == "declined"
+    assert preflight.portal_approval([declined, approved]) == "approved"
+
+
+def _wayland_report(portal_types, approval="approved", ydotool_socket="missing"):
+    return {
+        "session": {"XDG_SESSION_TYPE": "wayland", "XDG_CURRENT_DESKTOP": "KDE"},
+        "tools": {"wtype": "", "xdotool": "/usr/bin/xdotool", "ydotool": "", "flatpak": "/usr/bin/flatpak"},
+        "ydotool_socket": ydotool_socket,
+        "remote_desktop_portal": {"available_device_types": portal_types, "aura_approval": approval},
+        "wayfinder_socket": {"ping": "pong"},
+        "gpu": {"dedicated_gpu": {"present": False}, "vulkan_devices": []},
+        "steam_deck": {"detected": False},
+    }
+
+
+def _rows(preflight, report):
+    return {name: (status, detail) for status, name, detail in preflight.summarize(report)}
+
+
+def test_wayland_with_portal_treats_wtype_and_ydotool_as_fallbacks():
+    preflight = _load_preflight()
+    rows = _rows(preflight, _wayland_report(7))
+
+    assert rows["RemoteDesktop portal"][0] == "OK"
+    assert rows["Aura portal approval"][0] == "OK"
+    assert rows["host tool wtype"][0] == "INFO"
+    assert rows["host tool ydotool"][0] == "INFO"
+    assert rows["ydotool socket"][0] == "INFO"
+    assert "secret" not in repr(rows)
+
+
+def test_wayland_without_portal_keyboard_warns_and_needs_fallbacks():
+    preflight = _load_preflight()
+    rows = _rows(preflight, _wayland_report(None, approval="not asked yet"))
+
+    assert rows["RemoteDesktop portal"][0] == "WARN"
+    assert rows["Aura portal approval"][0] == "INFO"
+    assert rows["host tool wtype"][0] == "WARN"
+    assert rows["ydotool socket"][0] == "WARN"
+
+
+def test_declined_portal_warns_with_the_settings_toggle():
+    preflight = _load_preflight()
+    status, detail = _rows(preflight, _wayland_report(7, approval="declined"))["Aura portal approval"]
+
+    assert status == "WARN"
+    assert "Type into every app" in detail
+
+
+def test_x11_session_has_no_portal_rows():
+    preflight = _load_preflight()
+    report = _wayland_report(7)
+    report["session"]["XDG_SESSION_TYPE"] = "x11"
+    rows = _rows(preflight, report)
+
+    assert "RemoteDesktop portal" not in rows
+    assert rows["host tool wtype"][0] == "WARN"
