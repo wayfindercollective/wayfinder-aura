@@ -497,6 +497,33 @@ def test_characters_without_a_key_are_pasted(portal_ready, monkeypatch):
     assert portal_ready.typed == []
 
 
+def test_the_portal_paste_puts_the_old_clipboard_back(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    clipboard = {"text": "user's url"}
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", lambda: clipboard["text"])
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE",
+                        lambda t: clipboard.update(text=t) or True)
+    monkeypatch.setattr(injector, "_PORTAL_PASTE_SETTLE_S", 0)
+    monkeypatch.setattr(injector, "_PORTAL_RESTORE_AFTER_S", 0)
+    injector._inject_text_type_linux("café")
+    assert portal_ready.pressed == ["ctrl+v"] and clipboard["text"] == "user's url"
+
+
+def test_the_portal_paste_never_overwrites_a_newer_copy(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    clipboard = {"text": "user's url"}
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", lambda: clipboard["text"])
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE",
+                        lambda t: clipboard.update(text=t) or True)
+    monkeypatch.setattr(injector, "_PORTAL_PASTE_SETTLE_S", 0)
+    # The user copies something else while Aura waits to restore.
+    monkeypatch.setattr(injector.time, "sleep",
+                        lambda s: clipboard.update(text="copied meanwhile") if s else None)
+    monkeypatch.setattr(injector, "_PORTAL_RESTORE_AFTER_S", 0.4)
+    injector._inject_text_type_linux("café")
+    assert clipboard["text"] == "copied meanwhile"
+
+
 def test_without_a_clipboard_accents_are_folded(portal_ready):
     import wayfinder.core.injector as injector
     injector._inject_text_type_linux("café")

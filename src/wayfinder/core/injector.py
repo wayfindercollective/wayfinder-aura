@@ -1357,7 +1357,10 @@ def _portal_paste(text: str) -> None:
     if previous is not None and previous != text:
         time.sleep(_PORTAL_RESTORE_AFTER_S)
         try:
-            _PORTAL_CLIPBOARD_WRITE(previous)
+            # Only if the clipboard still holds the dictation: the user may
+            # have copied something new meanwhile.
+            if _PORTAL_CLIPBOARD_READ() == text:
+                _PORTAL_CLIPBOARD_WRITE(previous)
         except Exception:
             pass
 
