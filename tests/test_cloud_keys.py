@@ -147,3 +147,39 @@ def test_default_cloud_models_are_current():
     from wayfinder.config import DEFAULT_CONFIG
     assert DEFAULT_CONFIG["anthropic_model"] in ck.ANTHROPIC_CLEANUP_MODELS
     assert DEFAULT_CONFIG["openai_model"] in ck.OPENAI_CLEANUP_MODELS
+
+
+def test_a_key_that_could_not_be_read_is_never_deleted(tmp_path, monkeypatch):
+    """A locked Keychain or a denied access prompt made get() fail; the next
+    save treated the empty value as "removed" and deleted every stored key."""
+    import wayfinder.config as config_module
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(config_module.sys, "platform", "darwin")
+    if not hasattr(config_module.os, "fchmod"):  # Windows simulating macOS
+        monkeypatch.setattr(config_module.os, "fchmod", lambda _fd, _mode: None, raising=False)
+    calls = []
+
+    class Locked:
+        def get(self, name):
+            calls.append(("get", name))
+            return None              # the store failed: the key may still be there
+
+        def set(self, name, value):
+            calls.append(("set", name))
+            return True
+
+        def delete(self, name):
+            calls.append(("delete", name))
+            return True
+
+    monkeypatch.setattr(config_module, "_macos_keychain", lambda: Locked())
+    monkeypatch.setattr(config_module, "_KEYCHAIN_SYNCED", {})
+    monkeypatch.setattr(config_module, "_KEYCHAIN_UNREADABLE", set())
+    config = config_module.load_config()
+    config_module.save_config(config)
+    assert not [c for c in calls if c[0] == "delete"]
+    # A key the user enters afterwards is still stored.
+    config["groq_api_key"] = "gsk_new"
+    config_module.save_config(config)
+    assert ("set", "groq_api_key") in calls

@@ -1301,6 +1301,9 @@ def load_config() -> dict:
 # Credential Manager (utils/windows_credentials.py), not config.json.
 SECRET_CONFIG_KEYS = ("groq_api_key", "openai_api_key", "anthropic_api_key")
 _KEYCHAIN_SYNCED: dict[str, str] = {}
+# Names whose stored key could not be read (locked Keychain, a denied access
+# prompt): an empty value there means "unknown", not "removed".
+_KEYCHAIN_UNREADABLE: set[str] = set()
 
 
 def _macos_keychain():
@@ -1375,7 +1378,10 @@ def _load_macos_secrets(config: dict, user_config: dict) -> bool:
             config[name] = plain
             continue
         stored = keychain.get(name)
-        if stored is not None:
+        if stored is None:
+            _KEYCHAIN_UNREADABLE.add(name)  # the key may still be stored
+        else:
+            _KEYCHAIN_UNREADABLE.discard(name)
             _KEYCHAIN_SYNCED[name] = stored
             config[name] = stored
     if moved:
@@ -1403,11 +1409,18 @@ def save_config(config: dict) -> None:
             on_disk = dict(config)
             for name in SECRET_CONFIG_KEYS:
                 value = str(config.get(name) or "").strip()
+                if not value and name in _KEYCHAIN_UNREADABLE:
+                    # Never delete a key we only failed to read: the next
+                    # save after a locked Keychain or a denied prompt would
+                    # otherwise erase it.
+                    on_disk[name] = ""
+                    continue
                 # Only a key the Keychain (Windows: Credential Manager) now
                 # holds leaves config.json; if it refused it, the file keeps it
                 # as before.
                 if _keychain_sync(keychain, name, value):
                     on_disk[name] = ""
+                    _KEYCHAIN_UNREADABLE.discard(name)
     # Atomic write: dump to a temp file, then os.replace() onto the real path so a
     # crash mid-write can never truncate/corrupt the existing config.
     tmp_file = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")
