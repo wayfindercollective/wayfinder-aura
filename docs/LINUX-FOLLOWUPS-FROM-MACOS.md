@@ -82,6 +82,9 @@ confirm it on Linux; **Fix sketch** is the macOS fix, for reference.
 - **Fix sketch (macOS):** a random key per spawn in the child's environment
   (`LLAMA_API_KEY`, never argv), `Authorization: Bearer` on our requests, and
   `--no-slots` (`llama_server.py`, darwin-gated).
+- **Linux: done 2026-10-04.** Same key and `--no-slots` on Linux (Windows
+  still unkeyed). Checked against the Flatpak's llama-server (b9608): /health
+  200 without a key, /completion and /props 401, /slots 501, our client 200.
 
 ### 1.9 whisper-server computes token timestamps nobody reads
 - **Evidence:** requests send only file/response_format/prompt, so the server
@@ -220,6 +223,7 @@ pre-empts it (`on_hotkey`). All darwin-gated.
 - **Evidence:** `urlopen` to 127.0.0.1 honours `http_proxy` unless `no_proxy`
   lists it, so dictation audio and cleanup text are sent to the proxy.
 - **Fix sketch (macOS):** `utils/loopback_http.py` (proxy-free opener).
+- **Linux: done 2026-10-04.** The proxy-free opener is used on every platform.
 
 ### 4.5 API keys are stored and handled loosely
 - Plain text in `config.json`; the temp file is created 0644 before chmod
@@ -237,6 +241,8 @@ pre-empts it (`on_hotkey`). All darwin-gated.
   deprecated (shutdown 2027-02-26, replacement `gpt-transcribe`).
 - **Fix sketch (macOS):** `core/cloud_keys.py` model lists + a config
   migration of retired IDs (darwin-gated in `config.py`).
+- **Linux: done 2026-10-04.** Linux uses the same model menus and default,
+  and migrates retired IDs (persisting only the rewritten keys).
 
 ### 4.7 Cloud key panels
 - A saved key cannot be removed (empty field + Save keeps it).
