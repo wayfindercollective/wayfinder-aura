@@ -77,7 +77,22 @@ fi
 
 (
   cd "$REPO_ROOT/flatpak"
-  flatpak-builder --user --force-clean --ccache --jobs=2 \
+  # A source host's hiccup must not fail a release (GitHub answered HTTP 504
+  # for SPIRV-Headers on v1.2.0-beta.7's first run): fetch every source into
+  # the state dir first, up to three times, then build without the network.
+  for attempt in 1 2 3; do
+    if flatpak-builder --user --download-only \
+        --state-dir="$STATE_DIR" build-dir "$manifest"; then
+      break
+    fi
+    if [[ $attempt -eq 3 ]]; then
+      echo "Flatpak sources could not be downloaded after 3 attempts." >&2
+      exit 1
+    fi
+    echo "Flatpak source download failed (attempt $attempt of 3); retrying in 60 s." >&2
+    sleep 60
+  done
+  flatpak-builder --user --force-clean --ccache --jobs=2 --disable-download \
     --state-dir="$STATE_DIR" --repo=repo build-dir "$manifest"
 )
 
