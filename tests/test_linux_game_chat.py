@@ -113,13 +113,13 @@ def _linux_app(monkeypatch, frontmost):
     app._set_clipboard_from_worker = (
         lambda text, timeout=2.0: calls.append(("clipboard", text)) or True)
     app._linux_game_paste_only = (
-        lambda text, window_id: wm.WayfinderApp._linux_game_paste_only(app, text, window_id))
+        lambda text, window_id, gen=None:
+        wm.WayfinderApp._linux_game_paste_only(app, text, window_id, gen))
     return wm, app, calls, logs
 
 
 @pytest.mark.parametrize("frontmost", [
     (5, "steam_app_1091500", "Cyberpunk 2077"),   # unlisted Proton game
-    (6, "sekiro.exe", "Sekiro"),                  # unlisted Wine game
     (7, "steam_app_1343400", "RuneScape"),        # a not-recommended profile
 ])
 def test_games_without_a_chat_profile_paste_and_never_type(monkeypatch, frontmost):
@@ -129,10 +129,35 @@ def test_games_without_a_chat_profile_paste_and_never_type(monkeypatch, frontmos
     assert any("pasting normally" in line.lower() for line in logs)
 
 
-def test_ordinary_apps_keep_the_normal_injection(monkeypatch):
-    wm, app, calls, _ = _linux_app(monkeypatch, (8, "konsole", "Konsole"))
+@pytest.mark.parametrize("frontmost", [
+    (8, "konsole", "Konsole"),
+    (6, "notepad.exe", "Untitled - Notepad"),   # any Wine window has an .exe class
+])
+def test_ordinary_apps_keep_the_normal_injection(monkeypatch, frontmost):
+    wm, app, calls, logs = _linux_app(monkeypatch, frontmost)
     assert wm.WayfinderApp._inject_into_game_chat(app, "ls", 1) is False
     assert calls == []
+    assert not any("pasting" in line.lower() for line in logs)
+
+
+def test_game_paste_stops_if_the_game_left_the_front(monkeypatch):
+    """Setting the clipboard waits on the Tk thread; an Alt+Tab meanwhile must
+    not paste the dictation into the other app."""
+    wm, app, calls, _ = _linux_app(monkeypatch, (5, "steam_app_1091500", "Cyberpunk 2077"))
+    fronts = iter([(5, "steam_app_1091500", "Cyberpunk 2077"), (9, "firefox", "Mail")])
+    monkeypatch.setattr(gc, "frontmost_app", lambda: next(fronts))
+    with pytest.raises(wm.InjectionError, match="left the front"):
+        wm.WayfinderApp._inject_into_game_chat(app, "secret plan", 1)
+    assert ("ctrl+v",) not in calls
+
+
+def test_game_paste_stops_if_the_dictation_was_reset(monkeypatch):
+    wm, app, calls, _ = _linux_app(monkeypatch, (5, "steam_app_1091500", "Cyberpunk 2077"))
+    app._set_clipboard_from_worker = (
+        lambda text, timeout=2.0: setattr(app, "session_generation", 2) or True)
+    with pytest.raises(wm.InjectionError, match="reset"):
+        wm.WayfinderApp._inject_into_game_chat(app, "old dictation", 1)
+    assert ("ctrl+v",) not in calls
 
 
 def _ok(argv=None, **_kwargs):

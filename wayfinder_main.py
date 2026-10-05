@@ -23703,15 +23703,24 @@ class WayfinderApp(ctk.CTk):
         inject_text_paste_windows(text)
         return True
 
-    def _linux_game_paste_only(self, text: str, window_id) -> bool:
-        """Linux, an unlisted or not-recommended game in front: the clipboard +
-        Ctrl+V the profiled games use, never keystroke typing - in a game,
-        typed letters are keybinds. A paste that fails raises
-        (-> INJECTION_ERROR); the text stays in History."""
+    def _linux_game_paste_only(self, text: str, window_id, gen=None) -> bool:
+        """Linux, an unlisted Steam game or a not-recommended one in front: the
+        clipboard + Ctrl+V the profiled games use, never keystroke typing - in a
+        game, typed letters are keybinds. A paste that fails or is stopped
+        raises (-> INJECTION_ERROR); the text stays in History."""
         game_chat = _game_chat_module()
         game_chat.ensure_game_focus(window_id)
         if not self._set_clipboard_from_worker(text):
             raise InjectionError("Could not set the clipboard for the game paste")
+        # Setting the clipboard waits on the Tk thread: the user may have
+        # Alt+Tabbed away or reset meanwhile. Paste only this dictation, and
+        # only into the same game.
+        if gen is not None and gen != self.session_generation:
+            raise InjectionError("Game paste stopped: the dictation was reset. "
+                                 "Your text is in History.")
+        if game_chat.frontmost_app()[0] != window_id:
+            raise InjectionError("Game paste stopped: the game left the front. "
+                                 "Your text is in History.")
         game_chat.paste_clipboard()
         return True
 
@@ -23779,12 +23788,21 @@ class WayfinderApp(ctk.CTk):
             category, bundle_path = game_chat.app_signals(pid)
             reason = game_chat.unlisted_game_reason(bundle_id, app_name, category, bundle_path)
             if reason is not None:
+                linux = _IS_LINUX and not (IS_MACOS or IS_WINDOWS)
+                # Linux: only a Steam game is surely a game. Any Wine window
+                # (Notepad, a launcher) has an .exe class, so those keep the
+                # normal typing path, Auto-Enter included.
+                steam_game = str(bundle_id or "").lower().startswith("steam_app_")
+                if linux and not steam_game:
+                    self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been "
+                             "tested with; typing as usual. See the Games tab.")
+                    return False
                 self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been tested "
                          "with; pasting normally. See the Games tab.")
                 if IS_WINDOWS and not IS_MACOS:
                     return self._windows_game_paste_only(text)
-                if _IS_LINUX and not IS_MACOS:
-                    return self._linux_game_paste_only(text, pid)
+                if linux:
+                    return self._linux_game_paste_only(text, pid, gen)
             return False
         if profile.caution:
             # Not recommended, but not restricted: the normal paste, with a heads-up.
@@ -23793,7 +23811,7 @@ class WayfinderApp(ctk.CTk):
             if IS_WINDOWS and not IS_MACOS:
                 return self._windows_game_paste_only(text)
             if _IS_LINUX and not IS_MACOS:
-                return self._linux_game_paste_only(text, pid)
+                return self._linux_game_paste_only(text, pid, gen)
             return False
         send = bool(self.config.get("game_chat_send", True)) and profile.auto_send
         typed = profile.key in getattr(game_chat, "TYPE_PROFILES", ())
