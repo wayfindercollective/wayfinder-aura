@@ -44,14 +44,28 @@ jobs:
       # Tools and limits are provisioned on the host.
       # Jobs never change host swap or overcommit settings.
 
+      # flatpak-builder's state (module cache, ccache, downloads) lives on the
+      # runner between runs, outside the checkout that actions/checkout wipes:
+      # only modules whose manifest or sources changed rebuild (docs/CI.md:
+      # ~30 min cold, ~5 min warm; v1.2.0-beta.6 spent 61 min cold under the
+      # job's limits). Capped at 30 GiB: past that it starts over cold.
+      # Delete the directory to force a cold build.
       - name: Build and smoke-test Flatpak
         run: |
+          state="$HOME/.cache/wayfinder-aura-flatpak/release-ci-state"
+          mkdir -p "$state"
+          if [ "$(du -s --block-size=1G "$state" | cut -f1)" -gt 30 ]; then
+            echo "Flatpak builder state is over 30 GiB: starting it over (cold build)."
+            rm -rf "$state" && mkdir -p "$state"
+          fi
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             scripts/ci/build-flatpak-candidate.sh \
               --tag "$GITHUB_REF_NAME" \
+              --state-dir "$state" \
               --output flatpak/io.wayfindercollective.WayfinderAura.flatpak
           else
             scripts/ci/build-flatpak-candidate.sh \
+              --state-dir "$state" \
               --output flatpak/io.wayfindercollective.WayfinderAura.flatpak
           fi
 
