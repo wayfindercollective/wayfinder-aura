@@ -408,6 +408,11 @@ class _Keyboard:
         self.typed = []
         self.pressed = []
         self.fail_at = fail_at
+        self.press_fails = False
+        self.failed = None
+
+    def mark_failed(self, detail):
+        self.failed = detail
 
     def type_text(self, text, delay, layout=None):
         if self.fail_at is not None:
@@ -417,6 +422,8 @@ class _Keyboard:
         self.typed.append((text, delay))
 
     def press_keys(self, combo, hold_s=0.0, layout=None):
+        if self.press_fails:
+            raise pk.PortalKeyboardError("gone")
         self.pressed.append(combo)
 
 
@@ -479,15 +486,82 @@ def test_without_a_clipboard_accents_are_folded(portal_ready):
     assert portal_ready.typed == [("cafe", 2)]
 
 
-def test_failure_before_any_key_falls_back_to_xdotool(portal_ready, monkeypatch):
+def _selection_without_a_failed_portal(monkeypatch, kb, fallback="xdotool"):
+    from wayfinder.utils import platform as plat
+    monkeypatch.setattr(plat, "get_text_injector",
+                        lambda: fallback if kb.failed else "portal")
+
+
+def test_failure_before_any_key_marks_the_portal_failed_and_falls_back(portal_ready, monkeypatch):
     import wayfinder.core.injector as injector
     portal_ready.fail_at = 0
+    _selection_without_a_failed_portal(monkeypatch, portal_ready)
     used = []
-    monkeypatch.setattr(injector, "_portal_fallback_tool", lambda: "xdotool")
     monkeypatch.setattr(injector, "_inject_text_xdotool",
                         lambda text, speed, target: used.append(text))
     injector._inject_text_type_linux("hello")
     assert used == ["hello"]
+    assert "did not reach the desktop" in portal_ready.failed   # the app logs it
+
+
+def _no_real_tools(monkeypatch):
+    """Record subprocess calls instead of running them (ydotoold may be live)."""
+    import wayfinder.core.injector as injector
+    from types import SimpleNamespace
+    runs = []
+    monkeypatch.setattr(injector.subprocess, "run",
+                        lambda argv, **k: runs.append(list(argv)) or
+                        SimpleNamespace(returncode=0, stdout="", stderr=""))
+    return runs
+
+
+def test_after_a_portal_failure_the_normal_selection_decides(portal_ready, monkeypatch):
+    # A non-Flatpak Wayland install with ydotool but no xdotool must not
+    # hard-fail with "no tool" once the portal stops taking keys.
+    import wayfinder.core.injector as injector
+    runs = _no_real_tools(monkeypatch)
+    portal_ready.fail_at = 0
+    _selection_without_a_failed_portal(monkeypatch, portal_ready, fallback="ydotool")
+    monkeypatch.setattr(injector, "_portal_fallback_tool", lambda: "none")
+    monkeypatch.setattr(injector, "check_ydotool_ready", lambda: (True, ""))
+    monkeypatch.setattr(injector, "_get_ydotool_binary", lambda: "/fake/ydotool")
+    monkeypatch.setattr(injector, "_get_ydotool_env", lambda: {})
+    injector._inject_text_type_linux("hello")
+    assert runs and runs[-1][0] == "/fake/ydotool" and runs[-1][-1] == "hello"
+
+
+def test_a_clipboard_error_does_not_disable_the_portal(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", lambda text: False)
+    monkeypatch.setattr(injector, "_portal_fallback_tool", lambda: "xdotool")
+    used = []
+    monkeypatch.setattr(injector, "_inject_text_xdotool",
+                        lambda text, speed, target: used.append(text))
+    injector._inject_text_type_linux("café")
+    assert used == ["café"] and portal_ready.failed is None
+
+
+def test_enter_after_a_portal_failure_marks_it_failed(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    runs = _no_real_tools(monkeypatch)
+    portal_ready.press_fails = True
+    _selection_without_a_failed_portal(monkeypatch, portal_ready, fallback="none")
+    monkeypatch.setattr(injector, "_get_ydotool_binary", lambda: None)
+    with pytest.raises(injector.InjectionError, match="ydotool"):
+        injector.press_enter()
+    assert portal_ready.failed and runs == []
+
+
+def test_mark_failed_only_leaves_a_ready_session(tmp_path):
+    kb = pk.PortalKeyboard(state_path=tmp_path / "state.json")
+    seen = []
+    kb.on_change(lambda state, detail: seen.append(state))
+    kb._state = kb.DECLINED
+    kb.mark_failed("x")
+    assert kb.state == kb.DECLINED and seen == []
+    kb._state = kb.READY
+    kb.mark_failed("keys did not reach the desktop")
+    assert kb.state == kb.FAILED and seen == [kb.FAILED]
 
 
 def test_partial_failure_is_never_retyped(portal_ready, monkeypatch):
@@ -592,3 +666,4 @@ def test_focus_inside_the_game_window_is_left_alone(monkeypatch):
     _xlib(monkeypatch, disp)
     assert gc.ensure_game_focus(0x6200001) is False
     assert not game.focused
+

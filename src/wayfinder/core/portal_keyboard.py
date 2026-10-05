@@ -330,6 +330,13 @@ class PortalKeyboard:
     def ready(self) -> bool:
         return self._state == self.READY and bool(self._session) and self._bus is not None
 
+    def mark_failed(self, detail: str) -> None:
+        """Keys stopped reaching the desktop although no Closed signal came (a
+        portal backend restart): stop routing dictation here, so the next one
+        takes the normal fallback instead of failing the same way again."""
+        if self._state == self.READY:
+            self._set(self.FAILED, detail)
+
     def on_change(self, callback: Callable[[str, str], None]) -> None:
         """callback(state, detail) on every state change (any thread)."""
         self._listeners.append(callback)
