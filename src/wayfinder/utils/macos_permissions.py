@@ -27,15 +27,18 @@ def macos_bundle_path() -> Path | None:
 
 
 def macos_install_location_ready() -> bool:
-    """TCC approvals should be granted to the stable /Applications copy."""
+    """TCC approvals should be granted to a stable installed copy: /Applications,
+    or ~/Applications (where a standard user without admin rights installs)."""
     bundle = macos_bundle_path()
     if bundle is None:
         return True
-    try:
-        bundle.relative_to("/Applications")
-        return True
-    except ValueError:
-        return False
+    for root in (Path("/Applications"), Path.home() / "Applications"):
+        try:
+            bundle.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def request_accessibility_permission(*, prompt: bool = True) -> bool | None:

@@ -30,6 +30,21 @@ def test_frozen_macos_permissions_require_applications_copy(monkeypatch):
     )
     assert macos_permissions.macos_install_location_ready() is True
 
+    # A standard user without admin rights installs into ~/Applications.
+    monkeypatch.setattr(macos_permissions.Path, "home", classmethod(lambda cls: cls("/Users/pat")))
+    monkeypatch.setattr(
+        macos_permissions.sys,
+        "executable",
+        "/Users/pat/Applications/Wayfinder Aura.app/Contents/MacOS/Wayfinder Aura",
+    )
+    assert macos_permissions.macos_install_location_ready() is True
+    monkeypatch.setattr(
+        macos_permissions.sys,
+        "executable",
+        "/Users/pat/Downloads/Wayfinder Aura.app/Contents/MacOS/Wayfinder Aura",
+    )
+    assert macos_permissions.macos_install_location_ready() is False
+
 
 def test_macos_passes_prompt_choice_to_native_api(monkeypatch):
     calls = []
