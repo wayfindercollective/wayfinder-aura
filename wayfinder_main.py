@@ -3625,6 +3625,15 @@ def _macos_keep_awake(fn, key: str, reason: str):
     return run
 
 
+def _portal_desktop() -> bool:
+    """A Wayland desktop where Aura opens the RemoteDesktop portal keyboard."""
+    try:
+        from wayfinder.core import portal_keyboard
+        return portal_keyboard.host_is_wayland_desktop()
+    except Exception:
+        return False
+
+
 def _cloud_cleanup_models(provider: str) -> list[str]:
     """Current cloud cleanup models for the Settings model menus."""
     from wayfinder.core.cloud_keys import ANTHROPIC_CLEANUP_MODELS, OPENAI_CLEANUP_MODELS
@@ -4084,8 +4093,9 @@ def hotkey_listener(
                     else:
                         regrab_retries -= 1
                         if regrab_retries == 0:
-                            log("⚠️ Couldn't re-grab the device after Game Mode — toggle hotkeys "
-                                "off/on in Settings to retry if its keys leak to other apps")
+                            log("⚠️ Couldn't re-grab the device after Game Mode — pick it again "
+                                "in Settings → System → Hotkey Devices if its keys leak to "
+                                "other apps")
 
             # No devices: wait (honoring shutdown) and rescan instead of dying — a slept
             # wireless keyboard or USB re-enumeration then recovers automatically.
@@ -12657,8 +12667,20 @@ class WayfinderApp(ctk.CTk):
                 if portal_keyboard.portal_keyboard_offered():
                     break
             else:
-                self.log("⌨️ This desktop offers no remote-control keyboard: "
-                         "Aura types with xdotool (X11 apps and games only)")
+                try:
+                    from wayfinder.utils.platform import get_text_injector
+                    tool = get_text_injector()
+                except Exception:
+                    tool = "none"
+                if tool == "xdotool":
+                    self.log("⌨️ This desktop offers no remote-control keyboard: "
+                             "Aura types with xdotool (X11 apps and games only)")
+                elif tool in ("wtype", "ydotool"):
+                    self.log("⌨️ This desktop offers no remote-control keyboard: "
+                             f"Aura types with {tool}")
+                else:
+                    self.log("⚠️ This desktop offers no remote-control keyboard and no "
+                             "typing tool was found: install ydotool or xdotool")
                 return
             if not self.config.get("linux_portal_typing", True):
                 return  # turned off while waiting
@@ -14872,6 +14894,11 @@ class WayfinderApp(ctk.CTk):
                 self.log("✓ Text injection: xdotool")
             elif _tool == "wtype":
                 self.log("✓ Text injection: wtype (Wayland virtual keyboard)")
+            elif (self.config.get("linux_portal_typing", True)
+                  and _portal_desktop()):
+                # The portal comes up a moment later and logs its own result;
+                # warning that typing "won't work" first was false.
+                pass
             elif not shutil.which("ydotool"):
                 self.log("⚠️ ydotool not found - text injection won't work")
                 self.log(f"💡 Install: {_get_install_hint('ydotool')}")
@@ -22307,9 +22334,7 @@ class WayfinderApp(ctk.CTk):
         self._evdev_stop_event = threading.Event()
 
         hotkey_name = self.get_hotkey_display()
-        style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
-                         65: "F7", 66: "F8", 67: "F9", 68: "F10",
-                         57: "Space", 28: "Enter"}.get(style_toggle_key, f"Key{style_toggle_key}")
+        style_key_name = self.get_style_hotkey_display()
         self.log(f"⌨️ Record hotkey: {hotkey_name} | Style toggle: {style_key_name}")
 
         self._hotkey_thread = threading.Thread(
@@ -23790,7 +23815,12 @@ class WayfinderApp(ctk.CTk):
                 # unless Aura runs elevated too; the text stays on the clipboard.
                 return ("Couldn't type the text — click into a text box and try again. "
                         "Apps running as administrator can't receive it; press Ctrl+V there.")
-            return "Couldn't type the text — check input permissions (Settings) or install ydotool."
+            # Messages written for the user (a key still held, a game that
+            # left the front, how to get a missing tool) say it best.
+            if has("still held", "game chat stopped", "not found:", "type into every app"):
+                return message.split("Injection: ", 1)[-1]
+            return ("Couldn't type the text — click into a text box and try again. On Wayland, "
+                    "check Settings → System → Type into every app.")
         if has("api key", "401", "unauthorized"):
             return "Cloud API key issue — re-check it in Settings."
         if has("rate", "429"):

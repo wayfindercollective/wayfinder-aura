@@ -587,5 +587,9 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     assert "administrator" in windows and "ydotool" not in windows
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
     linux = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
-    assert linux == ("Couldn't type the text — check input permissions (Settings) "
-                     "or install ydotool.")
+    assert linux == ("Couldn't type the text — click into a text box and try again. On "
+                     "Wayland, check Settings → System → Type into every app.")
+    # Messages written for the user pass through instead of the generic line.
+    held = ("Injection: A Shift, Ctrl, Alt, or Super key is still held. "
+            "Release it, then dictate again; the transcript was not typed.")
+    assert wayfinder_main.WayfinderApp._error_guidance(ns, held) == held[len("Injection: "):]
