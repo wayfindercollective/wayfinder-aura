@@ -42,7 +42,7 @@ does not regress the Linux app.
 
 | | |
 |---|---|
-| 🎙️ **Hotkey dictation** | Fn+Space on macOS, Ctrl+Alt+Space elsewhere (configurable); text lands at your cursor |
+| 🎙️ **Hotkey dictation** | Right Option on macOS (tap, or hold to talk), Ctrl+Alt+Space elsewhere (configurable); text lands at your cursor |
 | 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
 | 🎨 **Tone presets (Ultra)** | Normal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
@@ -108,8 +108,8 @@ copy. The first-run flow downloads the Base speech model and walks through
 Microphone, Accessibility, and Input Monitoring. Input Monitoring may require
 clicking **+** and selecting `/Applications/Wayfinder Aura.app` manually.
 
-The default shortcuts are **Fn+Space** for dictation and **Fn+Enter** for the
-Ultra style cycle. The stateful menu-bar item is optional under Settings.
+The default shortcuts are **Right Option** for dictation (tap to start and stop,
+or hold to talk) and **Fn+Enter** for the Ultra style cycle. The stateful menu-bar item is optional under Settings.
 
 ### Windows (internal testing)
 
@@ -212,7 +212,7 @@ macOS uses `~/Library/Application Support/wayfinder-aura/config.json`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `hotkey_key` + `hotkey_modifiers` | Fn+Space on macOS; Ctrl+Alt+Space elsewhere | Recording toggle |
+| `hotkey_key` + `hotkey_modifiers` | Right Option on macOS; Ctrl+Alt+Space elsewhere | Recording toggle |
 | `style_toggle_key` + `style_toggle_modifiers` | Fn+Enter on macOS; Ctrl+Alt+Enter elsewhere | Style cycle |
 | `audio_device` / `audio_device_name` | auto | Microphone (saved by name — index-proof) |
 | `typing_speed` | instant | instant, fast, normal, slow, very_slow |
