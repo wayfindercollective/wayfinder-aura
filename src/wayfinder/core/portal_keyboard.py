@@ -319,6 +319,10 @@ class PortalKeyboard:
         self._changed = threading.Condition()
         self._type_lock = threading.Lock()
         self._listeners: list = []
+        # start() is serialized (two starters must not launch two workers);
+        # close() only counts and signals, so it never waits on a starter.
+        self._lifecycle = threading.Lock()
+        self._close_count = 0
 
     # -- status ---------------------------------------------------------------
     @property
@@ -331,6 +335,12 @@ class PortalKeyboard:
 
     def ready(self) -> bool:
         return self._state == self.READY and bool(self._session) and self._bus is not None
+
+    @property
+    def close_count(self) -> int:
+        """How many times close() ran; start(after_closes=...) uses it to drop a
+        start that was asked for before the latest close."""
+        return self._close_count
 
     def mark_failed(self, detail: str) -> None:
         """Keys stopped reaching the desktop although no Closed signal came (a
@@ -367,31 +377,41 @@ class PortalKeyboard:
     # -- lifecycle ------------------------------------------------------------
     def start(self, *, parent_window: str = "", ask_again: bool = False,
               log: Optional[Callable[[str], None]] = None,
-              may_ask: Optional[Callable[[], bool]] = None) -> bool:
+              may_ask: Optional[Callable[[], bool]] = None,
+              after_closes: Optional[int] = None) -> bool:
         """Open the session in the background. False when nothing was started
-        (already running, or a declined request and ``ask_again`` is False).
-        ``may_ask`` holds the request that can show the desktop's dialog until
-        it returns True (the app: no dictation running)."""
-        if self._thread is not None and self._thread.is_alive():
-            if not self._stop.is_set():
+        (already running, a declined request and ``ask_again`` is False, or a
+        close() since ``after_closes``, the close_count the caller saw when it
+        decided to start). ``may_ask`` holds the request that can show the
+        desktop's dialog until it returns True (the app: no dictation running).
+        """
+        closes = self._close_count if after_closes is None else after_closes
+        with self._lifecycle:
+            if self._close_count != closes:
+                return False  # switched off after this start was asked for
+            if self._thread is not None and self._thread.is_alive():
+                if not self._stop.is_set():
+                    return False
+                self._thread.join(timeout=2.0)  # closing: let it finish first
+                if self._thread.is_alive():
+                    return False
+            remembered = load_state(self._state_path)
+            if remembered.get("declined") and not ask_again:
+                self._set(self.DECLINED, "declined earlier")
                 return False
-            self._thread.join(timeout=2.0)  # closing: let it finish first
-            if self._thread.is_alive():
-                return False
-        remembered = load_state(self._state_path)
-        if remembered.get("declined") and not ask_again:
-            self._set(self.DECLINED, "declined earlier")
-            return False
-        self._stop.clear()
-        self._set(self.STARTING)
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(parent_window, remembered.get("restore_token") or "", log, may_ask),
-            name="wayfinder-portal-keyboard", daemon=True)
-        self._thread.start()
+            self._stop.clear()
+            self._set(self.STARTING)
+            self._thread = threading.Thread(
+                target=self._run,
+                args=(parent_window, remembered.get("restore_token") or "", log, may_ask),
+                name="wayfinder-portal-keyboard", daemon=True)
+            self._thread.start()
+        if self._close_count != closes:
+            self._stop.set()  # a close() raced the launch: the worker stops at its next check
         return True
 
     def close(self) -> None:
+        self._close_count += 1
         self._stop.set()
         bus, session = self._bus, self._session
         if bus is not None and session:

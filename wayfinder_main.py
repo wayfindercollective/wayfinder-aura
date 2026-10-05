@@ -12705,10 +12705,13 @@ class WayfinderApp(ctk.CTk):
         def idle() -> bool:  # read from the portal worker; no Tk call
             return getattr(self, "app_state", AppState.IDLE) == AppState.IDLE
 
+        # Seen here, on the Tk thread: a switch-off (close) after this point
+        # makes the start below a no-op even if its thread runs late.
+        closes = getattr(kb, "close_count", None)
         # start() can wait up to 2 s for a closing session: never on the Tk thread.
         threading.Thread(
             target=lambda: kb.start(parent_window=parent, ask_again=ask_again,
-                                    log=self.log, may_ask=idle),
+                                    log=self.log, may_ask=idle, after_closes=closes),
             daemon=True, name="wayfinder-portal-session",
         ).start()
 

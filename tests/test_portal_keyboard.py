@@ -981,3 +981,36 @@ def test_the_portal_paste_uses_the_one_step_restorer(portal_ready, monkeypatch):
     monkeypatch.setattr(injector, "_PORTAL_RESTORE_AFTER_S", 0)
     injector._inject_text_type_linux("café")
     assert restored == [("café", "user's url")]
+
+
+def test_a_start_asked_for_before_a_switch_off_does_nothing(monkeypatch, tmp_path):
+    """A delayed starter must not reopen a session the user just turned off."""
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    seen = kb.close_count
+    kb.close()                                   # the switch went off
+    assert kb.start(after_closes=seen) is False
+    assert not any(m == "CreateSession" for _i, m, _f, _b in bus.calls)
+
+
+def test_concurrent_starters_launch_one_worker(monkeypatch, tmp_path):
+    """Startup and a switch retry can both reach start(); only one worker runs."""
+    import threading as _threading
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    results = []
+    barrier = _threading.Barrier(2)
+
+    def starter():
+        barrier.wait()
+        results.append(kb.start(may_ask=lambda: False))   # hold before Start
+
+    threads = [_threading.Thread(target=starter) for _ in range(2)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(3)
+        assert sorted(results) == [False, True]
+    finally:
+        kb.close()
