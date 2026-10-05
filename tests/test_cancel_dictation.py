@@ -27,9 +27,33 @@ def _app(backend=None, triggers=None, config=None):
     return app
 
 
+class _Thread:
+    def __init__(self, alive):
+        self._alive = alive
+
+    def is_alive(self):
+        return self._alive
+
+
 def test_non_portal_listeners_cancel_with_bare_escape():
-    for backend in ("pynput", "evdev", None):
+    for backend in ("pynput", None):
         assert wm.WayfinderApp._cancel_hotkey_display(_app(backend)) == "Esc"
+    evdev = _app("evdev")
+    evdev._hotkey_thread = _Thread(alive=True)
+    assert wm.WayfinderApp._cancel_hotkey_display(evdev) == "Esc"
+
+
+def test_no_escape_promise_without_a_listener():
+    # KDE owns the record key (evdev binding skipped) or no backend at all:
+    # nothing outside the window hears Esc, so the hint only names the stop key.
+    kde = _app("evdev")
+    kde._hotkey_thread = None
+    assert wm.WayfinderApp._cancel_hotkey_display(kde) is None
+    stopped = _app("evdev")
+    stopped._hotkey_thread = _Thread(alive=False)
+    assert wm.WayfinderApp._cancel_hotkey_display(stopped) is None
+    assert wm.WayfinderApp._cancel_hotkey_display(_app("unavailable")) is None
+    assert wm.WayfinderApp._hero_state_hint_text(kde, AppState.RECORDING) == "press F3 to stop"
 
 
 def test_portal_shows_the_desktop_bound_trigger():

@@ -18260,7 +18260,15 @@ class WayfinderApp(ctk.CTk):
         desktop's own trigger is the truth; every other listener (macOS,
         Windows, X11 pynput, evdev) takes a bare Escape.
         """
-        if getattr(self, "_hotkey_backend", None) != "portal":
+        backend = getattr(self, "_hotkey_backend", None)
+        if backend == "unavailable":
+            return None  # no listener at all
+        if backend == "evdev":
+            # KDE owns the record key (evdev skipped) or evdev is missing:
+            # nothing outside this window hears Esc, so promise nothing.
+            thread = getattr(self, "_hotkey_thread", None)
+            return "Esc" if thread is not None and thread.is_alive() else None
+        if backend != "portal":
             return "Esc"
         triggers = getattr(self, "_portal_triggers", None)
         if triggers is None:  # bind still in flight: what the app asked for
