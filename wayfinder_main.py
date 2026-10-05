@@ -22551,6 +22551,17 @@ class WayfinderApp(ctk.CTk):
             return data[0], data[1]
         return data, None
 
+    def _gamer_mode_keeps_shortcut(self, event_type) -> bool:
+        """Gamer mode exists to dictate in games, so the GameMode pause (which
+        keeps bare keys such as F3 from colliding with in-game binds) must not
+        swallow a chorded shortcut like the default Ctrl+Alt+Space. A bare-key
+        shortcut is still paused while a GameMode game runs."""
+        if not self.config.get("gamer_mode", True):
+            return False
+        key = ("hotkey_modifiers" if event_type == EventType.HOTKEY_PRESSED
+               else "style_toggle_modifiers")
+        return bool(self.config.get(key))
+
     def handle_event(self, event_type, data):
         # gamemoded pause: silently drop F-key triggers while a Lutris/Steam game
         # is registered. Other event types (transcription results, UI updates,
@@ -22594,11 +22605,13 @@ class WayfinderApp(ctk.CTk):
                 # not drop the trigger here. This gates ONLY the event-drop — the separate
                 # exclusive-grab-release path in the evdev listener still runs, so grabbed
                 # devices keep returning to the game.
-                if is_hotkeys_paused() and not getattr(self, "_game_mode", False):
+                if (is_hotkeys_paused() and not getattr(self, "_game_mode", False)
+                        and not self._gamer_mode_keeps_shortcut(event_type)):
                     if not getattr(self, "_gamemode_pause_logged", False):
                         self._gamemode_pause_logged = True
                         self.log("⏸ Shortcut ignored: a game is running with GameMode, "
-                                 "which pauses Aura's shortcuts while you play.")
+                                 "which pauses single-key shortcuts while you play. "
+                                 "A shortcut with Ctrl/Alt (with Gamer mode on) keeps working.")
                     return
                 self._gamemode_pause_logged = False
         if event_type == EventType.HOTKEY_PRESSED:

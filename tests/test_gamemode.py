@@ -128,7 +128,28 @@ def test_a_shortcut_dropped_by_the_gamemode_pause_is_logged_once(monkeypatch):
     monkeypatch.setitem(wm._HOTKEY_CAPTURE, "armed", False)
     monkeypatch.setitem(wm._HOTKEY_CAPTURE, "suppress_until", 0)
     logs = []
-    app = SimpleNamespace(log=logs.append, _game_mode=False)
+    app = SimpleNamespace(log=logs.append, _game_mode=False,
+                          config={"gamer_mode": True, "hotkey_modifiers": []})  # bare F3
+    app._gamer_mode_keeps_shortcut = (
+        lambda event_type: wm.WayfinderApp._gamer_mode_keeps_shortcut(app, event_type))
     for _ in range(3):
         wm.WayfinderApp.handle_event(app, EventType.HOTKEY_PRESSED, None)
     assert len(logs) == 1 and "GameMode" in logs[0]
+
+
+@pytest.mark.parametrize("config, event, kept", [
+    ({"gamer_mode": True, "hotkey_modifiers": ["ctrl", "alt"]}, "HOTKEY_PRESSED", True),
+    ({"gamer_mode": True, "hotkey_modifiers": []}, "HOTKEY_PRESSED", False),      # bare F3
+    ({"gamer_mode": False, "hotkey_modifiers": ["ctrl", "alt"]}, "HOTKEY_PRESSED", False),
+    ({"gamer_mode": True, "style_toggle_modifiers": ["ctrl", "alt"]}, "STYLE_TOGGLE", True),
+])
+def test_gamer_mode_keeps_chorded_shortcuts_through_the_gamemode_pause(config, event, kept):
+    """Gamer mode is for dictating in games; the pause exists for bare keys
+    that collide with in-game binds, not for Ctrl+Alt chords."""
+    from types import SimpleNamespace
+
+    import wayfinder_main as wm
+    from wayfinder.hotkeys.types import EventType
+
+    app = SimpleNamespace(config=config)
+    assert wm.WayfinderApp._gamer_mode_keeps_shortcut(app, getattr(EventType, event)) is kept
