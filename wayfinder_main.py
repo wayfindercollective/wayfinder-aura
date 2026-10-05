@@ -12701,7 +12701,16 @@ class WayfinderApp(ctk.CTk):
         if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
             self.after(1000, lambda: self._start_portal_session_when_idle(kb, parent, ask_again))
             return
-        kb.start(parent_window=parent, ask_again=ask_again, log=self.log)
+
+        def idle() -> bool:  # read from the portal worker; no Tk call
+            return getattr(self, "app_state", AppState.IDLE) == AppState.IDLE
+
+        # start() can wait up to 2 s for a closing session: never on the Tk thread.
+        threading.Thread(
+            target=lambda: kb.start(parent_window=parent, ask_again=ask_again,
+                                    log=self.log, may_ask=idle),
+            daemon=True, name="wayfinder-portal-session",
+        ).start()
 
     def _portal_typing_in_play(self) -> bool:
         """The RemoteDesktop portal is (or is about to be) Aura's typing path:

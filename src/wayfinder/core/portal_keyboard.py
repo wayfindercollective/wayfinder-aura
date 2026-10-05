@@ -366,9 +366,12 @@ class PortalKeyboard:
 
     # -- lifecycle ------------------------------------------------------------
     def start(self, *, parent_window: str = "", ask_again: bool = False,
-              log: Optional[Callable[[str], None]] = None) -> bool:
+              log: Optional[Callable[[str], None]] = None,
+              may_ask: Optional[Callable[[], bool]] = None) -> bool:
         """Open the session in the background. False when nothing was started
-        (already running, or a declined request and ``ask_again`` is False)."""
+        (already running, or a declined request and ``ask_again`` is False).
+        ``may_ask`` holds the request that can show the desktop's dialog until
+        it returns True (the app: no dictation running)."""
         if self._thread is not None and self._thread.is_alive():
             if not self._stop.is_set():
                 return False
@@ -382,7 +385,8 @@ class PortalKeyboard:
         self._stop.clear()
         self._set(self.STARTING)
         self._thread = threading.Thread(
-            target=self._run, args=(parent_window, remembered.get("restore_token") or "", log),
+            target=self._run,
+            args=(parent_window, remembered.get("restore_token") or "", log, may_ask),
             name="wayfinder-portal-keyboard", daemon=True)
         self._thread.start()
         return True
@@ -411,7 +415,8 @@ class PortalKeyboard:
             None, None)
 
     def _run(self, parent_window: str, restore_token: str,
-             log: Optional[Callable[[str], None]]) -> None:
+             log: Optional[Callable[[str], None]],
+             may_ask: Optional[Callable[[], bool]] = None) -> None:
         def say(msg: str) -> None:
             if log:
                 try:
@@ -542,6 +547,10 @@ class PortalKeyboard:
                 self._set(self.FAILED, "the desktop refused a keyboard")
                 return
 
+            # Start can show the desktop's approval dialog: never mid-dictation.
+            while may_ask is not None and not may_ask():
+                if self._stop.wait(0.5):
+                    return
             self._set(self.WAITING)
             if not restore_token:
                 say("⌨️ Your desktop is asking whether Aura may type in every app: "

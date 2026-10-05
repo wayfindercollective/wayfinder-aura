@@ -912,6 +912,14 @@ def test_the_approval_dialog_never_opens_mid_dictation(monkeypatch):
     from types import SimpleNamespace
     import wayfinder_main as wm
 
+    class _Inline:
+        def __init__(self, target, **_k):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(wm.threading, "Thread", _Inline)
     starts, retries = [], []
     kb = SimpleNamespace(start=lambda **k: starts.append(k))
     app = SimpleNamespace(config={"linux_portal_typing": True}, log=lambda m: None,
@@ -922,6 +930,28 @@ def test_the_approval_dialog_never_opens_mid_dictation(monkeypatch):
     app.app_state = wm.AppState.IDLE
     wm.WayfinderApp._start_portal_session_when_idle(app, kb, "x11:1", False)
     assert len(starts) == 1
+    # The worker gets the same guard for its Start request.
+    may_ask = starts[0]["may_ask"]
+    assert may_ask() is True
+    app.app_state = wm.AppState.RECORDING
+    assert may_ask() is False
+
+
+def test_the_start_request_waits_until_the_app_may_ask(monkeypatch, tmp_path):
+    """Between the app's idle check and the worker's Start call a dictation can
+    begin; the worker holds the request (and the dialog) until it ends."""
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    busy = {"now": True}
+    try:
+        assert kb.start(may_ask=lambda: not busy["now"])
+        time.sleep(0.3)
+        assert not any(m == "Start" for _i, m, _f, _b in bus.calls)
+        busy["now"] = False
+        assert _settle(kb, kb.READY) == kb.READY
+        assert any(m == "Start" for _i, m, _f, _b in bus.calls)
+    finally:
+        kb.close()
 
 
 
