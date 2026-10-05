@@ -89,9 +89,9 @@ network and not perf"`) passes on a headless node; Ruff's CI classes and
   installs.
 - Windows still runs llama-server without a key.
 - Linux renders the Mac shader ribbon and runs the recording ribbon at 30 fps
-  on desktops (deliberate in code, now in the CHANGELOG); CLAUDE.md rules 1
-  and 9 still say 15 fps active. Decide, then measure focused-idle CPU at
-  HiDPI (`top -p $(pgrep -f wayfinder)`, rule 1 budget 2%).
+  on desktops (15 fps on Steam hardware); CLAUDE.md rules 1 and 9 now say so
+  (2026-10-04). Still measure focused-idle CPU at HiDPI
+  (`top -p $(pgrep -f wayfinder)`, rule 1 budget 2%).
 - macOS: bare permission prompts for returning users at launch, no hotkey
   recovery after a late Accessibility grant. Windows: unsigned installer
   (public-release blocker), a blocked microphone dead-ends the tour.
