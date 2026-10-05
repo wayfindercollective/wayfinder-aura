@@ -762,11 +762,18 @@ def _start_portal(monkeypatch, offered):
             self._target()
 
     monkeypatch.setattr(wm.threading, "Thread", _Inline)
+    from queue import Queue
     app = SimpleNamespace(config={"linux_portal_typing": True}, log=logs.append,
                           wm_frame=lambda: "0x1", _portal_listener_added=True,
                           _set_clipboard_from_worker=lambda t: True,
-                          _get_clipboard_from_worker=lambda: "old")
+                          _get_clipboard_from_worker=lambda: "old",
+                          event_queue=Queue(), app_state=wm.AppState.IDLE,
+                          after=lambda ms, fn: None)
+    app._start_portal_session_when_idle = (
+        lambda *a: wm.WayfinderApp._start_portal_session_when_idle(app, *a))
     wm.WayfinderApp._start_portal_keyboard(app)
+    while not app.event_queue.empty():          # the app's Tk-thread drain
+        app.event_queue.get_nowait()[1]()
     return hooks, starts, logs
 
 
@@ -885,3 +892,22 @@ def test_a_failed_or_closed_session_is_shown(monkeypatch):
         wm.WayfinderApp._on_portal_keyboard_state(app, state, "gone")
         app.event_queue.get_nowait()[1]()
     assert len(banners) == 2 and all("Type into every app" in b for b in banners)
+
+
+
+def test_the_approval_dialog_never_opens_mid_dictation(monkeypatch):
+    """The retried probe can succeed seconds after launch; the session (and
+    the desktop's dialog) waits until no dictation is running."""
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    starts, retries = [], []
+    kb = SimpleNamespace(start=lambda **k: starts.append(k))
+    app = SimpleNamespace(config={"linux_portal_typing": True}, log=lambda m: None,
+                          app_state=wm.AppState.RECORDING,
+                          after=lambda ms, fn: retries.append((ms, fn)))
+    wm.WayfinderApp._start_portal_session_when_idle(app, kb, "x11:1", False)
+    assert starts == [] and retries and retries[0][0] >= 100
+    app.app_state = wm.AppState.IDLE
+    wm.WayfinderApp._start_portal_session_when_idle(app, kb, "x11:1", False)
+    assert len(starts) == 1

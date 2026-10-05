@@ -12685,9 +12685,22 @@ class WayfinderApp(ctk.CTk):
                 return
             if not self.config.get("linux_portal_typing", True):
                 return  # turned off while waiting
-            kb.start(parent_window=parent, ask_again=ask_again, log=self.log)
+            # The desktop may now show its approval dialog: never mid-dictation.
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: self._start_portal_session_when_idle(
+                kb, parent, ask_again)))
 
         threading.Thread(target=_go, daemon=True, name="wayfinder-portal-start").start()
+
+    def _start_portal_session_when_idle(self, kb, parent: str, ask_again: bool) -> None:
+        """Open the portal keyboard session, whose approval dialog may appear,
+        only while no dictation is running; otherwise look again in a second.
+        The retried startup probe can succeed seconds after launch. Tk thread."""
+        if not self.config.get("linux_portal_typing", True):
+            return
+        if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+            self.after(1000, lambda: self._start_portal_session_when_idle(kb, parent, ask_again))
+            return
+        kb.start(parent_window=parent, ask_again=ask_again, log=self.log)
 
     def _portal_typing_in_play(self) -> bool:
         """The RemoteDesktop portal is (or is about to be) Aura's typing path:
