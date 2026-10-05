@@ -36,7 +36,8 @@ otherwise it does nothing and tries again the next night
   installer and publishes a GitHub **prerelease**. The Windows installer is
   attached by its own job (`publish-windows`), so Linux never waits on it.
 - The Mac DMG is built, notarized and attached by the **Mac release watcher**
-  on the Mac Studio (below), within about an hour of the release.
+  on the Mac Studio (below). It starts as soon as the tag's Release run does,
+  so the DMG is usually attached minutes after the release appears.
 - A beta is finished when its release carries the AppImage, its zsync file,
   the Flatpak and the Windows installer. If the dispatch, the build or an upload failed, the next
   night waits on that beta's build, or starts it once more while `main` is
@@ -107,7 +108,8 @@ force-pushed). Anything else stops the script for a person: a tag, branch or
 open pull request from a different beta, or a notes pull request closed
 without merging (reopen it, or re-run with `--new-notes-pr`).
 
-The Mac release watcher attaches its DMG within the hour. The website's
+The Mac release watcher builds the DMG while the release builds and attaches
+it minutes after the release appears. The website's
 download links and every installed app pick the new release up by themselves.
 
 Before the first stable release on a platform, also run its manual checklist
@@ -135,10 +137,15 @@ The Developer ID certificate and the `wayfinder-aura` notary profile live in
 the Mac Studio's login Keychain and never leave it. A LaunchAgent
 (`io.wayfindercollective.aura-mac-release`, installed with
 `scripts/release/install_mac_release_watcher.sh`, log
-`~/Library/Logs/aura-mac-release.log`) checks GitHub hourly. When a release
-from the last 7 days has no Mac DMG, it runs
+`~/Library/Logs/aura-mac-release.log`) checks GitHub every 10 minutes. When a
+release from the last 7 days has no Mac DMG, it runs
 `scripts/release/attach_mac_dmg.sh` for it: build from the tag, notarize,
-staple, attach. It builds one release per run and gives a release 3 tries.
+staple, attach. When a tag's Release workflow is still running, it builds
+the DMG ahead (`AURA_DMG_ONLY`), keeps it in
+`~/Library/Application Support/wayfinder-aura-release/dmg`, and attaches it on
+the first check after the release appears (re-checked by Gatekeeper and the
+stapled ticket first; no build, so no hold). It builds one tag per run and
+gives a tag 3 tries.
 
 It shares the Mac with the local model and the Fox Grid VM, so it is admitted
 the way Fox Grid admits Mac CI jobs ([CI.md](CI.md)): available memory, minus

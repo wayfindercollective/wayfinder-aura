@@ -969,6 +969,28 @@ def test_flatpak_ci_builds_tag_sourced_release_manifest_on_tags():
     assert 'build-dir "$manifest"' in build_script
 
 
+def test_flatpak_sources_are_fetched_with_retries_before_an_offline_build():
+    """One HTTP 504 from a source host failed v1.2.0-beta.7's release."""
+    script = _flatpak_build_script_text()
+    download = script.index("flatpak-builder --user --download-only")
+    build = script.index("flatpak-builder --user --force-clean --ccache --jobs=2 --disable-download")
+    assert download < build
+    assert "for attempt in 1 2 3; do" in script[:download + 200][-400:]
+    assert 'if [[ $attempt -eq 3 ]]; then' in script and "exit 1" in script[download:build]
+    assert script.count('--state-dir="$STATE_DIR"') == 2   # both share the kept state
+
+
+def test_release_flatpak_keeps_builder_state_outside_the_wiped_checkout():
+    """A cold Flatpak build took 61 min of v1.2.0-beta.6's release; warm is ~5.
+    The state must outlive actions/checkout's clean, and stay bounded."""
+    job = _workflow_job_body("build-flatpak")
+
+    assert 'state="$HOME/.cache/wayfinder-aura-flatpak/release-ci-state"' in job
+    assert job.count('--state-dir "$state"') == 2   # tag and dispatch builds
+    assert 'du -s --block-size=1G "$state"' in job and "-gt 30" in job
+    assert "$GITHUB_WORKSPACE" not in job.split("Build and smoke-test Flatpak", 1)[1]
+
+
 def test_appimage_version_matches_pyproject():
     script = (REPO / "scripts" / "build-appimage.sh").read_text(encoding="utf-8")
     match = re.search(r'^VERSION="([^"]+)"$', script, re.MULTILINE)

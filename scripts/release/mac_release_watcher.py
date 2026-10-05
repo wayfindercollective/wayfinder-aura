@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Attach the notarized Mac DMG to every new Aura release, from this Mac.
 
-Installed as a LaunchAgent by install_mac_release_watcher.sh (hourly). The
-signing certificate and notary profile stay in the Mac's login Keychain: no
-signing secret is uploaded anywhere. Each run:
+Installed as a LaunchAgent by install_mac_release_watcher.sh (every 10
+minutes). The signing certificate and notary profile stay in the Mac's login
+Keychain: no signing secret is uploaded anywhere. Each run:
 
 1. lists the wayfinder-aura releases from the last 7 days (stable, and the
-   betas the Beta workflow makes) that carry no Mac DMG for their version;
+   betas the Beta workflow makes) that carry no Mac DMG for their version, and
+   attaches any DMG it already built for one (step 3) at once: no build, so
+   no admission and no hold;
 2. builds, notarizes and attaches the newest such release with
    attach_mac_dmg.sh (one build per run; the next run takes the next one);
-3. gives up on a release after 3 failed builds (the state file records them).
+3. otherwise, for a tag whose Release workflow is still running, builds the
+   DMG ahead (AURA_DMG_ONLY) and keeps it in DMG_CACHE, so the release gets
+   its DMG minutes after it appears instead of a build later;
+4. gives up on a tag after 3 failed builds (the state file records them).
 
 The Mac is shared with a local model (memory guard up to 160 GiB) and the Fox
 Grid VM, so a build is admitted the way Fox Grid admits Mac CI jobs
@@ -55,6 +60,7 @@ HERE = Path(__file__).resolve().parent
 STATE_DIR = Path.home() / "Library" / "Application Support" / "wayfinder-aura-release"
 STATE = STATE_DIR / "watcher-state.json"
 LOCK = STATE_DIR / "watcher.lock"
+DMG_CACHE = STATE_DIR / "dmg"   # DMGs built ahead of their release (step 3)
 HOLD = Path.home() / ".cache" / "foxgrid" / "aura-mac-ci.hold"
 GRANT = Path.home() / ".cache" / "foxgrid" / "aura-release-grant.json"
 REPO = "wayfindercollective/wayfinder-aura"
@@ -130,6 +136,30 @@ def gh_env() -> dict:
 
 # --- what to build --------------------------------------------------------------------
 
+def dmg_name(tag: str) -> str:
+    return f"Wayfinder_Aura-{tag[1:]}-macOS-arm64.dmg"
+
+
+def built_ahead(tag: str) -> Path:
+    return DMG_CACHE / dmg_name(tag)
+
+
+def tags_being_released(runs: list, releases: list) -> list[str]:
+    """Tags (newest first) whose Release workflow is queued or running and
+    whose release does not exist yet or has no Mac DMG: their DMG can be
+    built now, while the Linux and Windows builds run."""
+    with_dmg = {r.get("tag_name") for r in releases
+                if dmg_name(r.get("tag_name") or "v") in
+                {a.get("name") for a in r.get("assets") or [] if a.get("state") == "uploaded"}}
+    tags = []
+    for run in sorted(runs, key=lambda r: r.get("created_at") or "", reverse=True):
+        tag = run.get("head_branch") or ""
+        if (run.get("status") in ("queued", "in_progress", "waiting", "pending")
+                and TAG_RE.match(tag) and tag not in with_dmg and tag not in tags):
+            tags.append(tag)
+    return tags
+
+
 def releases_missing_a_dmg(releases: list, now: datetime) -> list[str]:
     """Tags (newest first) of recent releases whose Mac DMG is missing."""
     missing = []
@@ -145,9 +175,8 @@ def releases_missing_a_dmg(releases: list, now: datetime) -> list[str]:
             continue
         if now - when > timedelta(days=WINDOW_DAYS):
             continue
-        dmg = f"Wayfinder_Aura-{match[1]}-macOS-arm64.dmg"
         names = {a.get("name") for a in release.get("assets") or [] if a.get("state") == "uploaded"}
-        if dmg not in names:
+        if dmg_name(tag) not in names:
             missing.append((when, tag))
     return [tag for _, tag in sorted(missing, reverse=True)]
 
@@ -387,7 +416,7 @@ def build_command(tag: str) -> list[str]:
             "/bin/bash", str(HERE / "attach_mac_dmg.sh"), tag]
 
 
-def run_build(tag: str, env: dict, build: dict) -> int:
+def run_build(tag: str, env: dict, build: dict, ahead: bool = False) -> int:
     """attach_mac_dmg.sh under the hold this run already took: background QoS,
     a wall clock, and memory re-checked every CHECK_EVERY_S seconds (with the
     model's allowance re-read each time: a grant that expired or no longer
@@ -398,10 +427,11 @@ def run_build(tag: str, env: dict, build: dict) -> int:
     proc = None
     try:
         with signals_held():  # a stop lands after the build is recorded, never between
+            extra = {"AURA_DMG_ONLY": str(built_ahead(tag))} if ahead else {}
             proc = subprocess.Popen(
                 build_command(tag),
                 env={**env, "AURA_REPO": str(AURA_REPO), "AURA_HOLD_HELD": "1",
-                     "AURA_BUILD_DEADLINE_S": str(BUILD_TIMEOUT_S + 300)},
+                     "AURA_BUILD_DEADLINE_S": str(BUILD_TIMEOUT_S + 300), **extra},
                 start_new_session=True)
             build["pgid"] = proc.pid
             note_build_in_hold(proc.pid)
@@ -442,6 +472,44 @@ def finish_hold(build: dict) -> None:
     release_hold()
 
 
+def attach_built_ahead(tag: str, env: dict) -> bool:
+    """Upload the DMG built ahead for ``tag`` once its release exists: checked
+    again (Gatekeeper, stapled ticket) right before the upload, then removed."""
+    dmg = built_ahead(tag)
+    if not dmg.is_file():
+        return False
+    checks = (["/usr/sbin/spctl", "--assess", "--type", "open",
+               "--context", "context:primary-signature", str(dmg)],
+              ["/usr/bin/xcrun", "stapler", "validate", str(dmg)])
+    if any(subprocess.run(c, capture_output=True).returncode != 0 for c in checks):
+        log(f"The DMG built ahead for {tag} failed its checks: discarding it.")
+        dmg.unlink(missing_ok=True)
+        return False
+    upload = subprocess.run(["gh", "release", "upload", tag, str(dmg), "--repo", REPO,
+                             "--clobber"], capture_output=True, text=True, env=env)
+    if upload.returncode != 0:
+        return False  # no release yet (or GitHub hiccup): the next run tries again
+    dmg.unlink(missing_ok=True)
+    return True
+
+
+def prune_built_ahead(now: float | None = None) -> None:
+    """DMGs built ahead for tags that never got a release go after WINDOW_DAYS."""
+    now = time.time() if now is None else now
+    for dmg in DMG_CACHE.glob("*.dmg*"):
+        try:
+            if now - dmg.stat().st_mtime > WINDOW_DAYS * 86400:
+                dmg.unlink()
+        except OSError:
+            pass
+
+
+def note_attached(state: dict, tag: str) -> None:
+    state.setdefault("tries", {}).pop(tag, None)
+    state.setdefault("attached", []).append(tag)
+    state["attached"] = state["attached"][-20:]
+
+
 def main() -> int:
     for sig in STOP_SIGNALS:
         signal.signal(sig, _raise_stop)
@@ -462,9 +530,6 @@ def watch() -> int:
         except BlockingIOError:
             return 0  # a build from the previous hour is still running
         reclaim_stale_hold()
-        if HOLD.exists():
-            log("The Mac CI queue is held by someone else: trying next hour.")
-            return 0
         env = gh_env()
         listing = subprocess.run(
             ["gh", "api", f"repos/{REPO}/releases?per_page=30"],
@@ -472,10 +537,32 @@ def watch() -> int:
         if listing.returncode != 0:
             log(f"Could not list releases: {listing.stderr.strip()[:200]}")
             return 0
+        releases = json.loads(listing.stdout)
         state = load_state()
         tries = state.setdefault("tries", {})
-        pending = [t for t in releases_missing_a_dmg(json.loads(listing.stdout), datetime.now(timezone.utc))
-                   if tries.get(t, 0) < MAX_TRIES]
+        missing = releases_missing_a_dmg(releases, datetime.now(timezone.utc))
+        prune_built_ahead()
+        for tag in list(missing):  # step 1: no build, so no admission or hold needed
+            if attach_built_ahead(tag, env):
+                missing.remove(tag)
+                note_attached(state, tag)
+                save_state(state)
+                log(f"Attached the Mac DMG built ahead to {tag}.")
+        if HOLD.exists():
+            if missing:
+                log("The Mac CI queue is held by someone else: trying next run.")
+            return 0
+        runs = subprocess.run(
+            ["gh", "api", f"repos/{REPO}/actions/workflows/release.yml/runs?per_page=20",
+             "--jq", ".workflow_runs"], capture_output=True, text=True, env=env)
+        try:
+            ahead = [t for t in tags_being_released(json.loads(runs.stdout or "[]"), releases)
+                     if t not in missing and not built_ahead(t).is_file()]
+        except ValueError:
+            ahead = []
+        # A DMG already built ahead is never rebuilt: its upload is retried next run.
+        pending = [t for t in missing + ahead
+                   if tries.get(t, 0) < MAX_TRIES and not built_ahead(t).is_file()]
         if not pending:
             return 0
         reading = host_reading()
@@ -486,7 +573,7 @@ def watch() -> int:
                 f"({'admitted' if refusal is None else 'not now: ' + refusal}).")
             return 0
         if refusal:
-            log(f"Not building {pending[0]} yet: {refusal}. Trying next hour.")
+            log(f"Not building {pending[0]} yet: {refusal}. Trying next run.")
             return 0
         held = False
         build: dict = {}
@@ -494,25 +581,32 @@ def watch() -> int:
             with signals_held():  # taken and owned with no gap a stop could land in
                 held = acquire_hold()
             if not held:
-                log("The Mac CI queue was just held by someone else: trying next hour.")
+                log("The Mac CI queue was just held by someone else: trying next run.")
                 return 0
             # Admitted again under the hold: a CI job (or memory use) that
             # started since the first check refuses the build here.
             reading = host_reading()
             refusal = admission_refusal(reading, model_reserve(reading))
             if refusal:
-                log(f"Not building {pending[0]} yet: {refusal}. Trying next hour.")
+                log(f"Not building {pending[0]} yet: {refusal}. Trying next run.")
                 return 0
             tag = pending[0]
+            early = tag not in missing
             tries[tag] = tries.get(tag, 0) + 1
             save_state(state)
-            log(f"Building the Mac DMG for {tag} (try {tries[tag]} of {MAX_TRIES}).")
-            returncode = run_build(tag, env, build)
-            if returncode == 0:
-                tries.pop(tag, None)
-                state.setdefault("attached", []).append(tag)
-                state["attached"] = state["attached"][-20:]
+            log(f"Building the Mac DMG for {tag} (try {tries[tag]} of {MAX_TRIES})"
+                + (", ahead of its release." if early else "."))
+            returncode = run_build(tag, env, build, ahead=early)
+            if returncode == 0 and not early:
+                note_attached(state, tag)
                 log(f"Attached the Mac DMG to {tag}.")
+            elif returncode == 0:
+                tries.pop(tag, None)
+                if attach_built_ahead(tag, env):  # the release may have appeared meanwhile
+                    note_attached(state, tag)
+                    log(f"Attached the Mac DMG to {tag}.")
+                else:
+                    log(f"Built the Mac DMG for {tag}; attaching it when the release appears.")
             else:
                 log(f"Mac DMG for {tag} failed (exit {returncode}).")
             save_state(state)

@@ -1359,6 +1359,21 @@ def _hero_active_interval_ms(platform_name: str | None = None, steam_platform=_U
     return 66 if steam_platform else 33
 
 
+def _flush_windows_clipboard_restore() -> None:
+    """Windows: give the user their clipboard back now if a paste's delayed
+    restore (injector_windows, 0.8 s) is still pending. Quit ends with
+    os._exit, which skips atexit and kills the timer thread."""
+    if not IS_WINDOWS or IS_MACOS:
+        return
+    module = sys.modules.get("wayfinder.core.injector_windows")
+    if module is None:
+        return
+    try:
+        module._pending_restore.flush()
+    except Exception:
+        pass
+
+
 def _windows_dpi_scale() -> float:
     """Windows' display scale (1.75 at 175%) once the app is DPI aware, else 1.0.
 
@@ -6380,6 +6395,16 @@ class WayfinderApp(ctk.CTk):
             self.after(1200, self._refresh_macos_permission_banner)
             self._apply_macos_window_chrome()
         if IS_WINDOWS and not IS_MACOS:
+            # One "🔎 Paste" activity-log line per paste (target app, clipboard
+            # timings, who read it and when) so a bad paste can be diagnosed.
+            try:
+                from wayfinder.core.injector_windows import set_paste_reporter
+
+                set_paste_reporter(self.log, watch_reads=bool(
+                    self.config.get("paste_diagnostics_watch", False)))
+            except Exception:
+                pass
+        if IS_WINDOWS and not IS_MACOS:
             # Same sleep/wake/display handling as the Mac, from Windows'
             # WM_POWERBROADCAST / WM_DISPLAYCHANGE (utils/windows_lifecycle.py);
             # its thread only queues, Tk runs the handlers.
@@ -7110,6 +7135,8 @@ class WayfinderApp(ctk.CTk):
                 pass
         self._active_dropdown_panel = None
         self._active_dropdown_owner = None
+        if IS_MACOS:
+            WayfinderApp._sync_macos_hero_visibility(self)
 
     def _dropdown_row_selected(self, option_menu, value):
         self.log(f"[dropdown] row clicked: {value!r}")
@@ -7264,6 +7291,9 @@ class WayfinderApp(ctk.CTk):
         self._active_dropdown_owner = option_menu
         self._ensure_dropdown_dismiss_bindings()
         if IS_MACOS:
+            # The list may open upward over the hero card: the native layer
+            # (above every Tk pixel) steps aside until it closes.
+            WayfinderApp._sync_macos_hero_visibility(self)
             # Aqua Tk delivers keys only to the focus widget; after clicking a
             # CTk option menu nothing holds focus, so Escape never reached the
             # dismiss binding. Focus the panel so Escape closes it.
@@ -7963,11 +7993,9 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass  # Skip logo if icon not found
 
-        # Smaller, refined logo wordmark (underlined when Ultra is active)
-        wordmark_font = (
-            (self.font_mono[0], self.font_sizes["body"], "underline") if is_ultra
-            else (self.font_mono[0], self.font_sizes["body"])
-        )
+        # Keep the wordmark stable across Free and Ultra; the gold badge and
+        # halo already communicate the active tier.
+        wordmark_font = (self.font_mono[0], self.font_sizes["body"])
         ctk.CTkLabel(
             title_frame,
             text="wayfinder",
@@ -8100,7 +8128,7 @@ class WayfinderApp(ctk.CTk):
         ToolTip(plus_btn, "Increase UI Scale (Ctrl++)")
 
     def _rebuild_header(self) -> None:
-        """Rebuild the header in place so the Ultra badge/glow/underline flip
+        """Rebuild the header in place so the Ultra badge/glow flip
         live (no restart) when the tier changes. Also re-syncs the sidebar tier
         label. Safe to call twice in a row and before the header exists."""
         parent = getattr(self, "_header_parent", None)
@@ -8420,24 +8448,42 @@ class WayfinderApp(ctk.CTk):
             native_layer.set_hidden(True)
 
     def _macos_hero_is_occluded(self) -> bool:
-        """Whether Tk currently owns a surface above the native hero layer."""
-        return (
-            getattr(self, "active_tab", "dictate") != "dictate"
-            or getattr(self, "_premium_banner", None) is not None
-        )
+        """Whether Tk is drawing something over the hero card right now.
+
+        The native layer sits above every Tk pixel, so it steps aside for what
+        Tk places over the window: the Ultra scrim, a custom dropdown list (one
+        can open upward over the card) and the caricature toast. Tab pages are
+        packed below the hero card and never overlap it, so a tab alone is no
+        reason for the Tk fallback, which redraws the ribbon in Python at 15 fps
+        (37% of a core on the Mac Studio, 2026-10-05) where the native layer
+        costs ~0.5%.
+        """
+        if getattr(self, "_premium_banner", None) is not None:
+            return True
+        if getattr(self, "_active_dropdown_panel", None) is not None:
+            return True
+        toast = getattr(self, "_confetti_overlay", None)
+        return toast is not None and not getattr(toast, "_destroyed", True)
 
     def _sync_macos_hero_visibility(self) -> None:
-        """Keep the native layer behind tabs and animate its visible Tk fallback."""
+        """Hide the native layer under Tk overlays and animate its Tk fallback."""
         native_layer = getattr(self, "_macos_hero_layer", None)
         if native_layer is not None:
             occluded = WayfinderApp._macos_hero_is_occluded(self)
             native_layer.set_hidden(occluded)
             if occluded:
-                # Tabs and scrims can draw over the independent Metal layer.
-                # Seed the Tk canvas now; the idle/active loop advances it on
-                # other tabs, since the hero card itself remains visible.
+                # A scrim, dropdown or toast draws over the independent Metal
+                # layer. Seed the Tk canvas now; the idle/active loop advances
+                # it while the overlay is up, since the hero card stays visible.
                 try:
                     self._draw_hero_waveform(force_canvas=True)
+                except Exception:
+                    pass
+            if getattr(self, "app_state", None) == AppState.IDLE:
+                # Occluded: start the Tk loop. Clear: its next pass hands the
+                # frames back to the native timer and stops.
+                try:
+                    self._start_idle_breath()
                 except Exception:
                     pass
 
@@ -8476,8 +8522,8 @@ class WayfinderApp(ctk.CTk):
             return
 
         # The hero card sits above every tab. On macOS the native layer must
-        # stay below tab surfaces, so keep its Tk fallback moving there.
-        if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate":
+        # stay below Tk overlays, so keep its Tk fallback moving under them.
+        if IS_MACOS and WayfinderApp._macos_hero_is_occluded(self):
             force_canvas = True
 
         # Initialize on first call
@@ -8931,9 +8977,9 @@ class WayfinderApp(ctk.CTk):
         
         self._write_status_breadcrumb()
         if IS_MACOS and getattr(self, "app_state", None) == AppState.IDLE:
-            # The native renderer owns Dictate's idle frames and leaves no
-            # Python timer behind. Re-seed the Tk timer for the always-visible
-            # hero when switching to another tab.
+            # The native renderer owns the idle frames on every tab and leaves
+            # no Python timer behind; one pass re-seeds whichever renderer the
+            # hero needs now (the Tk one only under an overlay).
             self._start_idle_breath()
 
     def show_setup_pane(self, on_done=None) -> None:
@@ -12259,6 +12305,15 @@ class WayfinderApp(ctk.CTk):
             
             # Inline toast placed over the main container (no Toplevel).
             self._confetti_overlay = ConfettiOverlay(self, main_container=self.main_container)
+            if IS_MACOS:
+                # It sits over the hero card: the native layer steps aside
+                # while it is up and returns when it is destroyed.
+                WayfinderApp._sync_macos_hero_visibility(self)
+                self._confetti_overlay.bind(
+                    "<Destroy>",
+                    lambda _e: self.after_idle(
+                        lambda: WayfinderApp._sync_macos_hero_visibility(self)),
+                    add="+")
         except Exception as e:
             print(f"[Easter Egg] Couldn't show confetti: {e}")
     
@@ -14076,16 +14131,41 @@ class WayfinderApp(ctk.CTk):
 
     def _apply_transcription_hardware_change(self, gpu_on: bool) -> None:
         """Make a CPU/GPU or speech-model change take effect without a restart."""
-        if gpu_on and IS_WINDOWS and not IS_MACOS:
+        if (
+            gpu_on and IS_WINDOWS and not IS_MACOS
+            and self.config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
+        ):
             # Startup skips the GPU probe in CPU mode: pick the device now (the
             # configured gpu_device, else the discrete GPU), off the Tk thread.
+            # Until this finishes, a recording must use the Free Base CPU path:
+            # otherwise the new Vulkan server can start on the old/default
+            # device and appear stuck in PROCESSING until Aura restarts.
+            ready = threading.Event()
+            self._windows_gpu_setup_done = ready
+            self._windows_gpu_setup_failed = False
+
+            def _prepare_windows_gpu():
+                try:
+                    setup_gpu_environment(dict(self.config))
+                except Exception as exc:
+                    if self._windows_gpu_setup_done is ready:
+                        self._windows_gpu_setup_failed = True
+                    self.log(f"⚠ Windows GPU setup failed: {exc}")
+                finally:
+                    ready.set()
+
             try:
                 from wayfinder.utils.gpu_simple import setup_gpu_environment
 
-                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
-                                 daemon=True).start()
-            except Exception:
-                pass
+                threading.Thread(target=_prepare_windows_gpu, daemon=True,
+                                 name="wayfinder-windows-gpu-setup").start()
+            except Exception as exc:
+                self.log(f"⚠ Could not start Windows GPU setup: {exc}")
+                self._windows_gpu_setup_failed = True
+                ready.set()
+        elif IS_WINDOWS and not IS_MACOS:
+            self._windows_gpu_setup_done = None
+            self._windows_gpu_setup_failed = False
         # Apply live: drop the resident whisper-server so the next dictation respawns
         # it in the new CPU/GPU mode — no app restart needed.
         try:
@@ -18176,7 +18256,9 @@ class WayfinderApp(ctk.CTk):
         ("audio-waveform", "Chunk Processing", "Long dictations transcribe while you speak"),
     ]
 
-    def _build_ultra_benefit_rows(self, parent, icon_color: str | None = None) -> None:
+    def _build_ultra_benefit_rows(
+        self, parent, icon_color: str | None = None, wraplength: int | None = None
+    ) -> None:
         """Render the Ultra benefit rows (icon + title + description) into `parent`."""
         icon_color = icon_color or COLORS["accent"]
         for icon_name, title, desc in self.ULTRA_BENEFITS:
@@ -18198,9 +18280,11 @@ class WayfinderApp(ctk.CTk):
                 txt, text=title, font=(self.font_body[0], self.font_sizes["body"], "bold"),
                 text_color=COLORS["text_bright"], anchor="w", justify="left",
             ).pack(fill="x")
+            description_kwargs = {"wraplength": wraplength} if wraplength else {}
             ctk.CTkLabel(
                 txt, text=desc, font=(self.font_body[0], self.font_sizes["small"]),
                 text_color=COLORS["text_secondary"], anchor="w", justify="left",
+                **description_kwargs,
             ).pack(fill="x")
 
     @staticmethod
@@ -18489,6 +18573,8 @@ class WayfinderApp(ctk.CTk):
                 pass
         self._premium_banner = None
         self._premium_dismiss_button = None
+        self._premium_key_entry = None
+        self._premium_key_feedback = None
         WayfinderApp._sync_macos_hero_visibility(self)
         try:
             self._write_status_breadcrumb()
@@ -18529,17 +18615,24 @@ class WayfinderApp(ctk.CTk):
         # of the covering Ultra card, then restore on dismissal.
         WayfinderApp._sync_macos_hero_visibility(self)
 
-        # Content-hugging card (~470px) — the old relwidth=0.82 card stretched absurdly
-        # wide on large windows. place() with no explicit size lets pack propagation size
-        # the card to its content; the strut below sets the minimum content width.
+        # Bound the card to the *current* window, including at larger UI scales.
+        # The benefits can be taller than the window, but the activation field and
+        # every exit remain reachable through the normal scroll pipeline.
+        scale = max(0.5, float(ctk.ScalingTracker.get_widget_scaling(self)))
+        available_w = max(1, self.winfo_width() - 24) / scale
+        available_h = max(1, self.winfo_height() - 24) / scale
+        card_width = min(484, available_w)
+        card_height = min(680, available_h)
         # Ultra is gold everywhere (header glow, activation banner); the panel
         # that sells it matches.
         gold = COLORS["accent_yellow"]
         card = ctk.CTkFrame(
-            scrim, fg_color=COLORS["bg_card"], corner_radius=RADIUS["xl"],
+            scrim, width=card_width, height=card_height,
+            fg_color=COLORS["bg_card"], corner_radius=RADIUS["xl"],
             border_width=2, border_color=gold,
         )
         card.place(relx=0.5, rely=0.5, anchor="center")
+        card.pack_propagate(False)
 
         # Redundant exits are intentional: mouse users can use the close glyph,
         # the existing Maybe later button, or the surrounding scrim; Escape is
@@ -18550,7 +18643,7 @@ class WayfinderApp(ctk.CTk):
             fg_color="transparent", hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_muted"], corner_radius=RADIUS["sm"],
             command=self._dismiss_premium_prompt,
-        ).place(relx=1.0, x=-12, y=12, anchor="ne")
+        ).pack(anchor="e", padx=SPACING["sm"], pady=(SPACING["sm"], 0))
         scrim.bind("<Button-1>", self._dismiss_premium_prompt, add="+")
         # One permanent root binding that only acts while the panel is open.
         # unbind(seq, funcid) on Python < 3.11.7 drops EVERY <Escape> binding
@@ -18563,9 +18656,17 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
 
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=SPACING["2xl"], pady=SPACING["xl"])
-        ctk.CTkFrame(inner, fg_color="transparent", width=420, height=1).pack()
+        inner = SmoothScrollableFrame(
+            card, fg_color="transparent",
+            scrollbar_button_color=COLORS["bg_hover"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        inner.pack(fill="both", expand=True, padx=SPACING["lg"], pady=(0, SPACING["lg"]))
+        content_pad = SPACING["lg"]
+        # The scrollbar takes a little width of its own; keep all text and
+        # controls inside the rounded border even in a narrow 360px window.
+        content_width = max(180, int(card_width - 2 * content_pad - 24))
+        ctk.CTkFrame(inner, fg_color="transparent", width=content_width, height=1).pack()
 
         title_row = ctk.CTkFrame(inner, fg_color="transparent")
         title_row.pack(pady=(SPACING["xs"], 0))
@@ -18589,13 +18690,52 @@ class WayfinderApp(ctk.CTk):
 
         ctk.CTkLabel(
             inner, text=feature_msg, font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_secondary"], wraplength=400, justify="center",
+            text_color=COLORS["text_secondary"], wraplength=content_width, justify="center",
         ).pack(pady=(SPACING["sm"], SPACING["lg"]))
 
-        ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
-            fill="x", pady=(0, SPACING["md"]))
+        ctk.CTkLabel(
+            inner, text="Already have an Ultra key? Activate it here.",
+            font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w", pady=(0, SPACING["xs"]))
+        key_row = ctk.CTkFrame(inner, fg_color="transparent")
+        key_row.pack(fill="x")
+        key_entry = ctk.CTkEntry(
+            key_row, placeholder_text="WV-XXXX-XXXX-XXXX-XXXX",
+            font=(self.font_body[0], self.font_sizes["body"]),
+            height=34, corner_radius=RADIUS["sm"],
+            fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
+            border_color=COLORS["border_subtle"],
+        )
+        attach_secret_paste(key_entry, tk, log=self.log)
+        key_entry.pack(side="left", fill="x", expand=True, padx=(0, SPACING["sm"]))
+        self._premium_key_entry = key_entry
+        key_feedback = ctk.CTkLabel(
+            inner, text="", font=(self.font_body[0], self.font_sizes["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._premium_key_feedback = key_feedback
 
-        self._build_ultra_benefit_rows(inner, icon_color=gold)
+        def activate_from_panel(_event=None):
+            if not key_feedback.winfo_manager():
+                key_feedback.pack(after=key_row, anchor="w", pady=(SPACING["xs"], 0))
+            self._activate_license(key_entry, key_feedback)
+
+        ctk.CTkButton(
+            key_row, text="Activate", width=90, height=34,
+            font=(self.font_body[0], self.font_sizes["body"], "bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_dim"],
+            text_color="#FFFFFF", corner_radius=RADIUS["sm"],
+            command=activate_from_panel,
+        ).pack(side="left")
+        key_entry.bind("<Return>", activate_from_panel)
+
+        ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
+            fill="x", pady=(SPACING["lg"], SPACING["md"]))
+
+        self._build_ultra_benefit_rows(
+            inner, icon_color=gold, wraplength=max(140, content_width - 42)
+        )
 
         ctk.CTkFrame(inner, fg_color=COLORS["border_subtle"], height=1).pack(
             fill="x", pady=(SPACING["md"], SPACING["md"]))
@@ -18649,12 +18789,18 @@ class WayfinderApp(ctk.CTk):
         # Publish readiness only after every exit binding/button exists. This
         # is also what the packaged interaction smoke test waits on.
         self.update_idletasks()
+        try:
+            key_entry.focus_set()
+        except Exception:
+            pass
         self._write_status_breadcrumb()
 
-    def _activate_license(self) -> None:
-        """Activate a license key from the Settings UI."""
-        entry = getattr(self, "_license_key_entry", None)
-        feedback = getattr(self, "_license_feedback", None)
+    def _activate_license(self, entry=None, feedback=None) -> None:
+        """Activate a key from Settings or the inline Upgrade panel."""
+        if entry is None:
+            entry = getattr(self, "_license_key_entry", None)
+        if feedback is None:
+            feedback = getattr(self, "_license_feedback", None)
         if entry is None or feedback is None:
             return
         key = entry.get().strip().upper()
@@ -18785,7 +18931,7 @@ class WayfinderApp(ctk.CTk):
                 _release_cleanup_residency()
             except Exception:
                 pass
-        # Revert the badge/glow/underline/tier live.
+        # Revert the badge/glow/tier live.
         prior = getattr(self, "_ultra_banner", None)
         if prior is not None:
             try:
@@ -22322,6 +22468,7 @@ class WayfinderApp(ctk.CTk):
 
         # Restore ducked streams before os._exit bypasses normal destructors.
         self._close_audio_ducking()
+        _flush_windows_clipboard_restore()
 
         # Shutdown thread pool executors gracefully
         try:
@@ -22864,6 +23011,13 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
+        if IS_MACOS and getattr(self, "_premium_banner", None) is not None:
+            # The opaque Ultra scrim covers the whole window, hero card
+            # included: nothing to animate (it cost 16% of a core). Dismissing
+            # it re-syncs the hero, which restarts this loop.
+            self._idle_breath_job = None
+            return
+
         # Linux: while another app has focus (LINUX-FOLLOWUPS 3.1) the calm
         # ribbon drifts at a third of its speed on a low frame rate: still
         # alive beside a side-by-side window, at a fraction of the ~10% of a
@@ -22894,7 +23048,7 @@ class WayfinderApp(ctk.CTk):
         if (
             native_layer is not None
             and native_layer.native_renderer is not None
-            and (not IS_MACOS or getattr(self, "active_tab", "dictate") == "dictate")
+            and (not IS_MACOS or not WayfinderApp._macos_hero_is_occluded(self))
         ):
             # The native Objective-C timer owns all 30 fps idle frames. Python
             # wakes again only on a state/tab/window event.
@@ -22902,7 +23056,7 @@ class WayfinderApp(ctk.CTk):
             return
 
         interval = (
-            66 if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate"
+            66 if IS_MACOS and WayfinderApp._macos_hero_is_occluded(self)
             else _HERO_BACKGROUND_INTERVAL_MS if background
             else _hero_idle_interval_ms()
         )
@@ -23827,6 +23981,43 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.core.macos_game_chat import gamer_asr_overlay
         return gamer_asr_overlay(config, profile)
 
+    def _asr_config_for_dictation(self) -> dict:
+        """Snapshot one dictation's ASR mode while Windows finishes GPU setup."""
+        from wayfinder.core.gm_asr import effective_asr_config
+
+        config = WayfinderApp._gamer_asr_config(self, effective_asr_config(
+            self.config, bool(getattr(self, "_game_mode", False))
+        ))
+        if not (
+            IS_WINDOWS and not IS_MACOS and config.get("use_gpu", False)
+            and config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
+        ):
+            return config
+        ready = getattr(self, "_windows_gpu_setup_done", None)
+        cpu_session = getattr(self, "_windows_gpu_cpu_for_session", None)
+        cpu_session = bool(cpu_session) or bool(ready is not None and not ready.is_set())
+        cpu_session = cpu_session or bool(getattr(self, "_windows_gpu_setup_failed", False))
+        if not cpu_session:
+            return config
+
+        config = dict(config)  # runtime overlay only; keep Ultra settings saved
+        config["use_gpu"] = False
+        names = (
+            ("ggml-base.en.bin", "ggml-base.bin")
+            if config.get("language", "en") == "en"
+            else ("ggml-base.bin", "ggml-base.en.bin")
+        )
+        for name in names:
+            base = _resolve_whisper_model(name)
+            if base is not None:
+                config["model_path"] = str(base)
+                break
+        if not getattr(self, "_windows_gpu_setup_notice_logged", False):
+            self._windows_gpu_setup_notice_logged = True
+            model = Path(str(config.get("model_path", ""))).name
+            self.log(f"⌛ GPU setup is unavailable or unfinished; this dictation uses {model} on CPU")
+        return config
+
     def start_recording(self):
         # Gamer mode follows the game in front when dictation starts.
         self._gamer_profile = WayfinderApp._gamer_profile_now(self)
@@ -23883,6 +24074,12 @@ class WayfinderApp(ctk.CTk):
 
             # New recording session: bump the generation so any still-in-flight work or
             # scheduled callbacks from a previous session are recognised as stale and ignored.
+            if IS_WINDOWS and not IS_MACOS:
+                ready = getattr(self, "_windows_gpu_setup_done", None)
+                self._windows_gpu_cpu_for_session = bool(
+                    ready is not None and not ready.is_set()
+                )
+                self._windows_gpu_setup_notice_logged = False
             self.session_generation += 1
             gen = self.session_generation
             if self._finish_injection_job is not None:
@@ -24151,11 +24348,9 @@ class WayfinderApp(ctk.CTk):
                     time.sleep(0.05)
 
             # Skip post-processing per-chunk - will be applied to final combined text.
-            # Light ASR profile is a runtime overlay only (never written back to disk).
-            from wayfinder.core.gm_asr import effective_asr_config
-            asr_cfg = WayfinderApp._gamer_asr_config(self, effective_asr_config(
-                self.config, bool(getattr(self, "_game_mode", False))
-            ))
+            # Light ASR and first-session Windows GPU preparation are runtime
+            # overlays only (never written back to disk).
+            asr_cfg = WayfinderApp._asr_config_for_dictation(self)
             text = transcribe_with_config(
                 chunk_path,
                 asr_cfg,
@@ -24547,11 +24742,9 @@ class WayfinderApp(ctk.CTk):
         try:
             self.log("🔄 Transcribing...")
             trans_start = time_module.perf_counter()
-            # Light ASR profile is a runtime overlay only (never written back to disk).
-            from wayfinder.core.gm_asr import effective_asr_config
-            asr_cfg = WayfinderApp._gamer_asr_config(self, effective_asr_config(
-                self.config, bool(getattr(self, "_game_mode", False))
-            ))
+            # Same per-session ASR snapshot as chunks: Windows stays on Base
+            # CPU while the initial Ultra GPU device selection is unfinished.
+            asr_cfg = WayfinderApp._asr_config_for_dictation(self)
             text = transcribe_with_config(audio_path, asr_cfg)
             trans_elapsed = time_module.perf_counter() - trans_start
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
@@ -25439,6 +25632,7 @@ def main():
                 # Restore any stream volumes Aura still owns. The recovery
                 # journal remains if the audio server rejects a final retry.
                 app._close_audio_ducking()
+                _flush_windows_clipboard_restore()
                 
                 # Shutdown thread pool executors gracefully
                 if hasattr(app, 'executor'):

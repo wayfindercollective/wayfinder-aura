@@ -22,13 +22,23 @@ def _expanded_wave_frame(
     width: float,
     height: float,
     content_height: float,
+    *,
+    geometry_flipped: bool,
     bleed: float = WAVE_BLEED,
 ) -> tuple[float, float, int, int]:
-    """Convert a Qt top-left wave box to an expanded Core Animation frame."""
+    """Place the wave in its parent CALayer's actual coordinate system.
+
+    Qt's macOS content layer is geometry-flipped (top-left origin). The old
+    bottom-left conversion happened to look right while the pill was vertically
+    centered, but adding the cancel-hint strip exposed the mirrored offset.
+    """
     expanded_width = max(1, int(round(width + bleed * 2.0)))
     expanded_height = max(1, int(round(height + bleed * 2.0)))
     native_x = float(x) - bleed
-    native_y = float(content_height) - float(top) - float(height) - bleed
+    native_y = (
+        float(top) - bleed if geometry_flipped
+        else float(content_height) - float(top) - float(height) - bleed
+    )
     return native_x, native_y, expanded_width, expanded_height
 
 
@@ -146,10 +156,11 @@ kernel void overlay_wave(texture2d<float, access::write> output [[texture(0)]],
 class MacOSOverlayMetalLayer:
     """ctypes bridge to the native 15 fps transparent Metal layer."""
 
-    def __init__(self, library, handle, ns_window):
+    def __init__(self, library, handle, ns_window, geometry_flipped: bool):
         self.library = library
         self.handle = handle
         self.ns_window = ns_window
+        self.geometry_flipped = geometry_flipped
         self._frame = None
 
     @classmethod
@@ -176,6 +187,9 @@ class MacOSOverlayMetalLayer:
             parent = view.layer()
             if parent is None:
                 return None
+            # QContainerLayer on macOS is flipped, unlike a bare CALayer.
+            # Detect the parent instead of assuming either orientation.
+            geometry_flipped = bool(parent.isGeometryFlipped())
             path = next((p for p in _native_library_candidates() if p.is_file()), None)
             if path is None:
                 return None
@@ -209,7 +223,7 @@ class MacOSOverlayMetalLayer:
                 float(ns_window.backingScaleFactor()),
                 _SHADER.encode("utf-8"),
             )
-            return cls(library, handle, ns_window) if handle else None
+            return cls(library, handle, ns_window, geometry_flipped) if handle else None
         except Exception as exc:
             print(f"overlay: native Metal waveform unavailable ({exc})", flush=True)
             return None
@@ -224,6 +238,7 @@ class MacOSOverlayMetalLayer:
             float(rect.width()),
             float(rect.height()),
             content_height,
+            geometry_flipped=self.geometry_flipped,
         )
         frame = (round(x, 3), round(y, 3), width, height)
         if frame != self._frame:

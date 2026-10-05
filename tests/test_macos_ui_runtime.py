@@ -307,7 +307,11 @@ def test_macos_idle_status_icon_uses_native_template_rendering(monkeypatch):
     assert calls == [True, False]
 
 
-def test_macos_native_hero_is_suspended_below_tabs_and_ultra_scrim():
+def test_macos_native_hero_steps_aside_only_for_tk_overlays():
+    """Tab pages sit below the hero card, so every tab keeps the native layer
+    (~0.5% CPU; the Tk fallback cost 37% of a core on Settings). Only what Tk
+    places over the window hides it: the Ultra scrim, an open dropdown list
+    and the caricature toast."""
     hidden = []
     layer = type("Layer", (), {"set_hidden": lambda self, value: hidden.append(value)})()
     app = type(
@@ -319,20 +323,32 @@ def test_macos_native_hero_is_suspended_below_tabs_and_ultra_scrim():
             "_macos_hero_layer": layer,
         },
     )()
+    occluded = lambda: wayfinder_main.WayfinderApp._macos_hero_is_occluded(app)
 
-    assert wayfinder_main.WayfinderApp._macos_hero_is_occluded(app) is False
+    assert occluded() is False
     app._premium_banner = object()
-    assert wayfinder_main.WayfinderApp._macos_hero_is_occluded(app) is True
+    assert occluded() is True
     wayfinder_main.WayfinderApp._sync_macos_hero_visibility(app)
     assert hidden[-1] is True
 
     app._premium_banner = None
-    app.active_tab = "settings"
-    assert wayfinder_main.WayfinderApp._macos_hero_is_occluded(app) is True
+    for tab in ("settings", "style", "history", "games"):
+        app.active_tab = tab
+        assert occluded() is False
+    wayfinder_main.WayfinderApp._sync_macos_hero_visibility(app)
+    assert hidden[-1] is False
+
+    app._active_dropdown_panel = object()
+    assert occluded() is True
+    app._active_dropdown_panel = None
+    app._confetti_overlay = type("Toast", (), {"_destroyed": False})()
+    assert occluded() is True
+    app._confetti_overlay._destroyed = True
+    assert occluded() is False
 
 
-def test_settings_wave_animates_on_canvas_while_native_layer_is_hidden(monkeypatch):
-    """The always-visible hero must not become a still image on Settings."""
+def test_wave_animates_on_canvas_while_an_overlay_hides_the_native_layer(monkeypatch):
+    """The always-visible hero must not become a still image under a dropdown."""
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
     _stub_appkit(monkeypatch)
     drawn = []
@@ -352,6 +368,7 @@ def test_settings_wave_animates_on_canvas_while_native_layer_is_hidden(monkeypat
 
     app = type("App", (), {
         "active_tab": "settings",
+        "_active_dropdown_panel": object(),
         "app_state": wayfinder_main.AppState.IDLE,
         "hero_canvas": Canvas(),
         "_macos_hero_layer": Native(),
@@ -372,13 +389,13 @@ def test_settings_wave_animates_on_canvas_while_native_layer_is_hidden(monkeypat
     assert drawn == [{"force_canvas": True}, {}]
     assert scheduled == [66]
 
-    app.active_tab = "dictate"
+    app._active_dropdown_panel = None   # the list closed: native frames again
     wayfinder_main.WayfinderApp._animate_idle_breath(app)
     assert app._idle_breath_job is None
     assert scheduled == [66]
 
 
-def test_settings_wave_does_not_reactivate_native_layer(monkeypatch):
+def test_wave_under_an_overlay_does_not_reactivate_native_layer(monkeypatch):
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
     monkeypatch.setattr(wayfinder_main, "get_hero_caches", lambda *args: None)
     frame = object()
@@ -407,13 +424,14 @@ def test_settings_wave_does_not_reactivate_native_layer(monkeypatch):
 
     class Native:
         def render_wave(self, **kwargs):
-            pytest.fail("Native renderer covered Settings")
+            pytest.fail("Native renderer covered the dropdown")
 
         def set_image(self, image):
-            pytest.fail("Native layer covered Settings")
+            pytest.fail("Native layer covered the dropdown")
 
     app = type("App", (), {
         "active_tab": "settings",
+        "_active_dropdown_panel": object(),
         "hero_canvas": Canvas(),
         "_hero_wave_items_created": True,
         "_hero_wave_image_id": 1,
@@ -775,3 +793,63 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     no_tool = ("Injection: No text injection tool available on Linux. "
                "Install xdotool (X11) or ydotool (Wayland).")
     assert wayfinder_main.WayfinderApp._error_guidance(ns, no_tool) == no_tool[len("Injection: "):]
+
+
+def test_closing_a_dropdown_gives_the_hero_back_to_the_native_layer(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    synced = []
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_sync_macos_hero_visibility",
+                        lambda self: synced.append(
+                            wayfinder_main.WayfinderApp._macos_hero_is_occluded(self)))
+    panel = type("Panel", (), {"place_forget": lambda self: None, "destroy": lambda self: None})()
+    app = type("App", (), {"_active_dropdown_panel": panel, "_active_dropdown_owner": object()})()
+
+    wayfinder_main.WayfinderApp._close_dropdown_panel(app)
+    assert app._active_dropdown_panel is None
+    assert synced == [False]
+
+
+def test_dropdown_and_toast_resync_the_native_hero():
+    import inspect
+
+    opener = inspect.getsource(wayfinder_main.WayfinderApp._open_dropdown_panel)
+    assert "self._active_dropdown_panel = panel" in opener
+    assert opener.index("WayfinderApp._sync_macos_hero_visibility(self)") > opener.index(
+        "self._active_dropdown_panel = panel")
+    egg = inspect.getsource(wayfinder_main.WayfinderApp)
+    toast = egg.index("self._confetti_overlay = ConfettiOverlay(")
+    assert "WayfinderApp._sync_macos_hero_visibility(self)" in egg[toast:toast + 700]
+    assert '"<Destroy>"' in egg[toast:toast + 700]
+
+
+def test_nothing_animates_under_the_opaque_ultra_scrim(monkeypatch):
+    """The Ultra panel's scrim covers the hero card: no Tk fallback frames
+    (16% of a core) until it is dismissed, which restarts the loop."""
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    _stub_appkit(monkeypatch)
+    drawn, scheduled = [], []
+
+    class Canvas:
+        @staticmethod
+        def winfo_viewable():
+            return True
+
+    app = type("App", (), {
+        "active_tab": "style",
+        "_premium_banner": object(),
+        "app_state": wayfinder_main.AppState.IDLE,
+        "hero_canvas": Canvas(),
+        "_macos_hero_layer": type("N", (), {"native_renderer": object(),
+                                            "set_hidden": lambda self, v: None})(),
+        "_hero_last_frame_ts": wayfinder_main.time.monotonic(),
+        "_hero_morph": 0.0,
+        "_hero_wave_time": 0.0,
+        "_idle_breath_job": "old",
+        "state": lambda self: "normal",
+        "after": lambda self, ms, fn: scheduled.append(ms) or "job",
+        "_hero_idle_backgrounded": lambda self: False,
+        "_draw_hero_waveform": lambda self, **kwargs: drawn.append(kwargs),
+    })()
+
+    wayfinder_main.WayfinderApp._animate_idle_breath(app)
+    assert drawn == [] and scheduled == [] and app._idle_breath_job is None

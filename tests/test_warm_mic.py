@@ -438,3 +438,147 @@ class TestRecordersUseWarmMic:
         rec.stop()
         warm.release.assert_called_once()
         assert rec.is_recording() is False
+
+
+class TestWindowsSlowCloseRecovery:
+    """Windows: a healthy stream close takes ~0.35 s (MME, USB mic), so one slow
+    moment overran the 1 s watchdog and blocked recording until a restart
+    (owner, 2026-10-01). Windows allows 5 s, and a close that overruns but
+    finishes lifts the quarantine. The Mac keeps its restart."""
+
+    def _slow_close(self, monkeypatch, mock_sd, platform):
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", platform == "win32")
+        monkeypatch.setattr(recorder, "_MIC_CLOSE_TIMEOUT", 0.1)
+        blocker = threading.Event()
+        stream = MagicMock()
+        stream.active = True
+        stream.abort.side_effect = lambda: blocker.wait(timeout=5)
+        mock_sd.InputStream.return_value = stream
+        warm = _make_warm(device=7)
+        warm.acquire(MagicMock())
+        warm.release()
+        assert warm._close_stream() is False          # overran the watchdog
+        assert warm._abandoned_close is True
+        blocker.set()                                  # ...but then finishes
+        assert warm._close_done.wait(timeout=2)
+        return warm
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_windows_recovers_when_the_slow_close_finishes(self, mock_sd, _rate, monkeypatch):
+        warm = self._slow_close(monkeypatch, mock_sd, "win32")
+        assert warm._abandoned_close is False
+        warm.acquire(MagicMock())                      # records again, no restart
+        assert mock_sd.InputStream.call_count == 2
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_mac_still_requires_a_restart(self, mock_sd, _rate, monkeypatch):
+        warm = self._slow_close(monkeypatch, mock_sd, "darwin")
+        assert warm._abandoned_close is True
+        with pytest.raises(RuntimeError, match="stuck releasing"):
+            warm.acquire(MagicMock())
+
+    def test_close_budget_is_five_seconds_only_on_windows(self):
+        import sys as real_sys
+
+        from wayfinder.core import recorder
+
+        assert recorder._MIC_CLOSE_TIMEOUT == (5.0 if real_sys.platform == "win32" else 1.0)
+
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_windows_acquire_retries_when_the_close_finished_during_the_wait(
+        self, mock_sd, _rate, monkeypatch
+    ):
+        """The close returned (its flags cleared under the lock) but _close_done
+        was not set yet when acquire's wait gave up: retry, never quarantine."""
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", True)
+        monkeypatch.setattr(recorder, "_MIC_CLOSE_TIMEOUT", 0.05)
+        mock_sd.InputStream.return_value = MagicMock(active=True)
+        warm = _make_warm(device=7)
+        warm._close_done.clear()          # the gap: close done, Event not yet set
+        warm._closing_stream = False
+        threading.Timer(0.2, warm._close_done.set).start()
+        warm.acquire(MagicMock())
+        assert warm._abandoned_close is False and mock_sd.InputStream.call_count == 1
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_windows_no_stale_restart_notice_after_recovery(self, mock_sd, _rate, monkeypatch):
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", True)
+        notices = []
+        warm = _make_warm(device=7, on_restart_required=notices.append)
+        warm._abandoned_close = False      # recovered before the notice went out
+        warm._notify_restart_required("stale")
+        assert notices == []
+        warm._abandoned_close = True       # genuinely stuck: still reported
+        warm._notify_restart_required("stuck")
+        assert notices == ["stuck"]
+
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_windows_hotkey_during_a_normal_idle_close_still_records(
+        self, mock_sd, _rate, monkeypatch
+    ):
+        """The idle timer's close is in flight (not stuck) when the hotkey lands:
+        wait for it and record, never ask for a restart."""
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", True)
+        mock_sd.InputStream.return_value = MagicMock(active=True)
+        warm = _make_warm(device=7)
+
+        class IdleCloseStartsRightAfterTheCheck(threading.Event):
+            """acquire()'s first wait passes, then _on_idle wins the lock and
+            starts a (healthy) close: _closing_stream set, _close_done clear."""
+            first = True
+
+            def wait(self, timeout=None):
+                if self.first:
+                    self.first = False
+                    return True
+                return super().wait(timeout)
+
+        warm._close_done = IdleCloseStartsRightAfterTheCheck()
+        warm._closing_stream = True
+
+        def close_finishes():
+            with warm._lock:
+                warm._closing_stream = False
+            warm._close_done.set()
+
+        threading.Timer(0.2, close_finishes).start()
+        warm.acquire(MagicMock())
+        assert warm._abandoned_close is False and mock_sd.InputStream.call_count == 1
+
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_windows_close_finishing_right_after_the_watchdog_is_not_quarantined(
+        self, mock_sd, _rate, monkeypatch
+    ):
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder, "_IS_WINDOWS", True)
+        real_run = recorder._run_with_timeout
+
+        def watchdog_then_finish(fn, timeout_s):
+            fn()                          # the close completes...
+            raise TimeoutError("late")    # ...just as the watchdog gives up
+
+        mock_sd.InputStream.return_value = MagicMock(active=True)
+        warm = _make_warm(device=7)
+        warm.acquire(MagicMock())
+        warm.release()
+        monkeypatch.setattr(recorder, "_run_with_timeout", watchdog_then_finish)
+        assert warm._close_stream() is True
+        assert warm._abandoned_close is False
+        monkeypatch.setattr(recorder, "_run_with_timeout", real_run)

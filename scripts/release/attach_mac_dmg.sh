@@ -12,6 +12,11 @@
 # whisper/llama binaries (build/macos-native/bin) when present, pauses the Mac
 # CI queue while it runs (docs/CI.md) and uploads with --clobber, so a re-run
 # replaces the asset. GH_TOKEN must belong to an account that can edit releases.
+#
+# AURA_DMG_ONLY=<path>: build, notarize and check the DMG, copy it to <path>
+# and stop there (no release needed yet, no upload). The watcher uses it to
+# build while the Release workflow is still running, then attaches the saved
+# DMG the moment the release appears.
 set -euo pipefail
 
 TAG="${1:?usage: $0 vX.Y.Z[-beta.N]}"
@@ -24,7 +29,10 @@ PYTHON="${AURA_MAC_PYTHON:-$ROOT/venv-mac/bin/python}"
 [ -x "$PYTHON" ] || PYTHON="$HOME/wayfinder-aura/venv-mac/bin/python"
 HOLD="$HOME/.cache/foxgrid/aura-mac-ci.hold"
 
-gh release view "$TAG" --repo "$REPO" >/dev/null   # the release must exist first
+DMG_ONLY="${AURA_DMG_ONLY:-}"
+if [ -z "$DMG_ONLY" ]; then
+  gh release view "$TAG" --repo "$REPO" >/dev/null   # the release must exist first
+fi
 git -C "$ROOT" fetch -q origin "refs/tags/$TAG:refs/tags/$TAG"
 
 WORK="$(mktemp -d -t aura-dmg)"
@@ -66,5 +74,11 @@ DMG="dist/Wayfinder_Aura-${TAG#v}-macOS-$(uname -m).dmg"
 [ -f "$DMG" ] || { echo "expected $DMG" >&2; ls dist >&2; exit 1; }
 spctl --assess --type open --context context:primary-signature -v "$DMG"
 xcrun stapler validate "$DMG"
+if [ -n "$DMG_ONLY" ]; then
+  mkdir -p "$(dirname "$DMG_ONLY")"
+  cp "$DMG" "$DMG_ONLY.partial" && mv "$DMG_ONLY.partial" "$DMG_ONLY"
+  echo "Built $(basename "$DMG") for $TAG ahead of its release: $DMG_ONLY"
+  exit 0
+fi
 gh release upload "$TAG" "$DMG" --repo "$REPO" --clobber
 echo "Attached $(basename "$DMG") to $TAG"

@@ -112,6 +112,19 @@ Linux: dictation for gamers on every desktop.
 - **The AppImage tells the desktop who is asking.** It registers as Wayfinder
   Aura with the desktop portal (xdg-desktop-portal 1.19 or newer), even when
   started from a file manager.
+- **Mac: Aura idles at about 0.5% CPU on every tab.** On Settings, History
+  and Style the waveform was redrawn in Python, about 37% of a core on a Mac
+  Studio. It now uses the Mac's own renderer there too, and steps aside only
+  while a dropdown list or notice is drawn over it. Nothing is redrawn behind
+  the Ultra panel, which covers the whole window.
+- **Windows: pasting into VS Code and other Electron apps pastes the
+  dictation, not your old clipboard.** Aura now puts your clipboard back
+  0.8 s after Ctrl+V, as on the Mac, instead of 80 ms later. A paste that
+  starts sooner waits for that, and quitting Aura gives the clipboard back
+  first. If you copied something new in the meantime, it's kept.
+- **Windows: a slow microphone release no longer forces a restart.** Closing
+  a mic stream can take a moment on Windows. Aura now waits up to 5 s and
+  carries on once it finishes, instead of asking you to restart Aura.
 - **A muted or switched-off mic is named as the problem.** When the mic sends
   pure digital silence (a muted USB headset, a wireless headset turned off
   with its dongle still plugged in), Aura now says "Your mic … sent no sound
