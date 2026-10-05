@@ -110,6 +110,17 @@ def test_cancel_shortcut_follows_config_and_round_trips():
     assert parse_trigger_description("Shift+Escape") == (1, ["shift"])
 
 
+def test_cancel_shortcut_never_grabs_a_bare_escape():
+    # A hand-edited config without modifiers must not take Escape away from
+    # every app; the user picks the key at bind time instead.
+    for mods in ([], None):
+        specs = shortcut_specs_from_config({
+            "cancel_hotkey_key": 1, "cancel_hotkey_modifiers": mods,
+        })
+        cancel = next(s for s in specs if s.shortcut_id == "cancel-dictation")
+        assert cancel.trigger == ""
+
+
 def test_specs_with_mouse_hotkey_omit_the_trigger():
     config = {
         "hotkey_key": 275, "hotkey_modifiers": [],  # BTN_SIDE

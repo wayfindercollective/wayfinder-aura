@@ -201,6 +201,15 @@ class ShortcutSpec:
     event: EventType
 
 
+def _cancel_trigger(config: dict) -> str:
+    """The cancel shortcut's trigger, never a bare Escape: the portal grabs its
+    key in every app at all times, so Escape alone would stop working
+    everywhere. Without modifiers the user picks a key at bind time."""
+    modifiers = config.get("cancel_hotkey_modifiers", ["shift"])
+    trigger = encode_trigger(config.get("cancel_hotkey_key", 1), modifiers)
+    return "" if trigger == "Escape" else trigger
+
+
 def shortcut_specs_from_config(config: dict) -> list[ShortcutSpec]:
     """The app's global shortcuts, triggers encoded from the live config."""
     return [
@@ -224,10 +233,7 @@ def shortcut_specs_from_config(config: dict) -> list[ShortcutSpec]:
         ShortcutSpec(
             shortcut_id="cancel-dictation",
             description="Cancel dictation (nothing is typed)",
-            trigger=encode_trigger(
-                config.get("cancel_hotkey_key", 1),
-                config.get("cancel_hotkey_modifiers", ["shift"]),
-            ),
+            trigger=_cancel_trigger(config),
             event=EventType.CANCEL_RECORDING,
         ),
     ]
