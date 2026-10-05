@@ -14948,7 +14948,7 @@ class WayfinderApp(ctk.CTk):
                 if IS_FLATPAK:
                     text += " Get Update downloads it; open the file to install it."
                 else:
-                    text += " Get Update downloads the new AppImage; run it instead of this one."
+                    text += " Get Update downloads the new AppImage; make it executable (file Properties, or chmod +x), then run it instead of this one."
             label.configure(text=text)
             if IS_MACOS or IS_WINDOWS:
                 # A manual check may have hidden Get Update for a status line.
