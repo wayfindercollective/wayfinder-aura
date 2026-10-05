@@ -122,8 +122,9 @@ class _FakeBus:
     """Speaks the RemoteDesktop request/response lifecycle."""
 
     def __init__(self, start_code=0, devices=1, token="tok-new", fail_after=None,
-                 close_after_ready=False):
+                 close_after_ready=False, registry=True):
         self.start_code = start_code
+        self.registry = registry  # the portal has org.freedesktop.host.portal.Registry
         self.devices = devices
         self.token = token
         self.fail_after = fail_after          # NotifyKeyboardKeysym calls that succeed
@@ -160,6 +161,11 @@ class _FakeBus:
                 self.keys.append((body[2], body[3]))
             return None
         if method == "Close":
+            return None
+        if method == "Register":
+            assert fmt == "(sa{sv})"
+            if not self.registry:
+                raise RuntimeError("org.freedesktop.DBus.Error.UnknownInterface")
             return None
         options = body[-1]
         token = options["handle_token"][1]
@@ -328,6 +334,63 @@ def test_restore_token_is_sent_and_replaced(monkeypatch, tmp_path):
         assert pk.load_state(path)["restore_token"] == "tok-2"   # tokens are single-use
     finally:
         kb.close()
+
+
+def test_the_appimage_registers_its_app_id_before_any_other_portal_call(monkeypatch, tmp_path):
+    # Without an app ID the desktop cannot name Aura or keep its approval.
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    monkeypatch.setattr(pk, "host_app_id", lambda: "io.wayfindercollective.WayfinderAura")
+    try:
+        assert kb.start()
+        assert _settle(kb, kb.READY) == kb.READY
+        iface, method, _fmt, body = bus.calls[0]
+        assert (iface, method) == (pk._REGISTRY_IFACE, "Register")
+        assert body == ("io.wayfindercollective.WayfinderAura", {})
+        assert bus.calls[1][1] == "CreateSession"
+    finally:
+        kb.close()
+
+
+def test_a_portal_without_the_registry_still_types(monkeypatch, tmp_path):
+    bus = _FakeBus(registry=False)  # xdg-desktop-portal before 1.19
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    monkeypatch.setattr(pk, "host_app_id", lambda: "io.wayfindercollective.WayfinderAura")
+    try:
+        assert kb.start()
+        assert _settle(kb, kb.READY, kb.FAILED) == kb.READY
+    finally:
+        kb.close()
+
+
+def test_flatpak_and_source_runs_do_not_register(monkeypatch, tmp_path):
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    monkeypatch.setattr(pk, "host_app_id", lambda: "")
+    try:
+        assert kb.start()
+        assert _settle(kb, kb.READY) == kb.READY
+        assert "Register" not in [method for _i, method, _f, _b in bus.calls]
+    finally:
+        kb.close()
+
+
+def test_host_app_id_is_the_appimage_menu_entry(monkeypatch, tmp_path):
+    from wayfinder.utils import platform as plat
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(plat, "is_flatpak", lambda: False)
+    monkeypatch.setattr(plat, "is_appimage", lambda: True)
+    assert pk.host_app_id() == ""  # no menu entry under that ID yet
+    entry = tmp_path / "applications" / "io.wayfindercollective.WayfinderAura.desktop"
+    entry.parent.mkdir()
+    entry.write_text("[Desktop Entry]\n")
+    assert pk.host_app_id() == "io.wayfindercollective.WayfinderAura"
+    monkeypatch.setattr(plat, "is_flatpak", lambda: True)  # the sandbox names it
+    assert pk.host_app_id() == ""
+    monkeypatch.setattr(plat, "is_flatpak", lambda: False)
+    monkeypatch.setattr(plat, "is_appimage", lambda: False)  # a source run
+    assert pk.host_app_id() == ""
 
 
 def test_declined_is_remembered_and_not_asked_again(monkeypatch, tmp_path):

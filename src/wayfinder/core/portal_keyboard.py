@@ -50,6 +50,7 @@ _PORTAL_PATH = "/org/freedesktop/portal/desktop"
 _REQUEST_IFACE = "org.freedesktop.portal.Request"
 _SESSION_IFACE = "org.freedesktop.portal.Session"
 _REMOTE_IFACE = "org.freedesktop.portal.RemoteDesktop"
+_REGISTRY_IFACE = "org.freedesktop.host.portal.Registry"
 
 DEVICE_KEYBOARD = 1
 KEY_LEFTSHIFT = 42  # evdev; used when the layout has no Shift_L
@@ -243,6 +244,47 @@ def host_is_wayland_desktop() -> bool:
                              and os.environ.get("XDG_SESSION_TYPE") != "x11"):
         return False
     return not gamescope_x_server()
+
+
+def host_app_id() -> str:
+    """The app ID the AppImage registers with the portal, or "" (no registration).
+
+    A Flatpak is identified by its sandbox. A host process only by its systemd
+    scope, which an AppImage started from a file manager or terminal does not
+    carry: the desktop then cannot name Aura in the dialog or keep its approval
+    for the next launch. The AppImage installs
+    io.wayfindercollective.WayfinderAura.desktop (utils/desktop_integration.py),
+    so it registers under that ID. Source runs have no such desktop file.
+    """
+    try:
+        from ..utils.desktop_integration import APP_ID, _xdg_data_home
+        from ..utils.platform import is_appimage, is_flatpak
+        if is_flatpak() or not is_appimage():
+            return ""
+        if not (_xdg_data_home() / "applications" / f"{APP_ID}.desktop").is_file():
+            return ""
+        return APP_ID
+    except Exception:
+        return ""
+
+
+def register_host_app(bus, Gio, GLib, app_id: str) -> bool:
+    """Tell the portal which app this connection is (xdg-desktop-portal 1.19+).
+
+    Must be the connection's first portal call. Older portals lack the
+    Registry and a launcher's scope may already name the app; either way the
+    call fails harmlessly and the desktop identifies Aura as before.
+    """
+    if not app_id:
+        return False
+    try:
+        bus.call_sync(_PORTAL_DEST, _PORTAL_PATH, _REGISTRY_IFACE, "Register",
+                      GLib.Variant("(sa{sv})", (app_id, {})), None,
+                      Gio.DBusCallFlags.NONE, _CALL_TIMEOUT_MS, None)
+        return True
+    except Exception as exc:
+        print(f"[portal-keyboard] not registered as {app_id}: {exc}", flush=True)
+        return False
 
 
 def portal_keyboard_offered(bus=None) -> bool:
@@ -459,6 +501,7 @@ class PortalKeyboard:
         subs: list = []
         try:
             bus = self._open_bus(Gio)
+            register_host_app(bus, Gio, GLib, host_app_id())
             sender = (bus.get_unique_name() or "").lstrip(":").replace(".", "_")
             responses: dict = {}
             waiting = {"path": "", "loop": None, "closed": ""}
