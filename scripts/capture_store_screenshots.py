@@ -132,13 +132,19 @@ def _write_config(cfg_dir: Path, *, welcome_done: bool) -> None:
             "x": 400,
             "y": 120,
         },
-        "hotkey_key": 60,
-        "hotkey_modifiers": ["super"],
-        "style_toggle_key": 61,
-        "style_toggle_modifiers": ["super"],
+        # The Linux defaults a new install gets: Ctrl+Alt+Space / Ctrl+Alt+Enter.
+        "hotkey_key": 57,
+        "hotkey_modifiers": ["ctrl", "alt"],
+        "style_toggle_key": 28,
+        "style_toggle_modifiers": ["ctrl", "alt"],
         "output_tone": "professional",
         "gpu_nudge_dismissed": True,
         "check_for_model_updates": False,
+        # No banners in a store shot: no update check, no crash-report prompt,
+        # and no desktop dialog over the window from the typing portal.
+        "check_for_app_updates": False,
+        "crash_reports": "off",
+        "linux_portal_typing": False,
     }
     (cfg_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
