@@ -151,6 +151,8 @@ class _FakeBus:
     def call_sync(self, dest, path, iface, method, params, reply_type, flags, timeout, cancel):
         fmt, body = params if params is not None else (None, None)
         self.calls.append((iface, method, fmt, body))
+        self.timeouts = getattr(self, "timeouts", {})
+        self.timeouts[method] = timeout
         if method in ("NotifyKeyboardKeysym", "NotifyKeyboardKeycode"):
             assert fmt == "(oa{sv}iu)" and body[0] == SESSION
             if self.fail_after is not None and len(self.keys) + len(self.codes) >= self.fail_after:
@@ -348,6 +350,8 @@ def test_the_appimage_registers_its_app_id_before_any_other_portal_call(monkeypa
         assert (iface, method) == (pk._REGISTRY_IFACE, "Register")
         assert body == ("io.wayfindercollective.WayfinderAura", {})
         assert bus.calls[1][1] == "CreateSession"
+        # A portal still starting at login answers slowly: the setup timeout.
+        assert bus.timeouts["Register"] == pk._SETUP_TIMEOUT_S * 1000
     finally:
         kb.close()
 

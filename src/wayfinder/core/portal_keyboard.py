@@ -278,9 +278,12 @@ def register_host_app(bus, Gio, GLib, app_id: str) -> bool:
     if not app_id:
         return False
     try:
+        # The setup timeout, not the key timeout: a portal still starting
+        # (D-Bus activation at login) answered after 2 s in testing, and a
+        # registration that lands late still holds.
         bus.call_sync(_PORTAL_DEST, _PORTAL_PATH, _REGISTRY_IFACE, "Register",
                       GLib.Variant("(sa{sv})", (app_id, {})), None,
-                      Gio.DBusCallFlags.NONE, _CALL_TIMEOUT_MS, None)
+                      Gio.DBusCallFlags.NONE, _SETUP_TIMEOUT_S * 1000, None)
         return True
     except Exception as exc:
         print(f"[portal-keyboard] not registered as {app_id}: {exc}", flush=True)
