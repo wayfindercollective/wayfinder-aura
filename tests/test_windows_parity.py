@@ -227,6 +227,7 @@ def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
     monkeypatch.setattr(w, "_send", lambda inputs: None)
     monkeypatch.setattr(w.time, "sleep", lambda s: None)
     monkeypatch.setattr(w, "_clipboard_get_windows", lambda: clipboard["text"])
+    monkeypatch.setattr(w, "_clipboard_sequence", lambda: None)
 
     def fake_set(text, transient=False):
         sets.append((text, transient))
@@ -235,6 +236,7 @@ def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
 
     monkeypatch.setattr(w, "_clipboard_set_windows", fake_set)
     w.inject_text_paste_windows("dictated words")
+    w._pending_restore.flush()           # the deferred restore, run now
     assert sets == [("dictated words", True), ("user's own clipboard", True)]
 
 
@@ -1607,3 +1609,270 @@ def test_windows_never_offers_faster_whisper():
 
     src = inspect.getsource(wayfinder_main.WayfinderApp)
     assert "and not (IS_WINDOWS and not IS_MACOS)" in src.split("show_fw = (", 1)[1][:200]
+
+
+# --- Paste diagnostics (core/injector_windows.py, observation only) ---------
+
+def _diag(monkeypatch, target="Code.exe/Chrome_WidgetWin_1"):
+    from wayfinder.core import injector_windows as iw
+
+    monkeypatch.setattr(iw, "_window_app", lambda hwnd: target)
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1))
+    return iw._PasteDiagnostics("hello world")
+
+
+def test_paste_line_flags_the_target_reading_after_the_old_clipboard_is_back(monkeypatch):
+    d = _diag(monkeypatch)
+    d.previous("old text")
+    d._marks.update(mods=0, mods_free=1, set=2, ctrl_v=40, restored=120)
+    d._reads = [(30.0, "DefenderSessionHelper.exe/WDClip"), (300.0, "Code.exe/Chrome_MessageWindow")]
+    line = d._line("Code.exe/Chrome_WidgetWin_1")
+    assert line.startswith("🔎 Paste ⚠ 11 chars → Code.exe/")
+    assert "old clipboard 8 chars" in line and "old clipboard back at 120ms" in line
+    assert "DefenderSessionHelper.exe/WDClip at 30ms (background)" in line
+    assert "Code.exe/Chrome_MessageWindow at 300ms LATE READ" in line
+    assert "hello" not in line and "old text" not in line   # never the text itself
+
+
+def test_paste_line_is_quiet_when_the_target_reads_in_time(monkeypatch):
+    d = _diag(monkeypatch)
+    d.previous(None)
+    d._marks.update(ctrl_v=40)
+    d._reads = [(60.0, "Code.exe/Chrome_MessageWindow")]
+    line = d._line("Aura/TkTopLevel")
+    assert "⚠" not in line and "LATE" not in line
+    assert "old clipboard none" in line and "front after: Aura/TkTopLevel" in line
+
+
+def test_paste_still_runs_the_same_steps_and_reports_failures(monkeypatch):
+    from wayfinder.core import injector_windows as iw
+    from wayfinder.core.injector import InjectionError
+
+    lines, steps = [], []
+    monkeypatch.setattr(iw, "_paste_reporter", lines.append)
+    monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
+                                                       GetOpenClipboardWindow=lambda: None))
+    monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
+    monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
+    clip = {"v": "old"}
+    monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
+    monkeypatch.setattr(iw, "_clipboard_set_windows",
+                        lambda t, transient=False: steps.append(("set", t)) or clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
+    monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
+    monkeypatch.setattr(iw, "_WATCH_SECONDS", 0.05)
+    monkeypatch.setattr(iw.time, "sleep", lambda s: None)
+
+    iw.inject_text_paste_windows("hi")
+    iw._pending_restore.flush()
+    assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]
+    deadline = time.time() + 2
+    while not lines and time.time() < deadline:
+        time.sleep(0.01)
+    assert lines and "2 chars → app.exe/Cls" in lines[0]
+
+    lines.clear()
+    monkeypatch.setattr(iw, "_clipboard_set_windows", lambda t, transient=False: False)
+    with pytest.raises(InjectionError):
+        iw.inject_text_paste_windows("hi")
+    deadline = time.time() + 2
+    while not lines and time.time() < deadline:
+        time.sleep(0.01)
+    assert lines and "FAILED InjectionError" in lines[0]
+
+
+def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
+    from wayfinder.core import injector_windows as iw
+
+    steps = []
+    monkeypatch.setattr(iw, "_paste_reporter", lambda line: None)
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
+                                                       GetOpenClipboardWindow=lambda: None))
+    monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
+    monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
+    monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
+    clip = {"v": "old"}
+    monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
+    monkeypatch.setattr(iw, "_clipboard_set_windows",
+                        lambda t, transient=False: steps.append(("set", t)) or clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
+    monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
+    monkeypatch.setattr(iw.time, "sleep", lambda s: None)
+
+    def no_threads(*a, **k):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(iw.threading, "Thread", no_threads)
+    iw.inject_text_paste_windows("hi")
+    iw._pending_restore.flush()
+    assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]
+
+    steps.clear()
+    monkeypatch.setattr(iw, "_PasteDiagnostics", no_threads)   # even construction failing
+    iw.inject_text_paste_windows("hi")
+    iw._pending_restore.flush()
+    assert steps == [("set", "hi"), ("keys", (iw.VK_CONTROL, iw.VK_V)), ("set", "old")]
+
+
+
+# --- Deferred clipboard restore (the Mac's DeferredRestore) -----------------
+
+def _clipboard_fakes(monkeypatch, start):
+    from wayfinder.core import injector_windows as iw
+
+    clip = {"v": start, "seq": 1}
+
+    def fake_set(t, transient=False):
+        clip.update(v=t, seq=clip["seq"] + 1)
+        return True
+
+    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: clip["seq"])
+    monkeypatch.setattr(iw, "_paste_reporter", None)
+    monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
+    monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
+    monkeypatch.setattr(iw, "_press_keys", lambda vks: None)
+    monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
+    monkeypatch.setattr(iw, "_clipboard_set_windows", fake_set)
+    monkeypatch.setattr(iw, "_pending_restore", iw._DeferredRestore())
+    return iw, clip
+
+
+def test_old_clipboard_comes_back_after_the_app_had_time_to_read(monkeypatch):
+    """VS Code read the clipboard 30-90 ms after Ctrl+V; a restore at 80 ms
+    made it paste the old clipboard. The restore now waits ~0.8 s."""
+    iw, clip = _clipboard_fakes(monkeypatch, "user text")
+    assert iw.RESTORE_DELAY_S >= 0.5
+    iw.inject_text_paste_windows("dictation")
+    assert clip["v"] == "dictation"        # still there for a slow reader
+    time.sleep(iw.RESTORE_DELAY_S + 0.4)
+    assert clip["v"] == "user text"        # then put back on its own
+
+
+def test_back_to_back_dictations_never_capture_auras_own_text(monkeypatch):
+    iw, clip = _clipboard_fakes(monkeypatch, "user text")
+    iw.inject_text_paste_windows("first")
+    iw.inject_text_paste_windows("second")  # flushes the first restore first
+    iw._pending_restore.flush()
+    assert clip["v"] == "user text"
+
+
+def test_a_new_copy_before_the_restore_is_kept(monkeypatch):
+    iw, clip = _clipboard_fakes(monkeypatch, "user text")
+    iw.inject_text_paste_windows("dictation")
+    clip.update(v="something the user just copied", seq=clip["seq"] + 1)
+    iw._pending_restore.flush()
+    assert clip["v"] == "something the user just copied"
+
+
+
+def test_copying_the_same_words_before_the_restore_is_kept(monkeypatch):
+    """"Copy last transcription" (or Ctrl+C on the pasted text) puts the same
+    words back: the change counter, not the text, shows it is the user's."""
+    iw, clip = _clipboard_fakes(monkeypatch, "user text")
+    iw.inject_text_paste_windows("dictation")
+    clip.update(v="dictation", seq=clip["seq"] + 1)    # the user's own copy
+    iw._pending_restore.flush()
+    assert clip["v"] == "dictation"
+
+
+def test_next_paste_waits_for_a_restore_the_timer_is_already_running(monkeypatch):
+    """Game chat pastes part 2 ~0.85 s after part 1, right as part 1's timer
+    restore runs. The second paste must wait for it, not race it."""
+    import threading
+
+    iw, clip = _clipboard_fakes(monkeypatch, "USER")
+    pasted = []
+    monkeypatch.setattr(iw, "_press_keys", lambda vks: pasted.append(clip["v"]))
+    real_get = iw._clipboard_get_windows
+    started = threading.Event()
+
+    def slow_get():
+        if threading.current_thread() is not threading.main_thread():
+            started.set()
+            time.sleep(0.15)                # a slow restore, mid-flight
+        return real_get()
+
+    monkeypatch.setattr(iw, "_clipboard_get_windows", slow_get)
+    iw.inject_text_paste_windows("part1")
+    assert started.wait(iw.RESTORE_DELAY_S + 1)        # the timer restore began
+    iw.inject_text_paste_windows("part2")              # lands mid-restore
+    iw._pending_restore.flush()
+    assert pasted == ["part1", "part2"]                # never the user's text
+    assert clip["v"] == "USER"                         # and it comes back
+
+
+def test_quitting_flushes_a_pending_clipboard_restore(monkeypatch):
+    """Quit ends with os._exit (no atexit), so quit paths flush explicitly."""
+    import inspect
+    import sys as _sys
+
+    import wayfinder_main
+
+    calls = []
+    fake = SimpleNamespace(_pending_restore=SimpleNamespace(flush=lambda: calls.append(1)))
+    monkeypatch.setitem(_sys.modules, "wayfinder.core.injector_windows", fake)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", True)
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    wayfinder_main._flush_windows_clipboard_restore()
+    assert calls == [1]
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)       # Linux/macOS: no-op
+    wayfinder_main._flush_windows_clipboard_restore()
+    assert calls == [1]
+    quit_src = inspect.getsource(wayfinder_main.WayfinderApp.quit_app)
+    assert quit_src.index("_flush_windows_clipboard_restore()") < quit_src.index("os._exit(0)")
+
+
+def test_clipboard_read_watcher_is_off_unless_asked_for(monkeypatch):
+    """It polls every 0.5 ms for 1.5 s per paste (CLAUDE.md rule 1): the
+    paste_diagnostics_watch setting turns it on while chasing a report."""
+    from wayfinder.config import DEFAULT_CONFIG
+    from wayfinder.core import injector_windows as iw
+
+    assert DEFAULT_CONFIG["paste_diagnostics_watch"] is False
+    monkeypatch.setattr(iw, "_watch_reads", False)
+    monkeypatch.setattr(iw, "_paste_reporter", None)
+    iw.set_paste_reporter(lambda line: None)
+    d = _diag(monkeypatch)
+    d.start_watch()
+    assert d._watch is None
+    d._marks.update(ctrl_v=40)
+    assert "no clipboard read seen" not in d._line("Code.exe/Chrome_WidgetWin_1")
+
+    iw.set_paste_reporter(lambda line: None, watch_reads=True)
+    monkeypatch.setattr(iw, "_WATCH_SECONDS", 0.01)
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
+                                                       GetOpenClipboardWindow=lambda: None))
+    d = iw._PasteDiagnostics("hi")
+    d.start_watch()
+    assert d._watch is not None
+    d._watch.join(2)
+
+
+def test_a_failed_ctrl_v_leaves_the_dictation_and_schedules_no_restore(monkeypatch):
+    from wayfinder.core import injector_windows as iw
+
+    monkeypatch.setattr(iw, "_paste_reporter", None)
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1))
+    monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
+    monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
+    monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
+    clip = {"v": "old"}
+    monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
+    monkeypatch.setattr(iw, "_clipboard_set_windows",
+                        lambda t, transient=False: clip.update(v=t) or True)
+    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
+    monkeypatch.setattr(iw.time, "sleep", lambda s: None)
+
+    def refuse(vks):
+        raise RuntimeError("SendInput blocked")
+
+    monkeypatch.setattr(iw, "_press_keys", refuse)
+    with pytest.raises(RuntimeError):
+        iw.inject_text_paste_windows("dictated")
+    iw._pending_restore.flush()
+    assert clip["v"] == "dictated"   # the user can still press Ctrl+V

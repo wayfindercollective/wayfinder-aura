@@ -1359,6 +1359,21 @@ def _hero_active_interval_ms(platform_name: str | None = None, steam_platform=_U
     return 66 if steam_platform else 33
 
 
+def _flush_windows_clipboard_restore() -> None:
+    """Windows: give the user their clipboard back now if a paste's delayed
+    restore (injector_windows, 0.8 s) is still pending. Quit ends with
+    os._exit, which skips atexit and kills the timer thread."""
+    if not IS_WINDOWS or IS_MACOS:
+        return
+    module = sys.modules.get("wayfinder.core.injector_windows")
+    if module is None:
+        return
+    try:
+        module._pending_restore.flush()
+    except Exception:
+        pass
+
+
 def _windows_dpi_scale() -> float:
     """Windows' display scale (1.75 at 175%) once the app is DPI aware, else 1.0.
 
@@ -6368,6 +6383,16 @@ class WayfinderApp(ctk.CTk):
         if IS_MACOS:
             self.after(1200, self._refresh_macos_permission_banner)
             self._apply_macos_window_chrome()
+        if IS_WINDOWS and not IS_MACOS:
+            # One "🔎 Paste" activity-log line per paste (target app, clipboard
+            # timings, who read it and when) so a bad paste can be diagnosed.
+            try:
+                from wayfinder.core.injector_windows import set_paste_reporter
+
+                set_paste_reporter(self.log, watch_reads=bool(
+                    self.config.get("paste_diagnostics_watch", False)))
+            except Exception:
+                pass
         if IS_WINDOWS and not IS_MACOS:
             # Same sleep/wake/display handling as the Mac, from Windows'
             # WM_POWERBROADCAST / WM_DISPLAYCHANGE (utils/windows_lifecycle.py);
@@ -22193,6 +22218,7 @@ class WayfinderApp(ctk.CTk):
 
         # Restore ducked streams before os._exit bypasses normal destructors.
         self._close_audio_ducking()
+        _flush_windows_clipboard_restore()
 
         # Shutdown thread pool executors gracefully
         try:
@@ -25298,6 +25324,7 @@ def main():
                 # Restore any stream volumes Aura still owns. The recovery
                 # journal remains if the audio server rejects a final retry.
                 app._close_audio_ducking()
+                _flush_windows_clipboard_restore()
                 
                 # Shutdown thread pool executors gracefully
                 if hasattr(app, 'executor'):
