@@ -91,6 +91,23 @@ def test_state_round_trip_is_private(tmp_path):
     assert pk.load_state(tmp_path / "missing.json") == {}
 
 
+def test_a_hand_edited_token_that_is_not_text_is_ignored(tmp_path):
+    path = tmp_path / "pk.json"
+    path.write_text('{"restore_token": 123, "declined": false}')
+    assert pk.load_state(path) == {"restore_token": "", "declined": False}
+
+
+def test_state_is_written_by_the_owner_only_writer(tmp_path, monkeypatch):
+    # The restore token lets Aura type without asking: the file must never
+    # exist with group/other bits, which the shared writer guarantees (mkstemp).
+    from wayfinder.utils import fs_security
+    calls = []
+    monkeypatch.setattr(fs_security, "atomic_write_json",
+                        lambda path, data, mode=0o600: calls.append((path, data, mode)))
+    pk.save_state({"restore_token": "abc"}, tmp_path / "pk.json")
+    assert calls == [(tmp_path / "pk.json", {"restore_token": "abc"}, 0o600)]
+
+
 # ── the session against a fake bus ───────────────────────────────────────────
 
 class _Reply:
@@ -410,6 +427,11 @@ class _Keyboard:
         self.typed = []
         self.pressed = []
         self.fail_at = fail_at
+        self.press_fails = False
+        self.failed = None
+
+    def mark_failed(self, detail):
+        self.failed = detail
 
     def type_text(self, text, delay, layout=None):
         if self.fail_at is not None:
@@ -419,6 +441,8 @@ class _Keyboard:
         self.typed.append((text, delay))
 
     def press_keys(self, combo, hold_s=0.0, layout=None):
+        if self.press_fails:
+            raise pk.PortalKeyboardError("gone")
         self.pressed.append(combo)
 
 
@@ -433,6 +457,7 @@ def portal_ready(monkeypatch):
     monkeypatch.setattr(pk, "X11Layout", lambda: _Layout(set()))
     monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", None)
     monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", None)
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_RESTORE", None)
     monkeypatch.setattr("sys.platform", "linux")
     return kb
 
@@ -475,21 +500,115 @@ def test_characters_without_a_key_are_pasted(portal_ready, monkeypatch):
     assert portal_ready.typed == []
 
 
+def test_the_portal_paste_puts_the_old_clipboard_back(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    clipboard = {"text": "user's url"}
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", lambda: clipboard["text"])
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE",
+                        lambda t: clipboard.update(text=t) or True)
+    monkeypatch.setattr(injector, "_PORTAL_PASTE_SETTLE_S", 0)
+    monkeypatch.setattr(injector, "_PORTAL_RESTORE_AFTER_S", 0)
+    injector._inject_text_type_linux("café")
+    assert portal_ready.pressed == ["ctrl+v"] and clipboard["text"] == "user's url"
+
+
+def test_the_portal_paste_never_overwrites_a_newer_copy(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    clipboard = {"text": "user's url"}
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", lambda: clipboard["text"])
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE",
+                        lambda t: clipboard.update(text=t) or True)
+    monkeypatch.setattr(injector, "_PORTAL_PASTE_SETTLE_S", 0)
+    # The user copies something else while Aura waits to restore.
+    monkeypatch.setattr(injector.time, "sleep",
+                        lambda s: clipboard.update(text="copied meanwhile") if s else None)
+    monkeypatch.setattr(injector, "_PORTAL_RESTORE_AFTER_S", 0.4)
+    injector._inject_text_type_linux("café")
+    assert clipboard["text"] == "copied meanwhile"
+
+
 def test_without_a_clipboard_accents_are_folded(portal_ready):
     import wayfinder.core.injector as injector
     injector._inject_text_type_linux("café")
     assert portal_ready.typed == [("cafe", 2)]
 
 
-def test_failure_before_any_key_falls_back_to_xdotool(portal_ready, monkeypatch):
+def _selection_without_a_failed_portal(monkeypatch, kb, fallback="xdotool"):
+    from wayfinder.utils import platform as plat
+    monkeypatch.setattr(plat, "get_text_injector",
+                        lambda: fallback if kb.failed else "portal")
+
+
+def test_failure_before_any_key_marks_the_portal_failed_and_falls_back(portal_ready, monkeypatch):
     import wayfinder.core.injector as injector
     portal_ready.fail_at = 0
+    _selection_without_a_failed_portal(monkeypatch, portal_ready)
     used = []
-    monkeypatch.setattr(injector, "_portal_fallback_tool", lambda: "xdotool")
     monkeypatch.setattr(injector, "_inject_text_xdotool",
                         lambda text, speed, target: used.append(text))
     injector._inject_text_type_linux("hello")
     assert used == ["hello"]
+    assert "did not reach the desktop" in portal_ready.failed   # the app logs it
+
+
+def _no_real_tools(monkeypatch):
+    """Record subprocess calls instead of running them (ydotoold may be live)."""
+    import wayfinder.core.injector as injector
+    from types import SimpleNamespace
+    runs = []
+    monkeypatch.setattr(injector.subprocess, "run",
+                        lambda argv, **k: runs.append(list(argv)) or
+                        SimpleNamespace(returncode=0, stdout="", stderr=""))
+    return runs
+
+
+def test_after_a_portal_failure_the_normal_selection_decides(portal_ready, monkeypatch):
+    # A non-Flatpak Wayland install with ydotool but no xdotool must not
+    # hard-fail with "no tool" once the portal stops taking keys.
+    import wayfinder.core.injector as injector
+    runs = _no_real_tools(monkeypatch)
+    portal_ready.fail_at = 0
+    _selection_without_a_failed_portal(monkeypatch, portal_ready, fallback="ydotool")
+    monkeypatch.setattr(injector, "_portal_fallback_tool", lambda: "none")
+    monkeypatch.setattr(injector, "check_ydotool_ready", lambda: (True, ""))
+    monkeypatch.setattr(injector, "_get_ydotool_binary", lambda: "/fake/ydotool")
+    monkeypatch.setattr(injector, "_get_ydotool_env", lambda: {})
+    injector._inject_text_type_linux("hello")
+    assert runs and runs[-1][0] == "/fake/ydotool" and runs[-1][-1] == "hello"
+
+
+def test_a_clipboard_error_does_not_disable_the_portal(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", lambda text: False)
+    monkeypatch.setattr(injector, "_portal_fallback_tool", lambda: "xdotool")
+    used = []
+    monkeypatch.setattr(injector, "_inject_text_xdotool",
+                        lambda text, speed, target: used.append(text))
+    injector._inject_text_type_linux("café")
+    assert used == ["café"] and portal_ready.failed is None
+
+
+def test_enter_after_a_portal_failure_marks_it_failed(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    runs = _no_real_tools(monkeypatch)
+    portal_ready.press_fails = True
+    _selection_without_a_failed_portal(monkeypatch, portal_ready, fallback="none")
+    monkeypatch.setattr(injector, "_get_ydotool_binary", lambda: None)
+    with pytest.raises(injector.InjectionError, match="ydotool"):
+        injector.press_enter()
+    assert portal_ready.failed and runs == []
+
+
+def test_mark_failed_only_leaves_a_ready_session(tmp_path):
+    kb = pk.PortalKeyboard(state_path=tmp_path / "state.json")
+    seen = []
+    kb.on_change(lambda state, detail: seen.append(state))
+    kb._state = kb.DECLINED
+    kb.mark_failed("x")
+    assert kb.state == kb.DECLINED and seen == []
+    kb._state = kb.READY
+    kb.mark_failed("keys did not reach the desktop")
+    assert kb.state == kb.FAILED and seen == [kb.FAILED]
 
 
 def test_partial_failure_is_never_retyped(portal_ready, monkeypatch):
@@ -524,10 +643,11 @@ def test_game_keys_use_xdotool_without_the_portal(monkeypatch):
     from wayfinder.core import linux_game_chat as gc
     monkeypatch.setattr(pk, "ready", lambda: False)
     monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
     sent = []
-    monkeypatch.setattr(gc, "_xdotool", lambda *a: sent.append(a))
+    monkeypatch.setattr(gc, "_xdotool", lambda *a, **k: sent.append(a))
     gc.type_text("inc")
-    assert sent == [("type", "--clearmodifiers", "--delay", str(gc.TYPE_DELAY_MS), "--", "inc")]
+    assert sent == [tuple(injector.build_xdotool_type_command("inc", gc.TYPE_DELAY_MS)[1:])]
 
 
 class _Win:
@@ -593,3 +713,352 @@ def test_focus_inside_the_game_window_is_left_alone(monkeypatch):
     _xlib(monkeypatch, disp)
     assert gc.ensure_game_focus(0x6200001) is False
     assert not game.focused
+
+
+# ── the app wiring ───────────────────────────────────────────────────────────
+
+class _TkLike:
+    def __init__(self, clipboard=None, error=None):
+        self._clipboard, self._error = clipboard, error
+
+    def after(self, _ms, fn):
+        fn()
+
+    def clipboard_get(self):
+        if self._error:
+            raise self._error
+        return self._clipboard
+
+    def clipboard_clear(self):
+        self._clipboard = ""
+
+    def clipboard_append(self, text):
+        self._clipboard += text
+
+    def update_idletasks(self):
+        pass
+
+
+def test_app_clipboard_reader_runs_on_the_tk_side():
+    import wayfinder_main as wm
+    read = wm.WayfinderApp._get_clipboard_from_worker
+    assert read(_TkLike("https://example.org")) == "https://example.org"
+    assert read(_TkLike(error=RuntimeError("CLIPBOARD selection doesn't exist"))) is None
+
+
+def _start_portal(monkeypatch, offered):
+    """Run _start_portal_keyboard with the start thread inline and no waits."""
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+    import wayfinder.core.injector as injector
+
+    hooks, starts, logs = [], [], []
+    kb = SimpleNamespace(on_change=lambda cb: None,
+                         start=lambda **k: starts.append(k))
+    answers = iter(offered)
+    monkeypatch.setattr(wm, "_IS_LINUX", True)
+    monkeypatch.setattr(wm, "IS_MACOS", False)
+    monkeypatch.setattr(wm, "IS_WINDOWS", False)
+    monkeypatch.setattr(pk, "host_is_wayland_desktop", lambda: True)
+    monkeypatch.setattr(pk, "keyboard", lambda: kb)
+    monkeypatch.setattr(pk, "portal_keyboard_offered", lambda: next(answers))
+    monkeypatch.setattr(injector, "set_portal_clipboard_hooks",
+                        lambda write, read=None, restore=None: hooks.append((write, read, restore)))
+    monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
+
+    class _Inline:
+        def __init__(self, target, **_k):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(wm.threading, "Thread", _Inline)
+    from queue import Queue
+    app = SimpleNamespace(config={"linux_portal_typing": True}, log=logs.append,
+                          wm_frame=lambda: "0x1", _portal_listener_added=True,
+                          _set_clipboard_from_worker=lambda t: True,
+                          _get_clipboard_from_worker=lambda: "old",
+                          _restore_clipboard_from_worker=lambda pasted, previous: True,
+                          event_queue=Queue(), app_state=wm.AppState.IDLE,
+                          after=lambda ms, fn: None)
+    app._start_portal_session_when_idle = (
+        lambda *a: wm.WayfinderApp._start_portal_session_when_idle(app, *a))
+    wm.WayfinderApp._start_portal_keyboard(app)
+    while not app.event_queue.empty():          # the app's Tk-thread drain
+        app.event_queue.get_nowait()[1]()
+    return hooks, starts, logs
+
+
+def test_app_wires_both_clipboard_hooks_so_the_paste_restores(monkeypatch):
+    hooks, starts, _ = _start_portal(monkeypatch, [True])
+    assert len(hooks) == 1 and hooks[0][1] is not None and hooks[0][2] is not None
+    assert len(starts) == 1
+
+
+def test_a_portal_not_up_yet_at_login_is_asked_again(monkeypatch):
+    _, starts, logs = _start_portal(monkeypatch, [False, False, True])
+    assert len(starts) == 1 and not logs
+
+
+def test_a_desktop_without_the_portal_settles_for_xdotool(monkeypatch):
+    _, starts, logs = _start_portal(monkeypatch, [False] * 4)
+    assert starts == [] and "no remote-control keyboard" in logs[0]
+
+
+# ── Setup and the startup primer leave typing to the portal ─────────────────
+
+def _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.WAITING, offered=True,
+                               typing_switch=True):
+    """Setup on a faked portal desktop. ``typing_switch`` stubs the saved
+    "Type into every app" switch (None: read the real CONFIG_FILE the test set)."""
+    from types import SimpleNamespace
+    from wayfinder.core import setup
+    monkeypatch.setattr(setup, "_PORTAL_OFFERED", {})
+    if typing_switch is not None:
+        monkeypatch.setattr(setup, "_portal_typing_enabled", lambda: typing_switch)
+    monkeypatch.setattr(pk, "host_is_wayland_desktop", lambda: True)
+    monkeypatch.setattr(pk, "keyboard", lambda: SimpleNamespace(state=state))
+    monkeypatch.setattr(pk, "ready", lambda: state == pk.PortalKeyboard.READY)
+    monkeypatch.setattr(pk, "portal_keyboard_offered", lambda *a: offered)
+    monkeypatch.setattr(setup, "IS_APPIMAGE", False)
+    monkeypatch.setattr(setup, "IS_FLATPAK", False)
+    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+    monkeypatch.setattr(setup.sys, "platform", "linux")
+    return setup
+
+
+def test_setup_installs_no_ydotool_while_the_portal_will_type(monkeypatch):
+    setup = _setup_on_a_portal_desktop(monkeypatch)
+    monkeypatch.setattr("wayfinder.utils.platform.get_text_injector", lambda: "wtype")
+    assert "ydotool" not in setup.get_missing_system_packages()
+    status = setup.check_text_injection()
+    assert status.installed and "portal" in status.detail
+
+
+def test_setup_offers_ydotool_after_a_declined_portal(monkeypatch):
+    setup = _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.DECLINED)
+    assert "ydotool" in setup.get_missing_system_packages()
+
+
+def test_setup_offers_ydotool_where_no_portal_keyboard_exists(monkeypatch):
+    setup = _setup_on_a_portal_desktop(monkeypatch, offered=False)
+    assert "ydotool" in setup.get_missing_system_packages()
+
+
+def test_setup_offers_ydotool_when_typing_into_every_app_is_off(monkeypatch, tmp_path):
+    import json
+    import wayfinder.config as config_module
+    setup = _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.IDLE,
+                                       typing_switch=None)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
+    (tmp_path / "config.json").write_text(json.dumps({"linux_portal_typing": False}))
+    assert "ydotool" in setup.get_missing_system_packages()
+    (tmp_path / "config.json").write_text(json.dumps({"linux_portal_typing": True}))
+    assert "ydotool" not in setup.get_missing_system_packages()
+
+
+def test_wtype_primer_waits_while_the_portal_is_in_play(monkeypatch):
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+    monkeypatch.setattr(wm, "_IS_LINUX", True)
+    monkeypatch.setattr(wm, "IS_MACOS", False)
+    monkeypatch.setattr(wm, "IS_WINDOWS", False)
+    monkeypatch.setattr(wm, "_portal_desktop", lambda: True)
+    app = SimpleNamespace(config={"linux_portal_typing": True})
+    for state, in_play in ((pk.PortalKeyboard.WAITING, True), (pk.PortalKeyboard.READY, True),
+                           (pk.PortalKeyboard.DECLINED, False), (pk.PortalKeyboard.FAILED, False)):
+        monkeypatch.setattr(pk, "keyboard", lambda s=state: SimpleNamespace(state=s))
+        assert wm.WayfinderApp._portal_typing_in_play(app) is in_play, state
+    app._portal_not_offered = True
+    monkeypatch.setattr(pk, "keyboard", lambda: SimpleNamespace(state=pk.PortalKeyboard.IDLE))
+    assert wm.WayfinderApp._portal_typing_in_play(app) is False
+
+
+def test_a_decline_is_shown_and_the_switch_turns_off(monkeypatch, tmp_path):
+    """Esc on the desktop's dialog counts as a decline: the Dictate tab says so
+    and the switch goes off, so turning it on asks again."""
+    from queue import Queue
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    saved, banners, logs = [], [], []
+    monkeypatch.setattr(wm, "save_config", lambda cfg: saved.append(dict(cfg)))
+    var = SimpleNamespace(value=True)
+    var.set = lambda v: setattr(var, "value", v)
+    app = SimpleNamespace(config={"linux_portal_typing": True}, event_queue=Queue(),
+                          log=logs.append, _portal_typing_var=var,
+                          _show_error_banner=banners.append)
+    app._after_portal_declined = lambda: wm.WayfinderApp._after_portal_declined(app)
+    wm.WayfinderApp._on_portal_keyboard_state(app, pk.PortalKeyboard.DECLINED, "declined")
+    kind, callback = app.event_queue.get_nowait()
+    assert kind == wm.EventType.UI_CALLBACK
+    callback()                                   # runs on the Tk thread in the app
+    assert app.config["linux_portal_typing"] is False and saved
+    assert var.value is False
+    assert "declined" in banners[0] and "Type into every app" in banners[0]
+
+
+def test_a_failed_or_closed_session_is_shown(monkeypatch):
+    from queue import Queue
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    banners = []
+    app = SimpleNamespace(config={}, event_queue=Queue(), log=lambda m: None,
+                          _show_error_banner=banners.append)
+    for state in (pk.PortalKeyboard.FAILED, pk.PortalKeyboard.CLOSED):
+        wm.WayfinderApp._on_portal_keyboard_state(app, state, "gone")
+        app.event_queue.get_nowait()[1]()
+    assert len(banners) == 2 and all("Type into every app" in b for b in banners)
+
+
+
+def test_the_approval_dialog_never_opens_mid_dictation(monkeypatch):
+    """The retried probe can succeed seconds after launch; the session (and
+    the desktop's dialog) waits until no dictation is running."""
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    class _Inline:
+        def __init__(self, target, **_k):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(wm.threading, "Thread", _Inline)
+    starts, retries = [], []
+    kb = SimpleNamespace(start=lambda **k: starts.append(k))
+    app = SimpleNamespace(config={"linux_portal_typing": True}, log=lambda m: None,
+                          app_state=wm.AppState.RECORDING,
+                          after=lambda ms, fn: retries.append((ms, fn)))
+    wm.WayfinderApp._start_portal_session_when_idle(app, kb, "x11:1", False)
+    assert starts == [] and retries and retries[0][0] >= 100
+    app.app_state = wm.AppState.IDLE
+    wm.WayfinderApp._start_portal_session_when_idle(app, kb, "x11:1", False)
+    assert len(starts) == 1
+    # The worker gets the same guard for its Start request.
+    may_ask = starts[0]["may_ask"]
+    assert may_ask() is True
+    app.app_state = wm.AppState.RECORDING
+    assert may_ask() is False
+
+
+def test_the_start_request_waits_until_the_app_may_ask(monkeypatch, tmp_path):
+    """Between the app's idle check and the worker's Start call a dictation can
+    begin; the worker holds the request (and the dialog) until it ends."""
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    busy = {"now": True}
+    try:
+        assert kb.start(may_ask=lambda: not busy["now"])
+        time.sleep(0.3)
+        assert not any(m == "Start" for _i, m, _f, _b in bus.calls)
+        busy["now"] = False
+        assert _settle(kb, kb.READY) == kb.READY
+        assert any(m == "Start" for _i, m, _f, _b in bus.calls)
+    finally:
+        kb.close()
+
+
+
+def test_app_restores_the_clipboard_only_while_it_holds_the_dictation():
+    import wayfinder_main as wm
+    restore = wm.WayfinderApp._restore_clipboard_from_worker
+    tk = _TkLike("café")
+    assert restore(tk, "café", "user's url") is True and tk._clipboard == "user's url"
+    tk = _TkLike("copied meanwhile")
+    assert restore(tk, "café", "user's url") is False and tk._clipboard == "copied meanwhile"
+
+
+def test_the_portal_paste_uses_the_one_step_restorer(portal_ready, monkeypatch):
+    import wayfinder.core.injector as injector
+    restored = []
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", lambda: "user's url")
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", lambda t: True)
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_RESTORE",
+                        lambda pasted, previous: restored.append((pasted, previous)))
+    monkeypatch.setattr(injector, "_PORTAL_PASTE_SETTLE_S", 0)
+    monkeypatch.setattr(injector, "_PORTAL_RESTORE_AFTER_S", 0)
+    injector._inject_text_type_linux("café")
+    assert restored == [("café", "user's url")]
+
+
+def test_a_start_asked_for_before_a_switch_off_does_nothing(monkeypatch, tmp_path):
+    """A delayed starter must not reopen a session the user just turned off."""
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    seen = kb.close_count
+    kb.close()                                   # the switch went off
+    assert kb.start(after_closes=seen) is False
+    assert not any(m == "CreateSession" for _i, m, _f, _b in bus.calls)
+
+
+def test_concurrent_starters_launch_one_worker(monkeypatch, tmp_path):
+    """Startup and a switch retry can both reach start(); only one worker runs.
+    The first starter is held inside start() (reading the state file) while the
+    second one tries: without serialization both would launch."""
+    import threading as _threading
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    real_load = pk.load_state
+    entered, second_read, proceed = _threading.Event(), _threading.Event(), _threading.Event()
+    calls = {"n": 0}
+
+    def slow_first_load(path=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            entered.set()
+            proceed.wait(2)
+        else:
+            second_read.set()     # only reachable while the first holds start()
+        return real_load(path)
+
+    monkeypatch.setattr(pk, "load_state", slow_first_load)
+    results = []
+    first = _threading.Thread(target=lambda: results.append(kb.start(may_ask=lambda: False)))
+    second = _threading.Thread(target=lambda: results.append(kb.start(may_ask=lambda: False)))
+    try:
+        first.start()
+        assert entered.wait(2)
+        second.start()
+        # Unserialized, the second starter reaches the state read while the
+        # first is held there; serialized, it waits on the lock instead.
+        assert not second_read.wait(0.5)
+        proceed.set()
+        first.join(3)
+        second.join(3)
+        assert sorted(results) == [False, True]
+    finally:
+        kb.close()
+
+
+def test_a_close_during_start_never_reaches_the_dialog(monkeypatch, tmp_path):
+    """A switch-off that lands while start() reads its state cancels the new
+    worker before its Start request (the one that can show the dialog)."""
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    real_load = pk.load_state
+
+    def load_then_close(path=None):
+        state = real_load(path)
+        kb.close()                 # the user switched typing off right now
+        return state
+
+    monkeypatch.setattr(pk, "load_state", load_then_close)
+    kb.start()
+    kb._thread.join(2)             # the worker ran to its end (or its cancellation)
+    assert not any(m == "Start" for _i, m, _f, _b in bus.calls)
+
+
+def test_a_stale_start_leaves_the_running_session_alone(monkeypatch, tmp_path):
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    try:
+        stale = kb.close_count - 1           # asked for before a close
+        assert kb.start(may_ask=lambda: False)
+        assert kb.start(after_closes=stale) is False
+        assert not kb._stop.is_set()          # the running worker was not cancelled
+    finally:
+        kb.close()

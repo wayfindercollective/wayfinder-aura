@@ -1288,19 +1288,51 @@ def prime_wayland_injection() -> "tuple[bool, str]":
 # apps; then the portal presses Ctrl+V. The app registers the clipboard hooks.
 _PORTAL_CLIPBOARD_WRITE = None   # Callable[[str], bool], set by the app
 _PORTAL_CLIPBOARD_READ = None    # Callable[[], "str | None"], set by the app
+# Callable[[str, str], None]: put ``previous`` back only if the clipboard still
+# holds ``pasted``, compared and written in one step on the app's Tk thread.
+_PORTAL_CLIPBOARD_RESTORE = None
 _PORTAL_PASTE_SETTLE_S = 0.05
 _PORTAL_RESTORE_AFTER_S = 0.4
 
 
-def set_portal_clipboard_hooks(write, read=None) -> None:
-    """The app's clipboard writer/reader for the portal paste fallback."""
-    global _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ
+def set_portal_clipboard_hooks(write, read=None, restore=None) -> None:
+    """The app's clipboard writer/reader/restorer for the portal paste fallback."""
+    global _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ, _PORTAL_CLIPBOARD_RESTORE
     _PORTAL_CLIPBOARD_WRITE, _PORTAL_CLIPBOARD_READ = write, read
+    _PORTAL_CLIPBOARD_RESTORE = restore
 
 
 def _portal_fallback_tool() -> str:
     from ..utils.platform import is_xdotool_available
     return "xdotool" if is_xdotool_available() else "none"
+
+
+def _portal_key_error(e: Exception) -> InjectionError:
+    """An InjectionError for a portal key that did not go through."""
+    err = InjectionError(str(e))
+    err.portal_failure = True
+    return err
+
+
+def _fallback_after_portal_error(err: InjectionError) -> str:
+    """The tool to use after the portal path raised *err* before any key landed.
+
+    When the portal itself stopped taking keys (a backend restart leaves the
+    session dead without a Closed signal), mark it failed - the app logs that -
+    so this and every later dictation take the normal selection (ydotool,
+    wtype or xdotool) instead of silently retrying a dead session. Other
+    errors (clipboard) keep the xdotool fallback.
+    """
+    if not getattr(err, "portal_failure", False):
+        return _portal_fallback_tool()
+    from . import portal_keyboard
+    from ..utils.platform import get_text_injector
+    try:
+        portal_keyboard.keyboard().mark_failed(f"keys did not reach the desktop: {err}")
+    except Exception:
+        pass
+    tool = get_text_injector()
+    return "none" if tool == "portal" else tool
 
 
 def _portal_press(combo: str, hold_s: float = 0.0) -> None:
@@ -1309,7 +1341,7 @@ def _portal_press(combo: str, hold_s: float = 0.0) -> None:
     try:
         portal_keyboard.keyboard().press_keys(combo, hold_s, layout)
     except portal_keyboard.PortalKeyboardError as e:
-        raise InjectionError(str(e)) from e
+        raise _portal_key_error(e) from e
     finally:
         layout.close()
 
@@ -1329,7 +1361,13 @@ def _portal_paste(text: str) -> None:
     if previous is not None and previous != text:
         time.sleep(_PORTAL_RESTORE_AFTER_S)
         try:
-            _PORTAL_CLIPBOARD_WRITE(previous)
+            # Only if the clipboard still holds the dictation: the user may
+            # have copied something new meanwhile. The app's restorer compares
+            # and writes in one Tk step, so no copy can slip in between.
+            if _PORTAL_CLIPBOARD_RESTORE is not None:
+                _PORTAL_CLIPBOARD_RESTORE(text, previous)
+            elif _PORTAL_CLIPBOARD_READ() == text:
+                _PORTAL_CLIPBOARD_WRITE(previous)
         except Exception:
             pass
 
@@ -1357,7 +1395,7 @@ def _inject_text_portal(text: str, typing_speed: str = "instant") -> None:
         try:
             portal_keyboard.keyboard().type_text(text, key_delay, layout)
         except portal_keyboard.PortalKeyboardError as e:
-            err = InjectionError(str(e))
+            err = _portal_key_error(e)
             # Part of the text already landed: a fallback would type it twice.
             err.uncertain_delivery = bool(getattr(e, "typed", 0))
             raise err from e
@@ -1494,8 +1532,8 @@ def press_enter() -> None:
         try:
             _portal_press("Return")
             return
-        except InjectionError:
-            tool = _portal_fallback_tool()
+        except InjectionError as e:
+            tool = _fallback_after_portal_error(e)
     if tool == "xdotool":
         result = subprocess.run(
             ["xdotool", "key", "--clearmodifiers", "Return"],
@@ -1599,7 +1637,7 @@ def _inject_text_type_linux(
             # portal restart): fall back, unless part of the text landed.
             if getattr(e, "uncertain_delivery", False):
                 raise
-            tool = _portal_fallback_tool()
+            tool = _fallback_after_portal_error(e)
     if tool == "xdotool":
         _inject_text_xdotool(text, typing_speed, target_window)
         return

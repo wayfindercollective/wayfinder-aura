@@ -1851,8 +1851,11 @@ class TestWhisperServerWarmup:
     def test_module_warm_up_routes_to_server_backend(self, tmp_path):
         from wayfinder.core import transcriber
         # get_backend only returns the server backend when the binary exists.
-        (tmp_path / "whisper-cli").write_text("#!/bin/sh\n")
-        (tmp_path / "whisper-server").write_text("#!/bin/sh\n")
+        # Executable, so discovery keeps the configured binary instead of a
+        # whisper-cli the host happens to have on PATH.
+        for name in ("whisper-cli", "whisper-server"):
+            (tmp_path / name).write_text("#!/bin/sh\n")
+            (tmp_path / name).chmod(0o755)
         (tmp_path / "ggml-base.en.bin").write_bytes(b"\x00")
         cfg = {"transcription_backend": "whisper_cpp", "whisper_server_mode": True,
                "whisper_binary": str(tmp_path / "whisper-cli"),
@@ -1906,6 +1909,10 @@ class TestServerModeDefaultAndFallback:
         server.write_text("#!/bin/sh\n")
         cli = tmp_path / "whisper-cli"
         cli.write_text("#!/bin/sh\n")
+        # Executable, so discovery keeps the configured binary instead of a
+        # whisper-cli the host happens to have on PATH.
+        server.chmod(0o755)
+        cli.chmod(0o755)
         model = tmp_path / "ggml-base.en.bin"
         model.write_bytes(b"\x00")
         cfg = {"whisper_server_mode": True, "whisper_binary": str(cli),

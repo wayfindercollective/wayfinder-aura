@@ -599,10 +599,11 @@ def test_macos_docs_do_not_claim_python_311_is_supported():
 
 
 @pytest.mark.parametrize("is_macos, is_windows, expected", [
-    (True, False, False), (False, True, False), (False, False, True)])
+    (True, False, False), (False, True, False), (False, False, False)])
 def test_gated_developer_model_does_not_count_as_usable_on_macos(
         monkeypatch, is_macos, is_windows, expected):
-    """A Free Mac/PC with only small.en (Ultra) on disk must still be offered Base."""
+    """A Free Mac/PC/Linux install with only small.en (Ultra) on disk must still be
+    offered Base (the Linux AppImage tour now asks the same question)."""
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -765,5 +766,12 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     assert "administrator" in windows and "ydotool" not in windows
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
     linux = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
-    assert linux == ("Couldn't type the text — check input permissions (Settings) "
-                     "or install ydotool.")
+    assert linux == ("Couldn't type the text — click into a text box and try again. On "
+                     "Wayland, check Settings → System → Type into every app.")
+    # Messages written for the user pass through instead of the generic line.
+    held = ("Injection: A Shift, Ctrl, Alt, or Super key is still held. "
+            "Release it, then dictate again; the transcript was not typed.")
+    assert wayfinder_main.WayfinderApp._error_guidance(ns, held) == held[len("Injection: "):]
+    no_tool = ("Injection: No text injection tool available on Linux. "
+               "Install xdotool (X11) or ydotool (Wayland).")
+    assert wayfinder_main.WayfinderApp._error_guidance(ns, no_tool) == no_tool[len("Injection: "):]

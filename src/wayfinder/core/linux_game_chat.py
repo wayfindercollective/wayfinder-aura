@@ -114,10 +114,20 @@ def game_list() -> list[GameEntry]:
     facts don't hold; the Windows ones do under Wine/Proton)."""
     from .windows_game_chat import _researched
 
-    entries = [profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
+    entries = [_linux_profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
     names = {e.name.lower() for e in entries}
     entries += [e for e in _researched() if e.name.lower() not in names]
     return sorted(entries, key=lambda e: e.name.lower())
+
+
+def _linux_profile_entry(profile: GameProfile) -> GameEntry:
+    """The shared Games tab row, except that a typed chat shows its own note:
+    the shared "opens chat, pastes and sends; don't press Enter first" is the
+    opposite of what a player must do in Dark Age of Camelot."""
+    entry = profile_entry(profile)
+    if profile.key in TYPE_PROFILES and profile.note:
+        return GameEntry(entry.name, entry.status, profile.note, entry.aliases)
+    return entry
 
 
 def search_games(query: str) -> list[GameEntry]:
@@ -233,6 +243,9 @@ def _front_window() -> tuple[Optional[int], Optional[str], Optional[str]]:
         # Walk up to the first window that names itself (class or STEAM_GAME).
         for _ in range(8):
             cls, title, appid = _window_facts(win)
+            # Fresh facts win: an untagged window clears a stale entry for its
+            # id (X window ids are reused), classless windows included.
+            _note_steam_tag(int(win.id), appid)
             if cls or appid:
                 if appid and not (cls or "").lower().startswith("steam_app_"):
                     if not (cls or "").lower().endswith(".exe"):
@@ -250,6 +263,30 @@ def _front_window() -> tuple[Optional[int], Optional[str], Optional[str]]:
             disp.close()
         except Exception:
             pass
+
+
+# Window ids that carried STEAM_GAME when last seen in front. A Proton game can
+# keep its Windows exe name as the class (so exe profiles still match); this
+# keeps it known as a Steam game for the paste-only decision.
+_STEAM_WINDOWS: dict[int, str] = {}
+
+
+def _note_steam_tag(window_id: int, appid: Optional[str]) -> None:
+    """Record what the window says right now: its STEAM_GAME id, or none."""
+    if not appid:
+        _STEAM_WINDOWS.pop(window_id, None)
+        return
+    if len(_STEAM_WINDOWS) > 64:
+        _STEAM_WINDOWS.clear()
+    _STEAM_WINDOWS[window_id] = appid
+
+
+def is_steam_game(window_id: Optional[int], window_class: Optional[str]) -> bool:
+    """True for a window Steam identifies: a steam_app_<id> class, or a window
+    that carried gamescope's STEAM_GAME tag (whatever its class)."""
+    if str(window_class or "").lower().startswith("steam_app_"):
+        return True
+    return window_id is not None and window_id in _STEAM_WINDOWS
 
 
 def frontmost_app() -> tuple[Optional[int], Optional[str], Optional[str]]:
@@ -322,18 +359,37 @@ def _portal():
         return None
 
 
-def _xdotool(*args: str) -> None:
-    result = subprocess.run(["xdotool", *args], capture_output=True, text=True, timeout=10)
+def _xdotool(*args: str, timeout: float = 10) -> None:
+    """Run the host's xdotool. Every failure is an InjectionError whose message
+    never carries the argv (it can hold the dictated text)."""
+    from ..utils.hostexec import host_env
+    from .injector import InjectionError
+
+    try:
+        # A host binary: never hand it the bundle's library path.
+        result = subprocess.run(["xdotool", *args], capture_output=True, text=True,
+                                timeout=timeout, env=host_env())
+    except FileNotFoundError:
+        raise InjectionError(
+            "xdotool not found: install xdotool, or let Aura type through the desktop "
+            "(Settings → System → Type into every app)") from None
+    except subprocess.TimeoutExpired:
+        raise InjectionError(f"xdotool {args[0]} timed out after {timeout:.0f}s") from None
     if result.returncode != 0:
-        from .injector import InjectionError
         raise InjectionError(f"xdotool {' '.join(args[:2])} failed: {result.stderr.strip()}")
 
 
-def press_held(keys: str, hold_s: float = KEY_HOLD_S) -> None:
-    """Press ``keys`` (e.g. "Return", "ctrl+v") down for ``hold_s``, then release."""
+def press_held(keys: str, hold_s: float = KEY_HOLD_S, guard=None) -> None:
+    """Press ``keys`` (e.g. "Return", "ctrl+v") down for ``hold_s``, then release.
+
+    ``guard`` (raises to abort) runs after the wait for held modifiers, which
+    can take seconds, immediately before the keys go out.
+    """
     from .injector import InjectionError, _require_modifier_release
 
     _require_modifier_release()
+    if guard is not None:
+        guard()
     kb = _portal()
     if kb is not None:
         from .portal_keyboard import PortalKeyboardError, X11Layout
@@ -346,17 +402,23 @@ def press_held(keys: str, hold_s: float = KEY_HOLD_S) -> None:
         finally:
             layout.close()
     _xdotool("keydown", "--clearmodifiers", keys)
-    time.sleep(max(0.0, hold_s))
-    _xdotool("keyup", "--clearmodifiers", keys)
+    try:
+        time.sleep(max(0.0, hold_s))
+    finally:
+        try:
+            _xdotool("keyup", "--clearmodifiers", keys)
+        except InjectionError:
+            # A key left down autorepeats (a held Return keeps sending): once more.
+            _xdotool("keyup", keys)
 
 
 def press_return() -> None:
     press_held("Return")
 
 
-def paste_clipboard() -> None:
+def paste_clipboard(guard=None) -> None:
     """Ctrl+V into the game (the caller has already set the clipboard)."""
-    press_held("ctrl+v")
+    press_held("ctrl+v", guard=guard)
 
 
 def type_text(text: str) -> None:
@@ -381,4 +443,11 @@ def type_text(text: str) -> None:
             raise InjectionError(f"{e} (typed {getattr(e, 'typed', 0)} characters)") from e
         finally:
             layout.close()
-    _xdotool("type", "--clearmodifiers", "--delay", str(TYPE_DELAY_MS), "--", text)
+    from .injector import _running_under_xwayland, build_xdotool_type_command
+
+    # The injector's hardening: a warm-up key under XWayland (its first synthetic
+    # key is dropped) and Shift released again after shifted runs.
+    text = fold_typography_for_typing(text)
+    argv = build_xdotool_type_command(text, TYPE_DELAY_MS, warmup=_running_under_xwayland())
+    # Never cut a long message off mid-chat: allow twice the typing time.
+    _xdotool(*argv[1:], timeout=10 + 2 * len(text) * TYPE_DELAY_MS / 1000)

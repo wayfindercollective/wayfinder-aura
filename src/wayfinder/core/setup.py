@@ -7,6 +7,7 @@ and guides users through setup on first launch.
 Supports Ubuntu/Debian (apt), with graceful fallback to manual instructions.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -180,6 +181,43 @@ def check_audio() -> DependencyStatus:
         return DependencyStatus(False, error=f"Audio system error: {e}")
 
 
+_PORTAL_OFFERED: dict = {}
+
+
+def _portal_typing_enabled() -> bool:
+    """The saved "Type into every app" switch (default on), read without
+    load_config()'s migrations and saves."""
+    try:
+        from wayfinder import config as config_module
+        data = json.loads(config_module.CONFIG_FILE.read_text())
+    except Exception:
+        return True
+    return not isinstance(data, dict) or bool(data.get("linux_portal_typing", True))
+
+
+def _portal_typing_expected() -> bool:
+    """A Wayland desktop whose RemoteDesktop portal will type for Aura (asked
+    once at launch). ydotool and its daemon are only a fallback there, so Setup
+    must not install a package, enable a service or ask for a password for them
+    unless the user declined the portal or it failed."""
+    if not _portal_typing_enabled():
+        return False  # the user switched "Type into every app" off
+    try:
+        from wayfinder.core import portal_keyboard
+        if not portal_keyboard.host_is_wayland_desktop():
+            return False
+        pk = portal_keyboard.PortalKeyboard
+        if portal_keyboard.keyboard().state in (pk.DECLINED, pk.FAILED, pk.CLOSED):
+            return False
+        if portal_keyboard.ready():
+            return True
+        if "offered" not in _PORTAL_OFFERED:
+            _PORTAL_OFFERED["offered"] = bool(portal_keyboard.portal_keyboard_offered())
+        return _PORTAL_OFFERED["offered"]
+    except Exception:
+        return False
+
+
 def check_text_injection() -> DependencyStatus:
     """Check for an available text-injection backend (platform/session aware).
 
@@ -208,6 +246,11 @@ def check_text_injection() -> DependencyStatus:
 
     from wayfinder.utils.platform import get_text_injector, is_wayland
     tool = get_text_injector()
+    if tool == "portal":
+        return DependencyStatus(True, detail="desktop portal (types into every app)")
+    if tool in ("wtype", "ydotool", "none") and _portal_typing_expected():
+        return DependencyStatus(
+            True, detail="desktop portal (approve the desktop's Remote Control request)")
     if tool == "xdotool":
         return DependencyStatus(True, detail="xdotool (X11)")
     if tool == "wtype":
@@ -622,7 +665,8 @@ def _is_atomic_host() -> bool:
 
 
 def _detect_package_manager() -> str:
-    """Detect the system package manager. Returns 'brew', 'ostree', 'dnf', 'apt', or 'unknown'."""
+    """Detect the system package manager: 'brew', 'ostree', 'dnf', 'apt', 'pacman',
+    'zypper', or 'unknown'."""
     if sys.platform == "darwin" and shutil.which("brew"):
         return "brew"
     # Must precede the dnf check: Atomic hosts have a dnf binary that refuses to run.
@@ -634,17 +678,19 @@ def _detect_package_manager() -> str:
         return "apt"
     if shutil.which("pacman"):
         return "pacman"
+    if shutil.which("zypper"):
+        return "zypper"
     return "unknown"
 
 
 # Package name mapping: generic name -> {pkg_manager: actual_package_name}
 _PACKAGE_MAP = {
-    "ydotool":          {"apt": "ydotool",          "dnf": "ydotool",          "pacman": "ydotool"},
-    "git":              {"apt": "git",              "dnf": "git",              "brew": "git",       "pacman": "git"},
-    "cmake":            {"apt": "cmake",            "dnf": "cmake",            "brew": "cmake",     "pacman": "cmake"},
-    "build-essential":  {"apt": "build-essential",  "dnf": "gcc-c++ make",     "brew": "gcc",       "pacman": "base-devel"},
+    "ydotool":          {"apt": "ydotool",          "dnf": "ydotool",          "pacman": "ydotool",   "zypper": "ydotool"},
+    "git":              {"apt": "git",              "dnf": "git",              "brew": "git",       "pacman": "git",   "zypper": "git"},
+    "cmake":            {"apt": "cmake",            "dnf": "cmake",            "brew": "cmake",     "pacman": "cmake", "zypper": "cmake"},
+    "build-essential":  {"apt": "build-essential",  "dnf": "gcc-c++ make",     "brew": "gcc",       "pacman": "base-devel", "zypper": "gcc-c++ make"},
     "nvidia-cuda-toolkit": {"apt": "nvidia-cuda-toolkit", "dnf": "cuda-toolkit", "pacman": "cuda"},
-    "libfuse2":         {"apt": "libfuse2",         "dnf": "fuse-libs",        "pacman": "fuse2"},
+    "libfuse2":         {"apt": "libfuse2",         "dnf": "fuse-libs",        "pacman": "fuse2",     "zypper": "libfuse2"},
     "whisper-cpp":      {"brew": "whisper-cpp"},
 }
 
@@ -670,17 +716,34 @@ def _get_install_hint(generic_name: str) -> str:
         return f"sudo dnf install {pkg_str}"
     if pkg_mgr == "apt":
         return f"sudo apt install {pkg_str}"
+    if pkg_mgr == "zypper":
+        return f"sudo zypper install {pkg_str}"
     return f"install '{pkg_str}' with your system package manager"
 
 
 def _resolve_packages(generic_names: list[str], pkg_mgr: str) -> list[str]:
     """Map generic package names to the actual names for the detected package manager."""
     resolved = []
+    # rpm-ostree layers Fedora packages: same names as dnf.
+    names_for = "dnf" if pkg_mgr == "ostree" else pkg_mgr
     for name in generic_names:
-        mapped = _PACKAGE_MAP.get(name, {}).get(pkg_mgr, name)
+        mapped = _PACKAGE_MAP.get(name, {}).get(names_for, name)
         # Some mappings have multiple packages (e.g., "gcc-c++ make")
         resolved.extend(mapped.split())
     return resolved
+
+
+def _manual_install_command(pkg_mgr: str, resolved: list[str]) -> str:
+    """The command a user can run in a terminal for this package manager."""
+    pkgs = " ".join(resolved)
+    return {
+        "brew": f"brew install {pkgs}",
+        "dnf": f"sudo dnf install -y {pkgs}",
+        "pacman": f"sudo pacman -S --needed {pkgs}",
+        "apt": f"sudo apt update && sudo apt install -y {pkgs}",
+        "zypper": f"sudo zypper install {pkgs}",
+        "ostree": f"rpm-ostree install {pkgs}",
+    }.get(pkg_mgr, f"install {pkgs} with your system package manager")
 
 
 def install_system_packages(
@@ -742,6 +805,9 @@ def install_system_packages(
                 # initialized keyring first — most Deck users should use the Flatpak.
                 install_cmd = f"pacman -S --needed --noconfirm {' '.join(resolved)}"
                 cmd = ["pkexec", "bash", "-c", install_cmd]
+            elif pkg_mgr == "zypper":
+                install_cmd = f"zypper --non-interactive install {' '.join(resolved)}"
+                cmd = ["pkexec", "bash", "-c", install_cmd]
             else:  # apt
                 install_cmd = f"apt update -qq && apt install -y {' '.join(resolved)}"
                 cmd = ["pkexec", "bash", "-c", install_cmd]
@@ -769,44 +835,40 @@ def install_system_packages(
                                        capture_output=True, timeout=30, env=host_env())
                         log("  ydotool.service (user) enabled; FULL logout needed for input group")
                     else:
-                        subprocess.run(
+                        # Fedora ships the system unit as ydotool.service; older
+                        # packages named it ydotoold.
+                        enabled = subprocess.run(
                             ["pkexec", "bash", "-c",
-                             "systemctl enable --now ydotoold && "
+                             "(systemctl enable --now ydotool.service || "
+                             "systemctl enable --now ydotoold) && "
                              f"usermod -aG input {user}"],
                             capture_output=True, timeout=30, env=host_env(),
                         )
-                        log("  ydotoold enabled (re-login needed for input group)")
+                        if enabled.returncode == 0:
+                            log("  ydotool daemon enabled (re-login needed for input group)")
+                        else:
+                            log("  Could not enable the ydotool daemon: this package has "
+                                "no service to enable. Aura types with the other tools.")
 
                 done(True, "System packages installed successfully")
             elif proc.returncode in (126, 127):
                 log("")
                 log("No worries — you can install these yourself instead.")
                 log("Open a terminal and run:")
-                if pkg_mgr == "brew":
-                    log(f"  {install_cmd}")
-                else:
-                    log(f"  sudo {install_cmd}")
+                log(f"  {_manual_install_command(pkg_mgr, resolved)}")
                 log("")
                 log("Then restart Wayfinder Aura.")
                 done(False, "Manual install needed")
             else:
                 log(f"Package manager returned exit code {proc.returncode}.")
                 log("You can install manually:")
-                if pkg_mgr == "brew":
-                    log(f"  {install_cmd}")
-                else:
-                    log(f"  sudo {install_cmd}")
+                log(f"  {_manual_install_command(pkg_mgr, resolved)}")
                 done(False, f"{pkg_mgr} exited with code {proc.returncode}")
 
         except FileNotFoundError:
             log("Automatic install is not available on this system.")
             log("Install packages manually in a terminal:")
-            if pkg_mgr == "brew":
-                log(f"  brew install {' '.join(resolved)}")
-            elif pkg_mgr == "dnf":
-                log(f"  sudo dnf install -y {' '.join(resolved)}")
-            else:
-                log(f"  sudo apt install -y {' '.join(resolved)}")
+            log(f"  {_manual_install_command(pkg_mgr, resolved)}")
             done(False, "Manual install needed")
         except Exception as e:
             log(f"Error: {e}")
@@ -1325,6 +1387,7 @@ def get_missing_system_packages() -> list[str]:
         sys.platform != "darwin"
         and not (IS_APPIMAGE or IS_FLATPAK)
         and not shutil.which("ydotool")
+        and not _portal_typing_expected()   # the portal types; ydotool is a fallback
     ):
         packages.append("ydotool")
     # git/cmake/compilers/CUDA exist only to build whisper.cpp/llama.cpp from

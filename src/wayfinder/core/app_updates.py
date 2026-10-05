@@ -86,9 +86,9 @@ _WIN_SETUP_RE = re.compile(r"^WayfinderAura-Setup-(.+)\.exe$")
 # bundle name carries no version) and the AppImage build.
 _FLATPAK_BUNDLE_NAME = "io.wayfindercollective.WayfinderAura.flatpak"
 _APPIMAGE_RE = re.compile(r"^Wayfinder_Aura-(.+)-x86_64\.AppImage$")
-# Release assets are only ever served from GitHub; anything else is not a
-# download this module will hand to the browser.
-_DOWNLOAD_URL_PREFIX = "https://github.com/"
+# Release pages and assets are only ever served from this repository's
+# releases; anything else is not a URL this module will hand to the browser.
+_DOWNLOAD_URL_PREFIX = "https://github.com/wayfindercollective/wayfinder-aura/releases/"
 
 
 def parse_version(text: str) -> Optional[Tuple[Tuple[int, int, int], Optional[Tuple[str, ...]]]]:
@@ -375,9 +375,10 @@ def _select_release(
                 continue  # nothing this package can install (e.g. a Mac-only release)
 
         if not selected or is_newer(tag, selected["tag_name"]):
+            html_url = str(release.get("html_url", "") or "")
             selected = {
                 "tag_name": tag,
-                "html_url": str(release.get("html_url", "") or RELEASES_PAGE),
+                "html_url": html_url if html_url.startswith(_DOWNLOAD_URL_PREFIX) else RELEASES_PAGE,
             }
             if mac or win or linux_package:
                 selected["download_url"] = download_url
@@ -446,7 +447,10 @@ def check_for_app_update(
         results["error"] = str(e)
 
     results = _with_comparison(results, current_version)
-    _save_cache(results)
+    if results["error"] is None:
+        # A failed check (offline at login, GitHub's rate limit) is not
+        # cached: the next launch or "Check for updates" asks again.
+        _save_cache(results)
     return results
 
 

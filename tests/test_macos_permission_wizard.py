@@ -9,6 +9,8 @@ import sys
 import threading
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 import wayfinder_main
 from wayfinder_main import WayfinderApp
 
@@ -166,7 +168,7 @@ def test_permissions_menu_opens_input_monitoring_settings_after_menu_closes(monk
 
 
 class TestListenerRestartEventWiring:
-    def _start(self, monkeypatch, is_mac):
+    def _start(self, monkeypatch, is_mac, *, flatpak=True, windows=False):
         import wayfinder.hotkeys as hk
 
         seen = {}
@@ -177,6 +179,9 @@ class TestListenerRestartEventWiring:
             done.set()
 
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", is_mac)
+        monkeypatch.setattr(wayfinder_main, "IS_FLATPAK", flatpak)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", windows)
+        monkeypatch.setattr(wayfinder_main, "_IS_LINUX", not (is_mac or windows))
         monkeypatch.setattr(hk, "pynput_hotkey_listener", fake_listener)
         monkeypatch.setattr(hk, "is_pynput_available", lambda: True)
         ns = _ns(_queue_macos_hotkey_health=lambda state: None)
@@ -192,11 +197,20 @@ class TestListenerRestartEventWiring:
         assert seen["restart_event"] is not ns.stop_event
         assert seen["on_health"] is ns._queue_macos_hotkey_health
 
-    def test_linux_listener_call_is_unchanged(self, monkeypatch):
-        ns, seen = self._start(monkeypatch, False)
+    @pytest.mark.parametrize("flatpak, windows", [(True, False), (False, True)])
+    def test_flatpak_and_windows_listener_calls_are_unchanged(self, monkeypatch, flatpak, windows):
+        ns, seen = self._start(monkeypatch, False, flatpak=flatpak, windows=windows)
         assert "restart_event" not in seen
         assert "on_health" not in seen
         assert ns._pynput_restart_event is None
+
+    def test_native_linux_fallback_gets_its_own_stop_event(self, monkeypatch):
+        """The X11 no-input-group fallback must be stoppable when KDE takes the
+        shortcut over, without touching the shared stop_event."""
+        ns, seen = self._start(monkeypatch, False, flatpak=False)
+        assert isinstance(seen.get("restart_event"), threading.Event)
+        assert seen["restart_event"] is ns._pynput_restart_event
+        assert seen["restart_event"] is not ns.stop_event
 
     def test_finished_listener_clears_started_flag(self, monkeypatch):
         ns, _ = self._start(monkeypatch, False)

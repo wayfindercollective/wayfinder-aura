@@ -201,6 +201,13 @@ class TestCheckYdotool:
     # get_text_injector() (wtype on Wayland / xdotool on X11 / ydotool fallback). Mock that
     # to pin the backend under test, rather than the old ydotool-only shutil.which mocks.
 
+    def test_portal_backend_is_ready(self):
+        """Approved desktop portal -> ready; never 'No text injection backend'."""
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="portal"):
+            status = check_ydotool()
+        assert status.installed is True
+        assert "portal" in status.detail
+
     def test_ydotool_backend_with_daemon_running(self):
         """ydotool backend + a LIVE daemon (per check_ydotool_ready) -> installed."""
         with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
@@ -1208,8 +1215,16 @@ class TestSetupConfigIntegration:
             cfg_mod.CONFIG_FILE = temp_config_dir / "config.json"
 
             config = load_config()
-            new_binary = "/home/user/whisper.cpp/build/bin/whisper-cli"
-            new_model = "/home/user/whisper.cpp/models/ggml-large-v3-turbo.bin"
+            # Real files: load_config() repairs a missing whisper_binary to
+            # whatever whisper-cli the host has, which made this host-dependent.
+            build = temp_config_dir / "whisper.cpp"
+            (build / "build" / "bin").mkdir(parents=True)
+            (build / "models").mkdir()
+            new_binary = str(build / "build" / "bin" / "whisper-cli")
+            new_model = str(build / "models" / "ggml-large-v3-turbo.bin")
+            Path(new_binary).write_text("#!/bin/sh\n")
+            Path(new_binary).chmod(0o755)
+            Path(new_model).write_bytes(b"\x00")
 
             config["whisper_binary"] = new_binary
             config["model_path"] = new_model

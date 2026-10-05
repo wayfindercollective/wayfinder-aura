@@ -110,6 +110,17 @@ def test_cancel_shortcut_follows_config_and_round_trips():
     assert parse_trigger_description("Shift+Escape") == (1, ["shift"])
 
 
+def test_cancel_shortcut_never_grabs_a_bare_escape():
+    # A hand-edited config without modifiers must not take Escape away from
+    # every app; the user picks the key at bind time instead.
+    for mods in ([], None):
+        specs = shortcut_specs_from_config({
+            "cancel_hotkey_key": 1, "cancel_hotkey_modifiers": mods,
+        })
+        cancel = next(s for s in specs if s.shortcut_id == "cancel-dictation")
+        assert cancel.trigger == ""
+
+
 def test_specs_with_mouse_hotkey_omit_the_trigger():
     config = {
         "hotkey_key": 275, "hotkey_modifiers": [],  # BTN_SIDE
@@ -827,3 +838,78 @@ def test_builds_variants_the_real_glib_accepts(monkeypatch):
     result, events = _run(bus)
     assert result is True, "listener failed with real GLib variants"
     assert events == [(EventType.HOTKEY_PRESSED, None)]
+
+
+# ── desktops whose portal has no GlobalShortcuts ─────────────────────────────
+
+class _PropsBus:
+    """Answers (or refuses) the GlobalShortcuts `version` property read."""
+
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+
+    def call_sync(self, dest, path, iface, method, params, *_rest):
+        self.calls.append((iface, method, params))
+        if self.error:
+            raise RuntimeError(self.error)
+        return ("(v)", 2)
+
+
+@pytest.mark.parametrize("error, expected", [
+    (None, True),                                                       # KDE, GNOME 48+
+    ("GDBus.Error:org.freedesktop.DBus.Error.InvalidArgs: No such interface "
+     "“org.freedesktop.portal.GlobalShortcuts”", False),               # GNOME 46, Cinnamon
+    ("GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: no portal", False),
+    ("GDBus.Error:org.freedesktop.DBus.Error.NoReply: timed out", None),  # still starting
+])
+def test_global_shortcuts_probe_reads_only_the_version(monkeypatch, error, expected):
+    monkeypatch.setattr(portal, "_GI_PROBE", {"checked": True, "available": True, "detail": ""})
+    bus = _install_fake_gi(monkeypatch, _PropsBus(error))
+    assert portal.global_shortcuts_offered(bus) is expected
+    assert bus.calls == [("org.freedesktop.DBus.Properties", "Get",
+                          ("(ss)", ("org.freedesktop.portal.GlobalShortcuts", "version")))]
+
+
+def test_global_shortcuts_probe_without_pygobject_is_unknown(monkeypatch):
+    monkeypatch.setattr(portal, "_GI_PROBE", {"checked": True, "available": False, "detail": "x"})
+    assert portal.global_shortcuts_offered(_PropsBus()) is None
+
+
+@pytest.mark.parametrize("offered, session, backend", [
+    (False, "x11", "pynput"),          # Cinnamon / XFCE / MATE: XRecord works
+    (False, "wayland", "unavailable"),  # GNOME 45-47, Sway: desktop shortcut + --toggle
+    (None, "wayland", "portal"),       # could not ask: keep the portal and its retries
+    (True, "wayland", "portal"),
+])
+def test_flatpak_falls_back_when_the_portal_has_no_global_shortcuts(
+        monkeypatch, offered, session, backend):
+    import wayfinder_main as wm
+
+    monkeypatch.setattr(wm, "IS_FLATPAK", True)
+    monkeypatch.setattr(wm, "PORTAL_HOTKEYS_AVAILABLE", True)
+    monkeypatch.setattr(portal, "global_shortcuts_offered", lambda *a, **k: offered)
+    app = types.SimpleNamespace()
+    usable = wm.WayfinderApp._flatpak_portal_hotkeys(app)
+    assert wm.resolve_hotkey_backend("linux", True, usable, session) == backend
+    assert getattr(app, "_portal_shortcuts_missing", False) is (offered is False)
+    # Probed once: the supervisor and Settings reuse the answer.
+    monkeypatch.setattr(portal, "global_shortcuts_offered",
+                        lambda *a, **k: pytest.fail("probed twice"))
+    assert wm.WayfinderApp._flatpak_portal_hotkeys(app) is usable
+
+
+@pytest.mark.parametrize("flatpak, env, xwayland, expected", [
+    (True, "x11", True, "wayland"),    # the manifest forces x11; XWayland tells the truth
+    (True, "x11", False, "x11"),       # a real X11 desktop (Cinnamon, XFCE)
+    (False, "x11", True, "x11"),       # native installs trust the session
+    (False, "wayland", False, "wayland"),
+])
+def test_hotkey_session_type_sees_through_the_flatpak_env(monkeypatch, flatpak, env, xwayland, expected):
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+
+    monkeypatch.setattr(wm, "IS_FLATPAK", flatpak)
+    monkeypatch.setenv("XDG_SESSION_TYPE", env)
+    monkeypatch.setattr(injector, "_running_under_xwayland", lambda: xwayland)
+    assert wm.WayfinderApp._hotkey_session_type() == expected

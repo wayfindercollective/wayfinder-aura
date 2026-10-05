@@ -288,6 +288,21 @@ jobs:
           XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \
             --app-import-self-test | tee /tmp/app-import-self-test.log
           grep -Fq "APP_IMPORT_SELF_TEST_OK" /tmp/app-import-self-test.log
+          # Portal typing (Gio) and Gamer mode (python-xlib) degrade silently
+          # when their imports are missing; prove them in the frozen bundle.
+          HOME=$(mktemp -d) squashfs-root/AppRun \
+            --linux-input-self-test | tee /tmp/linux-input-self-test.log
+          grep -Fq "LINUX_INPUT_SELF_TEST_OK" /tmp/linux-input-self-test.log
+          # The in-app update check only offers an AppImage whose name carries
+          # the tag's version (src/wayfinder/core/app_updates.py).
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            expected="Wayfinder_Aura-${GITHUB_REF_NAME#v}-x86_64.AppImage"
+            if [ ! -e "$expected" ]; then
+              echo "::error::tag $GITHUB_REF_NAME expects $expected (scripts/build-appimage.sh VERSION out of sync?)"
+              ls Wayfinder_Aura-*.AppImage
+              exit 1
+            fi
+          fi
           # Exercise a real verified handshake from the finished AppImage.
           # The CDN may reject an anonymous request; an HTTP response still
           # proves the packaged OpenSSL trusted its certificate chain.
@@ -577,6 +592,16 @@ jobs:
           name: wayfinder-aura-flatpak
           path: dist/
 
+      # Published beside the packages so users and release QA can check the
+      # exact downloaded files (the in-app update checks only where a file came
+      # from and that an AppImage is one, not a checksum).
+      - name: Checksum the Linux packages
+        run: |
+          set -o pipefail
+          cd dist
+          sha256sum Wayfinder_Aura-*.AppImage io.wayfindercollective.WayfinderAura.flatpak \
+            | tee SHA256SUMS-linux.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
@@ -584,6 +609,7 @@ jobs:
             dist/Wayfinder_Aura-*.AppImage
             dist/Wayfinder_Aura-*.AppImage.zsync
             dist/io.wayfindercollective.WayfinderAura.flatpak
+            dist/SHA256SUMS-linux.txt
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}

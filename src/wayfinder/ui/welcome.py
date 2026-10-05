@@ -40,8 +40,10 @@ def _login_item_module():
 
 
 def _device_noun() -> str:
-    """How the copy names this computer ("PC" on Windows, else "Mac")."""
-    return "PC" if sys.platform == "win32" else "Mac"
+    """How the copy names this computer ("PC" on Windows, "Mac" on macOS)."""
+    if sys.platform == "win32":
+        return "PC"
+    return "Mac" if sys.platform == "darwin" else "computer"
 
 
 def permission_row_plan(name: str, hint: str, snapshot: dict, requested: set[str],
@@ -375,10 +377,11 @@ class WelcomePane:
         self._perm_requested: set[str] = set()  # native requests made in this process
         if getattr(app, "_macos_input_relaunch_required", False):
             self._perm_requested.add("input_monitoring")
-        # macOS Welcome owns the free Base-model download ("runs entirely on this
-        # Mac"). Linux keeps its separate setup flow and cue banner.
+        # The packaged app's Welcome owns the free Base-model download: macOS,
+        # Windows and the Linux AppImage (a frozen build) ship no model. The
+        # Flatpak bundles one; source installs get theirs from Setup.
         needs_model = False
-        if sys.platform in ("darwin", "win32"):
+        if sys.platform in ("darwin", "win32") or getattr(sys, "frozen", False):
             try:
                 needs_model = not bool(app._has_usable_whisper_model())
             except Exception:

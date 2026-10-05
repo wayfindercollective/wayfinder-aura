@@ -276,9 +276,13 @@ def _state_path() -> Path:
 def load_state(path: Optional[Path] = None) -> dict:
     try:
         data = json.loads((path or _state_path()).read_text())
-        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+    if not isinstance(data, dict):
+        return {}
+    if not isinstance(data.get("restore_token", ""), str):
+        data["restore_token"] = ""  # hand-edited: ask again rather than fail every launch
+    return data
 
 
 def save_state(update: dict, path: Optional[Path] = None) -> None:
@@ -286,11 +290,9 @@ def save_state(update: dict, path: Optional[Path] = None) -> None:
     data = load_state(target)
     data.update(update)
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.chmod(0o600)
-        tmp.replace(target)
+        from ..utils.fs_security import atomic_write_json
+        # Owner-only from creation: the restore token lets Aura type without asking.
+        atomic_write_json(target, data)
     except Exception:
         pass
 
@@ -317,6 +319,10 @@ class PortalKeyboard:
         self._changed = threading.Condition()
         self._type_lock = threading.Lock()
         self._listeners: list = []
+        # start() is serialized (two starters must not launch two workers);
+        # close() only counts and signals, so it never waits on a starter.
+        self._lifecycle = threading.Lock()
+        self._close_count = 0
 
     # -- status ---------------------------------------------------------------
     @property
@@ -329,6 +335,19 @@ class PortalKeyboard:
 
     def ready(self) -> bool:
         return self._state == self.READY and bool(self._session) and self._bus is not None
+
+    @property
+    def close_count(self) -> int:
+        """How many times close() ran; start(after_closes=...) uses it to drop a
+        start that was asked for before the latest close."""
+        return self._close_count
+
+    def mark_failed(self, detail: str) -> None:
+        """Keys stopped reaching the desktop although no Closed signal came (a
+        portal backend restart): stop routing dictation here, so the next one
+        takes the normal fallback instead of failing the same way again."""
+        if self._state == self.READY:
+            self._set(self.FAILED, detail)
 
     def on_change(self, callback: Callable[[str, str], None]) -> None:
         """callback(state, detail) on every state change (any thread)."""
@@ -357,28 +376,45 @@ class PortalKeyboard:
 
     # -- lifecycle ------------------------------------------------------------
     def start(self, *, parent_window: str = "", ask_again: bool = False,
-              log: Optional[Callable[[str], None]] = None) -> bool:
+              log: Optional[Callable[[str], None]] = None,
+              may_ask: Optional[Callable[[], bool]] = None,
+              after_closes: Optional[int] = None) -> bool:
         """Open the session in the background. False when nothing was started
-        (already running, or a declined request and ``ask_again`` is False)."""
-        if self._thread is not None and self._thread.is_alive():
-            if not self._stop.is_set():
+        (already running, a declined request and ``ask_again`` is False, or a
+        close() since ``after_closes``, the close_count the caller saw when it
+        decided to start). ``may_ask`` holds the request that can show the
+        desktop's dialog until it returns True (the app: no dictation running).
+        """
+        closes = self._close_count if after_closes is None else after_closes
+        with self._lifecycle:
+            if self._close_count != closes:
+                return False  # switched off after this start was asked for
+            if self._thread is not None and self._thread.is_alive():
+                if not self._stop.is_set():
+                    return False
+                self._thread.join(timeout=2.0)  # closing: let it finish first
+                if self._thread.is_alive():
+                    return False
+            remembered = load_state(self._state_path)
+            if remembered.get("declined") and not ask_again:
+                self._set(self.DECLINED, "declined earlier")
                 return False
-            self._thread.join(timeout=2.0)  # closing: let it finish first
-            if self._thread.is_alive():
-                return False
-        remembered = load_state(self._state_path)
-        if remembered.get("declined") and not ask_again:
-            self._set(self.DECLINED, "declined earlier")
-            return False
-        self._stop.clear()
-        self._set(self.STARTING)
-        self._thread = threading.Thread(
-            target=self._run, args=(parent_window, remembered.get("restore_token") or "", log),
-            name="wayfinder-portal-keyboard", daemon=True)
-        self._thread.start()
+            self._stop.clear()
+            self._set(self.STARTING)
+            self._thread = threading.Thread(
+                target=self._run,
+                args=(parent_window, remembered.get("restore_token") or "", log, may_ask,
+                      closes),
+                name="wayfinder-portal-keyboard", daemon=True)
+            self._thread.start()
+            # Still under the lock: a close() during the state read cancels this
+            # worker, and only this one (a later start cannot slip in between).
+            if self._close_count != closes:
+                self._stop.set()
         return True
 
     def close(self) -> None:
+        self._close_count += 1
         self._stop.set()
         bus, session = self._bus, self._session
         if bus is not None and session:
@@ -402,7 +438,9 @@ class PortalKeyboard:
             None, None)
 
     def _run(self, parent_window: str, restore_token: str,
-             log: Optional[Callable[[str], None]]) -> None:
+             log: Optional[Callable[[str], None]],
+             may_ask: Optional[Callable[[], bool]] = None,
+             closes: Optional[int] = None) -> None:
         def say(msg: str) -> None:
             if log:
                 try:
@@ -533,6 +571,16 @@ class PortalKeyboard:
                 self._set(self.FAILED, "the desktop refused a keyboard")
                 return
 
+            def closed_since_start() -> bool:
+                return closes is not None and self._close_count != closes
+
+            # Start can show the desktop's approval dialog: never mid-dictation,
+            # and never after the user switched typing off.
+            while may_ask is not None and not may_ask():
+                if self._stop.wait(0.5) or closed_since_start():
+                    return
+            if self._stop.is_set() or closed_since_start():
+                return
             self._set(self.WAITING)
             if not restore_token:
                 say("⌨️ Your desktop is asking whether Aura may type in every app: "

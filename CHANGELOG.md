@@ -28,21 +28,26 @@ Linux: dictation for gamers on every desktop.
   so it gets fixed: never the error message, audio, dictated text or
   settings (see PRIVACY.md). On by default for Beta, off for Stable;
   Settings → System → Send crash reports.
-- **Aura types into every app on Wayland desktops.** On KDE Plasma and GNOME
-  the desktop's remote-control (RemoteDesktop) portal delivers the keys, so
-  native Wayland apps receive dictation too, not only X11/XWayland windows.
-  The desktop asks once; Settings → System → "Type into every app" turns it
-  off. X11 sessions and SteamOS Game Mode keep xdotool.
+- **Aura types into every app on Wayland desktops.** On KDE Plasma (GNOME 45+
+  is expected to work but is not yet verified) the desktop's remote-control
+  (RemoteDesktop) portal delivers the keys, so native Wayland apps receive
+  dictation too, not only X11/XWayland windows. The desktop asks once;
+  Settings → System → "Type into every app" turns it off; a decline (Esc
+  included) is shown on the Dictate tab and turns the switch off, so turning it
+  back on asks again. X11 sessions and SteamOS Game Mode keep
+  xdotool; ydotool and wtype remain fallbacks for AppImage and source installs
+  when the portal is unavailable.
 - **Gamer mode on Linux.** The Games tab and game-chat dictation now run on
   Linux: games are recognised by their window (Wine/Lutris exe names, Proton
   `steam_app_<id>`, SteamOS Game Mode). Dark Age of Camelot (Eden) is typed
   into the chat box you opened and sent with Enter.
-- **Cancel a dictation from any app** (default Shift+Esc; Esc where Aura sees
-  keys) without anything being typed. While you're recording, a subtle
-  "✕ Shift+Esc" sits just above the pill (below it when the pill is on the top
-  edge), and the first-run guide says so too: Shift+Esc works on Mac, Windows
-  and Linux alike.
-- **Vocabulary corrections as Heard / Write-as pairs.**
+- **Cancel a recording from any app** (default Shift+Esc; Esc where Aura sees
+  keys) while it is still recording: the audio is discarded and nothing is
+  typed.
+- **Vocabulary card (Ultra).** Settings has a card for your names and terms
+  (comma-separated or one per line) and for Heard / Write-as corrections, which
+  apply in a single pass.
+
 - **Vocabulary fixes near-misses of your words (Ultra).** The speech model
   rarely misspells a rare name the same way twice (Large v3 Turbo Q5 wrote
   "Aeron" and "Arrhawn" for "Arawn"), so a word that sounds like one of your
@@ -70,13 +75,29 @@ Linux: dictation for gamers on every desktop.
 
 ### Changed
 
-- **The macOS design on Linux:** header brand mark, a quiet hairline mic
-  button, labels that fit at any zoom, a smoother benchmark bar. Zoom
-  defaults to the desktop's own scale and rescales in one frame; the idle
-  ribbon drifts slowly while another app has focus and stops when hidden.
-- **Get Update on Linux downloads the new Flatpak bundle (or AppImage);**
-  open the file to install it. The banner no longer points at a software
-  center that cannot update a GitHub install.
+- **The macOS design on Linux:** the Mac's shader ribbon and glass palette
+  (the previous ribbon remains with `WAYFINDER_LINUX_MAC_LOOK=0`), header brand
+  mark, a quiet hairline mic button, labels that fit at any zoom, a smoother
+  benchmark bar. The recording ribbon runs at 30 fps on desktops (15 fps on
+  Steam hardware). Zoom defaults to the desktop's own scale and rescales in one
+  frame; the idle ribbon drifts slowly while another app has focus and stops
+  when hidden.
+- **Get Update on the Linux Flatpak downloads the new bundle;** open the file
+  to install it (an AppImage that cannot replace itself downloads the new
+  AppImage). The banner no longer points at a software center that cannot
+  update a GitHub install.
+
+- **Minimal is now Normal.** Normal removes um/uh and doubled small words
+  instantly and needs no model; your saved style carries over. Styles the
+  selected cleanup model cannot do are greyed out, with the reason.
+- **A model you download becomes the active model at once** (queued until
+  idle if you are mid-dictation).
+- **The Accuracy Mode control is gone.** whisper.cpp decodes greedily
+  everywhere: beam search never beat greedy in testing and only added time.
+  "[sound of wind]"-style annotations are stripped from transcripts.
+- **The cleanup model stays loaded only when the style needs it.** On Normal
+  no cleanup model is held in memory; picking a style warms it in the
+  background.
 
 ### Fixed
 
@@ -111,6 +132,71 @@ Linux: dictation for gamers on every desktop.
   that comes back nearly empty is heard again without the prompt. Auto on
   Large v3 Turbo Q5: 8.2% → 5.7% word errors on 2-minute dictations, where a
   single pass lost up to half the words (docs/EVAL-2026-09-30-chunking.md).
+- **Flatpak model downloads persist across restarts.** Earlier builds saved
+  them where the sandbox discards them, so every start fell back to the bundled
+  Base.en and the models had to be downloaded again. Models an earlier build
+  kept in a persisted location are moved over automatically.
+- **Audio ducking is more reliable in the Flatpak,** and the duck amount now
+  accepts 0 to 100.
+- **XWayland dictation no longer comes out in ALL CAPS or loses its first
+  letter,** and the typing speed you choose is honoured instead of always
+  "instant".
+- **Typing stops with a clear message when a modifier key is still held**
+  ("A Shift, Ctrl, Alt, or Super key is still held. Release it, then dictate
+  again; the transcript was not typed.") instead of typing a corrupted
+  transcript.
+- **A dead portal session no longer swallows dictation.** If the desktop's
+  portal stops accepting keys (a portal backend restart), Aura logs it and uses
+  the normal typing tools instead of reporting "Text inserted" with nothing
+  typed.
+- **The portal paste restores your clipboard.** Characters the keyboard layout
+  has no key for (é on a US layout, emoji) are pasted, and the text that was on
+  the clipboard is put back afterwards; it used to be left holding the
+  dictation.
+- **Setup recognises the portal** as a working typing backend (it reported "No
+  text injection backend" once the portal was approved), and **Aura retries the
+  portal for about 20 seconds** if the desktop is still starting it,
+  before settling for xdotool.
+- **Gamer mode pastes into Steam games it does not list.** Unlisted Steam
+  games (Proton `steam_app_*`) and not-recommended ones used to fall through to
+  keystroke typing, where letters are keybinds; they now get the clipboard paste
+  the listed games use, and stop if the game leaves the front first. Other Wine
+  windows (Notepad, launchers) keep normal typing. The Games tab tells Dark Age
+  of Camelot players to press Enter to open chat first.
+- **Gamer mode's xdotool typing is hardened** (X11 sessions, SteamOS Game Mode,
+  or a declined portal): a warm-up key and Shift release under XWayland, a
+  timeout that scales with the message instead of cutting off long ones, Return
+  and Ctrl+V always released, and errors that no longer carry the dictated text.
+- **Gamer mode works while a GameMode game runs.** On AppImage and source
+  installs the GameMode pause (Lutris and Proton register games automatically)
+  swallowed the record shortcut in exactly the games Gamer mode is for. With
+  Gamer mode on, a Ctrl/Alt shortcut (the default Ctrl+Alt+Space) now goes
+  through; single-key shortcuts such as F3 still pause, and the first ignored
+  press logs why.
+- **The AppImage tour downloads the free Base model first.** The AppImage
+  carries no speech model, so a clean install's test dictation failed; the
+  tour now offers the download, as on macOS and Windows.
+- **The Style tab icon follows a license change** (the padlock stayed after
+  activating Ultra until a restart), **the recording hint promises Esc only
+  when something listens for it**, and **the pill no longer clips its right end**
+  after switching to the wider Normal badge.
+- **The cancel shortcut never grabs a bare Escape.** A config with no cancel
+  modifiers leaves the portal trigger empty for the desktop's shortcut editor
+  instead of binding Escape in every app.
+- **Get Update links are pinned to this repository** (a download or release
+  page outside `github.com/wayfindercollective/wayfinder-aura/releases/` is
+  refused), and **a failed update check is retried** instead of being cached
+  for a day, so being offline at login no longer hides an update.
+- **Linux cloud cleanup uses current models.** Anthropic cleanup defaults to
+  `claude-haiku-4-5-20251001` (Claude 3 Haiku was retired and every request
+  failed), the OpenAI and Anthropic menus list current models, and retired model
+  IDs saved in your config are migrated to their replacement.
+- **Loopback requests to Aura's own servers bypass HTTP proxies.** With a proxy
+  configured, dictation audio and cleanup text went through it, and dictation
+  broke when the proxy could not reach your loopback.
+- **The resident cleanup server (llama-server) is keyed per launch and hides
+  `/slots` on Linux,** so a web page cannot reach it over loopback (macOS
+  already did this).
 - **Keys typed into games through Wine arrive intact:** Shift is pressed as
   on a keyboard (KWin 6.4 dropped it for XWayland windows), and ( and ) use
   the main keys Wine understands.
@@ -119,6 +205,34 @@ Linux: dictation for gamers on every desktop.
   Wine's UseTakeFocus=N as the permanent fix).
 - **A stale Alt/Shift state from XWayland no longer blocks or shifts a
   dictation** ("…BUGS>" instead of "…bugs.").
+
+## [1.1.8] — 2026-08-26
+
+Faster local dictation, dependable sandbox integration, and clearer update
+behavior.
+
+### Added
+
+- **Local cleanup models can stay loaded between dictations,** substantially
+  reducing repeated cleanup latency, while a save-memory option is retained.
+- **Flatpak hotkeys use the desktop's GlobalShortcuts portal,** show the
+  compositor's live bindings, and open the desktop shortcut editor instead of
+  presenting settings that cannot take effect.
+- **Installed users are notified when a newer applicable GitHub release is
+  available,** while Flathub installs follow Flathub's managed update channel.
+
+### Changed
+
+- **Downloaded speech and cleanup models are verified against pinned
+  fingerprints,** size-bounded, and kept on secure connections across
+  redirects.
+- **CPU-versus-GPU benchmarks warm models first,** separate one-time loading
+  from processing, and retire stale results when a model is unavailable.
+
+### Fixed
+
+- **Flatpak audio feedback is isolated from microphone capture teardown** for
+  more reliable repeated dictation.
 
 ## [1.1.8-beta.1] — 2026-08-04
 
@@ -350,7 +464,7 @@ downloading the app and dictating with it. Independently reviewed (Codex,
   GPU-on-Tiny/Base promise now holds on Flathub. CPU fallback binaries remain
   for machines with broken Vulkan.
 
-## [Unreleased]
+## 1.1.0 verification pass (shipped in v1.1.0)
 
 Ship-readiness verification pass — defects found by a code audit + model review
 and fixed test-first, plus test infrastructure to guard the fixes. The full
@@ -404,5 +518,6 @@ First public release of Wayfinder Aura.
 - Tone-aware local post-processing with Gemma 3 1B as the default model.
 - System tray integration and configurable typing speeds.
 
-[Unreleased]: https://github.com/wayfindercollective/wayfinder-aura/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/wayfindercollective/wayfinder-aura/compare/v1.1.8...HEAD
+[1.1.8]: https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.8
 [1.1.0]: https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.0

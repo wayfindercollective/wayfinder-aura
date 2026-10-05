@@ -36,7 +36,8 @@ between the repo and a live listing.
 - ✅ Hardware safety nets: name-based mic persistence + pactl-curated picker,
   silent-capture guard, sample-rate fallback w/ resampling, whisper-cli flag
   probing (old/new binaries), download integrity checks, GameMode-aware
-  hotkeys, and conflict-resistant Ctrl+Alt+Space/Enter defaults.
+  hotkeys (AppImage and source only; the Flatpak has no dbus-python), and
+  conflict-resistant Ctrl+Alt+Space/Enter defaults.
 - ✅ Official Flathub manifest linter is clean locally. Builddir/repo lint now
   reaches the exported artifact; its only current errors are the expected
   screenshot-mirroring checks that clear after Flathub imports the screenshots.
@@ -108,14 +109,20 @@ the verified checkmark.
   machines where Vulkan init fails. Final runtime signoff is still required on
   Steam Deck and at least one dedicated GPU system before a paid public release.
 - Global hotkeys inside the sandbox use the XDG GlobalShortcuts portal
-  (PyGObject is bundled for this; record and style-cycle are both registered).
-  The user approves the binding once when prompted, or sets it in System
-  Settings → Shortcuts. Native Wayland typing uses a separate keyboard-only
-  RemoteDesktop portal session with remembered consent. KDE native Wayland
-  and XWayland injection have automated acceptance evidence; GNOME and the
-  remaining real-desktop/game checks are tracked in `docs/LINUX-SHIPPING-PLAN.md`.
-  AppImage and from-source installs do not use the portal; they read
-  /dev/input directly via evdev.
+  (PyGObject is bundled for this; record, style-cycle and cancel-dictation are
+  all registered). The user approves the binding once when prompted, or sets
+  it in System Settings → Shortcuts. Typing into native Wayland windows goes
+  through a separate keyboard-only `org.freedesktop.portal.RemoteDesktop`
+  portal session, approved once and remembered (Settings → System → "Type into
+  every app"). KDE native Wayland and XWayland injection have automated
+  acceptance evidence; GNOME 45+ is expected to work but is not yet verified,
+  and the remaining real-desktop/game checks are tracked in
+  `docs/LINUX-SHIPPING-PLAN.md`. On a desktop whose portal offers no keyboard
+  device (the app logs "This desktop offers no remote-control keyboard"), or
+  after a declined approval, the Flatpak types with the bundled xdotool, which
+  reaches X11/XWayland windows only.
+  AppImage and from-source installs do not use the portal for hotkeys; they
+  read /dev/input directly via evdev.
 
 ## Non-Flatpak channels (later)
 - AppImage: historical lite and full CPU-fallback builds were verified locally.

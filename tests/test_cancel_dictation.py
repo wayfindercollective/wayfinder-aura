@@ -27,11 +27,35 @@ def _app(backend=None, triggers=None, config=None):
     return app
 
 
+class _Thread:
+    def __init__(self, alive):
+        self._alive = alive
+
+    def is_alive(self):
+        return self._alive
+
+
 def test_non_portal_listeners_teach_shift_esc_everywhere():
     """Escape cancels with or without Shift on these listeners, and Shift+Esc is
     the portal default, so one key is taught on every platform."""
-    for backend in ("pynput", "evdev", None):
+    for backend in ("pynput", None):
         assert wm.WayfinderApp._cancel_hotkey_display(_app(backend)) == "Shift+Esc"
+    evdev = _app("evdev")
+    evdev._hotkey_thread = _Thread(alive=True)
+    assert wm.WayfinderApp._cancel_hotkey_display(evdev) == "Shift+Esc"
+
+
+def test_no_escape_promise_without_a_listener():
+    # KDE owns the record key (evdev binding skipped) or no backend at all:
+    # nothing outside the window hears Esc, so the hint only names the stop key.
+    kde = _app("evdev")
+    kde._hotkey_thread = None
+    assert wm.WayfinderApp._cancel_hotkey_display(kde) is None
+    stopped = _app("evdev")
+    stopped._hotkey_thread = _Thread(alive=False)
+    assert wm.WayfinderApp._cancel_hotkey_display(stopped) is None
+    assert wm.WayfinderApp._cancel_hotkey_display(_app("unavailable")) is None
+    assert wm.WayfinderApp._hero_state_hint_text(kde, AppState.RECORDING) == "press F3 to stop"
 
 
 def test_portal_shows_the_desktop_bound_trigger():
@@ -98,3 +122,31 @@ def test_overlay_controller_passes_the_hint_on_every_start():
     ctl.set_cancel_hint("Ctrl+Esc")
     assert sent == [{"cmd": "cancel_hint", "value": "Ctrl+Esc"}]
     assert ctl._cancel_hint == "Ctrl+Esc"
+
+
+class _Overlay:
+    def __init__(self):
+        self.calls = []
+
+    def set_cancel_hint(self, hint):
+        self.calls.append(("cancel_hint", hint))
+
+    def show(self, state):
+        self.calls.append(("show", state))
+        return True
+
+
+def test_overlay_hint_follows_the_listener_at_each_recording():
+    # The overlay is started with "Shift+Esc"; KDE then takes the record key
+    # and evdev stops. The next recording's pill must not still promise Esc.
+    app = _app("evdev")
+    app._hotkey_thread = _Thread(alive=True)
+    app.overlay_controller = _Overlay()
+    app._has_visual_pyqt_overlay = lambda: True
+    wm.WayfinderApp._set_status_indicator(app, "listening")
+    app._hotkey_thread = None  # KDE owns the key now
+    wm.WayfinderApp._set_status_indicator(app, "listening")
+    assert app.overlay_controller.calls == [
+        ("cancel_hint", "Shift+Esc"), ("show", "listening"),
+        ("cancel_hint", ""), ("show", "listening"),
+    ]

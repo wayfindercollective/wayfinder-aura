@@ -196,6 +196,22 @@ class TestCheckForAppUpdate:
         assert info["update_available"] is False
         assert "no network" in info["error"]
 
+    def test_a_failed_check_is_not_cached(self):
+        # Offline at login or rate-limited: the next check must ask again,
+        # not report the failure for a day.
+        with patch("requests.get", side_effect=OSError("no network")):
+            check_for_app_update("1.1.8")
+        with patch("requests.get", return_value=_github_response(_release("v9.9.9"))) as get:
+            info = check_for_app_update("1.1.8")
+        assert get.call_count == 1
+        assert info["update_available"] is True and info["error"] is None
+
+    def test_release_page_from_another_site_is_replaced(self):
+        with patch("requests.get",
+                   return_value=_github_response(_release("v9.9.9", url="https://evil.example/pwn"))):
+            info = check_for_app_update("1.1.8")
+        assert info["release_url"] == app_updates.RELEASES_PAGE
+
     def test_fresh_cache_skips_the_network(self):
         with patch("requests.get", return_value=_github_response(_release("v9.9.9"))) as get:
             check_for_app_update("1.1.8")
@@ -346,9 +362,9 @@ def _dmg(version, arch="arm64", **kw):
 
 # v1.1.9 shipped Linux-only; v1.1.8 carries a Mac DMG.
 MIXED_PAYLOAD = (
-    _release("v1.1.9", url="https://example.invalid/v1.1.9",
+    _release("v1.1.9", url="https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.9",
              assets=_linux_assets("1.1.9")),
-    _release("v1.1.8", url="https://example.invalid/v1.1.8",
+    _release("v1.1.8", url="https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.8",
              assets=_linux_assets("1.1.8") + [_dmg("1.1.8")]),
 )
 
@@ -371,7 +387,7 @@ class TestMacDownloads:
             info = check_for_app_update("1.1.7")
         assert info["update_available"] is True
         assert info["latest_version"] == "v1.1.8"
-        assert info["release_url"] == "https://example.invalid/v1.1.8"
+        assert info["release_url"] == "https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.8"
 
     def test_returns_the_direct_dmg_download_url(self):
         with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
@@ -479,7 +495,7 @@ class TestWindowsDownloads:
     def test_skips_newer_release_without_installer(self):
         payload = (
             MIXED_PAYLOAD[0],
-            _release("v1.1.8", url="https://example.invalid/v1.1.8",
+            _release("v1.1.8", url="https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.8",
                      assets=_linux_assets("1.1.8") + [_setup_exe("1.1.8")]),
         )
         with patch("requests.get", return_value=_github_response(*payload)):
@@ -567,6 +583,16 @@ class TestLinuxPackages:
             info = check_for_app_update("1.1.8")
         assert info["update_available"] is False
 
+    def test_a_download_from_another_github_repo_is_refused(self, monkeypatch):
+        self._as(monkeypatch, "flatpak")
+        other = _release("v1.2.0", assets=[_asset(
+            "io.wayfindercollective.WayfinderAura.flatpak",
+            url="https://github.com/attacker/evil/releases/download/x/"
+                "io.wayfindercollective.WayfinderAura.flatpak")])
+        with patch("requests.get", return_value=_github_response(other)):
+            info = check_for_app_update("1.1.8")
+        assert info["update_available"] is False
+
     def test_a_cache_from_a_source_install_is_refetched(self, monkeypatch):
         with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
             check_for_app_update("1.1.8")               # source install: no platform key
@@ -588,7 +614,7 @@ class TestLinuxUnchanged:
             info = check_for_app_update("1.1.8")
         assert info["update_available"] is True
         assert info["latest_version"] == "v1.1.9"
-        assert info["release_url"] == "https://example.invalid/v1.1.9"
+        assert info["release_url"] == "https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.9"
         assert set(info) == LINUX_RESULT_KEYS
 
     def test_linux_cache_format_is_unchanged(self):

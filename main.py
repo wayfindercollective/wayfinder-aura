@@ -424,6 +424,30 @@ if "--app-import-self-test" in sys.argv:
         sys.exit(1)
 
 
+# Linux typing and Gamer mode import PyGObject (Gio) and python-xlib behind
+# try/except: a package missing either silently types with xdotool only or never
+# sees a game. Release artifacts must prove both import.
+if "--linux-input-self-test" in sys.argv:
+    try:
+        import Xlib.display  # noqa: F401
+        from wayfinder.core import game_list_data, linux_game_chat, portal_keyboard  # noqa: F401
+
+        if portal_keyboard._gi() is None:
+            raise RuntimeError("PyGObject Gio/GLib did not load (portal typing)")
+        if not linux_game_chat.game_list():
+            raise RuntimeError("the Games list is empty")
+        print("LINUX_INPUT_SELF_TEST_OK", flush=True)
+        sys.exit(0)
+    except Exception as _linux_input_error:
+        print(
+            "LINUX_INPUT_SELF_TEST_FAILED "
+            f"{_linux_input_error.__class__.__name__}: {_linux_input_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
 # Confirm that native executables shipped beside the frozen application are
 # discoverable through the same resolver used by transcription and cleanup.
 if "--runtime-assets-self-test" in sys.argv:
@@ -815,8 +839,11 @@ def _check_venv_health(venv_dir: Path | None = None, smoke_imports: tuple[str, .
             if _has_tkinter_failure(missing_imports):
                 print("")
                 print("  If tkinter is missing, install the OS Tk package first:")
-                print("    Fedora/Bazzite: sudo dnf install python3-tkinter")
+                print("    Fedora: sudo dnf install python3-tkinter")
+                print("    Bazzite/Silverblue/Kinoite: rpm-ostree install python3-tkinter"
+                      " (then reboot), or use the Flatpak")
                 print("    Debian/Ubuntu: sudo apt install python3-tk")
+                print("    Arch: sudo pacman -S tk    openSUSE: sudo zypper install python3-tk")
             print(f"{'='*60}\n")
             sys.exit(1)
     except Exception:
@@ -994,11 +1021,12 @@ def main():
 
             frozen = getattr(sys, 'frozen', False)
             frozen_runtime_ready = True
-            if frozen and sys.platform in ("darwin", "win32"):
+            if frozen:
                 # Native dependencies are bundled, but speech-model weights are
                 # intentionally downloaded after install. Do not send a clean
-                # Mac (or PC: the Windows installer bundles no model either)
-                # into the live-dictation Welcome step until one exists.
+                # Mac, PC or AppImage install (none bundles a model; the
+                # Flatpak, which does, is not a frozen build) into the
+                # live-dictation Welcome step until one exists.
                 frozen_runtime_ready = app._has_usable_whisper_model()
                 # Keep a genuinely clean install marked incomplete until the
                 # required model exists. Existing packaged users who already
@@ -1006,11 +1034,6 @@ def main():
                 if frozen_runtime_ready:
                     app.config["setup_completed"] = True
                 save_config(app.config)
-            elif frozen:
-                # Linux frozen builds (as on main): keep the flag in
-                # WayfinderApp's live config so later save_config() calls persist
-                # it (frozen builds never run the setup pane).
-                app.config["setup_completed"] = True
 
             plan = first_run_plan(
                 setup_completed=app.config.get("setup_completed", False),

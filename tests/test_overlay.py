@@ -827,3 +827,25 @@ class TestMacQuitAppleEvent:
         assert ov.install_macos_quit_handler("linux") is False
         if _sys.platform == "darwin":
             assert ov.install_macos_quit_handler() is True
+
+
+def test_static_window_fits_every_style_badge():
+    """The pill window is sized once at boot. Sized for "Pro", switching to the
+    six-letter "Normal" badge clipped the pill's right end; the envelope must
+    cover every style's badge in every state."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay_mod = pytest.importorskip("wayfinder.ui.overlay")
+    ov = overlay_mod.GlassmorphicOverlay()
+    try:
+        ov._current_style = "professional"   # booted on a short badge
+        envelope = ov._static_content_width()
+        for style in overlay_mod.STYLE_PALETTES:
+            ov._current_style = style
+            widest = max(ov._calculate_target_width(label)
+                         for label in overlay_mod.STATE_LABELS.values())
+            assert widest <= envelope, style
+    finally:
+        ov.deleteLater()

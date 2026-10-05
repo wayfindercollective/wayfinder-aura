@@ -116,7 +116,7 @@ def _game_chat_module():
 
 def _device_noun() -> str:
     """How user-facing copy names this computer."""
-    return "PC" if IS_WINDOWS else "Mac"
+    return "PC" if IS_WINDOWS else "Mac" if IS_MACOS else "computer"
 
 
 def _footer_tagline(is_macos: bool | None = None, is_windows: bool | None = None) -> str:
@@ -1629,9 +1629,9 @@ SETTING_TOOLTIPS = {
         "Online, Albion Online, RuneScape and EVE Online. In games Aura pastes "
         "rather than typing keys, so dictation can't trigger a keybind."
         + (
-            " Dark Age of Camelot has no paste: open its chat first and Aura types "
-            "into it."
-            if sys.platform.startswith("linux") else ""
+            "\nDark Age of Camelot (Linux) has no paste: press Enter to open chat "
+            "first, then dictate, and Aura types it into the chat box."
+            if _IS_LINUX and not (IS_MACOS or IS_WINDOWS) else ""
         )
     ),
     "game_chat_send": (
@@ -3765,8 +3765,17 @@ def _macos_keep_awake(fn, key: str, reason: str):
     return run
 
 
-def _macos_cloud_models(provider: str) -> list[str]:
-    """Current cloud cleanup models (macOS panels)."""
+def _portal_desktop() -> bool:
+    """A Wayland desktop where Aura opens the RemoteDesktop portal keyboard."""
+    try:
+        from wayfinder.core import portal_keyboard
+        return portal_keyboard.host_is_wayland_desktop()
+    except Exception:
+        return False
+
+
+def _cloud_cleanup_models(provider: str) -> list[str]:
+    """Current cloud cleanup models for the Settings model menus."""
     from wayfinder.core.cloud_keys import ANTHROPIC_CLEANUP_MODELS, OPENAI_CLEANUP_MODELS
 
     return list(ANTHROPIC_CLEANUP_MODELS if provider == "anthropic" else OPENAI_CLEANUP_MODELS)
@@ -4223,8 +4232,9 @@ def hotkey_listener(
                     else:
                         regrab_retries -= 1
                         if regrab_retries == 0:
-                            log("⚠️ Couldn't re-grab the device after Game Mode — toggle hotkeys "
-                                "off/on in Settings to retry if its keys leak to other apps")
+                            log("⚠️ Couldn't re-grab the device after Game Mode — pick it again "
+                                "in Settings → System → Hotkey Devices if its keys leak to "
+                                "other apps")
 
             # No devices: wait (honoring shutdown) and rescan instead of dying — a slept
             # wireless keyboard or USB re-enumeration then recovers automatically.
@@ -8268,9 +8278,9 @@ class WayfinderApp(ctk.CTk):
     def _render_mic_button_photo(self, color: str, pressed: bool = False,
                                  is_active: bool = False, pulse: float | None = None,
                                  hover: bool = False):
-        """Render the mic button (``wayfinder.ui.mic_button``: a lit glass disc
-        with a state-colour glow, top-lit rim and a filled mic glyph; recording
-        shows a stop square and a breathing glow).
+        """Render the mic button (``wayfinder.ui.mic_button``: a quiet hairline
+        chip with a line mic glyph; recording shows a solid state-colour disc,
+        a stop square and an expanding ring).
 
         Results are cached per (color, state, quantized pulse, size) so a state
         change renders once and the recording pulse is a dict hit + itemconfig.
@@ -8557,8 +8567,8 @@ class WayfinderApp(ctk.CTk):
     
     @staticmethod
     def _style_tab_icon_and_label(unlocked: bool) -> tuple[str, str]:
-        """Style tab icon + label. macOS shows a line-icon lock in place of the
-        pen instead of an emoji suffix (rule 11: no emoji as UI chrome)."""
+        """Style tab icon + label: a line-icon lock in place of the pen instead
+        of an emoji suffix (rule 11: no emoji as UI chrome)."""
         if unlocked:
             return "pen-line", "Style"
         return "lock", "Style"
@@ -12774,6 +12784,13 @@ class WayfinderApp(ctk.CTk):
         ctrl_result = None
         if ctrl is not None:
             if state == "listening":
+                # The cancel key can change after the overlay starts (KDE takes
+                # the record key and evdev stops; an overlay turned on
+                # mid-session starts without one): name the current key.
+                try:
+                    ctrl.set_cancel_hint(self._cancel_hotkey_display() or "")
+                except Exception:
+                    pass
                 ctrl_result = ctrl.show("listening")
             elif state == "processing":
                 # Never hard-restart mid-dictation: remapping the overlay/tray
@@ -12899,8 +12916,11 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             return
         # Characters the keyboard layout lacks are pasted: our Tk window owns
-        # the clipboard (the Flatpak has no clipboard tools).
-        set_portal_clipboard_hooks(self._set_clipboard_from_worker)
+        # the clipboard (the Flatpak has no clipboard tools). The reader lets
+        # the paste put the user's clipboard back afterwards.
+        set_portal_clipboard_hooks(self._set_clipboard_from_worker,
+                                   self._get_clipboard_from_worker,
+                                   self._restore_clipboard_from_worker)
         try:
             parent = f"x11:{int(self.wm_frame(), 16):x}"
         except Exception:
@@ -12911,13 +12931,76 @@ class WayfinderApp(ctk.CTk):
             self._portal_listener_added = True
 
         def _go():
-            if not portal_keyboard.portal_keyboard_offered():
-                self.log("⌨️ This desktop offers no remote-control keyboard: "
-                         "Aura types with xdotool (X11 apps and games only)")
+            # At login the portal may still be starting (D-Bus activation):
+            # ask a few more times before settling for xdotool.
+            for delay in (0, 3, 6, 12):
+                time.sleep(delay)
+                if portal_keyboard.portal_keyboard_offered():
+                    break
+            else:
+                self._portal_not_offered = True
+                try:
+                    from wayfinder.utils.platform import get_text_injector
+                    tool = get_text_injector()
+                except Exception:
+                    tool = "none"
+                if tool == "xdotool":
+                    self.log("⌨️ This desktop offers no remote-control keyboard: "
+                             "Aura types with xdotool (X11 apps and games only)")
+                elif tool in ("wtype", "ydotool"):
+                    self.log("⌨️ This desktop offers no remote-control keyboard: "
+                             f"Aura types with {tool}")
+                else:
+                    self.log("⚠️ This desktop offers no remote-control keyboard and no "
+                             "typing tool was found: install ydotool or xdotool")
                 return
-            kb.start(parent_window=parent, ask_again=ask_again, log=self.log)
+            if not self.config.get("linux_portal_typing", True):
+                return  # turned off while waiting
+            # The desktop may now show its approval dialog: never mid-dictation.
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: self._start_portal_session_when_idle(
+                kb, parent, ask_again)))
 
         threading.Thread(target=_go, daemon=True, name="wayfinder-portal-start").start()
+
+    def _start_portal_session_when_idle(self, kb, parent: str, ask_again: bool) -> None:
+        """Open the portal keyboard session, whose approval dialog may appear,
+        only while no dictation is running; otherwise look again in a second.
+        The retried startup probe can succeed seconds after launch. Tk thread."""
+        if not self.config.get("linux_portal_typing", True):
+            return
+        if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+            self.after(1000, lambda: self._start_portal_session_when_idle(kb, parent, ask_again))
+            return
+
+        def idle() -> bool:  # read from the portal worker; no Tk call
+            return getattr(self, "app_state", AppState.IDLE) == AppState.IDLE
+
+        # Seen here, on the Tk thread: a switch-off (close) after this point
+        # makes the start below a no-op even if its thread runs late.
+        closes = getattr(kb, "close_count", None)
+        # start() can wait up to 2 s for a closing session: never on the Tk thread.
+        threading.Thread(
+            target=lambda: kb.start(parent_window=parent, ask_again=ask_again,
+                                    log=self.log, may_ask=idle, after_closes=closes),
+            daemon=True, name="wayfinder-portal-session",
+        ).start()
+
+    def _portal_typing_in_play(self) -> bool:
+        """The RemoteDesktop portal is (or is about to be) Aura's typing path:
+        starting, waiting for the user's approval, or ready. Declined, failed,
+        closed or not offered means the fallback tools type instead."""
+        if not (_IS_LINUX and not (IS_MACOS or IS_WINDOWS)):
+            return False
+        if not self.config.get("linux_portal_typing", True) or not _portal_desktop():
+            return False
+        if getattr(self, "_portal_not_offered", False):
+            return False
+        try:
+            from wayfinder.core.portal_keyboard import PortalKeyboard, keyboard
+            return keyboard().state not in (
+                PortalKeyboard.DECLINED, PortalKeyboard.FAILED, PortalKeyboard.CLOSED)
+        except Exception:
+            return False
 
     def _on_portal_keyboard_state(self, state: str, detail: str) -> None:
         """Portal keyboard state changes (session thread; self.log is thread-safe)."""
@@ -12929,11 +13012,35 @@ class WayfinderApp(ctk.CTk):
         elif state == _PK.DECLINED:
             self.log("⌨️ Desktop portal typing not allowed: Aura types into X11 apps "
                      "and games only. Turn on 'Type into every app' in Settings to ask again.")
+            self.event_queue.put((EventType.UI_CALLBACK, self._after_portal_declined))
         elif state == _PK.FAILED:
-            self.log(f"⚠️ Desktop portal typing unavailable ({detail}): using xdotool")
+            self.log(f"⚠️ Desktop portal typing unavailable ({detail}): using the other "
+                     "typing tools; turn 'Type into every app' off and on to retry")
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: self._show_error_banner(
+                "Typing into every app is unavailable right now, so text may reach X11 "
+                "apps only. Turn Settings → System → Type into every app off and on to retry.")))
         elif state == _PK.CLOSED:
             self.log(f"⚠️ Desktop portal typing ended ({detail}): using xdotool until "
                      "Aura restarts")
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: self._show_error_banner(
+                "Your desktop ended Aura's typing session, so text may reach X11 apps only. "
+                "Turn Settings → System → Type into every app off and on to start it again.")))
+
+    def _after_portal_declined(self) -> None:
+        """The desktop's remote-control request was declined (Esc counts). Say so
+        where the user looks, and turn the switch off so that turning it back on
+        asks again (it was left on, which read as "already allowed"). Tk thread."""
+        self.config["linux_portal_typing"] = False
+        save_config(self.config)
+        var = getattr(self, "_portal_typing_var", None)
+        if var is not None:
+            try:
+                var.set(False)
+            except Exception:
+                pass
+        self._show_error_banner(
+            "Aura types into X11 apps and games only: the desktop's remote-control request "
+            "was declined. Turn on Settings → System → Type into every app to be asked again.")
 
     def _on_portal_typing_toggled(self) -> None:
         """Settings switch: type through the desktop portal (Wayland)."""
@@ -13253,15 +13360,17 @@ class WayfinderApp(ctk.CTk):
         # --- Gamer mode ----------------------------------------------------------
         mode = tile("GAMER MODE")
         self._create_game_chat_rows(mode)
+        _linux_tab = _IS_LINUX and not (IS_MACOS or IS_WINDOWS)
         for line in (
             "In a supported game, don't press Enter first: tap your shortcut, speak, tap again.",
             "Aura hears gamer talk (inc, pull, LFG, M+...) and keeps your words as said.",
             "One message per dictation: if it's too long, the next part waits in chat for your "
             "Enter. Send it before dictating again.",
-            "In games Aura pastes rather than typing keys, so dictation can't trigger a keybind."
-            + (" Dark Age of Camelot has no paste: open its chat first and Aura types into it."
-               if sys.platform.startswith("linux") else ""),
-        ):
+            "In games Aura pastes rather than typing keys, so dictation can't trigger a keybind.",
+        ) + ((
+            "Dark Age of Camelot has no paste: press Enter to open chat first, then dictate. "
+            "Aura types it into the chat box.",
+        ) if _linux_tab else ()):
             note(mode, "•  " + line, color=COLORS["text_secondary"])
         ctk.CTkFrame(mode, fg_color="transparent", height=SPACING["tile_pad_y"]).pack()
 
@@ -15326,6 +15435,11 @@ class WayfinderApp(ctk.CTk):
                 self.log("✓ Text injection: xdotool")
             elif _tool == "wtype":
                 self.log("✓ Text injection: wtype (Wayland virtual keyboard)")
+            elif (self.config.get("linux_portal_typing", True)
+                  and _portal_desktop()):
+                # The portal comes up a moment later and logs its own result;
+                # warning that typing "won't work" first was false.
+                pass
             elif not shutil.which("ydotool"):
                 self.log("⚠️ ydotool not found - text injection won't work")
                 self.log(f"💡 Install: {_get_install_hint('ydotool')}")
@@ -15526,7 +15640,7 @@ class WayfinderApp(ctk.CTk):
                 if IS_FLATPAK:
                     text += " Get Update downloads it; open the file to install it."
                 else:
-                    text += " Get Update downloads the new AppImage; run it instead of this one."
+                    text += " Get Update downloads the new AppImage; make it executable (file Properties, or chmod +x), then run it instead of this one."
             label.configure(text=text)
             # A manual check or an install attempt may have hidden the button
             # for a status line.
@@ -15825,7 +15939,9 @@ class WayfinderApp(ctk.CTk):
                 # intentionally absent (deferred to the compositor to stop the
                 # F3→Find-bar leak), so `_hotkey_thread is None` is the correct
                 # steady state — restarting would spam a defer-and-return every 10s.
-                if (HAS_EVDEV and not IS_FLATPAK and not self._compositor_owns_hotkeys()
+                if (HAS_EVDEV and not IS_FLATPAK
+                        and getattr(self, "_hotkey_backend", "evdev") == "evdev"
+                        and not self._compositor_owns_hotkeys()
                         and (self._hotkey_thread is None or not self._hotkey_thread.is_alive())):
                     self.log("🔄 Hotkey listener not running - restarting...")
                     self.restart_evdev_listener("supervisor: listener was not alive")
@@ -15853,8 +15969,8 @@ class WayfinderApp(ctk.CTk):
                 # "unavailable" at startup; starting pynput there burns a thread on an XRecord
                 # grab Wayland never delivers) (Codex review).
                 flatpak_backend = resolve_hotkey_backend(
-                    sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
-                    os.environ.get("XDG_SESSION_TYPE", ""),
+                    sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
+                    self._hotkey_session_type(),
                 ) if IS_FLATPAK else None
                 if flatpak_backend == "portal":
                     if (not getattr(self, '_portal_listener_started', False)
@@ -15865,7 +15981,8 @@ class WayfinderApp(ctk.CTk):
                     self.log("🔄 pynput hotkey listener not running - restarting...")
                     self._start_pynput_listener()
                 elif (
-                    sys.platform in ("darwin", "win32")
+                    (sys.platform in ("darwin", "win32")
+                     or getattr(self, "_hotkey_backend", None) == "pynput")  # X11 fallback
                     and not getattr(self, '_pynput_listener_started', False)
                 ):
                     self.log("🔄 Global hotkey listener stopped - restarting...")
@@ -15964,7 +16081,7 @@ class WayfinderApp(ctk.CTk):
         elif backend == "anthropic":
             # API keys are read from environment variables only for security
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            model = self.config.get("anthropic_model", "claude-3-haiku-20240307")
+            model = self.config.get("anthropic_model", "claude-haiku-4-5-20251001")
             if api_key:
                 return f"{model.split('-')[1].title()}: ✓ Key set"
             return "⚠ Set ANTHROPIC_API_KEY env var"
@@ -16071,7 +16188,7 @@ class WayfinderApp(ctk.CTk):
             "openai_key": ctk.StringVar(value=self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")),
             "openai_model": ctk.StringVar(value=self.config.get("openai_model", "gpt-4o-mini")),
             "anthropic_key": ctk.StringVar(value=self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")),
-            "anthropic_model": ctk.StringVar(value=self.config.get("anthropic_model", "claude-3-haiku-20240307")),
+            "anthropic_model": ctk.StringVar(value=self.config.get("anthropic_model", "claude-haiku-4-5-20251001")),
         }
         
         def rebuild_provider_settings():
@@ -16135,11 +16252,7 @@ class WayfinderApp(ctk.CTk):
                 InlineOptionMenu(
                     api_frame,
                     variable=form_data["openai_model"],
-                    values=(
-                        _macos_cloud_models("openai")
-                        if sys.platform in ("darwin", "win32")
-                        else ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
-                    ),
+                    values=_cloud_cleanup_models("openai"),
                     font=(self.font_body[0], self.font_sizes["body"]),
                     fg_color=COLORS["bg_input"],
                     button_color=COLORS["bg_input"],
@@ -16230,16 +16343,7 @@ class WayfinderApp(ctk.CTk):
                 InlineOptionMenu(
                     api_frame,
                     variable=form_data["anthropic_model"],
-                    values=(
-                        _macos_cloud_models("anthropic")
-                        if sys.platform in ("darwin", "win32")
-                        else [
-                            "claude-3-haiku-20240307",
-                            "claude-3-5-haiku-20241022",
-                            "claude-3-sonnet-20240229",
-                            "claude-3-5-sonnet-20241022",
-                        ]
-                    ),
+                    values=_cloud_cleanup_models("anthropic"),
                     font=(self.font_body[0], self.font_sizes["body"]),
                     fg_color=COLORS["bg_input"],
                     button_color=COLORS["bg_input"],
@@ -17462,15 +17566,14 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("groq_whisper", "openai_whisper", "faster_whisper"):
             return True
-        # macOS/Windows: only count a model this license may load. A Free install with
+        # Only count a model this license may load. A Free install with
         # developer models (e.g. small.en in ~/whisper.cpp/models) otherwise
-        # skipped the Base download, then every dictation failed because the
-        # config repair (correctly) never switches Free to a gated model.
+        # skipped the Base download (macOS/Windows tour, Linux AppImage tour and
+        # setup cue), then every dictation failed because the config repair
+        # (correctly) never switches Free to a gated model.
         def usable(path) -> bool:
             if path is None:
                 return False
-            if not (IS_MACOS or IS_WINDOWS):
-                return True
             try:
                 from wayfinder.license import transcription_model_allowed
 
@@ -18939,13 +19042,12 @@ class WayfinderApp(ctk.CTk):
             style_btn = self.tab_buttons.get("style")
             if style_btn is not None:
                 icon_name, label = self._style_tab_icon_and_label(style_unlocked)
-                if IS_MACOS:
-                    style_btn.configure(
-                        text=label,
-                        image=get_icon(icon_name, 18, COLORS["text_secondary"]),
-                    )
-                else:
-                    style_btn.configure(text=label)
+                # Every platform builds the tab with this icon (lock / pen), so
+                # an activation or a lost license must swap it everywhere.
+                style_btn.configure(
+                    text=label,
+                    image=get_icon(icon_name, 18, COLORS["text_secondary"]),
+                )
         except Exception:
             pass
         try:
@@ -19003,9 +19105,18 @@ class WayfinderApp(ctk.CTk):
         desktop's own trigger is the truth. Every other listener (macOS,
         Windows, X11 pynput, evdev) cancels on Escape with or without Shift,
         so Shift+Esc is the one key taught everywhere (overlay hint, hero,
-        welcome guide).
+        welcome guide). None when no listener outside this window hears it:
+        no backend, or KDE owns the record key and evdev was skipped.
         """
-        if getattr(self, "_hotkey_backend", None) != "portal":
+        backend = getattr(self, "_hotkey_backend", None)
+        if backend == "unavailable":
+            return None  # no listener at all
+        if backend == "evdev":
+            # KDE owns the record key (evdev skipped) or evdev is missing:
+            # nothing outside this window hears Esc, so promise nothing.
+            thread = getattr(self, "_hotkey_thread", None)
+            return "Shift+Esc" if thread is not None and thread.is_alive() else None
+        if backend != "portal":
             return "Shift+Esc"
         triggers = getattr(self, "_portal_triggers", None)
         if triggers is None:  # bind still in flight: what the app asked for
@@ -19306,7 +19417,7 @@ class WayfinderApp(ctk.CTk):
         """Open the desktop-owned editor through GlobalShortcuts portal v2."""
         control = getattr(self, "_portal_control_queue", None)
         if control is None:
-            self.log("🖥 Open System Settings → Shortcuts to change this binding")
+            self.log("🖥 Change this binding in your desktop's keyboard shortcut settings")
             return
         control.put("configure")
         self.log("🖥 Asking your desktop to open its shortcut settings…")
@@ -19520,12 +19631,12 @@ class WayfinderApp(ctk.CTk):
         # key silently doesn't work.
         try:
             if IS_FLATPAK and resolve_hotkey_backend(
-                    sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
-                    os.environ.get("XDG_SESSION_TYPE", "")) == "portal":
+                    sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
+                    self._hotkey_session_type()) == "portal":
                 self.log(
                     f"ℹ️ Your desktop manages global shortcuts for sandboxed "
                     f"apps — if {display} doesn't trigger dictation, set it "
-                    f"under System Settings → Shortcuts → Wayfinder Aura."
+                    f"in your desktop's keyboard shortcut settings (Wayfinder Aura)."
                 )
         except Exception:
             pass
@@ -22796,6 +22907,41 @@ class WayfinderApp(ctk.CTk):
 
     # === Hotkey & Events ===
     
+    @staticmethod
+    def _hotkey_session_type() -> str:
+        """The session type for the hotkey decision. The Flatpak manifest forces
+        XDG_SESSION_TYPE=x11, so there the X server answers: XWayland means a
+        Wayland compositor, where an X11 listener only hears X11 windows."""
+        session = os.environ.get("XDG_SESSION_TYPE", "")
+        if IS_FLATPAK and session.lower() != "wayland":
+            try:
+                from wayfinder.core.injector import _running_under_xwayland
+                if _running_under_xwayland():
+                    return "wayland"
+            except Exception:
+                pass
+        return session
+
+    def _flatpak_portal_hotkeys(self) -> bool:
+        """The Flatpak can use the GlobalShortcuts portal: PyGObject imports AND
+        the desktop's portal implements it (GNOME before 48, Cinnamon, XFCE,
+        MATE and Sway do not, and their hotkey was simply dead). Probed once; an
+        unanswered probe keeps the portal path and its retry loop."""
+        cached = getattr(self, "_portal_hotkeys_ok", None)
+        if cached is not None:
+            return cached
+        ok = PORTAL_HOTKEYS_AVAILABLE
+        if ok and IS_FLATPAK:
+            try:
+                from wayfinder.hotkeys.dbus import global_shortcuts_offered
+                if global_shortcuts_offered() is False:
+                    ok = False
+                    self._portal_shortcuts_missing = True
+            except Exception:
+                pass
+        self._portal_hotkeys_ok = ok
+        return ok
+
     def start_hotkey_listener(self):
         # Socket listener stays up for the app's lifetime (config changes restart only the
         # keyboard listener — see restart_evdev_listener). Liveness-based so it self-heals.
@@ -22829,23 +22975,33 @@ class WayfinderApp(ctk.CTk):
         # Flatpak build while the socket path masked it). Non-sandboxed installs use
         # evdev + the 'input' group, identically on X11 and Wayland.
         backend = resolve_hotkey_backend(
-            sys.platform, IS_FLATPAK, PORTAL_HOTKEYS_AVAILABLE,
-            os.environ.get("XDG_SESSION_TYPE", ""),
+            sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
+            self._hotkey_session_type(),
         )
         self._hotkey_backend = backend
+        no_shortcuts_portal = getattr(self, "_portal_shortcuts_missing", False)
         if backend == "portal":
             self.log("🖥️ Flatpak — using the GlobalShortcuts portal for hotkeys")
             self._start_portal_listener()
             return
         if backend == "pynput":
             if IS_FLATPAK:  # macOS uses pynput silently; the Flatpak-X11 fallback logs why
-                msg = "Flatpak X11 — PyGObject missing, portal unavailable; using pynput global listener"
+                msg = ("Flatpak X11 — this desktop has no GlobalShortcuts portal; using the "
+                       "pynput global listener" if no_shortcuts_portal else
+                       "Flatpak X11 — PyGObject missing, portal unavailable; using pynput global listener")
                 self.log(f"🖥️ {msg}")
                 print(f"[Hotkeys] {msg}", flush=True)
             self._start_pynput_listener()
             return
+        if backend == "unavailable" and getattr(self, "_game_mode", False):
+            self.log("🎮 Game Mode — the shortcut comes from the Steam trigger service")
+            return
         if backend == "unavailable":
-            msg = ("Flatpak Wayland without PyGObject — global hotkeys UNAVAILABLE "
+            msg = ("This desktop offers apps no global shortcuts (GNOME before 48, Sway): "
+                   "add a keyboard shortcut in your desktop's settings that runs "
+                   "'flatpak run io.wayfindercollective.WayfinderAura --toggle'"
+                   if no_shortcuts_portal else
+                   "Flatpak Wayland without PyGObject — global hotkeys UNAVAILABLE "
                    "(socket trigger still works)")
             self.log(f"⚠️ {msg}")
             print(f"[Hotkeys] {msg}", flush=True)
@@ -22891,6 +23047,8 @@ class WayfinderApp(ctk.CTk):
             # dictation on a fresh install/rebuild and garble the output. No-op unless wtype
             # is the active injector (the Flatpak/Wayland path); the desktop's ydotool needs
             # no approval, so this does nothing there.
+            if self._portal_typing_in_play():
+                return  # the portal asks once itself; a wtype prompt would be a second one
             try:
                 from wayfinder.core.injector import prime_wayland_injection
                 ran, msg = prime_wayland_injection()
@@ -23000,9 +23158,12 @@ class WayfinderApp(ctk.CTk):
         self.log(f"🖥️ {platform_label} — using pynput (global keyboard listener)")
         self._pynput_listener_started = True
         # macOS: a per-listener restart event lets a permission grant re-create
-        # the event tap live (see _restart_pynput_listener). Elsewhere None, so
-        # the listener behaves exactly as before.
-        restart_event = threading.Event() if IS_MACOS else None
+        # the event tap live (see _restart_pynput_listener). Native Linux (the
+        # X11 no-input-group fallback): it lets a KDE-owned shortcut stop this
+        # listener. Elsewhere None, so the listener behaves exactly as before.
+        restart_event = (threading.Event()
+                         if IS_MACOS or (_IS_LINUX and not IS_FLATPAK and not IS_WINDOWS)
+                         else None)
         self._pynput_restart_event = restart_event
 
         def _pynput_wrapper():
@@ -23112,12 +23273,22 @@ class WayfinderApp(ctk.CTk):
         config_mods = self.config.get("hotkey_modifiers", []) or []
         return kde_binding_matches_config(active, config_code, config_mods)
 
+    @staticmethod
+    def _x11_without_input_devices() -> bool:
+        """An X11 session where no /dev/input device is readable (the user is not
+        in the 'input' group): evdev would hear nothing, while X11's XRecord
+        (pynput) needs no group."""
+        if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or not os.environ.get("DISPLAY"):
+            return False
+        import glob
+        events = glob.glob("/dev/input/event*")
+        return bool(events) and not any(os.access(path, os.R_OK) for path in events)
+
     def _start_evdev_listener(self):
         """Start (or restart) the evdev hotkey listener thread, cleanly stopping any prior one."""
         if not HAS_EVDEV:
             self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
             return
-
         # Defer to the compositor when KDE owns the record hotkey: binding it here
         # too would double-fire and, worse, leak the key (F3) to the focused window
         # because a passive evdev read can't consume it — that's the dictation
@@ -23131,6 +23302,27 @@ class WayfinderApp(ctk.CTk):
                 self._evdev_stop_event.set()
                 old_thread.join(timeout=2.5)
                 self._hotkey_thread = None
+            if getattr(self, "_hotkey_backend", None) == "pynput":
+                # The X11 fallback would see the same press KDE delivers through
+                # the socket and toggle twice: stop just that listener, and keep
+                # the supervisor from restarting it.
+                self._hotkey_backend = "evdev"
+                restart_event = getattr(self, "_pynput_restart_event", None)
+                if restart_event is not None:
+                    restart_event.set()
+                self.log("⌨️ KDE owns the shortcut: X11 listener stopped")
+            return
+
+        if self._x11_without_input_devices():
+            # AppImage/source on X11 without the 'input' group: the record
+            # shortcut was dead (only a log line said why). XRecord works.
+            # Checked after KDE ownership: a KDE-bound shortcut already reaches
+            # Aura through the socket, and a second listener would toggle twice.
+            if not getattr(self, "_pynput_listener_started", False):
+                self.log("🖥️ X11 — input devices are not readable (not in the 'input' "
+                         "group); using the X11 global listener instead")
+                self._hotkey_backend = "pynput"
+                self._start_pynput_listener()
             return
 
         hotkey_key = self.config.get("hotkey_key", 67)
@@ -23152,9 +23344,7 @@ class WayfinderApp(ctk.CTk):
         self._evdev_stop_event = threading.Event()
 
         hotkey_name = self.get_hotkey_display()
-        style_key_name = {59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
-                         65: "F7", 66: "F8", 67: "F9", 68: "F10",
-                         57: "Space", 28: "Enter"}.get(style_toggle_key, f"Key{style_toggle_key}")
+        style_key_name = self.get_style_hotkey_display()
         self.log(f"⌨️ Record hotkey: {hotkey_name} | Style toggle: {style_key_name}")
 
         self._hotkey_thread = threading.Thread(
@@ -23268,6 +23458,17 @@ class WayfinderApp(ctk.CTk):
             return data[0], data[1]
         return data, None
 
+    def _gamer_mode_keeps_shortcut(self, event_type) -> bool:
+        """Gamer mode exists to dictate in games, so the GameMode pause (which
+        keeps bare keys such as F3 from colliding with in-game binds) must not
+        swallow a chorded shortcut like the default Ctrl+Alt+Space. A bare-key
+        shortcut is still paused while a GameMode game runs."""
+        if not self.config.get("gamer_mode", True):
+            return False
+        key = ("hotkey_modifiers" if event_type == EventType.HOTKEY_PRESSED
+               else "style_toggle_modifiers")
+        return bool(self.config.get(key))
+
     def handle_event(self, event_type, data):
         # gamemoded pause: silently drop F-key triggers while a Lutris/Steam game
         # is registered. Other event types (transcription results, UI updates,
@@ -23311,8 +23512,15 @@ class WayfinderApp(ctk.CTk):
                 # not drop the trigger here. This gates ONLY the event-drop — the separate
                 # exclusive-grab-release path in the evdev listener still runs, so grabbed
                 # devices keep returning to the game.
-                if is_hotkeys_paused() and not getattr(self, "_game_mode", False):
+                if (is_hotkeys_paused() and not getattr(self, "_game_mode", False)
+                        and not self._gamer_mode_keeps_shortcut(event_type)):
+                    if not getattr(self, "_gamemode_pause_logged", False):
+                        self._gamemode_pause_logged = True
+                        self.log("⏸ Shortcut ignored: a game is running with GameMode, "
+                                 "which pauses single-key shortcuts while you play. "
+                                 "A shortcut with Ctrl/Alt (with Gamer mode on) keeps working.")
                     return
+                self._gamemode_pause_logged = False
         if event_type == EventType.HOTKEY_PRESSED:
             # A PortAudio open can only be bounded by abandoning its C worker. Any
             # stop presses arriving during that bounded wait sit in event_queue;
@@ -24435,6 +24643,35 @@ class WayfinderApp(ctk.CTk):
         inject_text_paste_windows(text)
         return True
 
+    def _linux_game_paste_only(self, text: str, window_id, gen=None) -> bool:
+        """Linux, an unlisted Steam game or a not-recommended one in front: the
+        clipboard + Ctrl+V the profiled games use, never keystroke typing - in a
+        game, typed letters are keybinds. A paste that fails or is stopped
+        raises (-> INJECTION_ERROR); the text stays in History."""
+        _game_chat_module().ensure_game_focus(window_id)
+        self._linux_paste_into_game(text, window_id, gen)
+        return True
+
+    def _linux_paste_into_game(self, text: str, window_id, gen=None) -> None:
+        """Clipboard + Ctrl+V into the game in front (Linux). Setting the
+        clipboard waits on the Tk thread and a held modifier can hold the keys
+        back for seconds; the user may Alt+Tab away or reset meanwhile. The
+        guard runs after that wait, immediately before Ctrl+V, and stops the
+        paste unless this dictation and this game are still current."""
+        game_chat = _game_chat_module()
+        if not self._set_clipboard_from_worker(text):
+            raise InjectionError("Could not set the clipboard for the game paste")
+
+        def still_this_game() -> None:
+            if gen is not None and gen != self.session_generation:
+                raise InjectionError("Game paste stopped: the dictation was reset. "
+                                     "Your text is in History.")
+            if game_chat.frontmost_app()[0] != window_id:
+                raise InjectionError("Game paste stopped: the game left the front. "
+                                     "Your text is in History.")
+
+        game_chat.paste_clipboard(guard=still_this_game)
+
     def _set_clipboard_from_worker(self, text: str, timeout: float = 2.0) -> bool:
         """Set the clipboard on the Tk thread and wait (Linux game paste).
 
@@ -24462,6 +24699,54 @@ class WayfinderApp(ctk.CTk):
         done.wait(timeout)
         return ok[0]
 
+    def _get_clipboard_from_worker(self, timeout: float = 1.0) -> "str | None":
+        """The clipboard's text, read on the Tk thread (None if empty or not
+        text): what the portal paste puts back after Ctrl+V."""
+        done = threading.Event()
+        value = [None]
+
+        def _get():
+            try:
+                value[0] = self.clipboard_get()
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        try:
+            self.after(0, _get)
+        except Exception:
+            return None
+        done.wait(timeout)
+        return value[0] if isinstance(value[0], str) else None
+
+    def _restore_clipboard_from_worker(self, pasted: str, previous: str,
+                                       timeout: float = 1.0) -> bool:
+        """Put ``previous`` back on the clipboard if it still holds ``pasted``.
+        Compared and written in one Tk callback, so a copy the user makes in
+        between is never overwritten. True when it restored."""
+        done = threading.Event()
+        restored = [False]
+
+        def _restore():
+            try:
+                if self.clipboard_get() == pasted:
+                    self.clipboard_clear()
+                    self.clipboard_append(previous)
+                    self.update_idletasks()
+                    restored[0] = True
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        try:
+            self.after(0, _restore)
+        except Exception:
+            return False
+        done.wait(timeout)
+        return restored[0]
+
     def _inject_into_game_chat(self, text: str, gen=None) -> bool:
         """Gamer mode: dictate into a supported game's chat. False = not a game.
 
@@ -24478,10 +24763,23 @@ class WayfinderApp(ctk.CTk):
             category, bundle_path = game_chat.app_signals(pid)
             reason = game_chat.unlisted_game_reason(bundle_id, app_name, category, bundle_path)
             if reason is not None:
+                linux = _IS_LINUX and not (IS_MACOS or IS_WINDOWS)
+                # Linux: only a Steam game is surely a game. Any Wine window
+                # (Notepad, a launcher) has an .exe class, so those keep the
+                # normal typing path, Auto-Enter included.
+                is_steam = getattr(game_chat, "is_steam_game", None)
+                steam_game = (is_steam(pid, bundle_id) if callable(is_steam)
+                              else str(bundle_id or "").lower().startswith("steam_app_"))
+                if linux and not steam_game:
+                    self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been "
+                             "tested with; typing as usual. See the Games tab.")
+                    return False
                 self.log(f"🎮 {app_name or 'This app'}: {reason} Aura hasn't been tested "
                          "with; pasting normally. See the Games tab.")
                 if IS_WINDOWS and not IS_MACOS:
                     return self._windows_game_paste_only(text)
+                if linux:
+                    return self._linux_game_paste_only(text, pid, gen)
             return False
         if profile.caution:
             # Not recommended, but not restricted: the normal paste, with a heads-up.
@@ -24489,12 +24787,14 @@ class WayfinderApp(ctk.CTk):
                      "see the Games tab.")
             if IS_WINDOWS and not IS_MACOS:
                 return self._windows_game_paste_only(text)
+            if _IS_LINUX and not IS_MACOS:
+                return self._linux_game_paste_only(text, pid, gen)
             return False
         send = bool(self.config.get("game_chat_send", True)) and profile.auto_send
         typed = profile.key in getattr(game_chat, "TYPE_PROFILES", ())
         if typed:
             self.log(f"🎮 {profile.name} chat: typing into the chat box you opened "
-                     "(press Enter first; you press Enter to send)")
+                     f"(press Enter first; {'Aura sends it' if send else 'you press Enter to send'})")
         else:
             self.log(
                 f"🎮 {profile.name} chat: {'open, paste, send' if send else 'paste for you to send'}"
@@ -24514,9 +24814,7 @@ class WayfinderApp(ctk.CTk):
                 paste = game_chat.type_text
             else:
                 def paste(message):
-                    if not self._set_clipboard_from_worker(message):
-                        raise InjectionError("Could not set the clipboard for the game paste")
-                    game_chat.paste_clipboard()
+                    self._linux_paste_into_game(message, pid, gen)
         elif IS_WINDOWS and not IS_MACOS:
             # Ctrl+V only: never the SendInput typing fallback in a game,
             # where letters are keybinds.
@@ -24647,7 +24945,13 @@ class WayfinderApp(ctk.CTk):
                 # unless Aura runs elevated too; the text stays on the clipboard.
                 return ("Couldn't type the text — click into a text box and try again. "
                         "Apps running as administrator can't receive it; press Ctrl+V there.")
-            return "Couldn't type the text — check input permissions (Settings) or install ydotool."
+            # Messages written for the user (a key still held, a game that
+            # left the front, how to get a missing tool) say it best.
+            if has("still held", "game chat stopped", "not found:", "type into every app",
+                   "no text injection tool"):
+                return message.split("Injection: ", 1)[-1]
+            return ("Couldn't type the text — click into a text box and try again. On Wayland, "
+                    "check Settings → System → Type into every app.")
         if has("api key", "401", "unauthorized"):
             return "Cloud API key issue — re-check it in Settings."
         if has("rate", "429"):

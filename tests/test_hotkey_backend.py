@@ -96,3 +96,76 @@ def test_portal_retry_delay_saturates_without_overflow():
 
     assert portal_retry_delay(1024) == 600.0
     assert portal_retry_delay(10_000_000) == 600.0
+
+
+# ── AppImage / source on X11 without the 'input' group ──────────────────────
+
+def _x11(monkeypatch, readable):
+    import glob
+
+    import wayfinder_main as wm
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(glob, "glob", lambda pattern: ["/dev/input/event0", "/dev/input/event1"])
+    monkeypatch.setattr(wm.os, "access", lambda path, mode: readable)
+    return wm
+
+
+def test_x11_without_readable_devices_is_detected(monkeypatch):
+    wm = _x11(monkeypatch, readable=False)
+    assert wm.WayfinderApp._x11_without_input_devices() is True
+    monkeypatch.setattr(wm.os, "access", lambda path, mode: True)
+    assert wm.WayfinderApp._x11_without_input_devices() is False
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")   # no XRecord alternative there
+    monkeypatch.setattr(wm.os, "access", lambda path, mode: False)
+    assert wm.WayfinderApp._x11_without_input_devices() is False
+
+
+def test_x11_without_the_input_group_uses_the_x11_listener(monkeypatch):
+    from types import SimpleNamespace
+    wm = _x11(monkeypatch, readable=False)
+    monkeypatch.setattr(wm, "HAS_EVDEV", True)
+    started, logs = [], []
+    app = SimpleNamespace(log=logs.append, _hotkey_backend="evdev",
+                          _x11_without_input_devices=wm.WayfinderApp._x11_without_input_devices,
+                          _compositor_owns_hotkeys=lambda: False)
+    app._start_pynput_listener = lambda: started.append(True) or setattr(
+        app, "_pynput_listener_started", True)
+    wm.WayfinderApp._start_evdev_listener(app)
+    wm.WayfinderApp._start_evdev_listener(app)   # a config-change restart: no second listener
+    assert started == [True] and app._hotkey_backend == "pynput"
+    assert "'input' group" in logs[0]
+
+
+
+def test_a_kde_owned_shortcut_gets_no_second_x11_listener(monkeypatch):
+    """KDE delivers its binding through the socket; an extra X11 listener
+    would see the same press and toggle the recording twice."""
+    from types import SimpleNamespace
+    wm = _x11(monkeypatch, readable=False)
+    monkeypatch.setattr(wm, "HAS_EVDEV", True)
+    logs = []
+    app = SimpleNamespace(log=logs.append, _hotkey_backend="evdev", _hotkey_thread=None,
+                          _x11_without_input_devices=wm.WayfinderApp._x11_without_input_devices,
+                          _compositor_owns_hotkeys=lambda: True,
+                          _start_pynput_listener=lambda: pytest.fail("second listener"))
+    wm.WayfinderApp._start_evdev_listener(app)
+    assert app._hotkey_backend == "evdev" and "KDE" in logs[0]
+
+
+
+def test_kde_taking_over_stops_the_x11_fallback(monkeypatch):
+    """A running X11 fallback would see the press KDE also delivers through
+    the socket; it is stopped (its own restart event) and not restarted."""
+    import threading
+    from types import SimpleNamespace
+    wm = _x11(monkeypatch, readable=False)
+    monkeypatch.setattr(wm, "HAS_EVDEV", True)
+    stop_this = threading.Event()
+    app = SimpleNamespace(log=lambda m: None, _hotkey_backend="pynput", _hotkey_thread=None,
+                          _pynput_listener_started=True, _pynput_restart_event=stop_this,
+                          _x11_without_input_devices=wm.WayfinderApp._x11_without_input_devices,
+                          _compositor_owns_hotkeys=lambda: True,
+                          _start_pynput_listener=lambda: pytest.fail("restarted"))
+    wm.WayfinderApp._start_evdev_listener(app)
+    assert stop_this.is_set() and app._hotkey_backend == "evdev"

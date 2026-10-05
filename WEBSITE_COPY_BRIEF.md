@@ -4,7 +4,7 @@ _Source of truth for public product copy. Keep in sync with `README.md` Free vs 
 
 ## Product Summary
 
-**Wayfinder Aura** is local-first voice dictation for Linux. Press a hotkey, speak, and your words are typed wherever your cursor is. By default, transcription runs on *your* machine with whisper.cpp — offline, in any app. Optional local cleanup, Ultra GPU acceleration, and cloud backends are opt-in.
+**Wayfinder Aura** is local-first voice dictation for Linux. Press a hotkey, speak, and your words are typed wherever your cursor is. By default, transcription runs on *your* machine with whisper.cpp — offline, in any app — and the Normal style removes um/uh instantly, with no model. Model-based cleanup styles, Ultra GPU acceleration, and cloud backends are opt-in.
 
 ## Hero statements (pick one)
 
@@ -25,7 +25,7 @@ _Source of truth for public product copy. Keep in sync with `README.md` Free vs 
 - Chunked recording (Ultra) for long dictations with live feedback
 
 ### 3. Writes like you, only cleaner
-- Optional local LLM cleanup (off by default; Gemma 3 1B when enabled): strip ums, fix punctuation, match tone
+- Normal cleanup on by default: strips um/uh instantly, no model. Optional local LLM cleanup (Gemma 3 1B) fixes punctuation and matches tone
 - Output styles: Minimal, Professional, Casual, Dev, Personal
 - Cycle styles with Super+F3
 
@@ -58,11 +58,12 @@ Ultra is one-time — no subscription. Activate a key in-app; works offline afte
 
 ## Defaults to advertise
 
-- Hotkey: **Super+F2** (start/stop)
-- Style cycle: **Super+F3**
+- Hotkey (Linux): **Ctrl+Alt+Space** (start/stop); Right Option on macOS,
+  Right Alt on Windows
+- Style cycle (Linux): **Ctrl+Alt+Enter**; Fn+Enter on macOS
 - Free default model (Flatpak): **base.en**
 - Processing: **Local** by default
-- Post-processing: **Off** by default
+- Cleanup: **Normal** by default (instant um/uh removal, no model)
 - Ultra chunk processing: **Auto** by default; Free remains one-shot
 - Auto press Enter: **Off** by default
 

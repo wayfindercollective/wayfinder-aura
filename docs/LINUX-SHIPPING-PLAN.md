@@ -19,7 +19,7 @@ X11 sessions are being retired, so Wayland has to be the primary path.
 | KDE Plasma 6 / GNOME 45+ (Wayland) | RemoteDesktop portal (keyboard), approved once, remembered with a restore token | same portal | X11 window of the game (XWayland) |
 | X11 session (KDE X11 etc.) | xdotool (XTEST) | xdotool | X11 window |
 | SteamOS Game Mode (gamescope) | xdotool on gamescope's X server | xdotool | X11 window + STEAM_GAME |
-| Portal missing or declined | xdotool (XWayland windows only), with a hint | xdotool | X11 window |
+| Portal missing or declined | Flatpak: xdotool (XWayland windows only), with a hint. AppImage/source: ydotool when its daemon is live, else wtype | same tool | X11 window |
 
 Wine and Proton games are XWayland windows in every session type, so game
 detection (WM_CLASS exe name, `steam_app_<id>`, gamescope's `STEAM_GAME`)
@@ -39,8 +39,13 @@ behaves the same everywhere.
    arrived as "x11; hello, world1"), and XWayland is where games live.
    Characters the keyboard layout has no key for (é on a US layout, emoji) are
    pasted: the Tk window owns the X11 clipboard, KWin hands it to Wayland
-   apps, the portal presses Ctrl+V. Falls back to xdotool when the portal is
-   missing or declined; a failure after some keys landed is never retyped.
+   apps, the portal presses Ctrl+V, and the previous clipboard text is put
+   back (the app registers the clipboard reader, 2026-10-04). Falls back to
+   xdotool (Flatpak) or ydotool/wtype (AppImage, source) when the portal is
+   missing or declined; a failure after some keys landed is never retyped. A
+   portal session that died without a Closed signal (a portal backend restart)
+   is marked failed, logged, and handed to the normal tool selection instead of
+   silently typing nothing (2026-10-04).
    Settings → System → "Type into every app" turns it off (or asks again after
    a decline).
    KDE shows a "Remote Control Started" notice when the session starts and a
@@ -55,7 +60,8 @@ behaves the same everywhere.
    the X input focus is on another window than the active game window (Wine
    handed focus to a hidden launcher window), the game window gets it back
    (`linux_game_chat.ensure_game_focus`). The DAoC note in the Games tab names
-   the permanent fix (Wine `UseTakeFocus=N`).
+   the permanent fix (Wine `UseTakeFocus=N`); until 2026-10-04 the tab showed
+   the shared wording instead, which is fixed.
 5. **Update banner on Linux (done 2026-09-28)**: the `.flatpak` from GitHub
    has no update channel (built without `--repo-url`), so "update via your
    software center" was wrong. Get Update now downloads the release's
@@ -64,8 +70,9 @@ behaves the same everywhere.
    in place (checked with a throwaway app in an isolated FLATPAK_USER_DIR).
    `.flatpak` files open in Discover, GNOME Software or (Bazzite) Warehouse.
    Real automatic updates need Flathub or a hosted repo + `--repo-url`.
-6. **Release candidate**: version bump, release notes, bundle built and
-   installed from the bundle, smoke-tested.
+6. **Release candidate**: the nightly `v1.2.0-beta.N` after this audit merges
+   (`docs/RELEASING.md`; no hand version bump), its bundle installed from the
+   release and smoke-tested.
 
 ## Off-screen KWin rig
 
@@ -89,7 +96,7 @@ Manual: a short pass on real hardware and games.
 
 | Setup | How it is covered | Status |
 |---|---|---|
-| KDE Plasma 6.7 Wayland (desktop) | isolated KWin rig: portal module + the real Aura Flatpak end to end (golden clips → GTK4 Wayland and X11 windows, 0.8 s to first text) | rig passed; live on Peter's desktop pending his one-time Approve |
+| KDE Plasma 6.7 Wayland (desktop) | isolated KWin rig: portal module + the real Aura Flatpak end to end (golden clips → GTK4 Wayland and X11 windows, 0.8 s to first text) | rig passed; live on Peter's desktop: portal approved and in daily use (2026-10-04: restore token saved and reused across restarts; the activity log shows portal injections) |
 | KDE Plasma 6.4 Wayland (SteamOS 3.8 desktop mode) | same rig on the Steam machine (KWin 6.4.3; its CreateSession needs KWin's screencast protocol, so the rig's KWin runs with permission checks off) | rig passed with key codes (keysyms lost Shift in XWayland); live pending |
 | GNOME 45+ Wayland | not available here: unit tests + portal spec; mutter documents NotifyKeyboardKeycode | open: needs one manual pass |
 | KDE X11 session | xdotool path, unchanged; the portal is not started (KDE refuses remote control on X11) | covered by existing tests |
@@ -97,14 +104,15 @@ Manual: a short pass on real hardware and games.
 | Proton game | Path of Exile 2 (Steam) | pending (manual) |
 | Lutris / Wine game | Wine console (wine-ge 8-26, throwaway prefix) in the KWin rig: 'Hello, World! ABC xyz 123 ?:{}~@#$*()_+=-[]"Q" a(b)c' exact; DAoC (Eden) typed via xdotool 2026-09-28 | rig passed; DAoC through the portal pending (manual) |
 | Native Linux game | stand-in Tk game (gamescope harness) | passed |
+| AppImage (any desktop) | not covered by the rig or the live run, which used the Flatpak: portal typing and restore-token persistence for the AppImage are untested | pending (manual) |
 | Windowed / borderless / fullscreen | the portal types to whatever has keyboard focus, so window mode does not change the path; DAoC windowed verified | fullscreen pass pending (manual) |
 ## Manual pass (Peter)
 
-1. Desktop: approve "Wayfinder Aura … Control input devices" once (leave
+1. (Done 2026-10-04.) Desktop: approve "Wayfinder Aura … Control input devices" once (leave
    "Allow restoring on future sessions" on). The log then says
    "✓ Text injection: desktop portal". Dictate into a native Wayland app
    (Kate, Dolphin's location bar, a KDE settings search) and into Claude.
-2. Restart Aura: no dialog the second time (restore token).
+2. (Done 2026-10-04.) Restart Aura: no dialog the second time (restore token).
 3. Dark Age of Camelot: restart the game and launcher (Wine UseTakeFocus=N
    applies from the next start), Enter, dictate, Alt+Tab away and back,
    dictate again.

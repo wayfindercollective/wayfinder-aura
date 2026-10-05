@@ -1,6 +1,10 @@
 # Linux follow-ups found during the macOS pass
 
-Written on the `macos` branch (2026-09-23). **Nothing here was changed on Linux.**
+Written on the `macos` branch (2026-09-23). **Nothing here was changed on Linux**
+at the time. Since then the integration branch has brought several Mac changes to
+Linux on purpose (the Mac shader ribbon and glass palette, the 30 fps recording
+ribbon on desktops, the header mark, the hairline mic button), and items marked
+"Linux: done" below were fixed in the 2026-10-04 audit.
 Every macOS change on this branch is behind a `darwin` check or lives in a
 macOS-only module; Linux/Windows behaviour matches `main` (the hero ribbon and
 overlay wave renderers were verified byte-for-byte). Each item below was
@@ -82,6 +86,9 @@ confirm it on Linux; **Fix sketch** is the macOS fix, for reference.
 - **Fix sketch (macOS):** a random key per spawn in the child's environment
   (`LLAMA_API_KEY`, never argv), `Authorization: Bearer` on our requests, and
   `--no-slots` (`llama_server.py`, darwin-gated).
+- **Linux: done 2026-10-04.** Same key and `--no-slots` on Linux (Windows
+  still unkeyed). Checked against the Flatpak's llama-server (b9608): /health
+  200 without a key, /completion and /props 401, /slots 501, our client 200.
 
 ### 1.9 whisper-server computes token timestamps nobody reads
 - **Evidence:** requests send only file/response_format/prompt, so the server
@@ -238,6 +245,7 @@ pre-empts it (`on_hotkey`). All darwin-gated.
 - **Evidence:** `urlopen` to 127.0.0.1 honours `http_proxy` unless `no_proxy`
   lists it, so dictation audio and cleanup text are sent to the proxy.
 - **Fix sketch (macOS):** `utils/loopback_http.py` (proxy-free opener).
+- **Linux: done 2026-10-04.** The proxy-free opener is used on every platform.
 
 ### 4.5 API keys are stored and handled loosely
 - Plain text in `config.json`; the temp file is created 0644 before chmod
@@ -255,6 +263,8 @@ pre-empts it (`on_hotkey`). All darwin-gated.
   deprecated (shutdown 2027-02-26, replacement `gpt-transcribe`).
 - **Fix sketch (macOS):** `core/cloud_keys.py` model lists + a config
   migration of retired IDs (darwin-gated in `config.py`).
+- **Linux: done 2026-10-04.** Linux uses the same model menus and default,
+  and migrates retired IDs (persisting only the rewritten keys).
 
 ### 4.7 Cloud key panels
 - A saved key cannot be removed (empty field + Save keeps it).

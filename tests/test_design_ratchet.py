@@ -196,8 +196,8 @@ def test_no_progressbar_start_loop():
 # so the lint now enforces that it never returns. The test's job is to make any
 # NEW sub-100ms self-rearming loop fail the suite.
 GRANDFATHERED_SUB100_SELF_REARM = {
-    "_animate_hero",        # hero waveform, 66ms = 15fps active (rule 9)
-    "_animate_idle_breath",  # helper: 33ms Linux, static on Aqua
+    "_animate_hero",        # hero recording ribbon: 30 fps desktops, 15 fps Steam (helper)
+    "_animate_idle_breath",  # hero idle breath, 33ms (helper)
     "_tray_pulse_step",     # tray recording pulse, 50ms (deliberate, CPU-validated)
     "_update_mic_test",     # calibration level meter, 50ms
     "_tick_benchmark_bar",  # benchmark busy bar, 33ms, only while a benchmark runs
@@ -260,6 +260,20 @@ def test_no_new_sub100_self_rearming_timers():
     # Sanity: the grandfathered loops we documented still exist (guards against
     # the regex silently breaking and the test becoming a no-op).
     assert {name for name, _ in rearms}, "timer lint found zero self-rearms — regex likely broke"
+
+
+def test_animation_cadences_are_pinned():
+    """The hero and tray loops take their interval from helpers, which the
+    literal-interval lint above cannot see. Pin the exact cadences (CLAUDE.md
+    rules 1 and 9): faster costs CPU, slower degrades the animation, so either
+    is a reviewed change."""
+    import wayfinder_main as wm
+
+    for platform_name in ("linux", "darwin", "win32"):
+        assert wm._hero_idle_interval_ms(platform_name) == 33          # 30 fps idle
+        assert wm._tray_pulse_interval_ms(platform_name) == 50
+        assert wm._hero_active_interval_ms(platform_name, None) == 33  # 30 fps on desktops
+    assert wm._hero_active_interval_ms("linux", "deck") == 66          # 15 fps on Steam hardware
 
 
 # ---------------------------------------------------------------------------

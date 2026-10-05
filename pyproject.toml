@@ -38,6 +38,9 @@ dependencies = [
     "scipy>=1.10.0",
     "evdev>=1.6.0; sys_platform == 'linux'",
     "pynput>=1.7.6",
+    # Linux Gamer mode reads the game window over X11 directly (pynput pulls it
+    # in too; core/linux_game_chat.py imports it on its own).
+    "python-xlib>=0.33; sys_platform == 'linux'",
     "pyautogui>=0.9.54; sys_platform == 'darwin'",
     "pyobjc-framework-Metal>=12.2.2; sys_platform == 'darwin'",
     # macOS app: Claude cleanup (Linux keeps it in the optional [llm] extra) and

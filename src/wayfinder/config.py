@@ -504,11 +504,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Cloud API settings (keys stored in config, loaded into environment on startup)
     "anthropic_api_key": "",  # Anthropic API key (for Claude post-processing)
-    # Claude 3 Haiku was retired 2026-04-20; macOS and Windows ship the current Haiku.
-    "anthropic_model": (
-        "claude-haiku-4-5-20251001" if sys.platform in ("darwin", "win32")
-        else "claude-3-haiku-20240307"
-    ),
+    # Claude 3 Haiku was retired 2026-04-20; every platform ships the current Haiku.
+    "anthropic_model": "claude-haiku-4-5-20251001",
     "openai_api_key": "",  # OpenAI API key (for GPT post-processing or Whisper transcription)
     "openai_model": "gpt-4o-mini",  # OpenAI model to use
     "openai_whisper_model": "whisper-1",  # OpenAI Whisper transcription model
@@ -1279,19 +1276,30 @@ def load_config() -> dict:
             if config.get("audio_device") is not None and not config.get("audio_device_name"):
                 config["audio_device"] = None
 
-            if sys.platform in ("darwin", "win32"):
-                # Retired cloud model IDs fail every request; move them to the
-                # provider's documented replacement.
-                try:
-                    from wayfinder.core.cloud_keys import RETIRED_MODEL_REPLACEMENTS
+            # Retired cloud model IDs fail every request; move them to the
+            # provider's documented replacement.
+            _retired_models = {}
+            try:
+                from wayfinder.core.cloud_keys import RETIRED_MODEL_REPLACEMENTS
 
-                    for _mkey, _table in RETIRED_MODEL_REPLACEMENTS.items():
-                        _replacement = _table.get(config.get(_mkey))
-                        if _replacement:
-                            config[_mkey] = _replacement
-                            _save_migrations = True
-                except Exception:
-                    pass
+                for _mkey, _table in RETIRED_MODEL_REPLACEMENTS.items():
+                    _replacement = _table.get(config.get(_mkey))
+                    if _replacement:
+                        config[_mkey] = _replacement
+                        _retired_models[_mkey] = _replacement
+            except Exception:
+                pass
+            if _retired_models:
+                if sys.platform in ("darwin", "win32"):
+                    _save_migrations = True
+                else:
+                    # Linux persists only the rewritten keys, like the Flatpak
+                    # model migration above (kept too: this save replaces its
+                    # file), so unsaved defaults stay unsaved.
+                    try:
+                        save_config({**user_config, **_migrated, **_retired_models})
+                    except OSError as e:
+                        print(f"WARNING: could not save migrated cloud models: {e}")
 
             if sys.platform in ("darwin", "win32") and _load_macos_secrets(config, user_config):
                 _save_migrations = True
@@ -1334,6 +1342,9 @@ def load_config() -> dict:
 # Credential Manager (utils/windows_credentials.py), not config.json.
 SECRET_CONFIG_KEYS = ("groq_api_key", "openai_api_key", "anthropic_api_key")
 _KEYCHAIN_SYNCED: dict[str, str] = {}
+# Names whose stored key could not be read (locked Keychain, a denied access
+# prompt): an empty value there means "unknown", not "removed".
+_KEYCHAIN_UNREADABLE: set[str] = set()
 
 
 def _macos_keychain():
@@ -1408,7 +1419,10 @@ def _load_macos_secrets(config: dict, user_config: dict) -> bool:
             config[name] = plain
             continue
         stored = keychain.get(name)
-        if stored is not None:
+        if stored is None:
+            _KEYCHAIN_UNREADABLE.add(name)  # the key may still be stored
+        else:
+            _KEYCHAIN_UNREADABLE.discard(name)
             _KEYCHAIN_SYNCED[name] = stored
             config[name] = stored
     if moved:
@@ -1436,11 +1450,18 @@ def save_config(config: dict) -> None:
             on_disk = dict(config)
             for name in SECRET_CONFIG_KEYS:
                 value = str(config.get(name) or "").strip()
+                if not value and name in _KEYCHAIN_UNREADABLE:
+                    # Never delete a key we only failed to read: the next
+                    # save after a locked Keychain or a denied prompt would
+                    # otherwise erase it.
+                    on_disk[name] = ""
+                    continue
                 # Only a key the Keychain (Windows: Credential Manager) now
                 # holds leaves config.json; if it refused it, the file keeps it
                 # as before.
                 if _keychain_sync(keychain, name, value):
                     on_disk[name] = ""
+                    _KEYCHAIN_UNREADABLE.discard(name)
     # Atomic write: dump to a temp file, then os.replace() onto the real path so a
     # crash mid-write can never truncate/corrupt the existing config.
     tmp_file = CONFIG_FILE.with_suffix(CONFIG_FILE.suffix + ".tmp")

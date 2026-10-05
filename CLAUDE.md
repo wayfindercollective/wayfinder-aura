@@ -42,7 +42,7 @@ This is not optional project flavor text — treat it as a hard constraint like 
 ### 1. No timers or polling under 100ms
 QTimer(0) caused 100% CPU. Overlay idle polling must be >=500ms, active transitions >=100ms. After any timer change, verify idle CPU stays under 2% (`top -p $(pgrep -f wayfinder)`).
 
-**Sanctioned sub-100ms exceptions (grandfathered, CPU-validated <1%, enforced by the whitelist in `tests/test_design_ratchet.py`):** the overlay's 50ms command-drain timer (it *coalesces* the drain of a queue fed by an always-on stdin reader thread, applying only the last level update per tick — an event-per-line design would *increase* active-use wakeups) and the named animation loops (hero 66ms active / 33ms idle breath, tray pulse 50ms, mic-test meter 50ms). Any **new** sub-100ms self-rearming repeating timer fails CI.
+**Sanctioned sub-100ms exceptions (grandfathered, CPU-validated <1%, enforced by the whitelist in `tests/test_design_ratchet.py`):** the overlay's 50ms command-drain timer (it *coalesces* the drain of a queue fed by an always-on stdin reader thread, applying only the last level update per tick — an event-per-line design would *increase* active-use wakeups) and the named animation loops (hero 33ms active on desktops / 66ms on Steam hardware, 33ms idle breath, tray pulse 50ms, mic-test meter 50ms). Any **new** sub-100ms self-rearming repeating timer fails CI.
 
 ### 2. No popup dialogs — use inline panels
 Every popup (Whisper Models, Audio Calibration, Advanced Settings, Benchmark) took 6+ commits to fix sizing/display/focus bugs on Linux/Wayland. Always show/hide a `CTkFrame` within the main window instead of spawning `CTkToplevel`.
@@ -66,7 +66,7 @@ State transitions (RECORDING -> PROCESSING) can complete in milliseconds. Users 
 `SmoothScrollableFrame`, custom button wrappers, and fancy subclasses were all replaced with standard `CTkScrollableFrame`, `CTkFrame`, `CTkButton`. Custom widgets introduce subtle bugs (bind parameter issues, constructor incompatibilities). Use the framework as-is.
 
 ### 9. Performance optimizations must preserve visual quality
-One render optimization was reverted because it degraded overlay animations. When batching canvas operations or reducing frame rates, visually confirm animations still look smooth. The hero waveform renders at 30fps idle / 15fps active, and the overlay at 15fps — don't reduce these.
+One render optimization was reverted because it degraded overlay animations. When batching canvas operations or reducing frame rates, visually confirm animations still look smooth. The hero waveform renders at 30fps idle and 30fps active on desktops (15fps active on Steam hardware, where it shares the CPU with transcription), and the overlay at 15fps — don't reduce these. `test_animation_cadences_are_pinned` in `tests/test_design_ratchet.py` pins these cadences.
 
 ### 10. Wrap all Tk canvas operations in try/except
 Tk 9.0 throws unexpected exceptions during rapid canvas redraws and window destruction. All `canvas.create_*`, `canvas.delete`, and `canvas.itemconfig` calls must be wrapped to prevent app crashes.

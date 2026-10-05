@@ -71,6 +71,44 @@ def portal_shortcuts_available() -> bool:
     return _GI_PROBE["available"]
 
 
+# D-Bus errors that mean "this portal has no GlobalShortcuts" (as opposed to
+# "could not ask right now"): the interface or the portal itself is missing.
+_NOT_OFFERED_ERRORS = (
+    "org.freedesktop.DBus.Error.InvalidArgs",       # "No such interface"
+    "org.freedesktop.DBus.Error.UnknownInterface",
+    "org.freedesktop.DBus.Error.UnknownProperty",
+    "org.freedesktop.DBus.Error.UnknownMethod",
+    "org.freedesktop.DBus.Error.ServiceUnknown",     # no xdg-desktop-portal at all
+)
+
+
+def global_shortcuts_offered(bus=None, timeout_ms: int = 3000) -> "bool | None":
+    """Whether the desktop's portal implements GlobalShortcuts.
+
+    A read of its ``version`` property: no dialog, no session. GNOME before 48,
+    Cinnamon, XFCE, MATE and Sway answer "no such interface" (False). None when
+    the question could not be asked (no PyGObject or session bus, a timeout while
+    the portal starts at login): callers keep the portal path and its retries.
+    """
+    if not portal_shortcuts_available():
+        return None
+    try:
+        from gi.repository import Gio, GLib
+        if bus is None:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.call_sync(
+            _PORTAL_DEST, _PORTAL_PATH, "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", (_SHORTCUTS_IFACE, "version")),
+            GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, timeout_ms, None,
+        )
+        return True
+    except Exception as exc:
+        text = str(exc)
+        if any(marker in text for marker in _NOT_OFFERED_ERRORS):
+            return False
+        return None
+
+
 def portal_unavailable_detail() -> str:
     """Why the probe failed ("" when it succeeded or hasn't run)."""
     portal_shortcuts_available()
@@ -201,6 +239,15 @@ class ShortcutSpec:
     event: EventType
 
 
+def _cancel_trigger(config: dict) -> str:
+    """The cancel shortcut's trigger, never a bare Escape: the portal grabs its
+    key in every app at all times, so Escape alone would stop working
+    everywhere. Without modifiers the user picks a key at bind time."""
+    modifiers = config.get("cancel_hotkey_modifiers", ["shift"])
+    trigger = encode_trigger(config.get("cancel_hotkey_key", 1), modifiers)
+    return "" if trigger == "Escape" else trigger
+
+
 def shortcut_specs_from_config(config: dict) -> list[ShortcutSpec]:
     """The app's global shortcuts, triggers encoded from the live config."""
     return [
@@ -224,10 +271,7 @@ def shortcut_specs_from_config(config: dict) -> list[ShortcutSpec]:
         ShortcutSpec(
             shortcut_id="cancel-dictation",
             description="Cancel dictation (nothing is typed)",
-            trigger=encode_trigger(
-                config.get("cancel_hotkey_key", 1),
-                config.get("cancel_hotkey_modifiers", ["shift"]),
-            ),
+            trigger=_cancel_trigger(config),
             event=EventType.CANCEL_RECORDING,
         ),
     ]
@@ -481,7 +525,7 @@ def wayland_hotkey_listener(
             except Exception as exc:
                 log(
                     "⚠️ Your desktop could not open shortcut settings "
-                    f"({type(exc).__name__}) — open System Settings → Shortcuts"
+                    f"({type(exc).__name__}) — open your desktop's keyboard shortcut settings"
                 )
 
         def _poll(*_args) -> bool:
@@ -644,12 +688,12 @@ def wayland_hotkey_listener(
                             f" (trigger: {actual or spec.trigger or 'choose in System Settings'})")
                 if missing:
                     log(f"⚠️ Portal did not bind: {', '.join(missing)}"
-                        " — set them in System Settings → Shortcuts")
+                        " — set them in your desktop's keyboard shortcut settings")
             elif bcode == _RESPONSE_CANCELLED:
-                log("⚠️ Shortcut bind cancelled — set them in System Settings → Shortcuts")
+                log("⚠️ Shortcut bind cancelled — set them in your desktop's keyboard shortcut settings")
             else:
                 log(f"⚠️ Shortcut bind failed (code {bcode})"
-                    " — set them in System Settings → Shortcuts")
+                    " — set them in your desktop's keyboard shortcut settings")
 
         # Listen until stopped or the session dies. Even after a cancelled
         # bind the session is valid: bindings made later in System Settings

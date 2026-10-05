@@ -1,6 +1,100 @@
 # Ship Readiness — Wayfinder Aura
 
-_Last updated: 2026-08-04. Tracks what remains before a paid public release. Complements `SHIPPING.md`, `docs/GO-LIVE-INPUTS.md`, `docs/SHIP-VERIFICATION-RUNBOOK.md`, and the current `docs/PROMOTION-READINESS-CHECKLIST.md`._
+_Last updated: 2026-10-04 (Linux gamer release audit, below). The sections after
+it are the 2026-08-04 pass for v1.1.8-beta.1, kept as history: v1.1.8 has since
+been tagged and released. Tracks what remains before a paid public release.
+Complements `SHIPPING.md`, `docs/GO-LIVE-INPUTS.md`, `docs/SHIP-VERIFICATION-RUNBOOK.md`,
+`docs/LINUX-SHIPPING-PLAN.md`, and the current `docs/PROMOTION-READINESS-CHECKLIST.md`._
+
+---
+
+## Linux gamer release: audit 2026-10-04
+
+Scope: the integration tree (macOS/Windows port plus the Linux gamer work,
+`docs/LINUX-SHIPPING-PLAN.md`) audited for Linux ship readiness, with fixes
+committed on top. No blocker was found in packaging, portal typing, Gamer mode
+or updates: both packages carry everything the new features import, and the
+release asset names match what Get Update selects.
+
+Fixed in the audit (see `CHANGELOG.md` [Unreleased]): resident llama-server
+keyed and `/slots` hidden on Linux; loopback requests bypass HTTP proxies;
+current cloud cleanup models with retired IDs migrated; Gamer mode pastes into
+unlisted games, shows the DAoC note, and its xdotool path is hardened; a dead
+portal session falls back with a log line; the portal paste restores the
+clipboard; Setup and startup recognise the portal and retry its probe; the
+restore token is owner-only from creation; Get Update links are pinned to this
+repository and failed checks are retried; the cancel shortcut never grabs a
+bare Escape; the GameMode pause logs dropped shortcuts; release artifacts prove
+the portal/Gamer-mode imports (`--linux-input-self-test`), a tag fails if the
+AppImage name does not carry its version, and releases publish
+`SHA256SUMS-linux.txt`; the ship preflight checks the RemoteDesktop portal;
+user docs, PRIVACY.md and the CHANGELOG match the code. UI: the Style tab icon
+follows a license change, the recording hint promises Esc only when something
+listens, the pill fits every style badge.
+
+Permissions and first run (`docs/PERMISSIONS-AND-FIRST-RUN.md`): Flatpak
+shortcuts no longer die on desktops without a GlobalShortcuts portal (GNOME
+before 48, Cinnamon, XFCE, MATE, Sway; already broken in 1.1.8): X11 falls back
+to the X11 listener and Wayland names the `--toggle` desktop shortcut; X11
+AppImage/source shortcuts work without the `input` group; a declined or failed
+typing portal shows on the Dictate tab and the switch asks again; Setup no
+longer installs ydotool or raises password prompts where the portal types, and
+prints runnable commands per distro (rpm-ostree, zypper); permission copy names
+the dialogs users see. macOS/Windows: a failed Keychain read no longer deletes
+API keys, a failed Windows paste keeps the dictation on the clipboard,
+`~/Applications` counts as installed.
+
+Automated gate: the CI-equivalent suite (`-m "not ui and not slow and not
+network and not perf"`) passes on a headless node; Ruff's CI classes and
+`scripts/verify_structure.py` pass.
+
+### What still blocks the Linux release
+
+1. **Release candidate** (plan item 6). `main` names the next stable
+   release (`1.2.0`), and the nightly Beta workflow cuts and stamps
+   `v1.2.0-beta.N` from it (`docs/RELEASING.md`). The first beta after this
+   audit merges is the Linux candidate: install the AppImage and Flatpak from
+   that release, check them against `SHA256SUMS-linux.txt`, and confirm the
+   `--linux-input-self-test` step passed in its build. Stable 1.1.8 users are
+   not offered a beta; `scripts/release/promote.py` ships `1.2.0` from a
+   complete beta after the manual passes below.
+2. **Manual passes still open** in `docs/LINUX-SHIPPING-PLAN.md`: GNOME 45+,
+   the Steam machine (desktop approval, then Game Mode), Path of Exile 2 under
+   Proton (windowed and fullscreen), DAoC through the portal, and the AppImage
+   on KDE Wayland (portal typing and whether its restore token persists).
+   Also confirm on the Steam machine that an unlisted game now gets a paste
+   (Ctrl+V) rather than typed keys, as the Games tab promises.
+3. **Known issue, decided 2026-10-04**: the two Flatpak dialogs (shortcut
+   bind, typing approval) are neither sequenced nor announced in the tour; it
+   ships as a known issue (`docs/PERMISSIONS-AND-FIRST-RUN.md`). The AppImage
+   tour now downloads the Base model first.
+4. **Server and storefront items outside this repo**: the feedback endpoint
+   (`docs/LINUX-FOLLOWUPS-FROM-MACOS.md` 5.5) and the store screenshots, which
+   still show Super+F2 and "Minimal" (recapture with
+   `scripts/capture_store_screenshots.py`).
+
+### Known limitations to decide or schedule (not blockers)
+
+- Portal typing reads only the first layout of a multi-layout keymap: with us+de
+  and de active, key codes produce the first layout's letters.
+- A layout-less character makes the whole dictation a Ctrl+V paste, which most
+  terminals ignore (they paste on Ctrl+Shift+V).
+- Cancel works only while recording; Shift+Esc after the stop press does not
+  stop typing.
+- Decided 2026-10-04: with Gamer mode on, Ctrl/Alt shortcuts go through the
+  GameMode pause; single-key shortcuts still pause (AppImage/source).
+- Get Update hands the browser an unverified file (no in-app checksum or
+  signature check), and Flathub installs are not yet told apart from bundle
+  installs.
+- Windows still runs llama-server without a key.
+- Linux renders the Mac shader ribbon and runs the recording ribbon at 30 fps
+  on desktops (15 fps on Steam hardware); CLAUDE.md rules 1 and 9 now say so
+  (2026-10-04). Still measure focused-idle CPU at HiDPI
+  (`top -p $(pgrep -f wayfinder)`, rule 1 budget 2%).
+- macOS: bare permission prompts for returning users at launch (hotkey
+  recovery after a late Accessibility grant is fixed on main, #41; confirm on
+  a real Mac). Windows: unsigned installer
+  (public-release blocker), a blocked microphone dead-ends the tour.
 
 ---
 

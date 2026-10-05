@@ -2,9 +2,10 @@
 """Non-invasive host preflight for Wayfinder Aura release signoff.
 
 This does not click keys or inject text. It verifies the machine-level
-prerequisites for the remaining manual QA: Wayland/X11 session signals, host
-injection tools, ydotool daemon, Wayfinder control socket, Flatpak access, and
-Vulkan GPU visibility. When launched from a foreign Flatpak-hosted editor, it
+prerequisites for the remaining manual QA: Wayland/X11 session signals, the
+RemoteDesktop portal (Aura's Wayland typing path) and whether Aura was approved
+for it, fallback injection tools, ydotool daemon, Wayfinder control socket,
+Flatpak access, and Vulkan GPU visibility. When launched from a foreign Flatpak-hosted editor, it
 uses flatpak-spawn for host-only commands.
 """
 
@@ -13,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -21,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 WAYFINDER_APP_IDS = {"io.wayfindercollective.WayfinderAura"}
+PORTAL_KEYBOARD = 1  # RemoteDesktop AvailableDeviceTypes bit
 
 
 def should_use_flatpak_spawn(env: dict[str, str] | None = None) -> bool:
@@ -117,6 +120,40 @@ def detect_dedicated_gpu(lspci_text: str, vulkan_devices: list[dict[str, str]]) 
     return {"present": bool(likely), "source": "lspci", "devices": likely}
 
 
+def parse_portal_device_types(text: str) -> int | None:
+    """AvailableDeviceTypes from ``gdbus call ... Properties.Get``: '(<uint32 7>,)'."""
+    match = re.search(r"uint32\s+(\d+)", text or "")
+    return int(match.group(1)) if match else None
+
+
+def portal_state_paths(env: dict[str, str] | None = None) -> list[Path]:
+    """Where Aura keeps its portal restore token (core/portal_keyboard.py)."""
+    env = env or os.environ
+    config_home = Path(env.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    flatpak = Path.home() / ".var" / "app" / "io.wayfindercollective.WayfinderAura" / "config"
+    return [
+        config_home / "wayfinder-aura" / "portal-keyboard.json",  # source / AppImage
+        flatpak / "wayfinder-aura" / "portal-keyboard.json",  # Flatpak
+    ]
+
+
+def portal_approval(paths: list[Path]) -> str:
+    """'approved', 'declined' or 'not asked yet' (never reveals the token)."""
+    states = []
+    for path in paths:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            states.append("declined" if data.get("declined") else
+                          "approved" if data.get("restore_token") else "not asked yet")
+    for state in ("approved", "declined"):
+        if state in states:
+            return state
+    return "not asked yet"
+
+
 def collect_preflight() -> dict[str, Any]:
     host = should_use_flatpak_spawn()
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%s" % os.getuid())
@@ -137,6 +174,13 @@ def collect_preflight() -> dict[str, Any]:
     lspci_text = command_stdout("lspci -nn | grep -Ei 'vga|3d|display' || true", host=host)
     vulkan_summary = command_stdout("vulkaninfo --summary 2>/dev/null || true", host=host, timeout=20)
     vulkan_devices = parse_vulkan_devices(vulkan_summary)
+    portal_types = parse_portal_device_types(command_stdout(
+        "gdbus call --session --dest org.freedesktop.portal.Desktop "
+        "--object-path /org/freedesktop/portal/desktop "
+        "--method org.freedesktop.DBus.Properties.Get "
+        "org.freedesktop.portal.RemoteDesktop AvailableDeviceTypes 2>/dev/null || true",
+        host=host,
+    ))
 
     os_release = command_stdout("cat /etc/os-release 2>/dev/null || true", host=host)
     is_steamos = "ID=steamos" in os_release or "VARIANT_ID=steamdeck" in os_release
@@ -145,6 +189,10 @@ def collect_preflight() -> dict[str, Any]:
         "session": session,
         "tools": tools,
         "ydotool_socket": ydotool_socket,
+        "remote_desktop_portal": {
+            "available_device_types": portal_types,
+            "aura_approval": portal_approval(portal_state_paths()),
+        },
         "wayfinder_socket": {
             "path": str(wayfinder_socket),
             "ping": host_socket_ping(wayfinder_socket) if host else socket_ping(wayfinder_socket),
@@ -169,11 +217,32 @@ def summarize(report: dict[str, Any]) -> list[tuple[str, str, str]]:
         detail = f"foreign Flatpak parent {session['FLATPAK_ID']}; host checks via flatpak-spawn={session['using_flatpak_spawn_host']}"
         rows.append(("OK" if session.get("using_flatpak_spawn_host") else "WARN", "host access", detail))
 
+    # Wayland desktops type through the RemoteDesktop portal; wtype/ydotool
+    # are only the fallback when it is missing (X11 and Game Mode use xdotool).
+    portal = report.get("remote_desktop_portal") or {}
+    portal_types = portal.get("available_device_types")
+    portal_ok = bool(portal_types is not None and portal_types & PORTAL_KEYBOARD)
+    if session_type == "wayland":
+        if portal_ok:
+            rows.append(("OK", "RemoteDesktop portal", f"keyboard available (device types {portal_types})"))
+        else:
+            rows.append(("WARN", "RemoteDesktop portal", "no keyboard: typing reaches X11/XWayland windows only"))
+        approval = portal.get("aura_approval", "not asked yet")
+        if approval == "approved":
+            rows.append(("OK", "Aura portal approval", "approved (restore token saved)"))
+        elif approval == "declined":
+            rows.append(("WARN", "Aura portal approval", "declined: Settings > System > 'Type into every app' asks again"))
+        else:
+            rows.append(("INFO", "Aura portal approval", "not asked yet: Aura asks once at launch"))
+    fallback_only = session_type == "wayland" and portal_ok
+
     tools = report["tools"]
     for tool in ("wtype", "xdotool", "ydotool", "flatpak"):
-        rows.append(("OK" if tools.get(tool) else "WARN", f"host tool {tool}", tools.get(tool) or "missing"))
+        missing = "INFO" if fallback_only and tool in ("wtype", "ydotool") else "WARN"
+        rows.append(("OK" if tools.get(tool) else missing, f"host tool {tool}", tools.get(tool) or "missing"))
 
-    rows.append(("OK" if report["ydotool_socket"] == "present" else "WARN", "ydotool socket", report["ydotool_socket"]))
+    socket_missing = "INFO" if fallback_only else "WARN"
+    rows.append(("OK" if report["ydotool_socket"] == "present" else socket_missing, "ydotool socket", report["ydotool_socket"]))
     wayfinder_ping = report["wayfinder_socket"]["ping"]
     rows.append(("OK" if wayfinder_ping == "pong" else "WARN", "Wayfinder control socket", wayfinder_ping))
 
