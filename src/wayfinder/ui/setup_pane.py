@@ -26,6 +26,7 @@ wizard used.
 from __future__ import annotations
 
 import queue
+import os
 import sys
 import threading
 from typing import Optional
@@ -706,14 +707,15 @@ class SetupPane:
         row.pack(fill="x", pady=(0, 4))
         self._dep_rows[dep.id] = row
 
-        # One-line Wayland approval hint under the text-injection row: on
-        # KDE/Wayland the compositor gates synthetic input behind a one-time
-        # "allow input control" prompt that must be approved or typing fails.
-        if dep.id == 'ydotool' and sys.platform != 'darwin':
+        # One-line Wayland approval hint under the text-injection row: KDE and
+        # GNOME ask once whether Aura may type (the RemoteDesktop portal; KDE
+        # titles it "Remote Control"). X11 sessions have no such request.
+        if (dep.id == 'ydotool' and sys.platform != 'darwin'
+                and os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'):
             hint = self._ctk.CTkLabel(
                 self._dep_frame,
-                text="On Wayland, approve the one-time 'allow input control' "
-                     "prompt so Aura can type for you.",
+                text="Your desktop asks once whether Aura may control input devices "
+                     "(KDE: Remote Control). Allow it so Aura can type into every app.",
                 font=(FONTS['body'][0], FONT_SIZES['caption']),
                 text_color=COLORS['text_muted'],
                 anchor='w',

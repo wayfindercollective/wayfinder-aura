@@ -18606,7 +18606,7 @@ class WayfinderApp(ctk.CTk):
         """Open the desktop-owned editor through GlobalShortcuts portal v2."""
         control = getattr(self, "_portal_control_queue", None)
         if control is None:
-            self.log("🖥 Open System Settings → Shortcuts to change this binding")
+            self.log("🖥 Change this binding in your desktop's keyboard shortcut settings")
             return
         control.put("configure")
         self.log("🖥 Asking your desktop to open its shortcut settings…")
@@ -18825,7 +18825,7 @@ class WayfinderApp(ctk.CTk):
                 self.log(
                     f"ℹ️ Your desktop manages global shortcuts for sandboxed "
                     f"apps — if {display} doesn't trigger dictation, set it "
-                    f"under System Settings → Shortcuts → Wayfinder Aura."
+                    f"in your desktop's keyboard shortcut settings (Wayfinder Aura)."
                 )
         except Exception:
             pass

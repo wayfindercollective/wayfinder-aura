@@ -525,7 +525,7 @@ def wayland_hotkey_listener(
             except Exception as exc:
                 log(
                     "⚠️ Your desktop could not open shortcut settings "
-                    f"({type(exc).__name__}) — open System Settings → Shortcuts"
+                    f"({type(exc).__name__}) — open your desktop's keyboard shortcut settings"
                 )
 
         def _poll(*_args) -> bool:
@@ -688,12 +688,12 @@ def wayland_hotkey_listener(
                             f" (trigger: {actual or spec.trigger or 'choose in System Settings'})")
                 if missing:
                     log(f"⚠️ Portal did not bind: {', '.join(missing)}"
-                        " — set them in System Settings → Shortcuts")
+                        " — set them in your desktop's keyboard shortcut settings")
             elif bcode == _RESPONSE_CANCELLED:
-                log("⚠️ Shortcut bind cancelled — set them in System Settings → Shortcuts")
+                log("⚠️ Shortcut bind cancelled — set them in your desktop's keyboard shortcut settings")
             else:
                 log(f"⚠️ Shortcut bind failed (code {bcode})"
-                    " — set them in System Settings → Shortcuts")
+                    " — set them in your desktop's keyboard shortcut settings")
 
         # Listen until stopped or the session dies. Even after a cancelled
         # bind the session is valid: bindings made later in System Settings
