@@ -84,7 +84,7 @@ listed here.
   dictation.
 - **Setup recognises the portal** as a working typing backend (it reported "No
   text injection backend" once the portal was approved), and **Aura retries the
-  portal for about 20 seconds at login** if the desktop is still starting it,
+  portal for about 20 seconds** if the desktop is still starting it,
   before settling for xdotool.
 - **Gamer mode pastes into games it does not list.** Unlisted games (Proton
   `steam_app_*`, Wine `*.exe`) and not-recommended ones used to fall through to

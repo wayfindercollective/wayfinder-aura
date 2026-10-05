@@ -23934,7 +23934,8 @@ class WayfinderApp(ctk.CTk):
                         "Apps running as administrator can't receive it; press Ctrl+V there.")
             # Messages written for the user (a key still held, a game that
             # left the front, how to get a missing tool) say it best.
-            if has("still held", "game chat stopped", "not found:", "type into every app"):
+            if has("still held", "game chat stopped", "not found:", "type into every app",
+                   "no text injection tool"):
                 return message.split("Injection: ", 1)[-1]
             return ("Couldn't type the text — click into a text box and try again. On Wayland, "
                     "check Settings → System → Type into every app.")

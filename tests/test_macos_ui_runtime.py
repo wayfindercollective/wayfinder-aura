@@ -593,3 +593,6 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     held = ("Injection: A Shift, Ctrl, Alt, or Super key is still held. "
             "Release it, then dictate again; the transcript was not typed.")
     assert wayfinder_main.WayfinderApp._error_guidance(ns, held) == held[len("Injection: "):]
+    no_tool = ("Injection: No text injection tool available on Linux. "
+               "Install xdotool (X11) or ydotool (Wayland).")
+    assert wayfinder_main.WayfinderApp._error_guidance(ns, no_tool) == no_tool[len("Injection: "):]
