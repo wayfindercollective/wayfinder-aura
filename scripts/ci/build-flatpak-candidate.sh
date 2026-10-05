@@ -134,6 +134,11 @@ grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" "$test_logs/audio-processing.log"
 flatpak run "$APP_ID" --tls-self-test | tee "$test_logs/tls.log"
 grep -Fq "TLS_SELF_TEST_OK" "$test_logs/tls.log"
 
+# Portal typing (Gio) and Gamer mode (python-xlib) degrade silently when their
+# imports are missing; prove them inside the sandbox.
+flatpak run "$APP_ID" --linux-input-self-test | tee "$test_logs/linux-input.log"
+grep -Fq "LINUX_INPUT_SELF_TEST_OK" "$test_logs/linux-input.log"
+
 xvfb-run -a flatpak run "$APP_ID" --ui-renderer-self-test \
   | tee "$test_logs/ui-renderer.log"
 grep -Fq "UI_RENDERER_SELF_TEST_OK" "$test_logs/ui-renderer.log"

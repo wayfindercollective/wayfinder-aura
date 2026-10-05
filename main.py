@@ -419,6 +419,30 @@ if "--app-import-self-test" in sys.argv:
         sys.exit(1)
 
 
+# Linux typing and Gamer mode import PyGObject (Gio) and python-xlib behind
+# try/except: a package missing either silently types with xdotool only or never
+# sees a game. Release artifacts must prove both import.
+if "--linux-input-self-test" in sys.argv:
+    try:
+        import Xlib.display  # noqa: F401
+        from wayfinder.core import game_list_data, linux_game_chat, portal_keyboard  # noqa: F401
+
+        if portal_keyboard._gi() is None:
+            raise RuntimeError("PyGObject Gio/GLib did not load (portal typing)")
+        if not linux_game_chat.game_list():
+            raise RuntimeError("the Games list is empty")
+        print("LINUX_INPUT_SELF_TEST_OK", flush=True)
+        sys.exit(0)
+    except Exception as _linux_input_error:
+        print(
+            "LINUX_INPUT_SELF_TEST_FAILED "
+            f"{_linux_input_error.__class__.__name__}: {_linux_input_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+
 # Confirm that native executables shipped beside the frozen application are
 # discoverable through the same resolver used by transcription and cleanup.
 if "--runtime-assets-self-test" in sys.argv:
