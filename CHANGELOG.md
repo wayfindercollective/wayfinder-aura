@@ -88,11 +88,12 @@ listed here.
   text injection backend" once the portal was approved), and **Aura retries the
   portal for about 20 seconds** if the desktop is still starting it,
   before settling for xdotool.
-- **Gamer mode pastes into games it does not list.** Unlisted games (Proton
-  `steam_app_*`, Wine `*.exe`) and not-recommended ones used to fall through to
+- **Gamer mode pastes into Steam games it does not list.** Unlisted Steam
+  games (Proton `steam_app_*`) and not-recommended ones used to fall through to
   keystroke typing, where letters are keybinds; they now get the clipboard paste
-  the listed games use. The Games tab tells Dark Age of Camelot players to press
-  Enter to open chat first.
+  the listed games use, and stop if the game leaves the front first. Other Wine
+  windows (Notepad, launchers) keep normal typing. The Games tab tells Dark Age
+  of Camelot players to press Enter to open chat first.
 - **Gamer mode's xdotool typing is hardened** (X11 sessions, SteamOS Game Mode,
   or a declined portal): a warm-up key and Shift release under XWayland, a
   timeout that scales with the message instead of cutting off long ones, Return

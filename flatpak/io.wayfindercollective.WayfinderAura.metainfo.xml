@@ -129,7 +129,7 @@
         <p>Prerelease: dictation into every app and for gamers on Linux:</p>
         <ul>
           <li>On KDE Plasma (and, expected, GNOME 45 and later) Aura types into native Wayland apps too, through the desktop's remote-control permission, asked once</li>
-          <li>Gamer mode on Linux: games are recognised by their window, Dark Age of Camelot chat is typed and sent, and other games get a paste instead of keystrokes</li>
+          <li>Gamer mode on Linux: games are recognised by their window, Dark Age of Camelot chat is typed and sent, and Steam games without a profile get a paste instead of keystrokes</li>
           <li>A recording can be cancelled from any app, and vocabulary corrections are Heard / Write-as pairs</li>
           <li>Global shortcuts work on desktops without a shortcut portal (X11) or name the desktop shortcut to bind, and on X11 without extra permissions</li>
           <li>The AppImage tour downloads the free Base speech model first</li>
