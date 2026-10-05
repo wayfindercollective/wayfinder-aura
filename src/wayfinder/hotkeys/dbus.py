@@ -300,6 +300,7 @@ def wayland_hotkey_listener(
     stop_event: Event,
     log_callback: Optional[Callable[[str], None]] = None,
     control_queue: Optional[Queue] = None,
+    on_bind_settled: Optional[Callable[[], None]] = None,
 ) -> bool:
     """Register global shortcuts via the portal and emit events until stopped.
 
@@ -309,6 +310,10 @@ def wayland_hotkey_listener(
     caller may retry to build a fresh session. True only for a stop_event
     exit. A cancelled bind is neither: the session stays valid and the
     listener keeps running (see module docstring).
+
+    ``on_bind_settled`` runs once, when the desktop has answered the bind (its
+    dialog, if any, is gone) or setup ended without one: the app holds its
+    other portal dialog (typing) until then.
     """
     def log(msg: str) -> None:
         if log_callback:
@@ -317,8 +322,20 @@ def wayland_hotkey_listener(
             except Exception:
                 pass
 
+    settled: list = []
+
+    def bind_settled() -> None:
+        if settled or on_bind_settled is None:
+            return
+        settled.append(True)
+        try:
+            on_bind_settled()
+        except Exception:
+            pass
+
     if not portal_shortcuts_available():
         log(f"⚠️ PyGObject unavailable ({portal_unavailable_detail()}) — portal hotkeys disabled")
+        bind_settled()
         return False
 
     from gi.repository import Gio, GLib
@@ -655,6 +672,7 @@ def wayland_hotkey_listener(
         # there is no timeout: the stop poll keeps the wait interruptible, and
         # a session whose bind is still pending can already listen.
         bound = _wait_for(bind_actual, None)
+        bind_settled()
         if stop_event.is_set():
             return True
         if bound is None:
@@ -716,6 +734,7 @@ def wayland_hotkey_listener(
         log(f"⚠️ Portal hotkey setup failed: {type(exc).__name__}: {exc}")
         return False
     finally:
+        bind_settled()  # setup ended before a bind answer: nothing left to wait for
         try:
             if stop_source is not None:
                 stop_source.destroy()

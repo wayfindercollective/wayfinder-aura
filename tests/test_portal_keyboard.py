@@ -962,18 +962,105 @@ def test_a_decline_is_shown_and_the_switch_turns_off(monkeypatch, tmp_path):
     assert "declined" in banners[0] and "Type into every app" in banners[0]
 
 
-def test_a_failed_or_closed_session_is_shown(monkeypatch):
+def _state_app(**extra):
+    """A stand-in app for the portal state handler, retry plumbing included."""
     from queue import Queue
     from types import SimpleNamespace
     import wayfinder_main as wm
 
-    banners = []
-    app = SimpleNamespace(config={}, event_queue=Queue(), log=lambda m: None,
-                          _show_error_banner=banners.append)
-    for state in (pk.PortalKeyboard.FAILED, pk.PortalKeyboard.CLOSED):
-        wm.WayfinderApp._on_portal_keyboard_state(app, state, "gone")
+    W = wm.WayfinderApp
+    app = SimpleNamespace(config={}, event_queue=Queue(), logs=[], banners=[], timers=[],
+                          _PORTAL_RETRY_DELAYS_S=W._PORTAL_RETRY_DELAYS_S,
+                          _portal_failure_retryable=W._portal_failure_retryable)
+    app.log = app.logs.append
+    app._show_error_banner = app.banners.append
+    app.after = lambda ms, fn: app.timers.append((ms, fn))
+    app._schedule_portal_retry = lambda detail: W._schedule_portal_retry(app, detail)
+    app._retry_portal_keyboard = lambda: W._retry_portal_keyboard(app)
+    app.state = lambda state, detail: W._on_portal_keyboard_state(app, state, detail)
+    for key, value in extra.items():
+        setattr(app, key, value)
+    return app
+
+
+def _drain(app):
+    while not app.event_queue.empty():
         app.event_queue.get_nowait()[1]()
-    assert len(banners) == 2 and all("Type into every app" in b for b in banners)
+
+
+def test_a_failed_or_closed_session_is_shown(monkeypatch):
+    # Retries used up (FAILED) and a session the desktop ended (CLOSED).
+    app = _state_app(_portal_retries=3)
+    app.state(pk.PortalKeyboard.FAILED, "gone")
+    app.state(pk.PortalKeyboard.CLOSED, "the desktop ended the session")
+    _drain(app)
+    assert len(app.banners) == 2 and all("Type into every app" in b for b in app.banners)
+    assert app.timers == []
+
+
+def test_a_session_that_fails_to_start_is_tried_again_before_the_banner():
+    app = _state_app()
+    for attempt, delay in enumerate((5, 30, 120)):
+        app.state(pk.PortalKeyboard.FAILED, "the desktop did not create a session")
+        _drain(app)
+        assert app.banners == [] and app.timers[attempt][0] == delay * 1000
+        assert f"trying again in {delay} s" in app.logs[-1]
+    app.state(pk.PortalKeyboard.FAILED, "the desktop did not create a session")
+    _drain(app)
+    assert len(app.banners) == 1 and len(app.timers) == 3
+
+
+def test_a_ready_session_earns_fresh_retries():
+    app = _state_app(_portal_retries=3)
+    app.state(pk.PortalKeyboard.READY, "")
+    app.state(pk.PortalKeyboard.FAILED, "keys stopped reaching the desktop")
+    _drain(app)
+    assert app.banners == [] and app.timers[0][0] == 5000
+
+
+def test_failures_a_retry_cannot_fix_go_straight_to_the_banner():
+    for detail in ("PyGObject unavailable", "the desktop granted no keyboard",
+                   "the desktop answered 2"):
+        app = _state_app()
+        app.state(pk.PortalKeyboard.FAILED, detail)
+        _drain(app)
+        assert len(app.banners) == 1 and app.timers == [], detail
+
+
+def test_a_restarted_portal_is_rejoined_but_a_revoked_session_is_not():
+    app = _state_app()
+    app.state(pk.PortalKeyboard.CLOSED, "the portal restarted")
+    _drain(app)
+    assert app.banners == [] and app.timers[0][0] == 5000
+    app = _state_app()
+    app.state(pk.PortalKeyboard.CLOSED, "the desktop ended the session")
+    _drain(app)
+    assert len(app.banners) == 1 and app.timers == []
+
+
+def test_no_retry_once_typing_is_switched_off():
+    app = _state_app(config={"linux_portal_typing": False})
+    app.state(pk.PortalKeyboard.FAILED, "the desktop did not create a session")
+    _drain(app)
+    assert app.timers == []
+
+
+def test_the_retry_closes_the_failed_session_and_starts_again(monkeypatch):
+    from types import SimpleNamespace
+
+    closed, starts = [], []
+    kb = SimpleNamespace(state=pk.PortalKeyboard.FAILED, close=lambda: closed.append(1))
+    monkeypatch.setattr(pk, "keyboard", lambda: kb)
+    app = _state_app(_start_portal_keyboard=lambda: starts.append(1))
+    app._retry_portal_keyboard()
+    assert closed == [1] and starts == [1]
+    # Switched off and on meanwhile (running again), or switched off: no retry.
+    kb.state = pk.PortalKeyboard.READY
+    app._retry_portal_keyboard()
+    kb.state = pk.PortalKeyboard.FAILED
+    app.config["linux_portal_typing"] = False
+    app._retry_portal_keyboard()
+    assert closed == [1] and starts == [1]
 
 
 
@@ -1125,3 +1212,116 @@ def test_a_stale_start_leaves_the_running_session_alone(monkeypatch, tmp_path):
         assert not kb._stop.is_set()          # the running worker was not cancelled
     finally:
         kb.close()
+
+# ── one desktop dialog at a time ─────────────────────────────────────────────
+
+def _may_ask(monkeypatch, bind):
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    class _Inline:
+        def __init__(self, target, **_k):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(wm.threading, "Thread", _Inline)
+    starts = []
+    kb = SimpleNamespace(start=lambda **k: starts.append(k))
+    app = SimpleNamespace(config={"linux_portal_typing": True}, log=lambda m: None,
+                          app_state=wm.AppState.IDLE, after=lambda ms, fn: None,
+                          _PORTAL_BIND_WAIT_S=wm.WayfinderApp._PORTAL_BIND_WAIT_S)
+    if bind is not None:
+        app._portal_bind_settled = bind
+    wm.WayfinderApp._start_portal_session_when_idle(app, kb, "x11:1", False)
+    return starts[0]["may_ask"], app
+
+
+def test_the_typing_dialog_waits_for_the_shortcut_bind(monkeypatch):
+    import threading
+    import wayfinder_main as wm
+
+    bind = threading.Event()
+    may_ask, app = _may_ask(monkeypatch, bind)
+    assert may_ask() is False             # the shortcut dialog may be up
+    bind.set()
+    assert may_ask() is True
+    app.app_state = wm.AppState.RECORDING
+    assert may_ask() is False             # still never mid-dictation
+
+
+def test_an_unanswered_bind_holds_the_typing_dialog_only_so_long(monkeypatch):
+    import threading
+    import wayfinder_main as wm
+
+    now = [1000.0]
+    monkeypatch.setattr(wm.time, "monotonic", lambda: now[0])
+    may_ask, app = _may_ask(monkeypatch, threading.Event())
+    now[0] += app._PORTAL_BIND_WAIT_S - 1
+    assert may_ask() is False
+    now[0] += 2
+    assert may_ask() is True
+
+
+def test_no_shortcut_portal_means_nothing_to_wait_for(monkeypatch):
+    may_ask, _app = _may_ask(monkeypatch, None)
+    assert may_ask() is True
+
+
+def test_listeners_without_a_portal_bind_release_the_typing_dialog(monkeypatch):
+    """AppImage and source installs (evdev) and X11 (pynput) bind nothing:
+    their typing dialog must not sit out the bind wait."""
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    for backend, settled in (("evdev", True), ("pynput", True), ("unavailable", True),
+                             ("portal", False)):
+        monkeypatch.setattr(wm, "resolve_hotkey_backend", lambda *a, b=backend: b)
+        app = SimpleNamespace(
+            config={}, log=lambda m: None, _game_mode=False,
+            _ensure_socket_listener=lambda: None, _warm_up_transcription=lambda: None,
+            _ensure_gamemode_listener=lambda: None, _flatpak_portal_hotkeys=lambda: True,
+            _hotkey_session_type=lambda: "wayland", _start_portal_listener=lambda: None,
+            _start_pynput_listener=lambda: None, _start_evdev_listener=lambda: None,
+        )
+        wm.WayfinderApp.start_hotkey_listener(app)
+        assert app._portal_bind_settled.is_set() is settled, backend
+
+
+# ── the tour names the dialogs ───────────────────────────────────────────────
+
+def _note(monkeypatch, *, backend="portal", bind_set=False, in_play=True,
+          state=pk.PortalKeyboard.IDLE, token=""):
+    import threading
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+
+    monkeypatch.setattr(wm, "_IS_LINUX", True)
+    monkeypatch.setattr(wm, "IS_MACOS", False)
+    monkeypatch.setattr(wm, "IS_WINDOWS", False)
+    monkeypatch.setattr(pk, "keyboard", lambda: SimpleNamespace(state=state))
+    monkeypatch.setattr(pk, "load_state", lambda *a: {"restore_token": token})
+    bind = threading.Event()
+    if bind_set:
+        bind.set()
+    app = SimpleNamespace(_hotkey_backend=backend, _portal_bind_settled=bind,
+                          _portal_typing_in_play=lambda: in_play)
+    return wm.WayfinderApp._desktop_approval_note(app)
+
+
+def test_the_tour_names_both_desktop_dialogs_on_a_first_flatpak_run(monkeypatch):
+    assert "asks twice" in _note(monkeypatch)
+
+
+def test_the_tour_names_only_the_dialog_still_to_come(monkeypatch):
+    assert "may type in every app" in _note(monkeypatch, bind_set=True)
+    assert "may type in every app" in _note(monkeypatch, backend="evdev")  # AppImage
+    assert "shortcuts" in _note(monkeypatch, token="tok")      # typing already allowed
+    assert "twice" not in _note(monkeypatch, token="tok")
+
+
+def test_the_tour_says_nothing_once_no_dialog_is_pending(monkeypatch):
+    assert _note(monkeypatch, bind_set=True, token="tok") == ""
+    assert _note(monkeypatch, bind_set=True, state=pk.PortalKeyboard.READY) == ""
+    assert _note(monkeypatch, backend="pynput", in_play=False) == ""  # X11
