@@ -42,6 +42,8 @@ scipy>=1.10.0
 
 # Cross-platform hotkey listener
 pynput>=1.7.6
+# Linux Gamer mode reads the game window over X11 (core/linux_game_chat.py)
+python-xlib>=0.33; sys_platform == 'linux'
 
 # Text injection on macOS (pyautogui)
 pyautogui>=0.9.54; sys_platform == 'darwin'
