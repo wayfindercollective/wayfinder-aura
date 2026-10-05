@@ -1,6 +1,100 @@
 # Ship Readiness — Wayfinder Aura
 
-_Last updated: 2026-08-04. Tracks what remains before a paid public release. Complements `SHIPPING.md`, `docs/GO-LIVE-INPUTS.md`, `docs/SHIP-VERIFICATION-RUNBOOK.md`, and the current `docs/PROMOTION-READINESS-CHECKLIST.md`._
+_Last updated: 2026-10-04 (Linux gamer release audit, below). The sections after
+it are the 2026-08-04 pass for v1.1.8-beta.1, kept as history: v1.1.8 has since
+been tagged and released. Tracks what remains before a paid public release.
+Complements `SHIPPING.md`, `docs/GO-LIVE-INPUTS.md`, `docs/SHIP-VERIFICATION-RUNBOOK.md`,
+`docs/LINUX-SHIPPING-PLAN.md`, and the current `docs/PROMOTION-READINESS-CHECKLIST.md`._
+
+---
+
+## Linux gamer release: audit 2026-10-04
+
+Scope: the integration tree (macOS/Windows port plus the Linux gamer work,
+`docs/LINUX-SHIPPING-PLAN.md`) audited for Linux ship readiness, with fixes
+committed on top. No blocker was found in packaging, portal typing, Gamer mode
+or updates: both packages carry everything the new features import, and the
+release asset names match what Get Update selects.
+
+Fixed in the audit (see `CHANGELOG.md` [Unreleased]): resident llama-server
+keyed and `/slots` hidden on Linux; loopback requests bypass HTTP proxies;
+current cloud cleanup models with retired IDs migrated; Gamer mode pastes into
+unlisted games, shows the DAoC note, and its xdotool path is hardened; a dead
+portal session falls back with a log line; the portal paste restores the
+clipboard; Setup and startup recognise the portal and retry its probe; the
+restore token is owner-only from creation; Get Update links are pinned to this
+repository and failed checks are retried; the cancel shortcut never grabs a
+bare Escape; the GameMode pause logs dropped shortcuts; release artifacts prove
+the portal/Gamer-mode imports (`--linux-input-self-test`), a tag fails if the
+AppImage name does not carry its version, and releases publish
+`SHA256SUMS-linux.txt`; the ship preflight checks the RemoteDesktop portal;
+user docs, PRIVACY.md and the CHANGELOG match the code. UI: the Style tab icon
+follows a license change, the recording hint promises Esc only when something
+listens, the pill fits every style badge.
+
+Permissions and first run (`docs/PERMISSIONS-AND-FIRST-RUN.md`): Flatpak
+shortcuts no longer die on desktops without a GlobalShortcuts portal (GNOME
+before 48, Cinnamon, XFCE, MATE, Sway; already broken in 1.1.8): X11 falls back
+to the X11 listener and Wayland names the `--toggle` desktop shortcut; X11
+AppImage/source shortcuts work without the `input` group; a declined or failed
+typing portal shows on the Dictate tab and the switch asks again; Setup no
+longer installs ydotool or raises password prompts where the portal types, and
+prints runnable commands per distro (rpm-ostree, zypper); permission copy names
+the dialogs users see. macOS/Windows: a failed Keychain read no longer deletes
+API keys, a failed Windows paste keeps the dictation on the clipboard,
+`~/Applications` counts as installed.
+
+Automated gate: the CI-equivalent suite (`-m "not ui and not slow and not
+network and not perf"`) passes on a headless node; Ruff's CI classes and
+`scripts/verify_structure.py` pass.
+
+### What still blocks the Linux release
+
+1. **Version and release candidate** (plan item 6). Every version source still
+   says 1.1.8, which is already tagged: `pyproject.toml`,
+   `src/wayfinder/__init__.py`, `scripts/build-appimage.sh` `VERSION`,
+   `packaging/windows/installer.iss`, a new AppStream `<release>`, and the
+   `[Unreleased]` heading. The update check only offers a higher version, so
+   installed 1.1.8 users would never hear of a release still numbered 1.1.8.
+   Then build the candidate from the tag in CI, install it from the bundle, and
+   record hashes and self-tests.
+2. **Manual passes still open** in `docs/LINUX-SHIPPING-PLAN.md`: GNOME 45+,
+   the Steam machine (desktop approval, then Game Mode), Path of Exile 2 under
+   Proton (windowed and fullscreen), DAoC through the portal, and the AppImage
+   on KDE Wayland (portal typing and whether its restore token persists).
+   Also confirm on the Steam machine that an unlisted game now gets a paste
+   (Ctrl+V) rather than typed keys, as the Games tab promises.
+3. **First-run gaps from the permissions pass** (`docs/PERMISSIONS-AND-FIRST-RUN.md`):
+   the AppImage carries no speech model and its tour has no model step (users
+   must use Finish Setup on the Dictate tab, as the README now says), and the
+   two Flatpak dialogs are neither sequenced nor announced. Decide before the
+   release whether to ship these as known issues.
+4. **Server and storefront items outside this repo**: the feedback endpoint
+   (`docs/LINUX-FOLLOWUPS-FROM-MACOS.md` 5.5) and the store screenshots, which
+   still show Super+F2 and "Minimal" (recapture with
+   `scripts/capture_store_screenshots.py`).
+
+### Known limitations to decide or schedule (not blockers)
+
+- Portal typing reads only the first layout of a multi-layout keymap: with us+de
+  and de active, key codes produce the first layout's letters.
+- A layout-less character makes the whole dictation a Ctrl+V paste, which most
+  terminals ignore (they paste on Ctrl+Shift+V).
+- Cancel works only while recording; Shift+Esc after the stop press does not
+  stop typing.
+- The GameMode pause (AppImage/source) still ignores shortcuts while a
+  GameMode game runs, which conflicts with Gamer mode; now logged, policy open.
+- Get Update hands the browser an unverified file (no in-app checksum or
+  signature check), and Flathub installs are not yet told apart from bundle
+  installs.
+- Windows still runs llama-server without a key.
+- Linux renders the Mac shader ribbon and runs the recording ribbon at 30 fps
+  on desktops (deliberate in code, now in the CHANGELOG); CLAUDE.md rules 1
+  and 9 still say 15 fps active. Decide, then measure focused-idle CPU at
+  HiDPI (`top -p $(pgrep -f wayfinder)`, rule 1 budget 2%).
+- macOS: bare permission prompts for returning users at launch, no hotkey
+  recovery after a late Accessibility grant. Windows: unsigned installer
+  (public-release blocker), a blocked microphone dead-ends the tour.
 
 ---
 
