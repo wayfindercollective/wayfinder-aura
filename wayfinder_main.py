@@ -12636,8 +12636,10 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             return
         # Characters the keyboard layout lacks are pasted: our Tk window owns
-        # the clipboard (the Flatpak has no clipboard tools).
-        set_portal_clipboard_hooks(self._set_clipboard_from_worker)
+        # the clipboard (the Flatpak has no clipboard tools). The reader lets
+        # the paste put the user's clipboard back afterwards.
+        set_portal_clipboard_hooks(self._set_clipboard_from_worker,
+                                   self._get_clipboard_from_worker)
         try:
             parent = f"x11:{int(self.wm_frame(), 16):x}"
         except Exception:
@@ -12648,10 +12650,18 @@ class WayfinderApp(ctk.CTk):
             self._portal_listener_added = True
 
         def _go():
-            if not portal_keyboard.portal_keyboard_offered():
+            # At login the portal may still be starting (D-Bus activation):
+            # ask a few more times before settling for xdotool.
+            for delay in (0, 3, 6, 12):
+                time.sleep(delay)
+                if portal_keyboard.portal_keyboard_offered():
+                    break
+            else:
                 self.log("⌨️ This desktop offers no remote-control keyboard: "
                          "Aura types with xdotool (X11 apps and games only)")
                 return
+            if not self.config.get("linux_portal_typing", True):
+                return  # turned off while waiting
             kb.start(parent_window=parent, ask_again=ask_again, log=self.log)
 
         threading.Thread(target=_go, daemon=True, name="wayfinder-portal-start").start()
@@ -12665,9 +12675,11 @@ class WayfinderApp(ctk.CTk):
                      "Wayland and X11)")
         elif state == _PK.DECLINED:
             self.log("⌨️ Desktop portal typing not allowed: Aura types into X11 apps "
-                     "and games only. Turn on 'Type into every app' in Settings to ask again.")
+                     "and games only. Turn 'Type into every app' off and on in Settings "
+                     "to ask again.")
         elif state == _PK.FAILED:
-            self.log(f"⚠️ Desktop portal typing unavailable ({detail}): using xdotool")
+            self.log(f"⚠️ Desktop portal typing unavailable ({detail}): using the other "
+                     "typing tools; turn 'Type into every app' off and on to retry")
         elif state == _PK.CLOSED:
             self.log(f"⚠️ Desktop portal typing ended ({detail}): using xdotool until "
                      "Aura restarts")
@@ -23569,6 +23581,27 @@ class WayfinderApp(ctk.CTk):
             return False
         done.wait(timeout)
         return ok[0]
+
+    def _get_clipboard_from_worker(self, timeout: float = 1.0) -> "str | None":
+        """The clipboard's text, read on the Tk thread (None if empty or not
+        text): what the portal paste puts back after Ctrl+V."""
+        done = threading.Event()
+        value = [None]
+
+        def _get():
+            try:
+                value[0] = self.clipboard_get()
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        try:
+            self.after(0, _get)
+        except Exception:
+            return None
+        done.wait(timeout)
+        return value[0] if isinstance(value[0], str) else None
 
     def _inject_into_game_chat(self, text: str, gen=None) -> bool:
         """Gamer mode: dictate into a supported game's chat. False = not a game.

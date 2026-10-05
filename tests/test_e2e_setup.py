@@ -191,6 +191,13 @@ class TestCheckYdotool:
     # get_text_injector() (wtype on Wayland / xdotool on X11 / ydotool fallback). Mock that
     # to pin the backend under test, rather than the old ydotool-only shutil.which mocks.
 
+    def test_portal_backend_is_ready(self):
+        """Approved desktop portal -> ready; never 'No text injection backend'."""
+        with patch("wayfinder.utils.platform.get_text_injector", return_value="portal"):
+            status = check_ydotool()
+        assert status.installed is True
+        assert "portal" in status.detail
+
     def test_ydotool_backend_with_daemon_running(self):
         """ydotool backend + a LIVE daemon (per check_ydotool_ready) -> installed."""
         with patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \

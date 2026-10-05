@@ -667,3 +667,76 @@ def test_focus_inside_the_game_window_is_left_alone(monkeypatch):
     assert gc.ensure_game_focus(0x6200001) is False
     assert not game.focused
 
+
+# ── the app wiring ───────────────────────────────────────────────────────────
+
+class _TkLike:
+    def __init__(self, clipboard=None, error=None):
+        self._clipboard, self._error = clipboard, error
+
+    def after(self, _ms, fn):
+        fn()
+
+    def clipboard_get(self):
+        if self._error:
+            raise self._error
+        return self._clipboard
+
+
+def test_app_clipboard_reader_runs_on_the_tk_side():
+    import wayfinder_main as wm
+    read = wm.WayfinderApp._get_clipboard_from_worker
+    assert read(_TkLike("https://example.org")) == "https://example.org"
+    assert read(_TkLike(error=RuntimeError("CLIPBOARD selection doesn't exist"))) is None
+
+
+def _start_portal(monkeypatch, offered):
+    """Run _start_portal_keyboard with the start thread inline and no waits."""
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+    import wayfinder.core.injector as injector
+
+    hooks, starts, logs = [], [], []
+    kb = SimpleNamespace(on_change=lambda cb: None,
+                         start=lambda **k: starts.append(k))
+    answers = iter(offered)
+    monkeypatch.setattr(wm, "_IS_LINUX", True)
+    monkeypatch.setattr(wm, "IS_MACOS", False)
+    monkeypatch.setattr(wm, "IS_WINDOWS", False)
+    monkeypatch.setattr(pk, "host_is_wayland_desktop", lambda: True)
+    monkeypatch.setattr(pk, "keyboard", lambda: kb)
+    monkeypatch.setattr(pk, "portal_keyboard_offered", lambda: next(answers))
+    monkeypatch.setattr(injector, "set_portal_clipboard_hooks",
+                        lambda write, read=None: hooks.append((write, read)))
+    monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
+
+    class _Inline:
+        def __init__(self, target, **_k):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(wm.threading, "Thread", _Inline)
+    app = SimpleNamespace(config={"linux_portal_typing": True}, log=logs.append,
+                          wm_frame=lambda: "0x1", _portal_listener_added=True,
+                          _set_clipboard_from_worker=lambda t: True,
+                          _get_clipboard_from_worker=lambda: "old")
+    wm.WayfinderApp._start_portal_keyboard(app)
+    return hooks, starts, logs
+
+
+def test_app_wires_both_clipboard_hooks_so_the_paste_restores(monkeypatch):
+    hooks, starts, _ = _start_portal(monkeypatch, [True])
+    assert len(hooks) == 1 and hooks[0][1] is not None
+    assert len(starts) == 1
+
+
+def test_a_portal_not_up_yet_at_login_is_asked_again(monkeypatch):
+    _, starts, logs = _start_portal(monkeypatch, [False, False, True])
+    assert len(starts) == 1 and not logs
+
+
+def test_a_desktop_without_the_portal_settles_for_xdotool(monkeypatch):
+    _, starts, logs = _start_portal(monkeypatch, [False] * 4)
+    assert starts == [] and "no remote-control keyboard" in logs[0]

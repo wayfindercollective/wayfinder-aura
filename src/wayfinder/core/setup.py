@@ -196,6 +196,8 @@ def check_text_injection() -> DependencyStatus:
 
     from wayfinder.utils.platform import get_text_injector, is_wayland
     tool = get_text_injector()
+    if tool == "portal":
+        return DependencyStatus(True, detail="desktop portal (types into every app)")
     if tool == "xdotool":
         return DependencyStatus(True, detail="xdotool (X11)")
     if tool == "wtype":
