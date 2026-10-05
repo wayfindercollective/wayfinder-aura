@@ -966,12 +966,16 @@ def test_a_decline_is_shown_and_the_switch_turns_off(monkeypatch, tmp_path):
     assert "declined" in banners[0] and "Type into every app" in banners[0]
 
 
-def _state_app(**extra):
-    """A stand-in app for the portal state handler, retry plumbing included."""
+def _state_app(monkeypatch, **extra):
+    """A stand-in app for the portal state handler, retry plumbing included,
+    with a fake keyboard (``app.kb``) whose state follows each reported change."""
     from queue import Queue
     from types import SimpleNamespace
     import wayfinder_main as wm
 
+    kb = SimpleNamespace(state=pk.PortalKeyboard.IDLE, closes=0)
+    kb.close = lambda: setattr(kb, "closes", kb.closes + 1)
+    monkeypatch.setattr(pk, "keyboard", lambda: kb)
     W = wm.WayfinderApp
     app = SimpleNamespace(config={}, event_queue=Queue(), logs=[], banners=[], timers=[],
                           starts=[], _PORTAL_RETRY_DELAYS_S=W._PORTAL_RETRY_DELAYS_S,
@@ -983,7 +987,13 @@ def _state_app(**extra):
     for name in ("_portal_session_lost", "_reset_portal_retries", "_schedule_portal_retry",
                  "_retry_portal_keyboard", "_after_portal_declined"):
         setattr(app, name, getattr(W, name).__get__(app))
-    app.state = lambda state, detail: W._on_portal_keyboard_state(app, state, detail)
+    app.kb = kb
+
+    def report(state, detail):
+        kb.state = state
+        W._on_portal_keyboard_state(app, state, detail)
+
+    app.state = report
     for key, value in extra.items():
         setattr(app, key, value)
     return app
@@ -994,19 +1004,11 @@ def _drain(app):
         app.event_queue.get_nowait()[1]()
 
 
-def _failed_keyboard(monkeypatch):
-    from types import SimpleNamespace
-
-    kb = SimpleNamespace(state=pk.PortalKeyboard.FAILED, closes=0)
-    kb.close = lambda: setattr(kb, "closes", kb.closes + 1)
-    monkeypatch.setattr(pk, "keyboard", lambda: kb)
-    return kb
-
-
 def test_a_failed_or_closed_session_is_shown(monkeypatch):
     # Retries used up (FAILED) and a session the desktop ended (CLOSED).
-    app = _state_app(_portal_retries=3)
+    app = _state_app(monkeypatch, _portal_retries=3)
     app.state(pk.PortalKeyboard.FAILED, "gone")
+    _drain(app)
     app.state(pk.PortalKeyboard.CLOSED, "the desktop ended the session")
     _drain(app)
     assert len(app.banners) == 2 and all("Type into every app" in b for b in app.banners)
@@ -1014,8 +1016,7 @@ def test_a_failed_or_closed_session_is_shown(monkeypatch):
 
 
 def test_a_session_that_fails_to_start_is_tried_again_before_the_banner(monkeypatch):
-    _failed_keyboard(monkeypatch)
-    app = _state_app()
+    app = _state_app(monkeypatch)
     for attempt, delay in enumerate((5, 30, 120)):
         app.state(pk.PortalKeyboard.FAILED, "the desktop did not create a session")
         _drain(app)
@@ -1028,18 +1029,19 @@ def test_a_session_that_fails_to_start_is_tried_again_before_the_banner(monkeypa
     assert len(app.banners) == 1 and len(app.timers) == 3
 
 
-def test_one_retry_waits_at_a_time():
+def test_one_retry_waits_at_a_time(monkeypatch):
     # A key failure and then the portal exiting: one timer, not two.
-    app = _state_app()
+    app = _state_app(monkeypatch)
     app.state(pk.PortalKeyboard.FAILED, "keys stopped reaching the desktop")
+    _drain(app)
     app.state(pk.PortalKeyboard.CLOSED, "the portal exited")
     _drain(app)
     assert len(app.timers) == 1 and app.banners == []
 
 
 def test_a_stale_retry_cannot_reopen_a_revoked_session(monkeypatch):
-    kb = _failed_keyboard(monkeypatch)
-    app = _state_app()
+    app = _state_app(monkeypatch)
+    kb = app.kb
     app.state(pk.PortalKeyboard.FAILED, "keys stopped reaching the desktop")
     _drain(app)
     stale = app.timers[0][1]
@@ -1049,12 +1051,12 @@ def test_a_stale_retry_cannot_reopen_a_revoked_session(monkeypatch):
     _drain(app)
     stale()
     assert app.starts == [] and kb.closes == 0 and len(app.banners) == 1
+    assert kb.state == pk.PortalKeyboard.CLOSED
 
 
 def test_a_decline_voids_a_waiting_retry(monkeypatch):
-    _failed_keyboard(monkeypatch)
     monkeypatch.setattr("wayfinder_main.save_config", lambda cfg: None)
-    app = _state_app(_portal_typing_var=None)
+    app = _state_app(monkeypatch, _portal_typing_var=None)
     app.state(pk.PortalKeyboard.FAILED, "the desktop did not create a session")
     _drain(app)
     app._after_portal_declined()
@@ -1062,8 +1064,8 @@ def test_a_decline_voids_a_waiting_retry(monkeypatch):
     assert app.starts == []
 
 
-def test_a_ready_session_earns_fresh_retries():
-    app = _state_app(_portal_retries=3)
+def test_a_ready_session_earns_fresh_retries(monkeypatch):
+    app = _state_app(monkeypatch, _portal_retries=3)
     app.state(pk.PortalKeyboard.READY, "")
     _drain(app)
     app.state(pk.PortalKeyboard.FAILED, "keys stopped reaching the desktop")
@@ -1071,36 +1073,37 @@ def test_a_ready_session_earns_fresh_retries():
     assert app.banners == [] and app.timers[0][0] == 5000
 
 
-def test_failures_a_retry_cannot_fix_go_straight_to_the_banner():
+def test_failures_a_retry_cannot_fix_go_straight_to_the_banner(monkeypatch):
     for detail in ("PyGObject unavailable", "the desktop granted no keyboard",
                    "the desktop answered 2"):
-        app = _state_app()
+        app = _state_app(monkeypatch)
         app.state(pk.PortalKeyboard.FAILED, detail)
         _drain(app)
         assert len(app.banners) == 1 and app.timers == [], detail
 
 
-def test_a_restarted_portal_is_rejoined_but_a_revoked_session_is_not():
-    app = _state_app()
+def test_a_restarted_portal_is_rejoined_but_a_revoked_session_is_not(monkeypatch):
+    app = _state_app(monkeypatch)
     app.state(pk.PortalKeyboard.CLOSED, "the portal restarted")
     _drain(app)
     assert app.banners == [] and app.timers[0][0] == 5000
-    app = _state_app()
+    app = _state_app(monkeypatch)
     app.state(pk.PortalKeyboard.CLOSED, "the desktop ended the session")
     _drain(app)
     assert len(app.banners) == 1 and app.timers == []
 
 
-def test_no_retry_once_typing_is_switched_off():
-    app = _state_app(config={"linux_portal_typing": False})
+def test_no_retry_once_typing_is_switched_off(monkeypatch):
+    app = _state_app(monkeypatch, config={"linux_portal_typing": False})
     app.state(pk.PortalKeyboard.FAILED, "the desktop did not create a session")
     _drain(app)
     assert app.timers == []
 
 
 def test_the_retry_closes_the_failed_session_and_starts_again(monkeypatch):
-    kb = _failed_keyboard(monkeypatch)
-    app = _state_app()
+    app = _state_app(monkeypatch)
+    kb = app.kb
+    kb.state = pk.PortalKeyboard.FAILED
     app._retry_portal_keyboard(0)
     assert kb.closes == 1 and app.starts == [{"retry": True}]
     # Running again (switched off and on meanwhile), or switched off: no retry.
@@ -1134,11 +1137,11 @@ def test_a_retry_that_finds_no_portal_keeps_counting_down(monkeypatch):
     monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
     monkeypatch.setattr(pk, "host_is_wayland_desktop", lambda: True)
     monkeypatch.setattr(pk, "portal_keyboard_offered", lambda: False)
-    monkeypatch.setattr(pk, "keyboard", lambda: SimpleNamespace(on_change=lambda cb: None))
     monkeypatch.setattr(injector, "set_portal_clipboard_hooks", lambda *a, **k: None)
-    app = _state_app(_portal_retries=1, _portal_listener_added=True, wm_frame=lambda: "0x1",
-                     _set_clipboard_from_worker=None, _get_clipboard_from_worker=None,
-                     _restore_clipboard_from_worker=None)
+    app = _state_app(monkeypatch, _portal_retries=1, _portal_listener_added=True,
+                     wm_frame=lambda: "0x1", _set_clipboard_from_worker=None,
+                     _get_clipboard_from_worker=None, _restore_clipboard_from_worker=None)
+    app.kb.state = pk.PortalKeyboard.CLOSED        # the portal exited; this is the retry
     wm.WayfinderApp._start_portal_keyboard(app, retry=True)
     _drain(app)
     assert app.timers and app.timers[0][0] == 30_000      # the next retry, not silence
@@ -1148,6 +1151,58 @@ def test_a_retry_that_finds_no_portal_keeps_counting_down(monkeypatch):
     wm.WayfinderApp._start_portal_keyboard(app, retry=True)
     _drain(app)
     assert len(app.banners) == 1                           # retries used up: the banner
+
+
+def _probe_retry(monkeypatch, app):
+    """Run a retry's probes with no portal answering; return the verdict callback."""
+    import wayfinder.core.injector as injector
+    import wayfinder_main as wm
+
+    class _Inline:
+        def __init__(self, target, **_k):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(wm, "_IS_LINUX", True)
+    monkeypatch.setattr(wm, "IS_MACOS", False)
+    monkeypatch.setattr(wm, "IS_WINDOWS", False)
+    monkeypatch.setattr(wm.threading, "Thread", _Inline)
+    monkeypatch.setattr(wm.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(pk, "host_is_wayland_desktop", lambda: True)
+    monkeypatch.setattr(pk, "portal_keyboard_offered", lambda: False)
+    monkeypatch.setattr(injector, "set_portal_clipboard_hooks", lambda *a, **k: None)
+    for key, value in dict(_portal_listener_added=True, wm_frame=lambda: "0x1",
+                           _set_clipboard_from_worker=None, _get_clipboard_from_worker=None,
+                           _restore_clipboard_from_worker=None).items():
+        setattr(app, key, value)
+    wm.WayfinderApp._start_portal_keyboard(app, retry=True)
+    return app.event_queue.get_nowait()[1]
+
+
+def test_a_probe_verdict_from_before_a_toggle_is_dropped(monkeypatch):
+    app = _state_app(monkeypatch, _portal_retries=3)
+    app.kb.state = pk.PortalKeyboard.FAILED
+    verdict = _probe_retry(monkeypatch, app)
+    app._reset_portal_retries()                    # switched off and on meanwhile
+    verdict()
+    assert app.banners == [] and app.timers == []
+    verdict = _probe_retry(monkeypatch, app)
+    app.config["linux_portal_typing"] = False      # or just switched off
+    verdict()
+    assert app.banners == [] and app.timers == []
+
+
+def test_a_loss_reported_after_a_newer_session_took_over_is_dropped(monkeypatch):
+    import wayfinder_main as wm
+
+    app = _state_app(monkeypatch)
+    wm.WayfinderApp._on_portal_keyboard_state(app, pk.PortalKeyboard.FAILED,
+                                              "keys stopped reaching the desktop")
+    app.kb.state = pk.PortalKeyboard.READY         # a new session came up first
+    _drain(app)
+    assert app.timers == [] and app.banners == []
 
 
 def test_warm_mic_time_keeps_an_explicit_zero():

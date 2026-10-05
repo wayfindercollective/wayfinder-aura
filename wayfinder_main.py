@@ -12992,6 +12992,9 @@ class WayfinderApp(ctk.CTk):
         if not getattr(self, "_portal_listener_added", False):
             kb.on_change(self._on_portal_keyboard_state)
             self._portal_listener_added = True
+        # Seen on the Tk thread: a toggle or a working session while the probes
+        # below run makes their verdict stale.
+        gen = getattr(self, "_portal_retry_gen", 0)
 
         def _go():
             # At login the portal may still be starting (D-Bus activation):
@@ -13007,7 +13010,7 @@ class WayfinderApp(ctk.CTk):
                     # retries go on, then the banner.
                     self.event_queue.put((EventType.UI_CALLBACK, lambda: self._portal_session_lost(
                         portal_keyboard.PortalKeyboard.FAILED,
-                        "the remote-control portal is not answering")))
+                        "the remote-control portal is not answering", gen=gen)))
                     return
                 self._portal_not_offered = True
                 try:
@@ -13126,11 +13129,25 @@ class WayfinderApp(ctk.CTk):
             self.event_queue.put((EventType.UI_CALLBACK,
                                   lambda: self._portal_session_lost(state, detail)))
 
-    def _portal_session_lost(self, state: str, detail: str) -> None:
+    def _portal_session_lost(self, state: str, detail: str, gen: int | None = None) -> None:
         """Tk thread: a failed or ended typing session is retried (bounded) when a
-        retry can help; otherwise, or once the retries are used up, the banner."""
-        from wayfinder.core.portal_keyboard import PortalKeyboard as _PK
+        retry can help; otherwise, or once the retries are used up, the banner.
 
+        Stale reports are dropped: a session state that is no longer the
+        keyboard's (a newer session took over before this ran), or a retry
+        probe's verdict (``gen``) from before a toggle or a working session."""
+        from wayfinder.core.portal_keyboard import PortalKeyboard as _PK, keyboard
+
+        if gen is not None:
+            if (gen != getattr(self, "_portal_retry_gen", 0)
+                    or not self.config.get("linux_portal_typing", True)):
+                return
+        else:
+            try:
+                if keyboard().state != state:
+                    return
+            except Exception:
+                pass
         if state == _PK.FAILED:
             if self._portal_failure_retryable(detail) and self._schedule_portal_retry(detail):
                 return
