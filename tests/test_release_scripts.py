@@ -13,6 +13,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -489,11 +490,74 @@ class TestMacReleaseWatcher:
         ]
         assert watcher.releases_missing_a_dmg(releases, self.NOW) == ["v1.2.1-beta.1"]
 
+    @staticmethod
+    def _run(tag, status="in_progress", created="2026-10-10T09:05:00Z"):
+        return {"head_branch": tag, "status": status, "created_at": created}
+
+    def test_builds_ahead_for_tags_whose_release_build_is_running(self):
+        runs = [
+            self._run("v1.2.0-beta.7"),
+            self._run("v1.2.0-beta.6", status="completed"),
+            self._run("main"),                                   # a dispatched test build
+            self._run("v1.2.0-beta.8", status="queued", created="2026-10-11T09:05:00Z"),
+            self._run("v1.2.0-beta.7", created="2026-10-10T08:00:00Z"),  # its retry
+            self._run("v1.2.0-beta.5"),
+        ]
+        releases = [self._release("v1.2.0-beta.5",
+                                  assets=["Wayfinder_Aura-1.2.0-beta.5-macOS-arm64.dmg"])]
+        assert watcher.tags_being_released(runs, releases) == ["v1.2.0-beta.8", "v1.2.0-beta.7"]
+
+    def test_a_dmg_built_ahead_is_checked_then_attached_and_removed(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(watcher, "DMG_CACHE", tmp_path)
+        dmg = watcher.built_ahead("v1.2.0-beta.7")
+        dmg.write_bytes(b"dmg")
+        calls, results = [], {"spctl": 0, "stapler": 0, "gh": 1}
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            key = "spctl" if "spctl" in cmd[0] else "stapler" if "stapler" in cmd else "gh"
+            return SimpleNamespace(returncode=results[key], stdout="", stderr="")
+
+        monkeypatch.setattr(watcher.subprocess, "run", run)
+        assert watcher.attach_built_ahead("v1.2.0-beta.7", {}) is False  # no release yet
+        assert dmg.exists()
+        results["gh"] = 0
+        assert watcher.attach_built_ahead("v1.2.0-beta.7", {}) is True
+        assert not dmg.exists()
+        assert calls[-1][:3] == ["gh", "release", "upload"] and "--clobber" in calls[-1]
+
+    def test_a_dmg_built_ahead_that_fails_its_checks_is_discarded(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(watcher, "DMG_CACHE", tmp_path)
+        dmg = watcher.built_ahead("v1.2.0-beta.7")
+        dmg.write_bytes(b"dmg")
+        uploads = []
+        monkeypatch.setattr(watcher.subprocess, "run", lambda cmd, **k: (
+            uploads.append(cmd) if cmd[0] == "gh" else None)
+            or SimpleNamespace(returncode=1 if "stapler" in cmd else 0))
+        assert watcher.attach_built_ahead("v1.2.0-beta.7", {}) is False
+        assert not dmg.exists() and uploads == []
+
+    def test_old_dmgs_built_ahead_are_pruned(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(watcher, "DMG_CACHE", tmp_path)
+        old, new = tmp_path / "a.dmg", tmp_path / "b.dmg"
+        old.write_bytes(b""), new.write_bytes(b"")
+        os.utime(old, (0, 0))
+        watcher.prune_built_ahead(now=watcher.WINDOW_DAYS * 86400 + 10)
+        assert not old.exists() and new.exists()
+
+    def test_build_only_mode_needs_no_release_and_never_uploads(self):
+        text = (REPO / "scripts" / "release" / "attach_mac_dmg.sh").read_text(encoding="utf-8")
+        assert 'DMG_ONLY="${AURA_DMG_ONLY:-}"' in text
+        build_only = text.index('if [ -n "$DMG_ONLY" ]; then\n  mkdir -p')
+        assert text.index("exit 0", build_only) < text.index('gh release upload "$TAG"')
+        assert 'if [ -z "$DMG_ONLY" ]; then\n  gh release view' in text
+
     def test_installer_runs_it_in_the_background_lane(self):
         text = (REPO / "scripts" / "release" / "install_mac_release_watcher.sh").read_text(encoding="utf-8")
         assert "<key>ProcessType</key><string>Background</string>" in text
         assert "<key>LowPriorityIO</key><true/>" in text
         assert "<key>ExitTimeOut</key><integer>60</integer>" in text  # > stop_group's 40 + 10 s
+        assert "<key>StartInterval</key><integer>600</integer>" in text  # every 10 minutes
         source = (REPO / "scripts" / "release" / "mac_release_watcher.py").read_text(encoding="utf-8")
         assert '"/usr/sbin/taskpolicy", "-b"' in source
 
@@ -774,6 +838,7 @@ import signal, sys, time
 sys.path.insert(0, {str(REPO / "scripts" / "release")!r})
 import mac_release_watcher as w
 from pathlib import Path
+from types import SimpleNamespace
 w.HERE = Path({str(tmp_path)!r}); w.HOLD = Path({str(tmp_path / "hold")!r})
 w.host_reading = lambda: {_reading()!r}
 w.model_reserve = lambda reading: 125 * 1024 ** 3
