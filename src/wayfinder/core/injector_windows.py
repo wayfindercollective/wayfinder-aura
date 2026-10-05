@@ -505,16 +505,16 @@ def inject_text_paste_windows(text: str) -> None:
     previous = _clipboard_get_windows()
     if not _clipboard_set_windows(text, transient=True):
         raise InjectionError("Could not write to the Windows clipboard for paste.")
-    try:
-        time.sleep(0.03)
-        _press_keys([VK_CONTROL, VK_V])
-    finally:
-        # Best-effort restore, only if the clipboard still holds our text
-        # (the user may have copied something new in the meantime).
-        if previous is not None:
-            try:
-                time.sleep(0.08)
-                if _clipboard_get_windows() == text:
-                    _clipboard_set_windows(previous, transient=True)
-            except Exception:
-                pass
+    time.sleep(0.03)
+    # A failed paste raises here and leaves the dictation on the clipboard:
+    # the error tells the user to press Ctrl+V themselves (as on macOS).
+    _press_keys([VK_CONTROL, VK_V])
+    # Best-effort restore, only if the clipboard still holds our text
+    # (the user may have copied something new in the meantime).
+    if previous is not None:
+        try:
+            time.sleep(0.08)
+            if _clipboard_get_windows() == text:
+                _clipboard_set_windows(previous, transient=True)
+        except Exception:
+            pass

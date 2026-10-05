@@ -238,6 +238,30 @@ def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
     assert sets == [("dictated words", True), ("user's own clipboard", True)]
 
 
+def test_a_failed_paste_leaves_the_dictation_on_the_clipboard(monkeypatch):
+    """The error tells the user to press Ctrl+V themselves; restoring the old
+    clipboard after a failed paste made that paste the wrong text."""
+    from wayfinder.core import injector_windows as w
+    from wayfinder.core.injector import InjectionError
+
+    clipboard = {"text": "user's own clipboard"}
+    monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(w, "_refuse_own_window", lambda text: None)
+    monkeypatch.setattr(w, "require_modifier_release_windows", lambda: None)
+    monkeypatch.setattr(w.time, "sleep", lambda s: None)
+    monkeypatch.setattr(w, "_clipboard_get_windows", lambda: clipboard["text"])
+    monkeypatch.setattr(w, "_clipboard_set_windows",
+                        lambda text, transient=False: clipboard.update(text=text) or True)
+
+    def refused(_keys):
+        raise InjectionError("SendInput injected 0/4 events")
+
+    monkeypatch.setattr(w, "_press_keys", refused)
+    with pytest.raises(InjectionError):
+        w.inject_text_paste_windows("dictated words")
+    assert clipboard["text"] == "dictated words"
+
+
 def test_active_window_uses_the_foreground_hwnd_on_windows(monkeypatch):
     from wayfinder.core import injector
 
