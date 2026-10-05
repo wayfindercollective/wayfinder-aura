@@ -215,8 +215,9 @@ most machines, and hotkeys are fully rebindable in Settings.
 
 ### Dictation defaults and safety
 
-- **Post-processing starts off on new installs.** Raw transcription is the
-  lowest-latency default. Existing installs retain their saved cleanup choice.
+- **Cleanup starts on Normal for new installs.** Normal removes um/uh and
+  doubled small words instantly, with no model, so it adds no wait. Existing
+  installs retain their saved cleanup choice.
 - **Ultra Chunk Processing defaults to Auto.** Recordings under 30 seconds stay
   one-shot; longer recordings are chunked and fully assembled before cleanup,
   injection, or Auto-Enter. Free remains one-shot. Off and On remain available.
