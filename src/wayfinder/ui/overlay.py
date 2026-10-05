@@ -1704,15 +1704,23 @@ class GlassmorphicOverlay(QWidget):
             except Exception:
                 pass
     
+    def _static_content_width(self) -> int:
+        """The widest pill any state can draw with any style badge. The window
+        is sized once (KWin ghost frames), so a later style switch must fit:
+        sized for "Pro", the six-letter "Normal" badge clipped the pill."""
+        return max(
+            self._calculate_target_width(lbl, style)
+            for lbl in STATE_LABELS.values()
+            for style in STYLE_PALETTES
+        )
+
     def _update_size_full(self):
         """Update both widget width AND height (called when scale changes)."""
         if getattr(self, "_static_width", None):
             # Static-geometry mode: recompute the max-width envelope for the new
             # scale (a rare, user-initiated settings change — the one sanctioned
             # resize+re-place after boot).
-            content_width = max(
-                self._calculate_target_width(lbl) for lbl in STATE_LABELS.values()
-            )
+            content_width = self._static_content_width()
             self._static_width = content_width + (self.glow_margin * 2)
             width = self._static_width
         else:
@@ -1741,12 +1749,13 @@ class GlassmorphicOverlay(QWidget):
         """
         self.setWindowOpacity(opacity)
     
-    def _calculate_target_width(self, text: str) -> int:
-        """Calculate required width for text and wave."""
+    def _calculate_target_width(self, text: str, style: Optional[str] = None) -> int:
+        """Calculate required width for text and wave (with ``style``'s badge,
+        default the current style)."""
         from PyQt6.QtGui import QFontMetrics
         
         # Space for integrated style label + divider (dynamic based on label text)
-        style_label_width = self._get_style_label_width() + int(4 * self._scale)
+        style_label_width = self._get_style_label_width(style) + int(4 * self._scale)
         
         if not text:
             # READY state: compact pill with style label + centered wave.
@@ -2475,10 +2484,10 @@ class GlassmorphicOverlay(QWidget):
         
         painter.restore()
     
-    def _get_style_label_width(self) -> int:
-        """Calculate width needed for the current style label."""
+    def _get_style_label_width(self, style: Optional[str] = None) -> int:
+        """Calculate width needed for ``style``'s label (default: the current style)."""
         from PyQt6.QtGui import QFontMetrics
-        palette = STYLE_PALETTES.get(self._current_style, STYLE_PALETTES["professional"])
+        palette = STYLE_PALETTES.get(style or self._current_style, STYLE_PALETTES["professional"])
         label_font = QFont(self._font_family, int(9 * self._scale))
         label_font.setWeight(QFont.Weight.Medium)
         fm = QFontMetrics(label_font)
@@ -2649,9 +2658,7 @@ def run_overlay():
         # resize/move it again — the pill paints centered inside (see
         # _update_size / paintEvent). Per-state window resizes + KWin re-places
         # stranded ghost frames on KWin Wayland ("two overlays stacked").
-        content_width = max(
-            overlay._calculate_target_width(lbl) for lbl in STATE_LABELS.values()
-        )
+        content_width = overlay._static_content_width()
         final_width = content_width + (overlay.glow_margin * 2)
         final_height = overlay.widget_height
         overlay._static_width = final_width
