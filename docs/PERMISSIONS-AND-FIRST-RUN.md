@@ -25,14 +25,21 @@ autostart on Linux except the Steam Deck service.
 1. At launch the global-shortcut binding is requested (KDE, GNOME 48+). On
    desktops without the portal Aura picks the X11 listener (X11) or logs the
    `--toggle` advice (Wayland) instead of retrying a portal that cannot work.
-2. About a second later the desktop asks whether Aura may control input
-   devices (Wayland KDE/GNOME). Both dialogs can be on screen together; nothing
-   in the tour announces them yet (open item).
+2. Once the desktop has answered the shortcut request (Aura waits at most a
+   minute), it asks whether Aura may control input devices (Wayland
+   KDE/GNOME). The two dialogs never share the screen, and the tour's first
+   card names the ones still to come.
 3. Setup finds everything bundled (engines, Base model) and hands over to the
    tour: mic test, shortcut, a test dictation into the card.
 
 **AppImage** (no Setup, tour only):
-1. Adds a menu entry. On Wayland the typing dialog appears as above.
+1. Adds a menu entry (`io.wayfindercollective.WayfinderAura.desktop`). On
+   Wayland the typing dialog appears as above, and the tour names it. The
+   typing session first registers that ID with the portal
+   (`org.freedesktop.host.portal.Registry`, xdg-desktop-portal 1.19+), so the
+   desktop knows which app asks even when the AppImage was started from a file
+   manager. Checked against xdg-desktop-portal 1.22.1; an ID without an
+   installed desktop file is refused, so source runs do not register.
 2. Tour. The AppImage carries no speech model, so the tour's first step after
    the mic test downloads the free Base model (as on macOS and Windows); a user
    who skipped the tour gets the model panel at the next launch.
@@ -46,7 +53,8 @@ Bazzite/Silverblue, zypper on openSUSE), builds whisper.cpp, then the tour.
 | What happened | What Aura shows | How to recover |
 |---|---|---|
 | Typing dialog declined (Esc counts) | Dictate-tab banner; the "Type into every app" switch turns off; typing reaches X11 apps only | Settings → System → Type into every app: turn it on, the desktop asks again |
-| Typing session failed or ended by the desktop | Dictate-tab banner | Turn the switch off and on |
+| Typing session failed to start, or a restarting portal dropped it | tried again after 5, 30 and 120 s; then the Dictate-tab banner | Turn the switch off and on |
+| Typing session ended by the desktop (or revoked by the user) | Dictate-tab banner | Turn the switch off and on |
 | Portal stops taking keys mid-session | log line, then the normal tools (ydotool/wtype/xdotool) type | Turn the switch off and on |
 | No global-shortcut portal (Wayland) | activity log names the `--toggle` command | bind a desktop shortcut to it |
 | No `input` group (AppImage/source, Wayland) | activity log | `usermod -aG input $USER` as root, log out and in |
@@ -85,18 +93,18 @@ detected before pasting.
 
 ## Open items
 
-1. Sequence the two Flatpak dialogs and announce them in the tour (one line
-   before they fire, start the typing session after the shortcut bind).
-   Decided 2026-10-04: ships as a known issue in the 1.2.0 betas.
-2. AppImage: register a host app id with the portal (`org.freedesktop.host.portal.Registry`)
-   and confirm the restore token survives a restart.
-3. Retry a typing session that failed to start (not only the probe).
-4. Steam Deck installer: fail with a clear message when `/dev/input` is not
+1. Steam Deck installer: fail with a clear message when `/dev/input` is not
    readable; make the Scimitar grab and the R3 trigger opt-in.
+
+Done 2026-10-05: the Flatpak dialogs come one at a time and the tour names
+them; the AppImage registers its app ID with the portal; a typing session that
+fails to start is retried.
 
 ## Live checks still needed
 
 - GNOME 48+: both dialogs, typing into a GTK4 Wayland app, the token on restart.
+- AppImage on KDE Wayland, started from the file manager: the dialog names
+  Wayfinder Aura, and the approval carries over a restart (no second dialog).
 - GNOME 46 (Ubuntu 24.04): the log names `--toggle`; a desktop shortcut running it records.
 - Cinnamon or XFCE (X11) Flatpak: the shortcut works through the X11 listener.
 - AppImage on KDE Wayland: typing dialog once, token after restart; X11 AppImage

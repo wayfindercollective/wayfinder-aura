@@ -179,8 +179,8 @@ Unsafe / avoid:
   `https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/{main-window,settings,overlay,style,welcome}.png`  
 
 ### Hotkeys to advertise
-- **Super+F2** — start/stop dictation  
-- **Super+F3** — cycle styles (Normal → Professional → Casual → Dev → Personal)  
+- **Ctrl+Alt+Space** — start/stop dictation on Linux (Right Option on Mac, Right Alt on Windows)  
+- **Ctrl+Alt+Enter** — cycle styles with Ultra (Normal → Professional → Casual → Dev → Personal; Fn+Enter on Mac)  
 
 ---
 
@@ -219,7 +219,7 @@ Use this as the marketing spine (not a feature dump).
 | Toy UI / abandoned projects | Polished overlay, tray, styles |
 
 ### Use cases to feature (short scenes)
-1. **Dev in the terminal / IDE** — Super+F2, describe the bug, Dev style, paste as a commit-ready sentence.  
+1. **Dev in the terminal / IDE** — Ctrl+Alt+Space, describe the bug, Dev style, paste as a commit-ready sentence.  
 2. **Chat / Discord / email** — talk naturally; Casual or Professional cleans it.  
 3. **Long-form notes** (Ultra) — chunked recording, turbo model, GPU.  
 4. **Steam Deck couch** — back-button trigger, Game Mode path, text into chat/search.  
@@ -260,7 +260,7 @@ Suggested structure for `/aura` (single scroll, dark UI OK — match app violet 
    - Trust strip: Local by default · One-time Ultra · Linux + Steam Deck  
 
 2. **How it works** (3 steps)  
-   Super+F2 → Speak → Text at cursor  
+   Ctrl+Alt+Space → Speak → Text at cursor  
 
 3. **Why local / why Linux**  
    Privacy + Wayland + no subscription tax  
@@ -329,7 +329,7 @@ Show: `$29.99` launch · was `$60` (if claimed) · + processing fee as today · 
 - Works in any app that accepts text  
 
 ### Privacy one-liner
-By default your voice is processed on your machine. Optional cloud features are off until you turn them on and supply your own keys. License activation and optional model-update checks are the only network contacts for a normal local install.
+By default your voice is processed on your machine. Optional cloud features are off until you turn them on and supply your own keys. A normal local install goes online only for the model list, update checks, license activation and, on Beta builds, crash reports that never include audio or text (PRIVACY.md lists each).
 
 ### CTA labels
 - **Get Ultra — $29.99 launch**  
@@ -338,7 +338,7 @@ By default your voice is processed on your machine. Optional cloud features are 
 
 ### Social / launch post skeleton
 > Wayfinder Aura is local-first voice dictation for Linux.  
-> Super+F2 → talk → text at your cursor. Private by default.  
+> Ctrl+Alt+Space → talk → text at your cursor. Private by default.  
 > Free is real dictation. Ultra is a one-time $29.99 launch unlock for GPU, large models, tones, and long-form.  
 > Built for Wayland and Steam Deck — not a port of a Mac app.  
 > [ /aura ] [ checkout ]

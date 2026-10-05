@@ -61,17 +61,21 @@ network and not perf"`) passes on a headless node; Ruff's CI classes and
 2. **Manual passes still open** in `docs/LINUX-SHIPPING-PLAN.md`: GNOME 45+,
    the Steam machine (desktop approval, then Game Mode), Path of Exile 2 under
    Proton (windowed and fullscreen), DAoC through the portal, and the AppImage
-   on KDE Wayland (portal typing and whether its restore token persists).
+   on KDE Wayland (portal typing; its dialog should now name Wayfinder Aura and
+   the approval carry over a restart).
    Also confirm on the Steam machine that an unlisted game now gets a paste
    (Ctrl+V) rather than typed keys, as the Games tab promises.
-3. **Known issue, decided 2026-10-04**: the two Flatpak dialogs (shortcut
-   bind, typing approval) are neither sequenced nor announced in the tour; it
-   ships as a known issue (`docs/PERMISSIONS-AND-FIRST-RUN.md`). The AppImage
-   tour now downloads the Base model first.
-4. **Server and storefront items outside this repo**: the feedback endpoint
-   (`docs/LINUX-FOLLOWUPS-FROM-MACOS.md` 5.5) and the store screenshots, which
-   still show Super+F2 and "Minimal" (recapture with
-   `scripts/capture_store_screenshots.py`).
+3. **Fixed 2026-10-05** (was a known issue): the two Flatpak dialogs
+   (shortcut bind, typing approval) come one at a time, and the tour's first
+   card names them (`docs/PERMISSIONS-AND-FIRST-RUN.md`). The AppImage tour
+   downloads the Base model first.
+4. **Server and storefront items outside this repo**: the feedback endpoint is
+   live in production (checked 2026-10-05) and stores messages, but no Slack
+   webhook is set on the deployment (`AURA_FEEDBACK_SLACK_WEBHOOK_URL`;
+   `AURA_CRASH_SLACK_WEBHOOK_URL` for crash reports falls back to it), so
+   nobody is pinged. The store screenshots still show Super+F2 and "Minimal":
+   recapture with `scripts/capture_store_screenshots.py` on a KDE Wayland
+   session.
 
 ### Known limitations to decide or schedule (not blockers)
 

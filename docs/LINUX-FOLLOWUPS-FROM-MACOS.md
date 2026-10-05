@@ -332,6 +332,10 @@ pre-empts it (`on_hotkey`). All darwin-gated.
   branch `feat/aura-feedback-dev` ("desktop feedback ingestion + Slack
   notify"). Needs merge + prod deploy + the Slack webhook env var. No client
   change needed.
+- **Deployed (checked 2026-10-05):** the route is on Wayfinder-OS `main` and
+  in production; an empty message gets the endpoint's own 400. Still to do:
+  set `AURA_FEEDBACK_SLACK_WEBHOOK_URL` on the production deployment, or
+  feedback is stored without a Slack ping.
 
 ### 5.6 Fixed wraplengths clip text in narrower cards
 - **Evidence (macOS):** ~25 labels use fixed `wraplength` values (430-560 px)
