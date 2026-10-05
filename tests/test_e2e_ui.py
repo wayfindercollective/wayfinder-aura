@@ -1,11 +1,10 @@
 """
-UI end-to-end tests for Wayfinder Aura.
+Headless UI contract tests for Wayfinder Aura.
 
 These tests validate data structures, imports, and configuration consistency
 that the UI layer depends on. They do NOT create Tk windows or start event loops.
 
-All tests are marked @pytest.mark.ui so they can be skipped in headless CI:
-    pytest -m "not ui"
+These checks belong in the regular CI suite; a display server is unnecessary.
 """
 
 import json
@@ -14,9 +13,6 @@ import pytest
 
 # Skip entire file if CustomTkinter is not available
 ctk = pytest.importorskip("customtkinter")
-
-pytestmark = pytest.mark.ui
-
 
 # =============================================================================
 # App Import

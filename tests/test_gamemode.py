@@ -109,6 +109,12 @@ class TestDefaultsAreModifieredKeys:
             assert DEFAULT_CONFIG["hotkey_key"] == 100
             assert DEFAULT_CONFIG["hotkey_modifiers"] == []
             assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["fn"]
+        elif sys.platform == "win32":
+            # Windows: bare Right Alt / Alt Gr tap/hold, the same lone-modifier
+            # gesture (Ctrl+Alt+Space is the Claude desktop app's shortcut).
+            assert DEFAULT_CONFIG["hotkey_key"] == 100
+            assert DEFAULT_CONFIG["hotkey_modifiers"] == []
+            assert DEFAULT_CONFIG["style_toggle_modifiers"] == ["ctrl", "alt"]
         else:
             assert DEFAULT_CONFIG["hotkey_key"] == 57  # Space
             assert DEFAULT_CONFIG["hotkey_modifiers"] == ["ctrl", "alt"]

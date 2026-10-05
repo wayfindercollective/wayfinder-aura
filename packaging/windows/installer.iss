@@ -9,7 +9,7 @@
 ; Linux AppImage/Flatpak or macOS .app build.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.2.0-beta.1"
+  #define MyAppVersion "1.2.0"
 #endif
 #define MyAppName "Wayfinder Aura"
 #define MyAppPublisher "Wayfinder Collective"
@@ -37,12 +37,25 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#ifdef SignAura
+; build.py passes /DSignAura and the "aura" sign tool when a code-signing
+; identity is configured: Setup.exe and the uninstaller are then signed too.
+SignTool=aura
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[InstallDelete]
+; An upgrade replaces the whole PyInstaller payload. Otherwise every file an
+; older version shipped and this one dropped (SciPy, Qt pieces, DLLs: 125 MB on
+; one PC) stays behind in _internal, where the app can still import it. Runs
+; after Aura has been asked to quit; user data never lives under {app}.
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; The entire PyInstaller onedir output.
@@ -61,6 +74,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupA
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Install Update in the app runs this installer with /VERYSILENT /relaunch=1
+; (src/wayfinder/core/app_installer.py): start the new version afterwards.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: RelaunchAfterSilentUpdate
 
 [Code]
 { Aura's window close button hides it to the tray (as on the Mac), so the
@@ -102,6 +118,11 @@ begin
   end;
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM "{#MyAppExeName}"', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function RelaunchAfterSilentUpdate(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:relaunch|0}') = '1');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

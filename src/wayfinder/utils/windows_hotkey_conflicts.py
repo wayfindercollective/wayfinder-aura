@@ -85,8 +85,8 @@ def conflict_for(code, modifiers, *, installed=None, magnifier=None) -> str | No
         return None
     mods = {str(m).lower() for m in (modifiers or ())}
     if mods == {"ctrl", "alt"} and code == _SPACE:
-        # Aura's default. Only Magnifier claims it: with Magnifier on, the
-        # same keys also zoom out to a full-screen preview and back.
+        # Aura's pre-Right-Alt default. Magnifier claims it: with Magnifier
+        # on, the same keys also zoom out to a full-screen preview and back.
         if magnifier_running() if magnifier is None else magnifier:
             return ("Windows Magnifier is on, and Ctrl+Alt+Space is also its "
                     "full-screen preview (it zooms out and back). Pick another key, "

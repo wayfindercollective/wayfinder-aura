@@ -21,7 +21,7 @@ import requests
 
 from ..config import IS_APPIMAGE, IS_FLATPAK, APPDIR
 from ..utils.hostexec import host_env
-from ..utils.platform import get_user_llm_models_dir, get_user_whisper_models_dir
+from ..utils.platform import get_user_whisper_models_dir
 
 
 # ─── Model Catalog ───────────────────────────────────────────────
@@ -48,6 +48,15 @@ WHISPER_MODELS: dict[str, dict] = {
         "sha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
         "note": "Good balance for CPU",
     },
+    # Ultra's recommended speech model (core/ultra_defaults): the same accuracy
+    # as full Turbo at a third of the size (6.6% vs 6.7% WER, EVAL-2026-09-24).
+    "large-v3-turbo-q5_0": {
+        "label": "Large v3 Turbo Q5",
+        "size": "574 MB",
+        "bytes": 574_041_195,
+        "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+        "note": "Best speed/accuracy (recommended for GPU)",
+    },
     "medium.en": {
         "label": "Medium (English)",
         "size": "1.5 GB",
@@ -60,7 +69,7 @@ WHISPER_MODELS: dict[str, dict] = {
         "size": "1.6 GB",
         "bytes": 1_624_555_275,
         "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
-        "note": "Best speed/accuracy (recommended for GPU)",
+        "note": "Turbo Q5's accuracy at three times the size",
     },
     "large-v3": {
         "label": "Large v3",
@@ -80,7 +89,10 @@ MODEL_DOWNLOAD_BASE = (
     f"https://huggingface.co/ggerganov/whisper.cpp/resolve/{MODEL_DOWNLOAD_REVISION}"
 )
 
-# LLM models for post-processing (dictation cleanup)
+# LLM models for post-processing (dictation cleanup). Setup does not download
+# these: the app's model downloader does, and fetches Ultra entries only from
+# the Models CDN with the licence (models_cdn). tests/test_catalog_ratchet.py
+# keeps this copy equal to wayfinder_main.LLM_GGUF_MODELS.
 LLM_MODELS: dict[str, dict] = {
     "google_gemma-3-1b-it-Q4_K_M": {
         "label": "Gemma 3 1B",
@@ -107,7 +119,7 @@ LLM_MODELS: dict[str, dict] = {
         "bytes": 2_497_280_736,
         "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
-        "note": "Best local model for Strong & Caricature intensity; sharpest instruction follower at 4B",
+        "note": "Best local model for every style, including Strong and Caricature (Ultra)",
     },
 }
 
@@ -524,7 +536,11 @@ def check_cuda_toolkit() -> DependencyStatus:
         if Path(p).exists():
             return DependencyStatus(True, detail=f"CUDA found at {p}", warning="nvcc not in PATH")
 
-    return DependencyStatus(False, error="CUDA toolkit not installed (needed for GPU acceleration)")
+    return DependencyStatus(
+        False,
+        error="CUDA toolkit not found (only the optional Faster-Whisper engine needs it; "
+        "the default engine uses Vulkan)",
+    )
 
 
 def check_build_tools() -> DependencyStatus:
@@ -612,9 +628,16 @@ def check_whisper_model(config: dict) -> DependencyStatus:
         size_mb = Path(model_path).stat().st_size / 1_000_000
         return DependencyStatus(True, detail=f"{Path(model_path).name} ({size_mb:.0f} MB)")
 
-    # Check the writable model directory for any usable models
-    model_dir = get_user_whisper_models_dir(flatpak=IS_FLATPAK)
-    if model_dir.exists():
+    # Search the persistent download directory first, then legacy host
+    # locations outside Flatpak (including Windows' pre-AppData downloads).
+    from wayfinder.utils.platform import get_whisper_host_model_dirs
+
+    model_dirs = [get_user_whisper_models_dir(flatpak=IS_FLATPAK)]
+    if not IS_FLATPAK:
+        model_dirs.extend(d for d in get_whisper_host_model_dirs() if d not in model_dirs)
+    for model_dir in model_dirs:
+        if not model_dir.exists():
+            continue
         models = [p for p in model_dir.glob("ggml-*.bin") if _usable(str(p))]
         if models:
             best = max(models, key=lambda p: p.stat().st_size)
@@ -999,28 +1022,90 @@ def download_whisper_model(
     progress: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """
-    Download a Whisper model from Hugging Face. No sudo needed.
-    Runs in a background thread.
+    Download a Whisper model. No sudo needed. Runs in a background thread.
+
+    Free models (Base) come from the revision-pinned Hugging Face URL. Every
+    other model is Ultra (``large_models``, the same rule as
+    license.is_free_transcription_model) and comes only from the Models CDN
+    with the licence bearer, exactly like the app's model manager: never from
+    a public mirror (CLAUDE.md, models_cdn). Without the licence the download
+    is refused.
 
     Args:
-        model_name: Model identifier (e.g. "large-v3-turbo")
+        model_name: Model identifier (e.g. "large-v3-turbo-q5_0")
         log: Called with status messages
         done: Called with (success, path_or_error) when finished
         progress: Called with (downloaded_bytes, total_bytes) during download
     """
-    url = f"{MODEL_DOWNLOAD_BASE}/ggml-{model_name}.bin"
+    filename = f"ggml-{model_name}.bin"
     # Flatpak: persistent XDG_DATA_HOME (the sandbox's ~ is discarded on exit).
     model_dir = get_user_whisper_models_dir(flatpak=IS_FLATPAK)
-    target = model_dir / f"ggml-{model_name}.bin"
+    target = model_dir / filename
 
     def _run():
-        model_info = WHISPER_MODELS.get(model_name, {})
+        model_info = whisper_download_info(model_name)
         size_label = model_info.get("size", "unknown size")
+        try:
+            url, headers_for = _whisper_download_source(model_info)
+        except PermissionError as refused:
+            done(False, str(refused))
+            return
         _download_model_file(url, target, ".bin.part", size_label, log, done, progress,
                              sha256=model_info.get("sha256"),
-                             expected_bytes=model_info.get("bytes"))
+                             expected_bytes=model_info.get("bytes"),
+                             headers_for=headers_for)
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def whisper_download_info(model_name: str) -> dict:
+    """The download facts for a Setup model, in the app catalog's shape
+    (models_cdn): its pinned public ``url``, and for an Ultra model the
+    ``requires_feature`` and ``cdn_object`` that route it to the Models CDN."""
+    from wayfinder.license import is_free_transcription_model
+
+    filename = f"ggml-{model_name}.bin"
+    info = dict(WHISPER_MODELS.get(model_name, {}))
+    info.update({"filename": filename, "url": f"{MODEL_DOWNLOAD_BASE}/{filename}"})
+    if not is_free_transcription_model(filename):
+        info.update({"requires_feature": "large_models", "cdn_object": f"whisper/{filename}"})
+    return info
+
+
+def _whisper_download_source(model_info: dict):
+    """(url, headers_for) for a download; PermissionError if not allowed."""
+    from wayfinder.models_cdn import (
+        assert_may_download,
+        catalog_requires_feature,
+        download_auth_headers,
+        resolve_download_url,
+    )
+
+    if not catalog_requires_feature(model_info):
+        return model_info["url"], None
+    from wayfinder.config import load_config
+    from wayfinder.license import get_feature_gate
+
+    gate = get_feature_gate()
+    deny = assert_may_download(model_info, gate.has_feature)
+    if deny:
+        raise PermissionError(deny)
+    config = load_config()
+    url = resolve_download_url(model_info, config=config)
+    if not url:
+        raise PermissionError(
+            "The Ultra model server isn't configured, so this model can't be "
+            "downloaded. Choose Base, or set the Models CDN in Settings."
+        )
+
+    def headers_for(hop_url):
+        # Recomputed per hop: the bearer only ever goes to the Models CDN origin.
+        return download_auth_headers(
+            model_info, bearer_token=gate.get_bearer_token(), download_url=hop_url,
+            config=config,
+        )
+
+    return url, headers_for
 
 
 def _download_model_file(*args, **kwargs) -> None:
@@ -1045,6 +1130,7 @@ def _download_model_file_impl(
     min_bytes: int = 10_000_000,
     sha256: Optional[str] = None,
     expected_bytes: Optional[int] = None,
+    headers_for: Optional[Callable[[str], dict]] = None,
 ) -> None:
     """Shared model downloader: atomic .part file, integrity checks, clear errors.
 
@@ -1072,9 +1158,10 @@ def _download_model_file_impl(
         def _attempt():
             """One bounded, https-only transfer into tmp_target."""
             bounds = DownloadBounds(expected_bytes)
-            # Pass the module, not a Session: this path has no auth headers to
-            # pool and `requests.get` stays the single seam the setup tests patch.
-            response = https_only_get(requests, url, timeout=30)
+            # Pass the module, not a Session: auth headers are computed per hop
+            # (headers_for), never pooled, and `requests.get` stays the single
+            # seam the setup tests patch.
+            response = https_only_get(requests, url, timeout=30, headers_for=headers_for)
             if response.status_code == 429:
                 return None, None  # caller reports the rate-limit message
             response.raise_for_status()
@@ -1154,48 +1241,6 @@ def _download_model_file_impl(
         done(False, str(e))
 
 
-def download_llm_model(
-    model_key: str,
-    log: Callable[[str], None],
-    done: Callable[[bool, str], None],
-    progress: Optional[Callable[[int, int], None]] = None,
-) -> None:
-    """
-    Download an LLM model (GGUF) from Hugging Face for post-processing.
-
-    Args:
-        model_key: Key into LLM_MODELS (e.g. "Qwen3.5-2B-Q4_K_M")
-        log: Called with status messages
-        done: Called with (success, path_or_error) when finished
-        progress: Called with (downloaded_bytes, total_bytes) during download
-    """
-    model_info = LLM_MODELS.get(model_key)
-    if not model_info:
-        done(False, f"Unknown LLM model: {model_key}")
-        return
-
-    url = model_info["url"]
-    filename = model_info["filename"]
-    # Flatpak: persistent XDG_DATA_HOME. Windows: the folder config.py's Windows
-    # default and the in-app downloader use. Everywhere else (macOS included)
-    # the wizard keeps the dir it has always used.
-    if IS_FLATPAK:
-        model_dir = get_user_llm_models_dir(flatpak=True)
-    elif sys.platform == "win32":
-        model_dir = Path.home() / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
-    else:
-        model_dir = Path.home() / ".local" / "share" / "wayfinder-aura" / "llm-models"
-    target = model_dir / filename
-
-    def _run():
-        size_label = model_info.get("size", "unknown size")
-        _download_model_file(url, target, ".gguf.part", size_label, log, done, progress,
-                             min_bytes=100_000_000, sha256=model_info.get("sha256"),
-                             expected_bytes=model_info.get("bytes"))
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
 # ─── Dependency List Builder ─────────────────────────────────────
 
 def get_dependencies(config: dict) -> list[Dependency]:
@@ -1245,7 +1290,7 @@ def get_dependencies(config: dict) -> list[Dependency]:
         deps.append(Dependency(
             id="cuda",
             name="CUDA Toolkit",
-            description="NVIDIA GPU compute libraries for fast transcription",
+            description="NVIDIA CUDA libraries for the optional Faster-Whisper engine",
             required=False,
             _check=check_cuda_toolkit,
             # install handled by install_system_packages
@@ -1270,7 +1315,7 @@ def get_dependencies(config: dict) -> list[Dependency]:
         Dependency(
             id="whisper_cpp",
             name="Speech Engine (whisper.cpp)",
-            description="Local speech-to-text engine with GPU acceleration",
+            description="Local speech-to-text engine (GPU acceleration is an Ultra setting)",
             required=True,
             _check=lambda: check_whisper_cpp(config),
         ),
@@ -1320,7 +1365,9 @@ def get_recommended_model() -> str:
 
     vendor = _detect_gpu_vendor()
     if vendor in ("nvidia", "amd", "apple"):
-        return "large-v3-turbo"
+        from wayfinder.core.ultra_defaults import RECOMMENDED_SPEECH_MODEL_ID
+
+        return RECOMMENDED_SPEECH_MODEL_ID
     return "small.en"
 
 

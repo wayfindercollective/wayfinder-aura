@@ -55,19 +55,22 @@ reviewer Ultra keys, human PR only).
 - See `docs/GO-LIVE-INPUTS.md`.
 
 ### 2. Public repo + tag
-- Repo is public. **`v1.1.8-beta.10`** is published; stable **`v1.1.8`** is
-  prepared after hands-on signoff and must not be moved once tagged.
+- Repo is public. Stable **`v1.1.8`** was published on 2026-08-27.
+  The integrated Linux/macOS/Windows changes need a new version after exact
+  candidate checks and hands-on signoff; never move an existing release tag.
 - The fast Quality job on `main` and
   `scripts/ci/build-flatpak-on-mini-inf.sh` must both be green before tagging.
-  Heavy artifacts no longer rebuild on every push, and mini-inf is not exposed
-  as a self-hosted runner on this public repository.
+  Heavy Linux artifacts no longer rebuild on every push. All execution uses
+  the owner's self-hosted runners, with host-installed guards rejecting fork
+  jobs before checkout. Native Windows/macOS checks must also pass for the
+  integrated application. See `docs/CI.md` for runner admission and availability.
 
 ### 3. Git source for the app module (tag-time blocker)
 The `wayfinder-aura` module uses `type: dir, path: ..` (local builds only).
 After the release commit is tagged:
 
 ```bash
-python3 flatpak/prepare-release-manifest.py --tag v1.1.8
+python3 flatpak/prepare-release-manifest.py --tag vX.Y.Z
 ```
 
 ### 4. Clean Flatpak build on the target manifest
@@ -109,12 +112,15 @@ the verified checkmark.
   (PyGObject is bundled for this; record, style-cycle and cancel-dictation are
   all registered). The user approves the binding once when prompted, or sets
   it in System Settings → Shortcuts. Typing into native Wayland windows goes
-  through the `org.freedesktop.portal.RemoteDesktop` portal, approved once
-  (Settings → System → "Type into every app"). It is verified on KDE Plasma;
-  GNOME 45+ is expected to work but is not yet verified. On a desktop whose
-  portal offers no keyboard device (the app logs "This desktop offers no
-  remote-control keyboard"), or after a declined approval, the Flatpak types
-  with the bundled xdotool, which reaches X11/XWayland windows only.
+  through a separate keyboard-only `org.freedesktop.portal.RemoteDesktop`
+  portal session, approved once and remembered (Settings → System → "Type into
+  every app"). KDE native Wayland and XWayland injection have automated
+  acceptance evidence; GNOME 45+ is expected to work but is not yet verified,
+  and the remaining real-desktop/game checks are tracked in
+  `docs/LINUX-SHIPPING-PLAN.md`. On a desktop whose portal offers no keyboard
+  device (the app logs "This desktop offers no remote-control keyboard"), or
+  after a declined approval, the Flatpak types with the bundled xdotool, which
+  reaches X11/XWayland windows only.
   AppImage and from-source installs do not use the portal for hotkeys; they
   read /dev/input directly via evdev.
 
@@ -131,9 +137,9 @@ the verified checkmark.
   the native binaries print help on the Bazzite build host (`glibc 2.43`). The
   AppImage builder now copies the same desktop and screenshot-bearing AppStream
   metadata used by the Flatpak package.
-  The GitHub AppImage job is pinned to `ubuntu-22.04` for an older-glibc
-  baseline, installs Vulkan development packages, builds pinned Shaderc `glslc`
-  from source if the runner does not provide it, and extraction-smokes bundled
-  binaries/metadata before upload. Broad AppImage distribution still needs a
-  tag or workflow-dispatch run proving that CI artifact.
+  The AppImage job uses an Ubuntu 22.04 container on the owner's `aura-build`
+  runner for an older-glibc baseline. Dependency installation stays inside
+  that bounded container. It builds pinned Shaderc `glslc` when needed and
+  extraction-smokes bundled binaries/metadata. Broad AppImage distribution
+  still needs a tag or workflow-dispatch run proving that CI artifact.
 - Distro packages (AUR/COPR/PPA): out of scope until Flathub is live.

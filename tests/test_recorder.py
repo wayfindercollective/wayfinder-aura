@@ -444,6 +444,68 @@ class TestSilenceDetection:
         invalid.write_text("not audio")
         assert get_wav_peak_amplitude(invalid) is None
 
+    @staticmethod
+    def _feed_wav(recorder, path, block=512):
+        """Push a 16-bit WAV through the recorder's audio callback, as the stream would."""
+        import wave
+        import numpy as np
+
+        with wave.open(str(path), "rb") as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+        samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        for start in range(0, samples.size, block):
+            chunk = samples[start:start + block].reshape(-1, 1)
+            recorder._audio_callback(chunk, chunk.shape[0], None, None)
+
+    @staticmethod
+    def _write_wav(path, samples):
+        import wave
+
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(samples.tobytes())
+
+    @pytest.mark.parametrize("recorder_name", ["AudioRecorder", "ChunkedRecorder"])
+    def test_all_zero_capture_is_digital_silence_but_quiet_noise_is_not(
+        self, tmp_path, recorder_name
+    ):
+        """A muted USB headset sends exact zeros; a quiet live mic never does."""
+        import numpy as np
+        from wayfinder.core import recorder as recorder_module
+
+        zeros = tmp_path / "muted-headset.wav"
+        quiet = tmp_path / "quiet-room.wav"
+        self._write_wav(zeros, np.zeros(32000, dtype=np.int16))
+        rng = np.random.default_rng(5)
+        self._write_wav(quiet, np.clip(rng.normal(0, 6, 32000), -32768, 32767).astype(np.int16))
+
+        for path, expected in ((zeros, True), (quiet, False)):
+            with patch("wayfinder.core.recorder.sd"):
+                recorder = getattr(recorder_module, recorder_name)()
+            self._feed_wav(recorder, path)
+            assert recorder.is_digital_silence() is expected
+            # Both are rejected before whisper; only the message differs.
+            assert recorder.has_speech_activity() is False
+
+    def test_no_capture_is_not_digital_silence(self):
+        from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder
+
+        with patch("wayfinder.core.recorder.sd"):
+            assert AudioRecorder().is_digital_silence() is False
+            assert ChunkedRecorder().is_digital_silence() is False
+
+    def test_digital_silence_needs_every_sample_zero(self):
+        import numpy as np
+        from wayfinder.core.recorder import audio_is_digital_silence
+
+        assert audio_is_digital_silence(np.zeros((1600, 1), dtype=np.float32)) is True
+        assert audio_is_digital_silence(np.empty(0, dtype=np.float32)) is False
+        one_lsb = np.zeros(1600, dtype=np.float32)
+        one_lsb[800] = 1 / 32768
+        assert audio_is_digital_silence(one_lsb) is False
+
 
 # Real-world snapshot (Bazzite desktop, PipeWire): PortAudio shows raw ALSA dupes,
 # virtual PCMs, and sink monitors exposed as JACK capture nodes — while pactl lists

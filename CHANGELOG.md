@@ -7,16 +7,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [1.2.0-beta.1] — 2026-10-04
-
 Linux: dictation for gamers on every desktop.
-
-The macOS DMG and the internal Windows installer are built separately (see
-`docs/MACOS-PORT.md` and `packaging/windows/README.md`); only Linux changes are
-listed here.
 
 ### Added
 
+- **Windows downloads.** Every release now carries the Windows installer
+  (`WayfinderAura-Setup-<version>.exe`, Windows 10 and 11, x64). It isn't
+  code-signed yet, so SmartScreen asks once: **More info → Run anyway**.
+- **Choose Stable or Beta updates** (Settings → System → Updates). Beta
+  offers the newest build of Aura, as often as daily; Stable offers tested
+  releases every few weeks.
+- **Install Update installs it for you.** On the Mac the new version is
+  checked (same developer, notarized by Apple), swapped in and reopened, so
+  there's no dragging into Applications; Windows and the AppImage update in
+  place too. Aura waits for a dictation to finish first, puts the previous
+  version back if the new one doesn't start, and falls back to the download
+  when it can't install itself (Flatpak, no write access).
+- **Crash reports from Beta.** When a beta crashes or hits an error, it
+  tells Wayfinder the kind of error and where in Aura's code it happened,
+  so it gets fixed: never the error message, audio, dictated text or
+  settings (see PRIVACY.md). On by default for Beta, off for Stable;
+  Settings → System → Send crash reports.
 - **Aura types into every app on Wayland desktops.** On KDE Plasma (GNOME 45+
   is expected to work but is not yet verified) the desktop's remote-control
   (RemoteDesktop) portal delivers the keys, so native Wayland apps receive
@@ -37,6 +48,31 @@ listed here.
   (comma-separated or one per line) and for Heard / Write-as corrections, which
   apply in a single pass.
 
+- **Vocabulary fixes near-misses of your words (Ultra).** The speech model
+  rarely misspells a rare name the same way twice (Large v3 Turbo Q5 wrote
+  "Aeron" and "Arrhawn" for "Arawn"), so a word that sounds like one of your
+  vocabulary words and looks close is written your way, after transcription
+  and again after cleanup. Real English words (the 60,000 most common) are
+  never changed: a name heard as one ("Iran") still needs a correction, and
+  two of your words that sound alike are never swapped. A lowercased name
+  gets its spelling back ("pytorch" → PyTorch). The Dev and Casual styles do
+  the same for their built-in lists, and Dev now knows AI model and tool
+  names (Qwen, Ollama, DeepSeek, Grok and Groq, kubectl, …).
+- **Ultra switches on its recommended setup once.** The first time an install
+  becomes Ultra, GPU acceleration turns on (Apple silicon, NVIDIA, AMD),
+  Chunk Processing goes to Auto, text cleanup turns on, and with the GPU on
+  Large v3 Turbo Q5 becomes the speech model (downloaded if needed, then
+  switched to). It never runs again, so later choices stick; installs that
+  were Ultra before keep their settings.
+- **Setup recommends Large v3 Turbo Q5 for Ultra on a GPU** (574 MB, the
+  same accuracy as the 1.6 GB Turbo), matching the app's Ultra setup. Setup
+  now fetches every Ultra speech model like the in-app model manager: from
+  the Models CDN with your licence, never from a public mirror.
+- **Free removes um/uh out of the box.** Text cleanup is on for new installs;
+  with the Normal style it removes filler sounds instantly and runs no model.
+  Cleanup models are for the Ultra writing styles, so Free no longer shows a
+  model manager or loads one.
+
 ### Changed
 
 - **The macOS design on Linux:** the Mac's shader ribbon and glass palette
@@ -46,9 +82,11 @@ listed here.
   Steam hardware). Zoom defaults to the desktop's own scale and rescales in one
   frame; the idle ribbon drifts slowly while another app has focus and stops
   when hidden.
-- **Get Update on Linux downloads the new Flatpak bundle (or AppImage);**
-  open the file to install it. The banner no longer points at a software
-  center that cannot update a GitHub install.
+- **Get Update on the Linux Flatpak downloads the new bundle;** open the file
+  to install it (an AppImage that cannot replace itself downloads the new
+  AppImage). The banner no longer points at a software center that cannot
+  update a GitHub install.
+
 - **Minimal is now Normal.** Normal removes um/uh and doubled small words
   instantly and needs no model; your saved style carries over. Styles the
   selected cleanup model cannot do are greyed out, with the reason.
@@ -63,6 +101,37 @@ listed here.
 
 ### Fixed
 
+- **A muted or switched-off mic is named as the problem.** When the mic sends
+  pure digital silence (a muted USB headset, a wireless headset turned off
+  with its dongle still plugged in), Aura now says "Your mic … sent no sound
+  at all — it may be muted or switched off" instead of asking you to speak
+  closer. Quiet audio from a live mic keeps the no-speech message, and a mic
+  name containing words like "Type-C" no longer reads as a paste failure.
+- **Aura uses about a sixth of the CPU while it waits.** A CustomTkinter
+  theme check ran 33 times a second although Aura is always dark, and each
+  text box checked its scrollbars 5 times a second. On the Mac, menu-bar
+  actions now wake the app themselves, so its idle check runs once a second.
+  Main process on a Mac Studio: ~2.7% → ~0.5% of a core, window shown or
+  hidden.
+- **Mac: the hotkey works as soon as macOS allows it, and Aura says when it
+  can't.** On a new Mac, Right Option could stay dead after every permission
+  was allowed, and the banner's buttons seemed to do nothing:
+  - Aura now checks that keys actually reach it. When macOS hasn't applied a
+    permission yet, the banner says so and offers **Relaunch Aura**.
+  - Aura retries by itself every few seconds, so allowing Accessibility in
+    System Settings takes effect without a restart.
+  - A second "allow" no longer clears a switch you just turned on.
+  - **Recheck** answers "Still off" when nothing changed, and
+    **Permissions…** always opens the checklist.
+  - If macOS pauses Aura's keyboard listener, Aura replaces it at once.
+  - The activity log records each permission change and the macOS version,
+    so a report shows what happened.
+- **Long chunked dictations keep their words at the chunk boundaries.** The
+  prompt for each piece no longer ends on the half-heard word at the cut, the
+  join matches the overlap even when that word came out wrong, and a piece
+  that comes back nearly empty is heard again without the prompt. Auto on
+  Large v3 Turbo Q5: 8.2% → 5.7% word errors on 2-minute dictations, where a
+  single pass lost up to half the words (docs/EVAL-2026-09-30-chunking.md).
 - **Flatpak model downloads persist across restarts.** Earlier builds saved
   them where the sandbox discards them, so every start fell back to the bundled
   Base.en and the models had to be downloaded again. Models an earlier build
@@ -449,7 +518,6 @@ First public release of Wayfinder Aura.
 - Tone-aware local post-processing with Gemma 3 1B as the default model.
 - System tray integration and configurable typing speeds.
 
-[Unreleased]: https://github.com/wayfindercollective/wayfinder-aura/compare/v1.2.0-beta.1...HEAD
-[1.2.0-beta.1]: https://github.com/wayfindercollective/wayfinder-aura/compare/v1.1.8...v1.2.0-beta.1
+[Unreleased]: https://github.com/wayfindercollective/wayfinder-aura/compare/v1.1.8...HEAD
 [1.1.8]: https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.8
 [1.1.0]: https://github.com/wayfindercollective/wayfinder-aura/releases/tag/v1.1.0

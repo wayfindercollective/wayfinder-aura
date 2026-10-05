@@ -544,6 +544,18 @@ def test_windows_hotkey_clear_chords(monkeypatch):
 
 # --- Audio: ducking the main volume, "Auto" mic follows the Windows default ----
 
+@pytest.mark.parametrize("system,loads_core_audio", [("Windows", False), ("Linux", False), ("Darwin", True)])
+def test_core_audio_probe_is_macos_only(monkeypatch, system, loads_core_audio):
+    from unittest.mock import Mock
+    from wayfinder.utils import audio_ducker, macos_audio
+
+    load = Mock(return_value=object())
+    monkeypatch.setattr(audio_ducker.platform, "system", lambda: system)
+    monkeypatch.setattr(macos_audio, "_load", load)
+    assert audio_ducker._core_audio() is (macos_audio if loads_core_audio else None)
+    assert load.call_count == int(loads_core_audio)
+
+
 def test_windows_ducking_lowers_and_restores_main_volume(monkeypatch, tmp_path):
     from wayfinder.utils import audio_ducker, windows_audio
 
@@ -839,7 +851,7 @@ def test_app_picks_the_windows_game_backend(monkeypatch):
 
 # --- Tap / hold with Right Ctrl (the Mac's Right Option gesture) -----------------
 
-def _win_listener(monkeypatch, hotkey_key=97, modifiers=()):
+def _win_listener(monkeypatch, hotkey_key=97, modifiers=(), masks=None):
     from queue import Queue
     from threading import Event
 
@@ -848,6 +860,9 @@ def _win_listener(monkeypatch, hotkey_key=97, modifiers=()):
     if pl.keyboard is None:
         pytest.skip("pynput unavailable on this host")
     captured = {}
+    # Never inject real keys from a test; record the menu-mask sends instead.
+    sent = masks if masks is not None else []
+    monkeypatch.setattr(pl, "_win32_send_menu_mask", lambda: sent.append("mask"))
 
     class FakeListener:
         def __init__(self, **kwargs):
@@ -898,10 +913,13 @@ def test_right_ctrl_hold_is_push_to_talk(monkeypatch):
 
     pl, press, release, events = _win_listener(monkeypatch)
     press(pl.Key.ctrl_r)
-    time.sleep(pl.SOLO_HOLD_SECONDS + 0.15)
+    # The hold threshold fires from a timer thread, which a busy CI host can
+    # run well after SOLO_HOLD_SECONDS (v1.2.0-beta.3's macOS smoke released
+    # first and saw nothing): release only once the hold has begun.
+    started = events.get(timeout=5)
     release(pl.Key.ctrl_r)
-    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
-                              (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+    assert [started] + _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_START),
+                                          (EventType.HOTKEY_PRESSED, pl.HOLD_END)]
 
 
 def test_ctrl_alt_space_chord_is_unchanged_on_windows(monkeypatch):
@@ -923,6 +941,58 @@ def test_tap_hold_keys_per_platform():
     assert wm.is_tap_hold_hotkey(100, [], platform_name="darwin")
     assert not wm.is_tap_hold_hotkey(97, [], platform_name="linux")
     assert "Right Ctrl" in wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 57})
+    # Right Alt is the Windows default, so it is offered first.
+    options = wm.hotkey_key_options(platform_name="win32", available_pynput_codes={97, 100, 57})
+    assert list(options)[0] == "Right Alt (Alt Gr)"
+
+
+def test_right_alt_tap_masks_the_menu_bar_and_toggles_once(monkeypatch):
+    """A lone Alt release opens the front app's menu bar; the mask key sent
+    while Right Alt is down prevents that, and must not cancel the tap."""
+    from wayfinder.hotkeys.types import EventType
+
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
+    mask_key = pl.KeyCode.from_vk(pl._WIN32_MENU_MASK_VK)
+    press(pl.Key.alt_r)
+    press(mask_key)          # the injected mask comes back through the hook
+    release(mask_key)
+    release(pl.Key.alt_r)
+    assert masks == ["mask"]
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]
+
+
+def test_right_alt_masks_every_auto_repeat_while_held(monkeypatch):
+    from wayfinder.hotkeys.types import EventType
+
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
+    press(pl.Key.alt_r)
+    # The hold fires on a timer thread. Wait for its event before testing
+    # repeats; a fixed sleep can release Alt first on a busy CI host.
+    assert events.get(timeout=2) == (EventType.HOTKEY_PRESSED, pl.HOLD_START)
+    press(pl.Key.alt_r)      # keyboard auto-repeat
+    press(pl.Key.alt_r)
+    release(pl.Key.alt_r)
+    assert masks == ["mask"] * 3
+    assert _drain(events) == [(EventType.HOTKEY_PRESSED, pl.HOLD_END)]
+
+
+def test_only_a_right_alt_hotkey_sends_the_menu_mask(monkeypatch):
+    masks = []
+    pl, press, release, _events = _win_listener(monkeypatch, hotkey_key=97, masks=masks)
+    press(pl.Key.alt_r)      # Right Alt is not the hotkey: leave its menus alone
+    release(pl.Key.alt_r)
+    press(pl.Key.ctrl_r)     # Right Ctrl alone never opens a menu
+    release(pl.Key.ctrl_r)
+    assert masks == []
+
+    pl, press, release, _events = _win_listener(
+        monkeypatch, hotkey_key=57, modifiers=("ctrl", "alt"), masks=masks)
+    press(pl.Key.ctrl_l)
+    press(pl.Key.alt_r)
+    press(pl.Key.space)
+    assert masks == []
 
 
 
@@ -1131,12 +1201,14 @@ def test_alt_gr_taps_and_holds_like_right_alt(monkeypatch):
     Ctrl: it must still be the tap/hold key, and Alt Gr + a key must not record."""
     from wayfinder.hotkeys.types import EventType
 
-    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100)
+    masks = []
+    pl, press, release, events = _win_listener(monkeypatch, hotkey_key=100, masks=masks)
     press(pl.Key.ctrl_l)
     press(pl.Key.alt_gr)
     release(pl.Key.ctrl_l)
     release(pl.Key.alt_gr)
     assert _drain(events) == [(EventType.HOTKEY_PRESSED, None)]
+    assert masks == ["mask"]  # harmless on Alt Gr layouts, needed on US ones
     press(pl.Key.ctrl_l)
     press(pl.Key.alt_gr)
     press(pl.KeyCode.from_char("e"))       # Alt Gr+E types an accented e
@@ -1359,6 +1431,42 @@ def test_dpi_awareness_is_a_no_op_off_windows_or_when_disabled(monkeypatch):
     assert windows_dpi.to_px(80) == 80 and windows_dpi.to_logical(80) == 80
 
 
+def _fake_windll(set_hr, awareness, dpi=168):
+    """shcore/user32 stand-ins: SetProcessDpiAwareness returns ``set_hr``."""
+    import ctypes
+
+    def get_awareness(_proc, out):
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_int)).contents.value = awareness
+        return 0
+
+    return SimpleNamespace(
+        shcore=SimpleNamespace(SetProcessDpiAwareness=lambda level: set_hr,
+                               GetProcessDpiAwareness=get_awareness),
+        user32=SimpleNamespace(GetDpiForSystem=lambda: dpi, IsProcessDPIAware=lambda: awareness > 0),
+    )
+
+
+@pytest.mark.parametrize("set_hr, awareness, expected", [
+    (0, 1, 1.75),            # we declared it
+    (-2147024891, 2, 1.75),  # E_ACCESSDENIED: declared first (manifest, host Python)
+    (-2147024891, 0, 1.0),   # refused and not aware: Windows stretches, keep 1.0
+])
+def test_dpi_scale_follows_the_display_even_if_awareness_was_declared_first(
+        monkeypatch, set_hr, awareness, expected):
+    """The first Windows CI run's Python was already per-monitor aware, so our
+    call was refused and the scale stayed 1.0: Tk drew at real resolution with
+    unscaled geometry (a small window at 175%)."""
+    import ctypes
+
+    from wayfinder.utils import windows_dpi
+
+    monkeypatch.setattr(windows_dpi, "_scale", 1.0)
+    monkeypatch.setattr(windows_dpi.sys, "platform", "win32")
+    monkeypatch.delenv("WAYFINDER_WINDOWS_DPI_AWARE", raising=False)
+    monkeypatch.setattr(ctypes, "windll", _fake_windll(set_hr, awareness), raising=False)
+    assert windows_dpi.enable() == pytest.approx(expected)
+
+
 @windows_only
 def test_dpi_awareness_really_declared_on_windows():
     import os
@@ -1367,16 +1475,26 @@ def test_dpi_awareness_really_declared_on_windows():
     code = textwrap.dedent("""
         import ctypes, sys
         sys.path.insert(0, "src")
+        before = ctypes.c_int(-1)
+        ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(before))
         from wayfinder.utils import windows_dpi
         s = windows_dpi.enable()
         v = ctypes.c_int(-1)
         ctypes.windll.shcore.GetProcessDpiAwareness(None, ctypes.byref(v))
-        print(s, v.value)
+        dpi = windows_dpi._system_dpi()
+        print(before.value, s, v.value, dpi)
     """)
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          timeout=60, env={**os.environ, "WAYFINDER_WINDOWS_DPI_AWARE": "1"})
-    scale, awareness = out.stdout.split()
-    assert float(scale) >= 1.0 and awareness == "1"   # PROCESS_SYSTEM_DPI_AWARE
+    before, scale, awareness, dpi = out.stdout.split()
+    if before == "0":
+        assert awareness == "1"   # we declared PROCESS_SYSTEM_DPI_AWARE
+    else:
+        # Declared before us (the CI runner's Python came up per-monitor
+        # aware, 2): Windows refuses ours, Tk still draws at real resolution,
+        # so the scale must still follow the display.
+        assert awareness == before
+    assert float(scale) == pytest.approx(int(dpi) / 96.0 if 96 <= int(dpi) <= 480 else 1.0)
 
 
 def test_window_maths_stays_logical_and_converts_at_the_edges(monkeypatch):
@@ -1425,3 +1543,67 @@ def test_tooltips_and_fallback_pill_use_the_real_work_area(monkeypatch):
     real = window_geometry.windows_work_area(0, 0, physical=True)
     logical = window_geometry.windows_work_area(0, 0)
     assert logical[2] == int(real[2] / 2.0) and logical[3] == int(real[3] / 2.0)
+
+
+# --- Repaint after focus changes (black squares on some GPU setups) -----------
+
+def test_repaint_after_activation_coalesces_one_repaint_per_change(monkeypatch):
+    from wayfinder.ui import windows_window as ww
+
+    monkeypatch.setattr(ww.sys, "platform", "win32")
+    painted = []
+    monkeypatch.setattr(ww, "repaint", lambda root: painted.append(root))
+
+    class FakeRoot:
+        def __init__(self):
+            self.bindings, self.pending = {}, []
+
+        def bind(self, sequence, func, add=None):
+            assert add == "+"  # CTk binds <FocusIn> on the root itself
+            self.bindings[sequence] = func
+
+        def after(self, ms, func):
+            assert ms >= 100  # the app's timer floor
+            self.pending.append(func)
+            return len(self.pending)
+
+    root = FakeRoot()
+    assert ww.repaint_after_activation(root)
+    assert set(root.bindings) == {"<FocusIn>", "<FocusOut>", "<Map>"}
+    for _ in range(5):  # one event per child widget
+        root.bindings["<FocusIn>"](None)
+    root.bindings["<Map>"](None)
+    assert len(root.pending) == 1
+    root.pending.pop()()
+    assert painted == [root]
+    root.bindings["<FocusOut>"](None)  # the next change schedules again
+    assert len(root.pending) == 1
+
+
+def test_repaint_after_activation_is_windows_only(monkeypatch):
+    from wayfinder.ui import windows_window as ww
+
+    monkeypatch.setattr(ww.sys, "platform", "linux")
+    assert ww.repaint_after_activation(object()) is False
+    assert ww.repaint(object()) is False
+
+
+def test_idle_hero_holds_while_another_window_covers_aura():
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp._animate_idle_breath)
+    assert 'window_exposure(self) == "covered"' in src
+    assert "self.after(500, self._animate_idle_breath)" in src
+
+
+def test_windows_never_offers_faster_whisper():
+    """The Windows bundle has no Faster-Whisper/PyTorch; detecting an NVIDIA GPU
+    must not put it in the backend menu."""
+    import inspect
+
+    import wayfinder_main
+
+    src = inspect.getsource(wayfinder_main.WayfinderApp)
+    assert "and not (IS_WINDOWS and not IS_MACOS)" in src.split("show_fw = (", 1)[1][:200]

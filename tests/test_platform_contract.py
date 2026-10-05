@@ -20,10 +20,10 @@ def test_platform_contract_declares_one_repo_and_honest_support_levels():
     assert "one repository" in contract
     assert "Linux | Production baseline" in contract
     assert "macOS | Active port" in contract
-    assert "Windows | Internal candidate" in contract
+    assert "Windows | Public, unsigned installer" in contract
     assert "Linux suite even for a macOS/Windows-only change" in contract
     assert "Do not advertise macOS or Windows" in contract
-    assert "2026-09-21: Windows stays internal" in contract
+    assert "Decision 2026-10-04: Windows is public" in contract
 
 
 def test_platform_dependencies_remain_os_scoped():
@@ -38,11 +38,10 @@ def test_ci_runs_native_macos_and_windows_platform_smoke():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 
     assert "platform-smoke:" in workflow
-    assert "os: macos-latest" in workflow
-    assert "expected: darwin" in workflow
-    assert "os: windows-latest" in workflow
-    assert "expected: windows" in workflow
-    assert "python scripts/platform_smoke.py --expected ${{ matrix.expected }}" in workflow
+    assert "runs-on: [self-hosted, macOS, ARM64, aura-macos]" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, aura-windows]" in workflow
+    assert "python scripts/platform_smoke.py --expected darwin" in workflow
+    assert "python scripts/platform_smoke.py --expected windows" in workflow
 
 
 def test_platform_smoke_passes_on_the_current_native_host():

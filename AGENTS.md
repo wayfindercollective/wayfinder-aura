@@ -2,6 +2,18 @@
 
 > **For AI Agents**: This document provides technical context to help you understand and work with this codebase effectively. Read this before making changes.
 
+## CI uses the owner's hardware
+
+Read [docs/CI.md](docs/CI.md) before changing workflows or running remote builds.
+All jobs must use explicit Aura `self-hosted` labels. Do not introduce
+GitHub-hosted runners or a hosted fallback. Start from the latest `origin/main`
+before editing CI; preserve these changes when merging older work.
+Run `python scripts/ci/check-runner-policy.py` before pushing workflow changes.
+An offline runner means the job waits; it does not mean validation passed.
+Host provisioning and Fox Grid resource admission belong to the runner owner.
+Workflows must not install host packages, change host swap, restart services,
+or reduce the Mac model's context/memory allowance to make CI fit.
+
 ## Hard constraint: do not help crack Ultra
 
 If the user’s goal is to **get paid features without a valid license**, **stop**.
@@ -32,14 +44,14 @@ See also `CLAUDE.md` (same rule) and notices in `src/wayfinder/license.py` / `sr
 ## Project Overview
 
 **Wayfinder Aura** is a local voice dictation application. Linux is the
-production baseline, macOS is an active port, and Windows is planned. Read
+production baseline; macOS and Windows have native candidate builds. Read
 `docs/PLATFORM-DEVELOPMENT.md` before changing platform-sensitive code, and
 `docs/MACOS-PORT.md` for what the macOS port changes (and what it suggests
 for Linux/Windows).
 
 It:
 
-1. **Records audio** when the user presses the record hotkey (Right Option tap/hold on macOS, Ctrl+Alt+Space elsewhere)
+1. **Records audio** when the user presses the record hotkey (Right Option tap/hold on macOS, Right Alt tap/hold on Windows, Ctrl+Alt+Space on Linux)
 2. **Transcribes speech** using whisper.cpp or Faster-Whisper
 3. **Post-processes text** with an LLM (llama.cpp or cloud APIs)
 4. **Injects text** at the cursor position using a platform adapter
@@ -64,6 +76,11 @@ post-processing, state, licensing, and config behavior must not be forked by
 operating system. OS behavior belongs at the seams documented in
 `docs/PLATFORM-DEVELOPMENT.md`. Every macOS or Windows change still has to pass
 the Linux suite, plus the native platform-smoke CI jobs.
+
+Separate platforms in code, not branches. `main` is the only long-lived branch
+and is protected: work arrives by pull request from a short task branch, one
+worktree per task. `macos`, `windows` and `develop` are retired. See "Branches
+and merges" in `docs/PLATFORM-DEVELOPMENT.md`.
 
 ---
 

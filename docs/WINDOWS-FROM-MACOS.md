@@ -1,8 +1,10 @@
 # Windows: parity with the macOS app
 
-The `windows` branch is `macos` plus the Windows side of everything the Mac
-port built, so the two apps look, feel and behave the same wherever Windows
-allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
+Windows carries the Windows side of everything the Mac port built, so the two
+apps look, feel and behave the same wherever Windows allows it. It was built on
+a `windows` branch kept in step with `macos`; both are merged into `main` and
+retired (2026-09-30). New Windows work uses a short `win/*` branch from `main`
+([branch rules](PLATFORM-DEVELOPMENT.md#branches-and-merges)).
 
 **Ground rules** (the platform contract, as for the Mac port):
 
@@ -24,6 +26,9 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 | Frosted glass window, deeper ink panes, lifted rim on every pane, rounded content pane | Same palette and rims on a flat deep-ink surface (Tk can't show real vibrancy), rounded rimmed content pane with inset pages, no gradient. `WAYFINDER_WINDOWS_MAC_LOOK=0` restores the old look | `WINDOWS_MAC_LOOK` in `wayfinder_main.py` |
 | Retina-sharp at any display scale | Sharp at 125-175% too: the app is system-DPI aware and scales itself (it was bitmap-stretched, so soft). Same on-screen size; old saved window sizes carry over. A second monitor at a different scale is stretched as before. `WAYFINDER_WINDOWS_DPI_AWARE=0` reverts | `utils/windows_dpi.py` |
 | Unified title bar | Dark caption bar in the app's ink, rim-coloured border, rounded corners (DWM) | `ui/windows_window.py` |
+| App icon: dark squircle, glass rim, glowing arrow | The same artwork without the Mac grid margin and drop shadow (muddy in a taskbar), as one multi-size `.ico` for the exe, installer, title bar, taskbar and pill; re-rendered on every build | `packaging/windows/make_icon.py` |
+| Header mark (gradient arrow, halo, stardust) drawn by Core Animation | The same `render_brand_mark`, as a 4x CTkImage (sharp at any scale) | `ui/macos_brand_mark.py` |
+| Scroll views clipped by the rounded pane | Tk can't clip to a rounded shape: pages are inset half the pane radius, so a card scrolled under the edge is cut where the pane's side is straight, not inside its corner | `WINDOWS_MAC_LOOK` in `wayfinder_main.py` |
 | Opens content-sized (800x780), centred | Same size, centred in the work area (taskbar excluded) | `ui/window_geometry.py` |
 | No emoji as UI chrome | Same: lock icon on a locked Style tab, "Auto-detect", "GPU Acceleration (Ultra)" | |
 | No duplicate close/hide in the header | Same (Windows has caption buttons) | |
@@ -43,7 +48,7 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 | Control socket (tray, second launch, CLI, `tab:`/`inspect:`) | Token-guarded loopback channel with the same verbs (`hotkeys/windows_control.py`). **This also fixes the Windows tray menu, which never reached the app (no AF_UNIX on Windows)** |
 | First run: the tour downloads the free Base model, then resumes | Same (the installer bundles no model either); "this PC" copy |
 | After the first dictation: "open aura when I log in" | Same, via the per-user Run key; Settings ▸ System ▸ Open at login; removed on uninstall |
-| Right Option tap/hold hotkey | Right Ctrl or Right Alt / Alt Gr tap/hold (many laptops have no Right Ctrl). Alt Gr alone types nothing; Alt Gr + a key cancels the gesture. Default stays Ctrl+Alt+Space |
+| Right Option tap/hold hotkey (the default) | Right Alt / Alt Gr tap/hold is the default (many laptops have no Right Ctrl; Right Ctrl is offered too). Alt Gr alone types nothing; Alt Gr + a key cancels the gesture. On US layouts a lone Alt would open the front app's menu bar, so every Right Alt press sends the unassigned mask key 0xE8. Untouched Ctrl+Alt+Space configs move once (`windows_hotkey_defaults_v2`) |
 | Hotkey conflict caption | Windows collisions: Alt+Space, Ctrl/Shift+Space (IME), Alt/Ctrl+Enter, bare F-keys, 1Password, Magnifier's Ctrl+Alt+Space (`utils/windows_hotkey_conflicts.py`) |
 | Hotkey changes apply live | Same (no evdev restart and its "evdev not installed" warning) |
 | Escape cancels a recording from any app | Same |
@@ -70,11 +75,17 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
 | Bluetooth mic released right after dictating | Same |
 | Keys in the Keychain | Credential Manager (`utils/windows_credentials.py`) |
 | System trust store, loopback without proxy, keys scrubbed from children, retired cloud models, key help / Verify / Remove | Same |
-| Platform-aware update check (DMG) | Only releases carrying `WayfinderAura-Setup-<v>.exe` count (none today: Windows is internal) |
+| Platform-aware update check (DMG) | Only releases carrying `WayfinderAura-Setup-<v>.exe` count (every release since Windows went public, 2026-10-04) |
 | Transient clipboard | Excluded from Win+V history and Cloud Clipboard |
 | Packaged logs in ~/Library/Logs | `%LOCALAPPDATA%\wayfinder-aura\logs\app.log` (the windowed exe dropped all output) |
-| Benchmark system info | Registry + GlobalMemoryStatusEx (was "Unknown") |
+| Benchmark system info | Present PCI display adapters (EnumDisplayDevices; the registry also lists removed cards) + GlobalMemoryStatusEx (was "Unknown") |
 | CTk DPI poll hourly | Same (the app turns CTk DPI awareness off, so the poll can never find a change) |
+| Metal transcription in Ultra's GPU mode | A Vulkan build of the same pinned whisper.cpp (`_internal/whisper-vulkan`, `utils/windows_whisper.py`) for AMD, NVIDIA and Intel GPUs; the CPU build is its crash fallback (Windows crashes are NTSTATUS codes, not signals). Measured on a 32 s clip, Large v3 Turbo Q5: 16.97 s on 12 CPU threads, 1.12 s on an RX 7900 XTX, 3.41 s on a Radeon 780M. Cleanup stays on the CPU (no Vulkan llama-cpp-python wheel) |
+| GPU picked by Metal | Automatic = the discrete Vulkan device (probed with `whisper-cli --help`, only in GPU mode); Settings > GPU lists the devices when there are two or more |
+| Speech models in Application Support | `%LOCALAPPDATA%\wayfinder-aura\whisper-models` (was `%USERPROFILE%\whisper.cpp\models`, still searched) |
+| Hero idle at 30 fps, stopped by the compositor when hidden | Same rate; held while another window covers all of Aura (`windows_window.window_exposure`), as when minimized |
+| Cleanup threads follow the P-core count | Kept at 4: Gemma 3 1B cleanup measured 1.02 s at 4, 0.97 s at 6, 1.01 s at 8, 1.16 s at 16 threads on a Ryzen 7 7840HS (memory-bound; prompt processing already uses every core). whisper stays at 75% of logical cores: 16.97 s at 12 vs 18.49 s at 8 |
+| Audio resampling and rumble filter via SciPy | NumPy twins (`core/audio_dsp.py`), exact to 1e-9 against SciPy; the bundle drops SciPy (~72 MB) |
 
 ## Deliberately different on Windows
 
@@ -82,8 +93,13 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
   notifications (the Mac shows them top-right).
 - **30 s warm mic** (the Mac uses 5-10 s). Opening a WASAPI/MME stream costs
   0.25-0.55 s (measured), not Core Audio's ~0.1 s.
-- **Ctrl+Alt+Space stays the default hotkey**; Right Ctrl and Right Alt / Alt Gr
-  tap/hold are offered.
+- **Right Alt / Alt Gr tap/hold is the default hotkey** (2026-09-28), not
+  Ctrl+Alt+Space: the Claude desktop app owns Ctrl+Alt+Space as its global
+  shortcut, so both apps reacted. Right Ctrl and the chord keys are offered.
+- **One full repaint after each focus change or page switch.** On a PC with
+  two AMD GPUs and hardware GPU scheduling, parts of the window came back as
+  small black rectangles after activation until each widget redrew
+  (`windows_window.repaint_after_activation`, coalesced, 120 ms).
 
 ## Not ported, with reasons
 
@@ -98,10 +114,13 @@ allows it. Kept in step with `macos` by merging it (latest: 8a1eccd).
   the bundled in-process llama-cpp-python wheel.
 - **Tk self-pipe wake-up**: `createfilehandler` doesn't exist on Windows Tk.
 - **Permissions checklist (TCC), Dock, Metal, App Nap, DMG, notarization**:
-  macOS concepts. Signing the Windows installer (Authenticode) is its own task.
+  macOS concepts. Windows signing (Authenticode) is in `packaging/windows/build.py`
+  and turns on when a code-signing identity is configured.
 
 ## Follow-ups
 
 - Try Gamer mode in the real games (as on the Mac, nothing is "Verified" yet).
 - Label fitting for scaled Windows displays.
-- Authenticode signing (SmartScreen).
+- A code-signing identity for the Authenticode step (SmartScreen).
+- Confirm on the reporting PC that the focus-change repaint clears the black
+  squares, and that a lone Right Alt tap never opens the front app's menus.

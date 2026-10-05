@@ -11,8 +11,10 @@ Game Mode use xdotool (see Troubleshooting).
 In local mode your voice never leaves your computer; optional local cleanup,
 Ultra GPU acceleration, and cloud backends are available when you choose them.
 
-Linux is the current production release. macOS and Windows are ports in
-testing, not publicly released; contributors should follow the
+Linux is the current production release. **macOS is in public preview**
+([download](#macos-public-preview)), and **Windows is public too**
+([download](#windows)), with an installer that is not code-signed yet.
+Contributors should follow the
 [platform development contract](docs/PLATFORM-DEVELOPMENT.md) so platform work
 does not regress the Linux app.
 
@@ -43,7 +45,7 @@ does not regress the Linux app.
 
 | | |
 |---|---|
-| 🎙️ **Hotkey dictation** | Right Option on macOS (tap, or hold to talk), Ctrl+Alt+Space elsewhere (configurable); text lands at your cursor |
+| 🎙️ **Hotkey dictation** | Right Option on macOS (tap, or hold to talk), Right Alt on Windows, Ctrl+Alt+Space on Linux (configurable); text lands at your cursor |
 | 🔒 **100% local pipeline** | whisper.cpp transcription plus optional llama.cpp cleanup, both on-device |
 | ⚡ **GPU acceleration (Ultra)** | Vulkan on AMD/Intel/NVIDIA with per-machine CPU fallback |
 | 🎨 **Tone presets (Ultra)** | Normal, Professional, Casual, Dev, Personal — cycle with Ctrl+Alt+Enter |
@@ -80,7 +82,15 @@ Keys activate online once and keep working offline.
 
 ## Install
 
-### Download (recommended)
+Every download, for each platform and for both channels, is on
+**[wayfindercollective.io/aura/download](https://wayfindercollective.io/aura/download)**.
+**Stable** is the default. **Beta** builds are newer, released as often as
+daily, and may have bugs; switch channels any time in Settings → System →
+Updates. All builds are also on the
+[Releases page](https://github.com/wayfindercollective/wayfinder-aura/releases)
+(betas are marked Pre-release).
+
+### Linux: download (recommended)
 
 **[⬇ Download the latest AppImage](https://github.com/wayfindercollective/wayfinder-aura/releases/latest)** — one file with the CPU and GPU (Vulkan, Ultra) speech engines and wtype bundled. On X11 sessions, install xdotool from your distribution (the AppImage does not include it).
 
@@ -97,7 +107,10 @@ Keys activate online once and keep working offline.
    whether Aura may type into every app (KDE: Remote Control); allow it.
 
 Works on Linux distributions from 2022 onward — Ubuntu 22.04+, Debian 12+,
-Fedora 35+, Bazzite, and the Steam Deck. Wayland and X11.
+Fedora 35+, Bazzite, and the Steam Deck. Wayland and X11. Each release also
+carries a Flatpak bundle (`io.wayfindercollective.WayfinderAura.flatpak`). For
+the beta, pick the newest Pre-release on the
+[Releases page](https://github.com/wayfindercollective/wayfinder-aura/releases).
 
 ### Flatpak (GitHub release bundle)
 
@@ -125,23 +138,43 @@ then, the AppImage above is the fastest path. (Developers can build the
 Flatpak locally from `flatpak/io.wayfindercollective.WayfinderAura.yml` with
 `flatpak-builder`.)
 
-### macOS candidate
+### macOS (public preview)
 
-The Mac build targets Apple Silicon and macOS 14+. Download the architecture-
-labelled DMG, drag **Wayfinder Aura** into **Applications**, then launch that
-copy. The first-run flow downloads the Base speech model and walks through
-Microphone, Accessibility, and Input Monitoring. Input Monitoring may require
-clicking **+** and selecting `/Applications/Wayfinder Aura.app` manually.
+**[⬇ Download for Mac](https://wayfindercollective.io/aura/download/mac)**
+(always the newest signed Stable DMG) ·
+**[Beta for Mac](https://wayfindercollective.io/aura/download/mac?channel=beta)**:
+`Wayfinder_Aura-*-macOS-arm64.dmg`, for Apple Silicon Macs on macOS 14 or
+later. It is signed with Developer ID and notarized by Apple, so it opens
+without warnings. (The "latest AppImage" link above is the Linux app.)
 
-The default shortcuts are **Right Option** for dictation (tap to start and stop,
-or hold to talk) and **Fn+Enter** for the Ultra style cycle. The stateful menu-bar item is optional under Settings.
+1. Open the DMG, drag **Wayfinder Aura** into **Applications**, then launch
+   that copy.
+2. The setup checklist walks through Microphone, Accessibility and Input
+   Monitoring, and downloads the Base speech model. After you allow Input
+   Monitoring, macOS needs a relaunch; the app has a button for it. If Input
+   Monitoring doesn't list Aura, click **+** and pick
+   `/Applications/Wayfinder Aura.app`.
+3. Tap **Right Option** to start and stop dictating, or hold it to talk while
+   it's held. **Fn+Enter** cycles the Ultra styles. Both can be changed in
+   Settings.
 
-### Windows (internal testing)
+An Ultra key works on Mac, Windows and Linux: Settings → Ultra → Activate.
 
-A Windows installer is built and tested in CI, but it is **not publicly
-released** yet: it ships once testing is complete and the owner signs off.
-Team members can install the candidate from the **Windows Candidate** workflow
-artifact; see [packaging/windows/README.md](packaging/windows/README.md).
+### Windows
+
+**[⬇ Download for Windows](https://github.com/wayfindercollective/wayfinder-aura/releases)**:
+`WayfinderAura-Setup-<version>.exe` on the newest release that has one (until
+the next Stable release, that's a Beta, marked Pre-release). For Windows 10 and
+11 on x64. It installs for your user only, without administrator rights.
+
+1. Run the installer. It isn't code-signed yet, so SmartScreen says "Windows
+   protected your PC": click **More info → Run anyway**.
+2. Tap **Right Alt** (Alt Gr) to start and stop dictating, or hold it while you
+   talk. You can change it in Settings.
+3. Updates install from inside the app (Settings → System → Updates).
+
+Building the installer yourself: see
+[packaging/windows/README.md](packaging/windows/README.md).
 
 ### From source
 
@@ -239,7 +272,7 @@ macOS uses `~/Library/Application Support/wayfinder-aura/config.json`.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `hotkey_key` + `hotkey_modifiers` | Right Option on macOS; Ctrl+Alt+Space elsewhere | Recording toggle |
+| `hotkey_key` + `hotkey_modifiers` | Right Option on macOS; Right Alt on Windows; Ctrl+Alt+Space on Linux | Recording toggle |
 | `style_toggle_key` + `style_toggle_modifiers` | Fn+Enter on macOS; Ctrl+Alt+Enter elsewhere | Style cycle |
 | `audio_device` / `audio_device_name` | auto | Microphone (saved by name — index-proof) |
 | `typing_speed` | instant | instant, fast, normal, slow, very_slow |

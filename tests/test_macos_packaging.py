@@ -42,7 +42,7 @@ def test_macos_builder_pins_and_verifies_offline_runtimes():
 def test_manual_macos_candidate_workflow_uses_packaging_helper():
     workflow = (REPO / ".github" / "workflows" / "macos-build.yml").read_text(encoding="utf-8")
 
-    assert "runs-on: macos-latest" in workflow
+    assert "runs-on: [self-hosted, macOS, ARM64, aura-macos]" in workflow
     assert "python packaging/macos/build.py" in workflow
     assert "Wayfinder_Aura-*-macOS-*.dmg" in workflow
     assert 'PYTHON_VERSION: "3.12.10"' in workflow
@@ -206,11 +206,11 @@ def test_release_workflow_macos_job_never_gates_the_linux_release():
     # Linux assets are published without waiting on (or failing because of) macOS.
     assert "needs: [quality, release-readiness, build-appimage, build-flatpak]" in release
     assert "build-macos" not in release.split("steps:", 1)[0]
-    assert "options: [appimage, hosted-flatpak, windows, macos, all]" in workflow
+    assert "options: [appimage, flatpak, windows, macos, all]" in workflow
 
     # Same toolchain as the manual candidate workflow.
-    assert "runs-on: macos-latest" in mac
-    assert 'MACOS_PYTHON_VERSION: "3.12.10"' in mac
+    assert "runs-on: [self-hosted, macOS, ARM64, aura-macos]" in mac
+    assert 'PYTHON_VERSION: "3.12.10"' in mac
     assert "-c packaging/macos/constraints.txt -e '.[dev]'" in mac
     assert "python packaging/macos/build.py" in mac
     # Signed DMGs are verified before they get the publishable artifact name;

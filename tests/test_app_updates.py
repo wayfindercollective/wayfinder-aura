@@ -258,6 +258,74 @@ class TestCheckForAppUpdate:
         assert get.call_count == 1
         assert info["latest_version"] == "v1.2.0-beta.2"
 
+    def test_stable_install_opting_into_beta_sees_betas(self):
+        with patch(
+            "requests.get",
+            return_value=_github_response(
+                _release("v1.2.0-beta.3", prerelease=True),
+                _release("v1.1.9"),
+            ),
+        ):
+            info = check_for_app_update("1.1.8", channel="beta")
+        assert info["update_available"] is True
+        assert info["latest_version"] == "v1.2.0-beta.3"
+
+    def test_beta_install_moving_to_stable_waits_for_the_next_stable(self):
+        betas_only = _github_response(_release("v1.2.0-beta.4", prerelease=True))
+        with patch("requests.get", return_value=betas_only):
+            info = check_for_app_update("1.2.0-beta.3", channel="stable")
+        assert info["update_available"] is False
+        with patch(
+            "requests.get",
+            return_value=_github_response(
+                _release("v1.2.0-beta.4", prerelease=True), _release("v1.2.0")),
+        ):
+            info = check_for_app_update("1.2.0-beta.3", channel="stable", force=True)
+        assert info["latest_version"] == "v1.2.0"
+        assert info["update_available"] is True
+
+    def test_unset_channel_follows_the_build(self):
+        with patch(
+            "requests.get",
+            return_value=_github_response(_release("v1.2.0-beta.2", prerelease=True)),
+        ):
+            stable = check_for_app_update("1.1.8", channel="")
+            beta = check_for_app_update("1.2.0-beta.1", channel=None)
+        assert stable["update_available"] is False
+        assert beta["latest_version"] == "v1.2.0-beta.2"
+
+    def test_changing_the_channel_refetches_instead_of_reusing_the_cache(self):
+        with patch("requests.get", return_value=_github_response(_release("v1.1.9"))):
+            check_for_app_update("1.1.8", channel="stable")
+        with patch(
+            "requests.get",
+            return_value=_github_response(_release("v1.2.0-beta.1", prerelease=True)),
+        ) as get:
+            info = check_for_app_update("1.1.8", channel="beta")
+        assert get.call_count == 1
+        assert info["latest_version"] == "v1.2.0-beta.1"
+
+    def test_a_source_install_never_updates_even_on_beta(self):
+        with patch(
+            "requests.get",
+            return_value=_github_response(_release("v9.9.9-beta.1", prerelease=True)),
+        ):
+            info = check_for_app_update("dev", channel="beta")
+        assert info["update_available"] is False
+
+    @pytest.mark.parametrize("version,preference,label", [
+        ("1.1.8", None, "Stable"),
+        ("1.1.8", "beta", "Beta"),
+        ("1.2.0-beta.1", "", "Beta"),
+        ("1.2.0-beta.1", "stable", "Stable"),
+        ("1.1.8", "nonsense", "Stable"),
+    ])
+    def test_channel_label(self, version, preference, label):
+        assert app_updates.channel_label(version, preference) == label
+
+    def test_release_list_is_long_enough_for_daily_betas(self):
+        assert "per_page=100" in app_updates.RELEASES_API
+
     def test_missing_tag_in_response_is_quiet(self):
         with patch("requests.get", return_value=_github_response(_release(None))):
             info = check_for_app_update("1.1.8")
@@ -418,7 +486,7 @@ class TestWindowsDownloads:
         _simulate_platform(monkeypatch, "win32", machine="AMD64")
 
     def test_release_without_an_installer_is_not_an_update(self):
-        # Today's situation: Windows is internal, tags carry no Setup exe.
+        # A release without its Setup exe (e.g. its Windows build failed).
         with patch("requests.get", return_value=_github_response(*MIXED_PAYLOAD)):
             info = check_for_app_update("1.1.7")
         assert info["update_available"] is False
@@ -587,18 +655,72 @@ class TestBannerWiring:
     def test_banner_show_is_marshalled_to_the_tk_thread(self, src):
         body = src.split("def _check_app_update_background", 1)[1]
         body = body.split("def _show_app_update_banner", 1)[0]
-        assert "self.after(0, lambda: self._show_app_update_banner(info))" in body
+        assert "self.after(0, lambda: self._show_app_update_banner_if_current(info, generation))" in body
 
     def test_config_defaults_exist(self):
         from wayfinder.config import DEFAULT_CONFIG
         assert DEFAULT_CONFIG["check_for_app_updates"] is True
         assert DEFAULT_CONFIG["app_update_dismissed_version"] == ""
+        assert DEFAULT_CONFIG["update_channel"] == ""
+
+    def test_both_checks_pass_the_users_channel(self, src):
+        for name in ("def _check_app_update_background", "def _check_app_update_now"):
+            body = src.split(name, 1)[1].split("\n    def ", 1)[0]
+            assert 'self.config.get("update_channel")' in body
+            assert "channel=channel" in body
+
+    def test_updates_row_is_in_the_system_settings_tile(self, src):
+        body = src.split("# === BENTO TILE 3: System", 1)[1].split('yield "system"', 1)[0]
+        assert "self._create_update_channel_row(system_content)" in body
 
     def test_check_for_updates_menu_item_is_mac_only(self, src):
         body = src.split("update_items = (", 1)[1].split("menu = pystray.Menu(", 1)[0]
         assert '"Check for Updates…", self.check_for_updates_from_tray' in body
         assert 'if sys.platform == "darwin"' in body
         assert "else []" in body
+
+
+class TestUpdateChannelSetting:
+    """Settings > System > Updates, exercised on the unbound handler."""
+
+    @staticmethod
+    def _app(wm, config):
+        calls = []
+        app = types.SimpleNamespace(
+            config=config,
+            _UPDATE_CHANNEL_CHOICES=wm.WayfinderApp._UPDATE_CHANNEL_CHOICES,
+            log=lambda message: calls.append(("log", message)),
+            _hide_app_update_banner=lambda: calls.append(("hide",)),
+            _next_app_update_generation=lambda: calls.append(("generation",)),
+            _check_app_update_background=lambda force=False: calls.append(("check", force)),
+        )
+        return app, calls
+
+    def test_choosing_beta_saves_and_checks_now(self, monkeypatch):
+        import wayfinder_main as wm
+        saved = []
+        monkeypatch.setattr(wm, "save_config", lambda cfg: saved.append(dict(cfg)))
+        app, calls = self._app(wm, {"update_channel": ""})
+        wm.WayfinderApp._on_update_channel_changed(app, "Beta")
+        assert app.config["update_channel"] == "beta"
+        assert saved and saved[-1]["update_channel"] == "beta"
+        assert ("hide",) in calls and ("check", True) in calls
+
+    def test_an_answer_for_an_old_channel_never_reaches_the_banner(self):
+        import wayfinder_main as wm
+        shown = []
+        app = types.SimpleNamespace(_show_app_update_banner=shown.append)
+        old = wm.WayfinderApp._next_app_update_generation(app)   # Beta check starts
+        wm.WayfinderApp._next_app_update_generation(app)         # user switches to Stable
+        wm.WayfinderApp._show_app_update_banner_if_current(app, {"v": "beta"}, old)
+        assert shown == []
+
+    def test_reselecting_the_same_channel_does_nothing(self, monkeypatch):
+        import wayfinder_main as wm
+        monkeypatch.setattr(wm, "save_config", lambda cfg: pytest.fail("saved"))
+        app, calls = self._app(wm, {"update_channel": "stable"})
+        wm.WayfinderApp._on_update_channel_changed(app, "Stable")
+        assert calls == []
 
 
 class TestMacUpdateActions:
@@ -657,16 +779,21 @@ class TestMacUpdateActions:
         calls = []
         verdict = {"update_available": False, "latest_version": "v1.1.8", "error": None}
 
-        def fake_check(version, force=False):
-            calls.append((threading.current_thread(), force))
+        def fake_check(version, force=False, channel=None):
+            calls.append((threading.current_thread(), force, channel))
             return verdict
 
         monkeypatch.setattr(app_updates, "check_for_app_update", fake_check)
-        app = types.SimpleNamespace(event_queue=queue.Queue())
+        app = types.SimpleNamespace(
+            event_queue=queue.Queue(), config={"update_channel": "beta"},
+            _app_update_generation=0)
+        app._next_app_update_generation = (
+            lambda: wm.WayfinderApp._next_app_update_generation(app))
         wm.WayfinderApp._check_app_update_now(app)
         event_type, callback = app.event_queue.get(timeout=5)
         assert event_type == wm.EventType.UI_CALLBACK
         assert calls and calls[0][1] is True
+        assert calls[0][2] == "beta"
         assert calls[0][0] is not threading.main_thread()
         reported = []
         app._report_app_update_check = reported.append

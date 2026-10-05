@@ -51,7 +51,7 @@ Wayfinder Collective LLC (5JJQ8L5HHD)*.
 | Process | What it is | macOS specifics |
 |---|---|---|
 | Main app | CustomTkinter window, hotkeys, pipeline | Aqua Tk 8.6; glass window chrome; native layers for the waves and logo |
-| Overlay pill | Same executable, `--overlay-subprocess` (PyQt6) | Registered as an **accessory** app (no second Dock icon); Metal/Core Animation waves; answers Quit Apple events |
+| Overlay pill | Same executable, `--overlay-subprocess` (PyQt6) | Never in the Dock: the bundle sets `LSUIElement`, so every process starts without a Dock icon, and `main.py` gives only the app its icon (`utils/macos_dock.py`); before this the helper checked in as a regular app and left a second Dock tile. Metal/Core Animation waves; answers Quit Apple events |
 | `whisper-server` | Resident speech-to-text (bundled, pinned whisper.cpp) | Supervised child; CPU (Free) or Metal (Ultra GPU) |
 | `llama-server` | Resident cleanup LLM (bundled, pinned llama.cpp) | Loopback only; ownership proven via libproc |
 | Render thread | "Wayfinder waves" thread inside each process | Display-synced CADisplayLink; idle cost zero |
@@ -249,6 +249,9 @@ simply aren't ducked.
   for the Linux 800 px window are clamped to the card each label sits in.
 - **Pill placement:** inside the screen's visible frame, clear of the Dock
   at its real size.
+- **Disappearing pill:** the same PyQt helper keeps its window mapped offscreen
+  at rest and moves it onscreen for dictation without a show/raise call. A Tk
+  toplevel cannot appear while the main app is natively hidden to the menu bar.
 - **Idle budget:** CustomTkinter's 100 ms DPI poll is stretched to hourly
   (Aqua scales on its own); the hero doesn't poll while the window is hidden.
   On non-Dictate tabs its visible canvas updates at 15 fps.

@@ -35,12 +35,14 @@ class _Thread:
         return self._alive
 
 
-def test_non_portal_listeners_cancel_with_bare_escape():
+def test_non_portal_listeners_teach_shift_esc_everywhere():
+    """Escape cancels with or without Shift on these listeners, and Shift+Esc is
+    the portal default, so one key is taught on every platform."""
     for backend in ("pynput", None):
-        assert wm.WayfinderApp._cancel_hotkey_display(_app(backend)) == "Esc"
+        assert wm.WayfinderApp._cancel_hotkey_display(_app(backend)) == "Shift+Esc"
     evdev = _app("evdev")
     evdev._hotkey_thread = _Thread(alive=True)
-    assert wm.WayfinderApp._cancel_hotkey_display(evdev) == "Esc"
+    assert wm.WayfinderApp._cancel_hotkey_display(evdev) == "Shift+Esc"
 
 
 def test_no_escape_promise_without_a_listener():
@@ -109,3 +111,14 @@ def test_benchmark_bar_is_placed_by_wall_clock_at_30_fps(monkeypatch):
     app._benchmark_running = False
     wm.WayfinderApp._tick_benchmark_bar(app)
     assert scheduled == [33]        # stops (and hides) when the run ends
+
+
+# ---------------------------------------------------------------- overlay hint
+def test_overlay_controller_passes_the_hint_on_every_start():
+    sent = []
+    ctl = wm.OverlayController(cancel_hint="Shift+Esc")
+    ctl._send_command = lambda cmd, **k: sent.append(cmd) or True
+    ctl.set_cancel_hint("Shift+Esc")  # unchanged: nothing sent
+    ctl.set_cancel_hint("Ctrl+Esc")
+    assert sent == [{"cmd": "cancel_hint", "value": "Ctrl+Esc"}]
+    assert ctl._cancel_hint == "Ctrl+Esc"

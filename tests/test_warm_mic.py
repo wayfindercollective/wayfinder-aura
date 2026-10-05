@@ -14,9 +14,14 @@ import numpy as np
 import pytest
 
 
-def _make_warm(device=None, idle_secs=30.0):
+def _make_warm(device=None, idle_secs=30.0, **kwargs):
     from wayfinder.core.recorder import WarmMic
-    return WarmMic(device=device, sample_rate=16000, idle_secs=idle_secs)
+    return WarmMic(
+        device=device,
+        sample_rate=16000,
+        idle_secs=idle_secs,
+        **kwargs,
+    )
 
 
 class TestWarmMicLifecycle:
@@ -197,6 +202,73 @@ class TestWarmMicIdleClose:
         warm.acquire(MagicMock())  # re-acquired before the stale timer runs
         warm._on_idle()
         assert warm.is_open
+
+    @patch("wayfinder.core.recorder._MIC_CLOSE_TIMEOUT", 0.1)
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_stuck_idle_close_never_holds_shared_lock_or_freezes_acquire(
+        self, mock_sd, _rate
+    ):
+        """Regression 2026-09-30: CoreAudio wedged in AudioOutputUnitStop.
+
+        The idle timer owned WarmMic's RLock during abort(), so the next hotkey
+        blocked Tk forever trying to acquire that lock.  Teardown may remain
+        stuck, but the lock and UI must remain responsive and further PortAudio
+        work must fail closed.
+        """
+        entered = threading.Event()
+        release_abort = threading.Event()
+        stream = MagicMock()
+        stream.active = True
+
+        def stuck_abort():
+            entered.set()
+            release_abort.wait(timeout=5)
+
+        stream.abort.side_effect = stuck_abort
+        mock_sd.InputStream.return_value = stream
+        warm = _make_warm(device=7)
+        warm.acquire(MagicMock())
+        warm.release()
+
+        idle = threading.Thread(target=warm._on_idle)
+        idle.start()
+        assert entered.wait(timeout=1)
+
+        # The timer's native worker is stuck, but it must not own _lock.
+        assert warm._lock.acquire(timeout=0.2)
+        warm._lock.release()
+        with pytest.raises(RuntimeError, match="stuck releasing"):
+            warm.acquire(MagicMock())
+        assert mock_sd.InputStream.call_count == 1
+
+        release_abort.set()
+        idle.join(timeout=1)
+
+    @patch("wayfinder.core.recorder._MIC_CLOSE_TIMEOUT", 0.1)
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_timed_out_close_quarantines_portaudio(self, mock_sd, _rate):
+        blocker = threading.Event()
+        notices = []
+        stream = MagicMock()
+        stream.active = True
+        stream.abort.side_effect = lambda: blocker.wait(timeout=5)
+        mock_sd.InputStream.return_value = stream
+        warm = _make_warm(device=7, on_restart_required=notices.append)
+        warm.acquire(MagicMock())
+        warm.release()
+
+        assert warm._close_stream() is False
+        assert warm._abandoned_close is True
+        assert notices == ["Microphone backend got stuck releasing the previous stream"]
+        # Any later close/acquire path must not request multiple relaunches.
+        warm._notify_restart_required("duplicate")
+        assert len(notices) == 1
+        with pytest.raises(RuntimeError, match="stuck releasing"):
+            warm.acquire(MagicMock())
+        assert mock_sd.InputStream.call_count == 1
+        blocker.set()
 
     @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")

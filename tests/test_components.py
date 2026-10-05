@@ -6,16 +6,13 @@ Focuses on data structures and logic that don't require a running Tk instance:
 - MODEL_RECOMMENDATIONS string
 - get_dynamic_tooltip() function
 
-All tests are marked @pytest.mark.ui so they can be skipped in headless CI.
+These checks belong in the regular CI suite; a display server is unnecessary.
 """
 
 import pytest
 
 # Skip entire file if CustomTkinter is not available
 ctk = pytest.importorskip("customtkinter")
-
-pytestmark = pytest.mark.ui
-
 
 class TestSettingTooltips:
     """Tests for the SETTING_TOOLTIPS dictionary."""

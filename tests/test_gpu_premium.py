@@ -1,6 +1,9 @@
 """GPU acceleration is a PREMIUM feature — enforced at the backend factory so a
 config.json edit can't unlock it without a license. (Pairs with the UI gate.)"""
 import pytest
+
+# GPU gating decisions must not depend on a whisper.cpp build on the host.
+pytestmark = pytest.mark.usefixtures("no_host_binaries")
 from wayfinder.core.transcriber import get_backend, WhisperCppBackend
 from wayfinder.license import LicenseInfo
 
@@ -15,10 +18,9 @@ BASE_CFG = {
 @pytest.fixture(autouse=True)
 def _free_license(monkeypatch):
     # Real license = non-premium unless a test overrides load_stored_license.
+    # conftest's reset_feature_gate clears the gate singleton around each test.
     monkeypatch.setattr("wayfinder.license.load_stored_license",
                         lambda: LicenseInfo(is_valid=False, is_premium=False))
-    import wayfinder.license as L
-    L._feature_gate = None  # force gate rebuild per test
 
 def _reset_gate():
     import wayfinder.license as L

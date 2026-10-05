@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -284,16 +286,17 @@ def ask_for_permission(permission: str) -> bool:
         return False
     # A TCC entry left by an older build (different signature) makes macOS
     # skip the prompt, and its Settings switch then grants that old copy, not
-    # this one - the switch looks on while Aura stays blocked. Asking only
-    # happens while this copy is not allowed, so clearing Aura's own entry
-    # first is safe and lets the prompt and switch apply to the running app.
+    # this one - the switch looks on while Aura stays blocked. Clearing Aura's
+    # own entry lets the prompt and switch apply to the running app, but only
+    # on this build's first ask (_reset_stale_entry_once): a later ask can come
+    # right after the user turned the switch on, before macOS applied it.
     if permission == "microphone":
         if microphone_authorization() == MIC_DENIED:
-            _reset_own_entry("microphone")
+            _reset_stale_entry_once("microphone")
         return request_microphone_access()
     if permission == "accessibility":
         if request_accessibility_permission(prompt=False) is not True:
-            _reset_own_entry("accessibility")
+            _reset_stale_entry_once("accessibility")
         request_accessibility_permission(prompt=True)
     elif permission == "input_monitoring":
         # macOS can ignore a ListenEvent request while Accessibility is still
@@ -303,7 +306,7 @@ def ask_for_permission(permission: str) -> bool:
             request_accessibility_permission(prompt=True)
             return open_macos_privacy_settings("accessibility")
         if request_input_monitoring_permission(prompt=False) is not True:
-            _reset_own_entry("input_monitoring")
+            _reset_stale_entry_once("input_monitoring")
         if request_input_monitoring_registration() is None:
             request_input_monitoring_permission(prompt=True)
     else:
@@ -336,6 +339,50 @@ def _reset_own_entry(permission: str) -> bool:
     except Exception:
         return False
     return getattr(result, "returncode", 1) == 0
+
+
+def _reset_marker_path():
+    from wayfinder.config import CONFIG_DIR
+
+    return CONFIG_DIR / "macos-permission-resets.json"
+
+
+def _build_identity() -> str:
+    """Changes whenever a different Aura build is installed."""
+    try:
+        return str(os.stat(sys.executable).st_mtime_ns)
+    except OSError:
+        return ""
+
+
+def _reset_stale_entry_once(permission: str) -> bool:
+    """Clear Aura's own entry the first time this build asks, never again.
+
+    The reset is for one case: an entry left by an older, differently signed
+    build. Repeating it on every "allow" wiped a switch the user had just
+    turned on (macOS applies Input Monitoring to a new process only, so the
+    row still read "off" and invited another click). Later asks only prompt
+    and open the pane; "repair" remains the deliberate reset.
+    """
+    build = _build_identity()
+    try:
+        path = _reset_marker_path()
+        try:
+            done = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(done, dict):
+                done = {}
+        except (OSError, ValueError):
+            done = {}
+        if not build or done.get(permission) == build:
+            return False
+        if not _reset_own_entry(permission):
+            return False
+        done[permission] = build
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(done), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 
 def repair_permission(permission: str) -> bool:

@@ -50,14 +50,14 @@ network and not perf"`) passes on a headless node; Ruff's CI classes and
 
 ### What still blocks the Linux release
 
-1. **Release candidate** (plan item 6). Version bumped to `1.2.0-beta.1` on
-   2026-10-04 (pyproject, `__init__`, `build-appimage.sh`, `installer.iss`, an
-   AppStream development release, the CHANGELOG). Next: tag `v1.2.0-beta.1` from the
-   pushed branch once merged, let CI build the AppImage and Flatpak, install
-   from the bundle, and record hashes (`SHA256SUMS-linux.txt`) and self-tests.
-   Stable 1.1.8 users are not offered a beta; promote to `1.2.0` after QA. The
-   macOS DMG puts the full version in `CFBundleVersion`; confirm notarization
-   accepts a prerelease string on the first macOS candidate.
+1. **Release candidate** (plan item 6). `main` names the next stable
+   release (`1.2.0`), and the nightly Beta workflow cuts and stamps
+   `v1.2.0-beta.N` from it (`docs/RELEASING.md`). The first beta after this
+   audit merges is the Linux candidate: install the AppImage and Flatpak from
+   that release, check them against `SHA256SUMS-linux.txt`, and confirm the
+   `--linux-input-self-test` step passed in its build. Stable 1.1.8 users are
+   not offered a beta; `scripts/release/promote.py` ships `1.2.0` from a
+   complete beta after the manual passes below.
 2. **Manual passes still open** in `docs/LINUX-SHIPPING-PLAN.md`: GNOME 45+,
    the Steam machine (desktop approval, then Game Mode), Path of Exile 2 under
    Proton (windowed and fullscreen), DAoC through the portal, and the AppImage

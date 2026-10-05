@@ -94,25 +94,33 @@ def _workflow_job_body(name: str) -> str:
     return match.group("body")
 
 
-def test_windows_release_build_is_gated_but_not_published():
-    """Windows builds run behind the release gates; the installer stays internal.
-
-    Owner decision 2026-09-21: no public Windows distribution until testing is
-    complete and the owner signs off. The re-attach change is parked on
-    release/windows-public-pending-signoff.
+def test_windows_installer_is_published_without_holding_up_linux():
+    """Owner decision 2026-10-04: Windows is public. Like the Mac DMG, the
+    installer is attached by its own job, so the Linux release never waits on
+    the Windows runner and a failed Linux release never becomes Windows-only.
     """
     build = _workflow_job_body("build-windows")
     release = _workflow_job_body("release")
+    publish = _workflow_job_body("publish-windows")
 
     assert "needs: [quality, release-readiness]" in build
     assert "uses: ./.github/workflows/windows-build.yml" in build
     assert "startsWith(github.ref, 'refs/tags/v')" in build
     assert "inputs.artifacts == 'windows'" in build
     assert "inputs.artifacts == 'all'" in build
-    # The published release must not carry the Windows installer.
     assert "build-windows" not in release
-    assert "wayfinder-aura-windows-x64" not in release
     assert "WayfinderAura-Setup" not in release
+
+    assert "needs: [release, build-windows]" in publish
+    assert "startsWith(github.ref, 'refs/tags/v')" in publish
+    assert "name: wayfinder-aura-windows-x64" in publish
+    # Exactly the tag's installer, added to the existing release only.
+    assert 'WayfinderAura-Setup-${version}.exe' in publish
+    assert 'version="${GITHUB_REF_NAME#v}"' in publish
+    assert 'gh release upload "$GITHUB_REF_NAME"' in publish
+    assert "--clobber" in publish
+    assert "softprops/action-gh-release" not in publish
+    assert "runs-on: [self-hosted, Linux, X64, aura-linux]" in publish
 
 
 def test_appimage_metadata_copies_authoritative_desktop_and_metainfo():
@@ -585,7 +593,7 @@ def test_tagged_github_release_is_gated_by_release_readiness_check():
     assert "if: startsWith(github.ref, 'refs/tags/v')" in workflow
     assert "python scripts/ci/check-release-license-defaults.py" in workflow
     assert "python -m pip install playwright" in workflow
-    assert "python -m playwright install --with-deps chromium" in workflow
+    assert "python -m playwright install chromium" in workflow
     assert "python scripts/ci/check-storefront-readiness.py --browser --timeout 30" in workflow
     assert "python flatpak/prepare-release-manifest.py" in workflow
     assert '--tag "${GITHUB_REF_NAME}"' in workflow
@@ -611,14 +619,12 @@ def test_release_artifact_jobs_are_manual_or_tag_only_and_raw_binary_is_removed(
     assert "wayfinder-aura-linux" not in workflow
     assert "dist/wayfinder-aura" not in release_job
     assert "inputs.artifacts == 'appimage' || inputs.artifacts == 'all'" in appimage_job
-    assert "inputs.artifacts == 'hosted-flatpak' || inputs.artifacts == 'all'" in workflow
+    assert "inputs.artifacts == 'flatpak' || inputs.artifacts == 'all'" in workflow
     assert "uses: ./.github/workflows/flatpak-build.yml" in workflow
     assert "pull_request:" not in workflow.split("jobs:", 1)[0]
     assert "pull_request:" not in flatpak_workflow.split("jobs:", 1)[0]
     assert "if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'" in flatpak_workflow
-    assert "runs-on: ubuntu-latest" in flatpak_workflow
-    assert "self-hosted" not in workflow
-    assert "self-hosted" not in flatpak_workflow
+    assert "runs-on: [self-hosted, Linux, X64, aura-build]" in flatpak_workflow
     assert "uses: ./.github/workflows/ci.yml" in workflow
 
 
@@ -637,9 +643,10 @@ def test_normal_ci_keeps_cached_quality_platform_smoke_and_cancels_stale_pushes(
     assert "aura-flatpak" not in workflow
     assert "workflow_call:" in workflow
     platform_job = _workflow_job_body("platform-smoke")
-    assert "macos-latest" in platform_job
-    assert "windows-latest" in platform_job
-    assert "python scripts/platform_smoke.py --expected ${{ matrix.expected }}" in platform_job
+    assert "runs-on: [self-hosted, macOS, ARM64, aura-macos]" in platform_job
+    assert "python scripts/platform_smoke.py --expected darwin" in platform_job
+    assert "python -m pytest tests/" in platform_job
+    assert "packaging/macos/constraints.txt" in platform_job
 
 
 def test_model_pin_drift_is_scheduled_and_only_pushes_for_pin_surfaces():
@@ -685,8 +692,8 @@ def test_mini_inf_build_accepts_only_pushed_main_history_and_uses_no_runner():
     assert "systemd-run --user --scope" in script
     assert 'remote_tag=${TAG:--}' in script
     assert "scp --" in script
-    assert "permanently registered repository runner" in docs
-    assert "**not** registered" in docs
+    assert "trusted-runner.py" in docs
+    assert "fork" in docs
 
 
 @pytest.mark.linux_only
@@ -876,7 +883,8 @@ self.config.get("premium_price_regular", "$60")
 def test_appimage_ci_build_uses_older_glibc_runner_and_smoke_test():
     job = _workflow_job_body("build-appimage")
 
-    assert "runs-on: ubuntu-22.04" in job
+    assert "image: ubuntu:22.04" in job
+    assert "runs-on: [self-hosted, Linux, X64, aura-build]" in job
     assert "libvulkan-dev vulkan-tools" in job
     assert "scripts/ci/install-glslc-if-needed.sh" in job
     # ydotool is deliberately NOT installed/bundled at build: the client must
@@ -1485,3 +1493,50 @@ LICENSE_API_URL = os.environ.get("WAYFINDER_LICENSE_API_URL", "{dotted}")
         cwd=REPO, capture_output=True, text=True, timeout=10,
     )
     assert result.returncode == 2, result.stdout + result.stderr
+
+
+def test_windows_jobs_wait_for_admission_but_never_skip_a_release():
+    """Queued Windows jobs kept every run open (no failed job could be rerun).
+
+    Pushes and PRs skip them until AURA_WINDOWS_CI is 'true'; tag releases and
+    manual runs always build Windows (docs/CI.md).
+    """
+    ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    job = ci[ci.index("  windows-tests:"):]
+    gate = job[job.index("    if:"):job.index("\n", job.index("    if:"))]
+    assert "vars.AURA_WINDOWS_CI == 'true'" in gate
+    assert "startsWith(github.ref, 'refs/tags/')" in gate
+    assert "github.event_name == 'workflow_dispatch'" in gate
+
+    build = (REPO / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+    gate = build[build.index("    if:"):build.index("\n", build.index("    if:"))]
+    # Release calls (tags) and manual runs always build; main pushes and
+    # same-repo PRs follow the runner switch; forks never qualify.
+    assert gate.startswith("    if: github.event_name == 'workflow_dispatch' || "
+                           "startsWith(github.ref, 'refs/tags/') || (")
+    assert "vars.AURA_WINDOWS_CI == 'true'" in gate
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in gate
+
+
+def test_pull_requests_build_the_windows_installer_only_for_packaging_changes():
+    """One Windows job per ordinary PR (Windows tests); the installer build runs
+    on main pushes, tags, manual runs, and PRs that touch Windows packaging."""
+    build = (REPO / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+    triggers = build[build.index("\non:"):build.index("\npermissions:")]
+    assert "  push:\n    branches: [main]" in triggers
+    pull = triggers[triggers.index("  pull_request:"):]
+    paths = [line.strip()[2:].strip('"') for line in pull.splitlines() if line.strip().startswith("- ")]
+    assert "packaging/windows/**" in paths
+    assert ".github/workflows/windows-build.yml" in paths
+    assert not any(p.startswith("src") for p in paths)
+
+
+
+def test_appimage_container_installs_what_appimagetool_needs():
+    """appimagetool exits with "file command is missing but required" in the
+    bare build container (v1.2.0-beta.2..4 never published for this)."""
+    release = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    start = release.index("apt-get install -y python3-tk")
+    packages = release[start:release.index("\n\n", start)].replace("\\\n", " ").split()
+    for needed in ("libfuse2", "wget", "file"):
+        assert needed in packages, needed

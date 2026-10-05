@@ -10,13 +10,14 @@ and tests drift, so they are not the development model for this project.
 | Platform | Status | Release promise |
 |---|---|---|
 | Linux | Production baseline | AppImage and Flatpak behavior must not regress |
-| macOS | Active port | Source and bundle work may proceed behind macOS-specific branches |
-| Windows | Internal candidate | Installer built and smoke-tested in CI; not attached to public releases until sign-off |
+| macOS | Active port | Source and bundle work lands on `main` through short `mac/*` branches |
+| Windows | Public, unsigned installer | Installer built and smoke-tested in CI and attached to every release; not code-signed yet (SmartScreen warns) |
 
-Do not advertise macOS or Windows as generally available until their manual
-release checklist has been completed and the owner signs off (decision
-2026-09-21: Windows stays internal until then, and is published to neither the
-releases page nor the storefront).
+Do not advertise macOS or Windows as generally available (out of preview) until
+their manual release checklist has been completed and the owner signs off.
+Decision 2026-10-04: Windows is public. The installer goes on every release
+and the website lists it, which reverses the 2026-09-21 decision that kept it
+internal.
 
 ## Code ownership boundaries
 
@@ -38,10 +39,44 @@ Keep one backward-compatible config schema: a config written on one supported
 platform must load safely on another, with platform-specific defaults computed
 at runtime rather than persisted into new duplicate schemas.
 
+## Branches and merges
+
+`main` is the only long-lived branch. Operating systems are separated in code
+(the seams above), not in branches. Adopted 2026-09-30, after per-OS branches
+drifted: one commit existed as seven copies across branches, pushes to `macos`
+and `windows` ran no CI, and a Linux branch would have conflicted in 109 files
+although 174 of its 179 commits were already on `main`.
+
+- **One task, one short branch.** Branch from the latest `origin/main` and name
+  it by area: `mac/`, `win/`, `linux/`, `deck/`, `ci/`, `docs/` (`fix/` and
+  `feat/` also fine). Merge within days, then delete it.
+- **`main` is protected.** Changes land only by pull request, after the
+  `Quality` (Linux), `Platform smoke (macOS)` and `Windows tests` checks pass.
+  The rule applies to admins and agents too; nobody pushes to `main` directly.
+  Windows jobs are admitted automatically ([CI.md](CI.md)).
+- **Land shared changes once.** CI, docs, runner policy and test infrastructure
+  go to `main` in one pull request. Never cherry-pick a commit onto several
+  branches; a branch picks up `main` by merging or rebasing on it.
+- **One release line for every OS.** A release is a `vX.Y.Z` tag on `main`
+  that builds every platform's packages (see
+  [CI.md](CI.md#user-update-contract)). To patch a shipped release, cut
+  `release/<version>` from its tag: one branch for all operating systems, never
+  one per OS. Carry fixes from `main` into it, never the other way.
+- **One parked branch.** `release/windows-public-pending-signoff` keeps the
+  release workflow from before the 2026-09-21 decision, which attached the
+  Windows installer. Its change was redone from `main` when Windows went
+  public (2026-10-04, `publish-windows`); do not merge the parked branch.
+- **Retired branches.** `macos`, `windows`, `develop` and
+  `feat/premium-feel-polish` are retired: do not commit to or recreate them.
+  Their tips are kept as `archive/<name>` tags. A machine with unpushed work on
+  one of them rebases that work onto `main` in a new task branch.
+- **AI agents.** One git worktree per task, created from the latest
+  `origin/main`, and a pull request back. Do not reuse another session's branch
+  or worktree.
+
 ## Change workflow
 
-1. Start from current `main` and use a narrow branch such as `feat/macos-*` or
-   `feat/windows-*`. Avoid long-lived platform branches.
+1. Start from current `main` on a short task branch (see Branches and merges).
 2. Put shared behavior in `src/wayfinder/`; add or extend an adapter at the
    seams above for OS behavior. Do not copy shared core modules into a platform
    folder.
@@ -97,10 +132,11 @@ fallback that types into an unknown window.
 
 ## Windows port checklist
 
-Windows has a working, CI-tested installer that is not public yet. Windows
+Windows has a working, CI-tested installer, public since 2026-10-04. Windows
 development must use explicit adapters and packaging, not widen Linux or macOS
 conditionals until they happen to run. Complete this manual checklist on the
-exact artifact before any public release.
+exact artifact before calling Windows generally available (code signing
+included).
 
 - Add a Windows text-injection adapter that supports Unicode, preserves the
   clipboard when paste is used, verifies modifier release, and fails closed if

@@ -19,6 +19,7 @@ from wayfinder.utils.platform import (
     get_user_llm_models_dir,
     get_user_whisper_models_dir,
     get_wayfinder_appimage_dir,
+    get_whisper_download_dir,
     is_wayfinder_flatpak_env,
 )
 
@@ -202,6 +203,9 @@ else:
             / "whisper-models"
             / "ggml-base.en.bin"
         )
+    elif sys.platform == "win32":
+        # %LOCALAPPDATA%\wayfinder-aura\whisper-models (platform.get_whisper_download_dir).
+        _default_model_path = str(get_whisper_download_dir() / "ggml-base.en.bin")
     else:
         _default_model_path = "~/whisper.cpp/models/ggml-base.en.bin"
     # LLM model for post-processing - best-first from _LLM_PREFERENCE.
@@ -228,6 +232,17 @@ if sys.platform == "darwin":
     _default_style_toggle_key = 28  # Enter
     _default_style_toggle_modifiers = ["fn"]
     _default_overlay_anchor = "bottom-right"
+elif sys.platform == "win32":
+    # Windows records with Right Alt (Alt Gr) alone, the Mac's Right Option
+    # gesture: Ctrl+Alt+Space is also the Claude desktop app's global shortcut
+    # (and Magnifier's preview), so both apps reacted to it. Every keyboard
+    # has Right Alt (many laptops have no Right Ctrl); the listener masks the
+    # lone Alt so the app in front never opens its menu bar.
+    _default_hotkey_key = 100  # Right Alt / Alt Gr
+    _default_hotkey_modifiers = []
+    _default_style_toggle_key = 28  # Enter
+    _default_style_toggle_modifiers = ["ctrl", "alt"]
+    _default_overlay_anchor = "bottom-center"
 else:
     _default_hotkey_key = 57  # Space
     _default_hotkey_modifiers = ["ctrl", "alt"]
@@ -242,14 +257,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_binary": _default_whisper_binary,
     "model_path": _default_model_path,
     
-    # Hotkey settings — Fn+Space on macOS; Ctrl+Alt+Space elsewhere.
-    # Chosen 2026-07 over Super+F2: first-run users didn't know what the
+    # Hotkey settings — Right Option on macOS and Right Alt on Windows (tap/hold,
+    # see above); Ctrl+Alt+Space on Linux. Chosen 2026-07 over Super+F2: first-run users didn't know what the
     # "Super" key was (launch feedback), and every keyboard labels Ctrl/Alt/
     # Space. Still game-safe: bare F-keys collide with countless game keybinds
     # (e.g. DAoC qbinds) but Ctrl+Alt chords are as rare in games as Super+F*,
     # and the GameMode pause covers the rest. DE conflicts checked: unassigned
     # by default on KDE and GNOME. Existing user configs keep what they saved.
-    "hotkey_key": _default_hotkey_key,  # Space; Right Option on macOS
+    "hotkey_key": _default_hotkey_key,  # Space; Right Option (macOS) / Right Alt (Windows)
     "hotkey_modifiers": _default_hotkey_modifiers,
 
     # Style toggle hotkey (cycles Minimal → Professional → Casual → Dev → Personal).
@@ -268,6 +283,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "macos_hotkey_defaults_v2": sys.platform == "darwin",
     "macos_hotkey_defaults_v3": sys.platform == "darwin",
     "macos_overlay_anchor_defaults_v1": sys.platform == "darwin",
+    "windows_hotkey_defaults_v2": sys.platform == "win32",
 
     # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
     # fires, so chat inputs submit hands-free. Off by default — implicitly
@@ -347,8 +363,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     
     # Chunked recording settings. Auto keeps short dictations as one Whisper
     # request, then begins background chunks only after 30 seconds. This is the
-    # first-run Ultra default; existing boolean preferences migrate to Off/On.
-    # The feature gate is still enforced at the recording boundary.
+    # first-run Ultra default (core/ultra_defaults.py sets it again on the first
+    # switch to Ultra, since Free forces it off); existing boolean preferences
+    # migrate to Off/On. The feature gate is still enforced at the recording
+    # boundary.
     "chunked_mode": "auto",  # off | auto | on
     "chunk_auto_threshold": 30,  # First chunk boundary in Auto mode (seconds)
     "chunk_duration": 15,  # Empirical balance: fewer ASR boundary errors than 10s
@@ -364,9 +382,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Manual Backend dropdown sets this False. Auto never picks Faster-Whisper
     # (CUDA load can fail closed to slow CPU-large — Manual only).
     "transcription_backend_auto": True,
-    # GPU is an explicit Ultra opt-in. Even a newly activated Ultra install starts
-    # on CPU until the user enables this toggle; Free is also enforced at runtime.
+    # GPU is Ultra-only (enforced at runtime too), so installs start on CPU. The
+    # first switch to Ultra turns it on once on Apple Silicon/NVIDIA/AMD
+    # (core/ultra_defaults.py); after that it is the user's choice.
     "use_gpu": False,
+    # None = not decided yet, False = seen on Free, True = the one-time Ultra
+    # setup has run (or the install was Ultra before it existed).
+    "ultra_defaults_applied": None,
     "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
     "gpu_device": "auto",  # "auto" = benchmark and pick fastest, or "0", "1", "2" for manual selection
     "gpu_benchmark_cache": {},  # Cached GPU benchmark results: {"0": 0.6, "1": 7.5, "2": 52.0, "fastest": "0"}
@@ -387,7 +409,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Floating indicator settings
     "indicator_fps": 0,  # 0 = auto-detect monitor refresh rate, or set manually (60, 120, 144, etc.)
     "overlay_mode": "persistent",  # persistent (no focus steal) | standard (shows/hides, may steal focus)
-    "overlay_type": "always_on",  # always_on (PyQt6, stays visible) | disappearing (CTk, shows/hides)
+    "overlay_type": "always_on",  # always_on (PyQt6) | disappearing (PyQt6 on macOS, CTk elsewhere)
     # Master switch for the on-screen status pill. Off = no visual overlay; a
     # tray-only overlay subprocess still hosts the Qt StatusNotifier tray on Linux.
     "overlay_enabled": True,
@@ -441,10 +463,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "strong_mode": False,  # When True, allows sentence restructuring. When False, preserves user's words.
     "caricature_mode": False,  # 🎭 Secret easter egg! Unlocked by typing "lol" on Style tab.
     
-    # Post-processing settings (LLM cleanup)
-    # First-run default is raw Whisper output: fastest and least surprising.
-    # Existing installs preserve their saved cleanup preference during migration.
-    "post_processing_enabled": False,  # Enable LLM post-processing
+    # Text cleanup. On for new installs: with the Normal style it only removes
+    # um/uh (normal_filler_removal, ~1 ms, no model), Free included. Cleanup
+    # models run only for Ultra (the styles). Existing installs keep their saved
+    # choice.
+    "post_processing_enabled": True,  # Text cleanup (Normal: um/uh removal)
     "post_processing_backend": "llama_cpp",  # llama_cpp | anthropic | openai
     "fast_filler_removal": False,  # When True, use instant regex-based filler removal (no LLM) - best for "minimal" style
     "post_processing_max_tokens": 1024,  # Max tokens for LLM response
@@ -495,6 +518,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # App update checking
     "check_for_app_updates": True,  # Check GitHub Releases for a newer app version on startup (once/day)
     "app_update_dismissed_version": "",  # Release tag the user dismissed; a newer tag shows the banner again
+    "update_channel": "",  # "stable" or "beta" (Settings > System > Updates); "" follows the running build
+    "crash_reports": "",  # "on" / "off" (Settings > System); "" follows the channel: Beta sends, Stable doesn't
 
     # License / Premium
     # "Buy Now" goes straight to the Ultra checkout; "More Info" goes to the landing page.
@@ -559,6 +584,9 @@ KEY_CODES: dict[str, int] = {
 if sys.platform == "darwin":
     # Bare right-hand modifiers: the macOS tap/hold record hotkey.
     KEY_CODES.update({"right_option": 100, "right_command": 126})
+elif sys.platform == "win32":
+    # The Windows tap/hold record hotkey (Right Alt is the default).
+    KEY_CODES.update({"right_alt": 100, "right_ctrl": 97})
 
 # Modifier key codes (left and right variants)
 MODIFIER_CODES: dict[str, list[int]] = {
@@ -604,9 +632,9 @@ def _which_runtime_path(name: str) -> str | None:
 def _user_whisper_model_dirs() -> list[Path]:
     """Writable Whisper model dir(s) for this runtime, download dir first.
 
-    Outside the Flatpak this is just ~/whisper.cpp/models (unchanged). In the
-    Flatpak the persistent XDG_DATA_HOME dir leads; ~/whisper.cpp/models stays
-    listed for parity with older builds.
+    Windows leads with LocalAppData and Flatpak with persistent XDG_DATA_HOME.
+    Other host installs use ~/whisper.cpp/models, which also remains a legacy
+    lookup location on Windows and in Flatpak.
     """
     dirs = [get_user_whisper_models_dir(flatpak=IS_FLATPAK)]
     host_dir = Path(os.path.expanduser("~/whisper.cpp/models"))
@@ -1186,6 +1214,19 @@ def load_config() -> dict:
                     config["hotkey_key"] = 100
                     config["hotkey_modifiers"] = []
                 config["macos_hotkey_defaults_v3"] = True
+                _save_migrations = True
+
+            # Windows shipped Ctrl+Alt+Space, which the Claude desktop app also
+            # owns. Move only that exact untouched default to Right Alt tap/hold
+            # once; custom shortcuts remain untouched.
+            if sys.platform == "win32" and not user_config.get("windows_hotkey_defaults_v2", False):
+                if (
+                    config.get("hotkey_key") == 57
+                    and config.get("hotkey_modifiers") == ["ctrl", "alt"]
+                ):
+                    config["hotkey_key"] = 100
+                    config["hotkey_modifiers"] = []
+                config["windows_hotkey_defaults_v2"] = True
                 _save_migrations = True
 
             if (

@@ -65,6 +65,125 @@ def apply_window_chrome(root, caption: str, border: str, text: str = "#E6EDF3") 
         return False
 
 
+_RDW_INVALIDATE = 0x0001
+_RDW_ERASE = 0x0004
+_RDW_ALLCHILDREN = 0x0080
+_RDW_UPDATENOW = 0x0100
+_RDW_FRAME = 0x0400
+
+# One-shot, and above the app's 100 ms timer floor.
+REPAINT_DELAY_MS = 120
+
+
+def repaint(root) -> bool:
+    """Invalidate and repaint the whole window, every child widget included."""
+    if sys.platform != "win32":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.RedrawWindow.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+        flags = (_RDW_INVALIDATE | _RDW_ERASE | _RDW_FRAME
+                 | _RDW_ALLCHILDREN | _RDW_UPDATENOW)
+        return bool(user32.RedrawWindow(_hwnd(root), None, None, flags))
+    except Exception:
+        return False
+
+
+def repaint_after_activation(root, delay_ms: int = REPAINT_DELAY_MS) -> bool:
+    """Repaint the window once after it gains/loses focus or (re)maps a page.
+
+    On some GPU setups (hardware GPU scheduling, two adapters) Windows hands
+    back parts of the window's image black after an activation change and
+    never asks Tk to repaint them, so small black rectangles stay where CTk
+    widgets are until each happens to redraw. One full repaint shortly after
+    restores them. Focus and Map events arrive once per child widget, so the
+    repaint is coalesced into a single pending ``after``. True if installed.
+    """
+    if sys.platform != "win32":
+        return False
+    pending = {"id": None}
+
+    def _run():
+        pending["id"] = None
+        repaint(root)
+
+    def _schedule(_event=None):
+        if pending["id"] is None:
+            try:
+                pending["id"] = root.after(delay_ms, _run)
+            except Exception:
+                pending["id"] = None
+
+    try:
+        for sequence in ("<FocusIn>", "<FocusOut>", "<Map>"):
+            root.bind(sequence, _schedule, add="+")  # CTk binds <FocusIn> itself
+        return True
+    except Exception:
+        return False
+
+
+_DWMWA_EXTENDED_FRAME_BOUNDS = 9
+_GA_ROOTOWNER = 3
+# The desktop and taskbar can be the foreground window while Aura is plainly
+# visible above them; they never hide it.
+_SHELL_CLASSES = frozenset({"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"})
+
+
+def covers(outer, inner) -> bool:
+    """True if rect *outer* (left, top, right, bottom) contains rect *inner*."""
+    return (outer[0] <= inner[0] and outer[1] <= inner[1]
+            and outer[2] >= inner[2] and outer[3] >= inner[3])
+
+
+def exposure(aura, foreground, rect_of, class_of, root_owner_of) -> str:
+    """Aura's visibility: foreground, covered (the window in front hides all of it)
+    or background."""
+    if not foreground or root_owner_of(foreground) == aura or foreground == aura:
+        return "foreground"
+    if class_of(foreground) in _SHELL_CLASSES:
+        return "background"
+    front, ours = rect_of(foreground), rect_of(aura)
+    if front and ours and covers(front, ours):
+        return "covered"
+    return "background"
+
+
+def window_exposure(root) -> str:
+    """How much of Aura's window the user can see; "background" when unknown.
+
+    Windows has no occlusion API for plain Win32 windows, so this checks the
+    common case: the window in front (usually maximized) covers all of Aura's.
+    """
+    if sys.platform != "win32":
+        return "background"
+    try:
+        user32, dwmapi = ctypes.windll.user32, ctypes.windll.dwmapi
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        user32.GetAncestor.restype = ctypes.c_void_p
+        user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        dwmapi.DwmGetWindowAttribute.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]
+
+        def rect_of(hwnd):
+            rect = (ctypes.c_long * 4)()
+            if dwmapi.DwmGetWindowAttribute(hwnd, _DWMWA_EXTENDED_FRAME_BOUNDS,
+                                            ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
+                return None
+            return tuple(rect)
+
+        def class_of(hwnd):
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, buf, 64)
+            return buf.value
+
+        return exposure(_hwnd(root), user32.GetForegroundWindow(), rect_of, class_of,
+                        lambda hwnd: user32.GetAncestor(hwnd, _GA_ROOTOWNER))
+    except Exception:
+        return "background"
+
+
 _SPI_GETCLIENTAREAANIMATION = 0x1042
 
 

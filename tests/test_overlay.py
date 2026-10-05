@@ -136,7 +136,10 @@ def test_overlay_bare_script_import_bootstraps_wayfinder_package():
     bootstrap near the top of overlay.py, the Qt tray setup later fails with
     ``No module named 'wayfinder'`` and the notification tray dies on state
     changes. Run this in a child process so the current test runner's imported
-    packages and ``PYTHONPATH=src`` cannot mask the failure.
+    packages and ``PYTHONPATH=src`` cannot mask the failure. The child also
+    drops any other checkout's ``src/`` (e.g. a shared venv's editable-install
+    ``.pth`` pointing at the main checkout while this runs from a git
+    worktree); site-packages stays, since PyQt6 lives there.
     """
     pytest.importorskip("PyQt6")
     repo = Path(__file__).resolve().parent.parent
@@ -149,9 +152,14 @@ from pathlib import Path
 overlay = Path({str(overlay)!r})
 src_root = overlay.parents[2]
 repo_root = overlay.parents[3]
+def _is_wayfinder_src_checkout(p):
+    path = Path(p)
+    return path.name == 'src' and (path / 'wayfinder' / 'ui' / 'overlay.py').is_file()
+
 sys.path = [
     p for p in sys.path
     if p not in ('', str(src_root), str(repo_root))
+    and not _is_wayfinder_src_checkout(p)
 ]
 sys.path.insert(0, str(overlay.parent))
 spec = importlib.util.spec_from_file_location('wayfinder_overlay_bare', overlay)
@@ -170,7 +178,9 @@ assert str(src_root) in sys.path
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        # A cold PyQt6 import on the shared Windows runner (Defender scanning
+        # every DLL) took over 10 s once (PR #21); this checks paths, not speed.
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr or result.stdout
 
@@ -730,6 +740,35 @@ class TestOverlayIsClickThrough:
             assert bool(ov.windowFlags() & Qt.WindowType.WindowTransparentForInput)
         finally:
             ov.deleteLater()
+
+
+def test_disappearing_qt_pill_moves_without_remapping_or_raising(monkeypatch):
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "transient"
+        overlay.setWindowOpacity(0.0)
+        overlay.setGeometry(-9999, -9999, overlay.width(), overlay.height())
+        overlay.show()  # one startup map, while transparent and offscreen
+        app.processEvents()
+        monkeypatch.setattr(overlay, "show", lambda: pytest.fail("remapped during dictation"))
+        monkeypatch.setattr(overlay, "raise_", lambda: pytest.fail("raised during dictation"))
+
+        overlay._state = OverlayState.LISTENING
+        overlay._delayed_show(animate=False)
+        assert overlay._state == OverlayState.LISTENING
+
+        overlay.set_state(OverlayState.READY, animate=False)
+        app.processEvents()
+        assert overlay._state == OverlayState.HIDDEN
+        assert overlay.geometry().x() <= -9999
+    finally:
+        overlay.deleteLater()
 
 
 @pytest.mark.parametrize("platform_name, expected", [("linux", "primary"), ("darwin", "pointer")])

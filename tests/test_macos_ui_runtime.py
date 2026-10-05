@@ -4,11 +4,78 @@ from __future__ import annotations
 
 import sys
 import importlib.util
+from queue import Queue
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import wayfinder_main
+
+
+def test_disappearing_uses_separate_qt_process_only_on_macos():
+    assert wayfinder_main.visual_overlay_mode("darwin", "disappearing") == "transient"
+    assert wayfinder_main.visual_overlay_mode("darwin", "always_on") == "persistent"
+    assert wayfinder_main.visual_overlay_mode("linux", "disappearing") is None
+    assert wayfinder_main.visual_overlay_mode("win32", "disappearing") is None
+
+
+@pytest.mark.parametrize("tray_required", [False, True])
+def test_macos_enabling_disappearing_uses_qt_instead_of_hidden_tk(monkeypatch, tray_required):
+    started = []
+    monkeypatch.setattr(wayfinder_main.sys, "platform", "darwin")
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda config: None)
+    monkeypatch.setattr(
+        wayfinder_main, "should_host_qt_tray", lambda *args: tray_required
+    )
+    monkeypatch.setattr(
+        wayfinder_main, "FloatingIndicator",
+        lambda *args, **kwargs: pytest.fail("Tk indicator cannot survive native Hide"),
+    )
+    app = SimpleNamespace(
+        overlay_enabled_var=SimpleNamespace(get=lambda: True),
+        config={"overlay_type": "disappearing", "enable_tray_icon": True},
+        _stop_overlay_process=lambda: False,
+        _start_live_overlay_controller=lambda **kwargs: started.append(kwargs) or True,
+        log=lambda message: None,
+    )
+
+    wayfinder_main.WayfinderApp._on_overlay_enabled_toggled(app)
+
+    assert started == [{"tray_only": False, "want_tray": tray_required}]
+
+
+def test_live_disappearing_controller_starts_in_focus_safe_mode(monkeypatch):
+    created = []
+    monkeypatch.setattr(wayfinder_main.sys, "platform", "darwin")
+
+    class Controller:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+        def _start_process(self):
+            return True
+
+        def set_quality(self, quality):
+            pass
+
+        def show(self, state):
+            assert state == "ready"
+
+    monkeypatch.setattr(wayfinder_main, "OverlayController", Controller)
+    app = SimpleNamespace(
+        config={"overlay_type": "disappearing"},
+        app_state=wayfinder_main.AppState.IDLE,
+        _audio_level_for_overlay=lambda: 0.0,
+        log=lambda message: None,
+    )
+
+    assert wayfinder_main.WayfinderApp._start_live_overlay_controller(
+        app, tray_only=False, want_tray=False
+    )
+
+    assert created[0]["mode"] == "transient"
+    assert app._use_pyqt_overlay is True
 
 
 def test_aqua_idle_matches_linux_while_active_uses_thirty_fps():
@@ -76,21 +143,112 @@ def test_macos_hide_uses_native_application_hide(monkeypatch):
     assert calls == [None]
 
 
-def test_macos_status_menu_defers_until_native_menu_unwinds(monkeypatch):
+def _tray_app(scheduled, **attrs):
     import queue
 
-    ran = []
-    monkeypatch.setattr(wayfinder_main.sys, "platform", "darwin")
-    action_queue = queue.Queue()
-    app = type("App", (), {"_tray_action_queue": action_queue})()
+    cls = wayfinder_main.WayfinderApp
+    return type("App", (), {
+        "_tray_action_queue": queue.Queue(),
+        "event_queue": queue.Queue(),
+        "after": lambda self, ms, fn: scheduled.append((ms, fn)),
+        "log": lambda self, message: None,
+        "_refresh_tray_menu": lambda self: None,
+        "_drain_tray_actions": cls._drain_tray_actions,
+        "_schedule_tray_actions": cls._schedule_tray_actions,
+        **attrs,
+    })()
+
+
+def test_macos_status_menu_defers_until_native_menu_unwinds(monkeypatch):
+    ran, scheduled = [], []
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    app = _tray_app(scheduled)
 
     wayfinder_main.WayfinderApp._dispatch_tray_action(
         app, lambda: ran.append(True)
     )
 
-    assert ran == []
-    action_queue.get_nowait()()
+    # The PyObjC callback only queues: the action, and a pipe wake-up for Tk.
+    assert ran == [] and scheduled == []
+    event_type, wake = app.event_queue.get_nowait()
+    assert event_type == wayfinder_main.EventType.UI_CALLBACK
+    # Tk handles the wake-up by arming a one-shot, still not running inline.
+    wake()
+    assert ran == [] and [ms for ms, _ in scheduled] == [100]
+    scheduled.pop()[1]()
     assert ran == [True]
+    assert app._tray_action_queue.empty()
+
+
+def test_macos_idle_poll_is_a_backstop_once_the_event_pipe_is_attached(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    assert wayfinder_main._MACOS_IDLE_SAFETY_POLL_MS >= 500  # CLAUDE.md rule 1
+
+    def next_poll(**attrs):
+        scheduled = []
+        attrs.setdefault("app_state", wayfinder_main.AppState.IDLE)
+        app = _tray_app(scheduled, _draining_events=False,
+                        poll_events=wayfinder_main.WayfinderApp.poll_events, **attrs)
+        app.handle_event = lambda event_type, data: None
+        app.poll_events()
+        return [ms for ms, fn in scheduled if fn == app.poll_events]
+
+    assert next_poll(_event_wakeup_attached=True) == [
+        wayfinder_main._MACOS_IDLE_SAFETY_POLL_MS
+    ]
+    # Recording (or Detect armed) keeps the 100 ms floor.
+    assert next_poll(
+        _event_wakeup_attached=True,
+        app_state=wayfinder_main.AppState.RECORDING,
+    ) == [100]
+    # No pipe (createfilehandler failed, or another OS): the 250 ms poll stays.
+    assert next_poll(_event_wakeup_attached=False) == [250]
+
+
+def test_macos_stuck_microphone_relaunch_is_marshaled_to_tk():
+    events = Queue()
+    recovered = []
+    app = type(
+        "App",
+        (),
+        {
+            "event_queue": events,
+            "_recover_macos_microphone": lambda self, reason: recovered.append(reason),
+        },
+    )()
+
+    wayfinder_main.WayfinderApp._queue_macos_microphone_relaunch(
+        app, "CoreAudio close timed out"
+    )
+    event_type, callback = events.get_nowait()
+    assert event_type == wayfinder_main.EventType.UI_CALLBACK
+    callback()
+    assert recovered == ["CoreAudio close timed out"]
+
+
+def test_macos_microphone_recovery_schedules_only_one_relaunch():
+    scheduled = []
+    relaunched = []
+    messages = []
+    app = type(
+        "App",
+        (),
+        {
+            "log": lambda self, message: messages.append(message),
+            "_show_error_banner": lambda self, message: messages.append(message),
+            "after": lambda self, delay, callback: scheduled.append((delay, callback)),
+            "relaunch_app": lambda self, **kwargs: relaunched.append(kwargs) or True,
+        },
+    )()
+
+    wayfinder_main.WayfinderApp._recover_macos_microphone(app, "CoreAudio close timed out")
+    wayfinder_main.WayfinderApp._recover_macos_microphone(app, "duplicate")
+
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == 150
+    assert "restarting Aura" in messages[-1]
+    scheduled[0][1]()
+    assert relaunched == [{"background": True}]
 
 
 def test_macos_lifecycle_notifications_are_marshaled_out_of_appkit_callbacks():
@@ -373,6 +531,8 @@ def test_self_focus_injection_error_keeps_its_actionable_guidance(monkeypatch):
 
 
 def test_missing_input_monitoring_stays_visible_with_manual_add_guidance(monkeypatch):
+    from wayfinder.utils import macos_permissions as mp
+
     class Widget:
         def __init__(self, managed=""):
             self.managed = managed
@@ -404,6 +564,9 @@ def test_missing_input_monitoring_stays_visible_with_manual_add_guidance(monkeyp
         },
     )()
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    # This test isolates Input Monitoring.  Do not let the developer Mac's
+    # real microphone TCC state take precedence over the state under test.
+    monkeypatch.setattr(mp, "microphone_authorization", lambda: mp.MIC_AUTHORIZED)
 
     wayfinder_main.WayfinderApp._refresh_macos_permission_banner(app)
 
@@ -568,6 +731,21 @@ def test_ctk_dpi_poll_is_idle_on_macos():
         assert _ctk.ScalingTracker.update_loop_interval >= 60_000
         # The check it would run is a constant on macOS, so nothing is lost.
         assert _ctk.ScalingTracker.get_window_dpi_scaling(None) == 1
+
+
+def test_ctk_background_polls_stay_idle():
+    import re
+    import customtkinter as _ctk
+
+    # CTk's 30 ms system light/dark poll was 32 of 36 idle wakeups/s.
+    assert _ctk.AppearanceModeTracker.update_loop_interval >= 60_000
+    # That is only lossless while the app pins dark mode; following the
+    # system theme would need the fast poll (or a native notification).
+    source = Path(wayfinder_main.__file__).read_text(encoding="utf-8")
+    modes = re.findall(r"set_appearance_mode\(\s*[\"'](\w+)", source)
+    assert modes and set(modes) == {"dark"}
+    # Every CTkTextbox polls its scrollbars for its whole life (5/s at 200 ms).
+    assert _ctk.CTkTextbox._scrollbar_update_time >= 1000
 
 
 def test_settings_footer_names_the_platform():

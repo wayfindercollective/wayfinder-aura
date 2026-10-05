@@ -649,22 +649,25 @@ def get_upgrade_suggestion_for_intensity(intensity: str) -> Dict[str, Any]:
                        "Cloud AI backend (Ultra) for the best results.",
         }
     elif intensity == "standard":
+        # docs/EVAL-2026-09-24.md: only Qwen3 4B does the styles well; the 1-2B
+        # models are greyed out for them (STYLE_SUPPORT).
         return {
             "min_params": "1B+",
             "recommended_models": [
-                {"name": "Qwen3.5-2B-Q4_K_M.gguf", "type": "gguf", "description": "Great balance"},
-                {"name": "google_gemma-3-1b-it-Q4_K_M.gguf", "type": "gguf", "description": "Fast option, most consistent across tones"},
+                {"name": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf", "type": "gguf", "description": "4B - reliable in every style (Ultra)"},
+                {"name": "google_gemma-3-1b-it-Q4_K_M.gguf", "type": "gguf", "description": "Fast; changed meaning in styles, Normal only"},
+                {"name": "Qwen3.5-2B-Q4_K_M.gguf", "type": "gguf", "description": "Leaves text almost unchanged, Normal only"},
             ],
-            "message": "Standard intensity works with 1B+ parameter models.",
+            "message": "Styles need Qwen3 4B (Ultra); the 1-2B models are for Normal only.",
         }
     else:  # light
         return {
             "min_params": "500M+",
             "recommended_models": [
-                {"name": "google_gemma-3-1b-it-Q4_K_M.gguf", "type": "gguf", "description": "Fast and compact"},
-                {"name": "Qwen3.5-2B-Q4_K_M.gguf", "type": "gguf", "description": "Roomier, still very fast"},
+                {"name": "google_gemma-3-1b-it-Q4_K_M.gguf", "type": "gguf", "description": "Fast and compact; Normal only"},
+                {"name": "Qwen3.5-2B-Q4_K_M.gguf", "type": "gguf", "description": "Leaves text almost unchanged; Normal only"},
             ],
-            "message": "Light intensity works with most models.",
+            "message": "Normal needs no model: it removes um/uh without one.",
         }
 
 
@@ -3704,7 +3707,12 @@ def cleanup_model_needed(config: dict) -> bool:
         # A greyed-out style runs as Normal, which needs no model.
         if effective_style(config)[0] != "minimal":
             return True
-    return bool(config.get("normal_llm_cleanup")) and not config.get("fast_filler_removal")
+    # Free runs no cleanup model: Normal is um/uh removal only.
+    return (
+        styled
+        and bool(config.get("normal_llm_cleanup"))
+        and not config.get("fast_filler_removal")
+    )
 
 
 def warm_up_postprocessing(config: dict) -> None:
@@ -4029,13 +4037,21 @@ def process_with_config(text: str, config: dict) -> str:
     """Post-process, then re-apply the user's vocabulary corrections (Ultra).
 
     The cleanup model can re-spell a corrected term ("Wayfinder" -> "Way
-    finder"); applying the corrections to its output keeps them authoritative.
+    finder"); applying the corrections (and near-miss snapping) to its output
+    keeps them authoritative.
     """
     result = _process_with_config(text, config)
     try:
-        from .transcriber import apply_vocabulary_replacements, licensed_vocabulary_replacements
+        from .transcriber import (
+            apply_vocabulary_replacements,
+            licensed_style_vocabulary,
+            licensed_vocabulary_replacements,
+            licensed_vocabulary_terms,
+        )
 
-        return apply_vocabulary_replacements(result, licensed_vocabulary_replacements(config))
+        return apply_vocabulary_replacements(
+            result, licensed_vocabulary_replacements(config), licensed_vocabulary_terms(config),
+            licensed_style_vocabulary(config))
     except Exception:
         return result
 
@@ -4083,6 +4099,8 @@ def _process_with_config(text: str, config: dict) -> str:
             config["output_tone"] = "minimal"
             config["strong_mode"] = False
             config["caricature_mode"] = False
+            # Free cleanup is um/uh removal only; no cleanup model runs.
+            config["normal_llm_cleanup"] = False
         if not _vocabulary_allowed:
             config["custom_vocabulary"] = []
     if _vocabulary_allowed and config.get("vocabulary_replacements"):
@@ -4288,7 +4306,7 @@ def get_available_backends() -> list:
         "name": "llama.cpp (Local)",
         "available": llama_available,
         "requires_model": True,
-        "description": "Fast local inference using GGUF models. Recommended: Phi-3-mini, Qwen2.5-1.5B",
+        "description": "Local GGUF cleanup: Qwen3 4B Instruct 2507 for styles (Ultra); Gemma 3 1B and Qwen 3.5 2B for Normal-with-model only.",
     })
     
     # Check Anthropic

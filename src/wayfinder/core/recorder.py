@@ -69,11 +69,12 @@ _SCIPY_IMPORT_LOCK = threading.Lock()
 
 
 def _get_scipy_signal_functions():
-    """Return ``(butter, filtfilt, resample_poly)`` when SciPy is available.
+    """Return ``(butter, filtfilt, resample_poly)``: SciPy's, or the NumPy twins.
 
     The import is deliberately lazy so microphone discovery and recorder construction stay
-    fast. A failed optional import is cached too; repeated dictations then use the existing
-    NumPy fallback without repeatedly probing SciPy.
+    fast. Without SciPy (the Windows bundle leaves it out) the same algorithms come from
+    ``core.audio_dsp``, checked against SciPy by tests/test_audio_dsp.py. The result is
+    cached, so repeated dictations never probe the import again.
     """
     global _SCIPY_SIGNAL_FUNCTIONS, _SCIPY_IMPORT_ATTEMPTED
     if _SCIPY_IMPORT_ATTEMPTED:
@@ -84,9 +85,8 @@ def _get_scipy_signal_functions():
         try:
             from scipy.signal import butter, filtfilt, resample_poly
         except ImportError:
-            _SCIPY_SIGNAL_FUNCTIONS = None
-        else:
-            _SCIPY_SIGNAL_FUNCTIONS = (butter, filtfilt, resample_poly)
+            from wayfinder.core.audio_dsp import butter, filtfilt, resample_poly
+        _SCIPY_SIGNAL_FUNCTIONS = (butter, filtfilt, resample_poly)
         _SCIPY_IMPORT_ATTEMPTED = True
     return _SCIPY_SIGNAL_FUNCTIONS
 
@@ -181,6 +181,19 @@ def audio_has_speech_activity(audio_data: np.ndarray, sample_rate: int = 16000) 
     return dynamic_ratio >= 1.8
 
 
+def audio_is_digital_silence(audio_data: np.ndarray) -> bool:
+    """Whether captured audio is non-empty and every sample is exactly zero.
+
+    A live microphone always carries some analogue noise, so even a quiet room
+    leaves non-zero samples. Exact zeros mean the device sent no signal at all:
+    a hardware-muted USB headset, a wireless headset switched off while its
+    dongle stays plugged in, or a dead virtual device. Callers use this to tell
+    the user the mic is muted or off instead of asking them to speak closer.
+    """
+    samples = np.asarray(audio_data)
+    return samples.size > 0 and not np.any(samples)
+
+
 def get_wav_peak_amplitude(audio_path: str | Path) -> float | None:
     """Return a mono/stereo PCM WAV's normalized peak, or ``None`` if unreadable.
 
@@ -201,6 +214,16 @@ def get_wav_peak_amplitude(audio_path: str | Path) -> float | None:
             return 0.0
         # Promote before abs: abs(int16(-32768)) overflows in int16.
         return float(np.max(np.abs(samples.astype(np.int32)))) / 32768.0
+    except (OSError, EOFError, wave.Error):
+        return None
+
+
+def get_wav_duration_seconds(audio_path: str | Path) -> float | None:
+    """Return a WAV's length in seconds, or ``None`` if unreadable."""
+    try:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            rate = wav_file.getframerate()
+            return wav_file.getnframes() / float(rate) if rate else None
     except (OSError, EOFError, wave.Error):
         return None
 
@@ -688,6 +711,14 @@ def list_input_devices(exclude_outputs: bool = False) -> list[dict]:
 # (UI, tray, hotkeys). This watchdog caps every attempt so a wedged device falls
 # through the fallback chain instead of taking the app down. (2026-07-03 freeze.)
 _MIC_OPEN_TIMEOUT = 4.0
+# CoreAudio/PortAudio can wedge forever in AudioOutputUnitStop when an input
+# device is reconfigured while the warm stream is being released.  Teardown
+# must never own WarmMic's shared lock or block Tk indefinitely.
+_MIC_CLOSE_TIMEOUT = 1.0
+
+
+class MicrophoneRestartRequired(RuntimeError):
+    """The native audio backend is unsafe to reuse until the process restarts."""
 
 
 def _run_with_timeout(fn: Callable, timeout_s: float):
@@ -903,7 +934,8 @@ class WarmMic:
     def __init__(self, device: int | None = None, sample_rate: int = 16000,
                  channels: int = 1, idle_secs: float = 30.0,
                  resolve_device: Callable[[], int | None] | None = None,
-                 preferred_name: str | None = None):
+                 preferred_name: str | None = None,
+                 on_restart_required: Callable[[str], None] | None = None):
         self.device = device
         self.target_sample_rate = sample_rate
         self.channels = channels
@@ -915,6 +947,8 @@ class WarmMic:
         # a mic on a USB hub powered on after the app booted.
         self._resolve_device = resolve_device
         self.preferred_name = preferred_name
+        self._on_restart_required = on_restart_required
+        self._restart_required_notified = False
         self._stream: object | None = None
         self._recording_sample_rate: int | None = None
         self._sink: Callable | None = None
@@ -926,6 +960,15 @@ class WarmMic:
         # still be inside InputStream()/start(). Never _pa_rescan() while set: terminate
         # racing an in-flight open has SEGV'd ALSA (2026-07-13 Detect session).
         self._abandoned_open = False
+        # Closing is also a native, potentially unbounded operation.  The stream
+        # is detached under _lock, then stopped on a watchdog worker.  If that
+        # worker times out, quarantine this WarmMic for the rest of the process:
+        # starting or rescanning PortAudio beside the stuck CoreAudio call can
+        # deadlock or crash its callback thread.
+        self._close_done = threading.Event()
+        self._close_done.set()
+        self._closing_stream = False
+        self._abandoned_close = False
 
     @property
     def sample_rate(self) -> int:
@@ -962,6 +1005,11 @@ class WarmMic:
         if self._abandoned_open:
             raise RuntimeError(
                 "Microphone backend is still recovering from a timed-out open; "
+                "restart Wayfinder Aura before recording again"
+            )
+        if self._abandoned_close:
+            raise MicrophoneRestartRequired(
+                "Microphone backend got stuck releasing the previous stream; "
                 "restart Wayfinder Aura before recording again"
             )
         try:
@@ -1077,14 +1125,56 @@ class WarmMic:
 
         Returns the device index that actually opened so the caller can heal its cached index.
         """
+        # Never wait on a PortAudio close while owning _lock.  A normal close is
+        # sub-millisecond; the bound exists for the CoreAudio stop deadlock seen
+        # in the field.  Fail closed instead of freezing Tk or opening a second
+        # stream beside a native teardown that may still be running.
+        if not self._close_done.wait(_MIC_CLOSE_TIMEOUT):
+            with self._lock:
+                self._abandoned_close = True
+            raise MicrophoneRestartRequired(
+                "Microphone backend got stuck releasing the previous stream; "
+                "restart Wayfinder Aura before recording again"
+            )
+
+        close_inactive = False
         with self._lock:
             self._cancel_idle_timer()
-            self._sink = sink
-            if self._stream is not None and not bool(getattr(self._stream, "active", True)):
-                self._close_stream()
-            if self._stream is None:
-                self._open()
-            return self.device
+            if self._abandoned_close:
+                raise MicrophoneRestartRequired(
+                    "Microphone backend got stuck releasing the previous stream; "
+                    "restart Wayfinder Aura before recording again"
+                )
+            if self._closing_stream:
+                # The close completed between Event.wait() and this lock only
+                # when _closing_stream is false.  Seeing true here means a new
+                # close won the race; retry through the bounded wait above.
+                close_inactive = True
+            elif self._stream is not None and not bool(
+                getattr(self._stream, "active", True)
+            ):
+                close_inactive = True
+
+            if not close_inactive:
+                self._sink = sink
+                try:
+                    if self._stream is None:
+                        self._open()
+                except Exception:
+                    self._sink = None
+                    raise
+                return self.device
+
+        if close_inactive:
+            # _close_stream atomically detaches the stale handle and performs
+            # native teardown outside _lock.  A concurrent idle close may have
+            # detached it already; either way the recursive acquire is bounded
+            # by _close_done and cannot freeze the UI.
+            self._close_stream()
+            return self.acquire(sink)
+
+        # Kept for type checkers; every branch above returns or raises.
+        raise RuntimeError("Microphone stream could not be acquired")
 
     def release(self) -> None:
         """Detach the current sink and arm the idle-close timer. Leaves the stream warm."""
@@ -1107,12 +1197,24 @@ class WarmMic:
     def _on_idle(self) -> None:
         # Timer target. Only close if still idle — a recording may have re-acquired the mic
         # after the timer fired but before this ran.
+        self._close_stream(only_if_idle=True)
         with self._lock:
-            if self._sink is None:
-                self._close_stream()
-                self._idle_timer = None
+            self._idle_timer = None
 
-    def _close_stream(self) -> None:
+    def _notify_restart_required(self, reason: str) -> None:
+        """Notify the app once, outside native audio and UI callback threads."""
+        with self._lock:
+            if self._restart_required_notified:
+                return
+            self._restart_required_notified = True
+            callback = self._on_restart_required
+        if callback is not None:
+            try:
+                callback(reason)
+            except Exception:
+                pass
+
+    def _close_stream(self, *, only_if_idle: bool = False) -> bool:
         """Stop/close the PortAudio stream without double-close races.
 
         Atomically detach under ``_lock`` so concurrent callers cannot stop/close the
@@ -1120,28 +1222,60 @@ class WarmMic:
         SEGV'd when PortAudio tore down a stream that was already half-closed
         (live: 2026-07-13 Detect-key session after a mic rescan). Python
         try/except cannot catch SIGSEGV, so the only defense is never double-enter.
-        Teardown runs outside the lock so abort/close cannot deadlock other paths.
+
+        Native teardown runs on a watchdog worker and never owns ``_lock``.
+        CoreAudio has hung indefinitely in AudioOutputUnitStop; in that case
+        this returns False and permanently quarantines the WarmMic so Tk stays
+        responsive and no second PortAudio call races the stuck worker.
         """
         with self._lock:
+            if only_if_idle and self._sink is not None:
+                return True
             stream = self._stream
+            if stream is None:
+                return not self._closing_stream and not self._abandoned_close
             self._stream = None
             self._recording_sample_rate = None
-        if stream is None:
-            return
+            self._closing_stream = True
+            self._close_done.clear()
+
+        def teardown() -> None:
+            try:
+                try:
+                    # abort() is preferred when available: stop() can block
+                    # waiting for the PortAudio callback thread while a
+                    # rescan/terminate is racing.
+                    abort = getattr(stream, "abort", None)
+                    if callable(abort):
+                        abort()
+                    else:
+                        stream.stop()
+                except Exception:
+                    pass
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            finally:
+                with self._lock:
+                    self._closing_stream = False
+                self._close_done.set()
+
         try:
-            # abort() is preferred when available: stop() can block waiting for the
-            # PortAudio callback thread while a rescan/terminate is racing.
-            abort = getattr(stream, "abort", None)
-            if callable(abort):
-                abort()
-            else:
-                stream.stop()
-        except Exception:
-            pass
-        try:
-            stream.close()
-        except Exception:
-            pass
+            _run_with_timeout(teardown, _MIC_CLOSE_TIMEOUT)
+        except TimeoutError:
+            with self._lock:
+                self._abandoned_close = True
+            reason = (
+                "Microphone backend got stuck releasing the previous stream"
+            )
+            print(
+                "WarmMic: stream close timed out "
+                f"(>{_MIC_CLOSE_TIMEOUT:.0f}s) — quarantining PortAudio until restart"
+            )
+            self._notify_restart_required(reason)
+            return False
+        return True
 
     def close(self) -> None:
         """Stop and close the stream entirely (app shutdown, device change, force reset)."""
@@ -1176,12 +1310,19 @@ class WarmMic:
         with self._lock:
             if self._sink is not None:
                 return False  # a recording is active — don't yank its stream
-            if self._abandoned_open:
+            if self._abandoned_open or self._abandoned_close:
                 return False  # late open worker may still be inside PortAudio
             self._cancel_idle_timer()
-        self._close_stream()
+        # Older adapters/tests override this legacy internal method without a
+        # return value; only an explicit False means native teardown failed.
+        if self._close_stream() is False:
+            return False
         with self._lock:
-            if self._sink is not None or self._abandoned_open:
+            if (
+                self._sink is not None
+                or self._abandoned_open
+                or self._abandoned_close
+            ):
                 return False
             return _pa_rescan()
 
@@ -1255,6 +1396,11 @@ class AudioRecorder:
         if not self.frames:
             return False
         return audio_has_speech_activity(np.concatenate(self.frames, axis=0), self.sample_rate)
+
+    def is_digital_silence(self) -> bool:
+        """Whether the device delivered audio but every sample was exactly zero."""
+        frames = self.frames
+        return bool(frames) and all(audio_is_digital_silence(f) for f in frames)
 
     def start(self) -> None:
         """Start recording audio.
@@ -1563,6 +1709,12 @@ class ChunkedRecorder:
                 return False
             audio = np.concatenate(self._buffer, axis=0)
         return audio_has_speech_activity(audio, self.sample_rate)
+
+    def is_digital_silence(self) -> bool:
+        """Whether the device delivered audio but every sample was exactly zero."""
+        with self._buffer_lock:
+            frames = list(self._buffer)
+        return bool(frames) and all(audio_is_digital_silence(f) for f in frames)
 
     def _get_total_samples(self) -> int:
         """Get total number of samples in buffer."""

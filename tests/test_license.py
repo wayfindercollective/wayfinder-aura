@@ -5,6 +5,8 @@ Tests for the license management module.
 from pathlib import Path
 from unittest.mock import patch
 
+import json
+
 import pytest
 
 SAMPLE_LICENSE_KEY = "WF-TEST-ONLINE-ACTIVATION"
@@ -518,9 +520,8 @@ class TestFeatureGate:
         import wayfinder.license as lic
         from wayfinder.license import get_feature_gate, store_license
 
-        # Establish a clean non-premium baseline against the (empty) temp config dir. The module
-        # -level _feature_gate singleton persists across tests, so without force_refresh here a
-        # prior test that stored a license could leave gate1 premium (test-ordering flake).
+        # Non-premium baseline against the (empty) temp config dir; conftest's
+        # reset_feature_gate keeps an earlier test's gate out of the singleton.
         gate1 = get_feature_gate(force_refresh=True)
         assert not gate1.is_premium
 
@@ -535,6 +536,16 @@ class TestFeatureGate:
         gate3 = get_feature_gate(force_refresh=True)
         assert gate3 is not gate1
         assert gate3.is_premium
+
+    def test_default_gate_starts_free_and_isolated(self):
+        """conftest's reset_feature_gate: every test starts with no cached gate, and
+        the default gate never reads the real CONFIG_DIR/license.json."""
+        import wayfinder.config as cfg
+        import wayfinder.license as lic
+
+        assert lic._feature_gate is None
+        assert lic.get_license_path().parent != cfg.CONFIG_DIR
+        assert not lic.get_feature_gate().is_premium
 
 
 class TestMachineIdDerivation:
@@ -655,3 +666,93 @@ class TestDeferredRefresh:
 
         assert info.refresh_deferred is False
         assert lic.FeatureGate().refresh_pending is False
+
+
+
+# ---------------------------------------------------------------- releasing a slot
+class _Resp:
+    def __init__(self, status, body):
+        self.status_code = status
+        self._body = body
+
+    def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+def _post(status, body, calls=None):
+    def post(url, json=None, timeout=None):
+        if calls is not None:
+            calls.append((url, json))
+        return _Resp(status, body)
+    return post
+
+
+class TestReleaseLicense:
+    """Remove license frees this computer's activation slot (deactivate_online)."""
+
+    def test_deactivate_url_sits_beside_activation(self):
+        from wayfinder.license import LICENSE_API_URL, LICENSE_DEACTIVATE_URL, _sibling_endpoint
+
+        assert LICENSE_DEACTIVATE_URL == _sibling_endpoint(LICENSE_API_URL, "deactivate")
+        assert _sibling_endpoint("https://x.convex.site/activate", "deactivate") == (
+            "https://x.convex.site/deactivate")
+
+    @pytest.mark.parametrize("status, body, expected", [
+        (200, {"released": True}, "released"),
+        (200, {"released": False, "reason": "not_active"}, "released"),  # already free
+        (200, {"released": False, "reason": "not_found"}, "rejected"),
+        (404, ValueError("No matching routes found"), "unsupported"),  # server not updated yet
+        (502, ValueError("bad gateway"), "offline"),
+    ])
+    def test_server_answers(self, monkeypatch, status, body, expected):
+        import requests
+
+        from wayfinder import license as L
+
+        calls = []
+        monkeypatch.setattr(requests, "post", _post(status, body, calls))
+        assert L.deactivate_online("KEY-1", "machine-1", "tok") == expected
+        assert calls == [(L.LICENSE_DEACTIVATE_URL,
+                          {"key": "KEY-1", "machineId": "machine-1", "token": "tok"})]
+
+    def test_unreachable_server_is_offline(self, monkeypatch):
+        import requests
+
+        from wayfinder import license as L
+
+        def boom(*a, **k):
+            raise requests.ConnectionError("down")
+        monkeypatch.setattr(requests, "post", boom)
+        assert L.deactivate_online("KEY-1", "machine-1") == "offline"
+
+    @pytest.mark.parametrize("status, released, says", [
+        ("released", True, "free again"),
+        ("unsupported", False, "still counted"),
+        ("offline", False, "couldn't be reached"),
+    ])
+    def test_release_always_removes_the_local_license(self, temp_config_dir: Path, monkeypatch,
+                                                       status, released, says):
+        from wayfinder import license as L
+
+        path = L.get_license_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"license_key": "KEY-1", "machine_id": "machine-1",
+                                    "token": "tok"}))
+        seen = []
+        monkeypatch.setattr(L, "deactivate_online",
+                            lambda key, mid, token=None: seen.append((key, mid, token)) or status)
+
+        result = L.release_license()
+
+        assert seen == [("KEY-1", "machine-1", "tok")]
+        assert not path.exists()
+        assert result.released is released
+        assert says in result.message
+
+    def test_release_without_a_license_makes_no_request(self, temp_config_dir: Path, monkeypatch):
+        from wayfinder import license as L
+
+        monkeypatch.setattr(L, "deactivate_online", lambda *a, **k: pytest.fail("no request"))
+        assert L.release_license().released is True

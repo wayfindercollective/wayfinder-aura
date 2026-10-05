@@ -132,8 +132,10 @@ class _FakeRun:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def __call__(self, argv, capture_output=None, timeout=None, env=None):
-        self.calls.append({"argv": list(argv), "timeout": timeout, "env": env})
+    def __call__(self, argv, capture_output=None, timeout=None, env=None, creationflags=None):
+        # creationflags: Windows passes CREATE_NO_WINDOW (no console flash).
+        self.calls.append({"argv": list(argv), "timeout": timeout, "env": env,
+                           "creationflags": creationflags})
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome

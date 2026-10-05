@@ -12,6 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from wayfinder.utils import loopback_http  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _fresh_opener(monkeypatch):
+    """Each test builds its own no-proxy opener, not one an earlier test cached."""
+    monkeypatch.setattr(loopback_http, "_NO_PROXY_OPENER", None)
+
+
 def _serve(body: bytes, hits: list):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802

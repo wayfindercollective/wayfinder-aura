@@ -554,15 +554,12 @@ class TestCheckSettingsCompatibility:
 # =============================================================================
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestGetBackend:
     """Tests for the get_backend() factory function."""
 
-    def test_returns_llama_cpp_backend_by_default(self, monkeypatch):
+    def test_returns_llama_cpp_backend_by_default(self):
         """When CLI binary doesn't exist, falls back to Python bindings."""
-        # macOS also searches bundled/Homebrew llama binaries; the host's must
-        # not decide this test.
-        import wayfinder.utils.runtime_assets as runtime_assets
-        monkeypatch.setattr(runtime_assets, "find_llama_binary", lambda *_a, **_k: None)
         config = {
             "post_processing_backend": "llama_cpp",
             "llama_cpp_use_cli": True,
@@ -852,9 +849,13 @@ class TestProcessWithConfig:
         result = process_with_config("um hello world", config)
         assert result[0].isupper()
 
-    def test_minimal_tone_uses_neutral_llm_cleanup_when_opted_in(self):
+    def test_minimal_tone_uses_neutral_llm_cleanup_when_opted_in(self, monkeypatch):
         # Default Normal is instant filler removal (tests/test_normal_style.py);
-        # normal_llm_cleanup keeps the model path for users who want it.
+        # normal_llm_cleanup keeps the model path for Ultra users who want it.
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
         backend = SimpleNamespace(
             is_available=lambda: True,
             process=MagicMock(return_value="This is neutral cleaned text."),
@@ -875,6 +876,31 @@ class TestProcessWithConfig:
 
         assert result == "This is neutral cleaned text."
         backend.process.assert_called_once()
+
+    def test_free_normal_never_runs_a_cleanup_model(self, monkeypatch):
+        # Free cleanup is um/uh removal only, even with the hidden opt-in set.
+        import wayfinder.license as license_module
+
+        gate = SimpleNamespace(has_feature=lambda _feature: False)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        backend = SimpleNamespace(is_available=lambda: True, process=MagicMock())
+        config = {
+            "output_tone": "minimal",
+            "post_processing_enabled": True,
+            "normal_llm_cleanup": True,
+            "post_processing_backend": "llama_cpp",
+            "llama_cpp_model_path": "/tmp/model.gguf",
+        }
+
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+            result = process_with_config("um so this is uh my note", config)
+
+        backend.process.assert_not_called()
+        assert "um" not in result.lower().split()
+        assert "uh" not in result.lower().split()
+        from wayfinder.core.postprocessor import cleanup_model_needed
+
+        assert cleanup_model_needed(config) is False
 
     @pytest.mark.parametrize(
         "tone", ["minimal", "professional", "casual", "dev", "personal"]
@@ -908,7 +934,8 @@ class TestProcessWithConfig:
     def test_unlicensed_vocabulary_is_removed_before_cleanup_prompt(self, monkeypatch):
         import wayfinder.license as license_module
 
-        gate = SimpleNamespace(has_feature=lambda _feature: False)
+        # Styles licensed, custom vocabulary not: the prompt must drop the terms.
+        gate = SimpleNamespace(has_feature=lambda feature: feature != "custom_vocabulary")
         monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
         backend = SimpleNamespace(
             is_available=lambda: True,
@@ -920,7 +947,7 @@ class TestProcessWithConfig:
             "post_processing_backend": "llama_cpp",
             "llama_cpp_model_path": "/tmp/model.gguf",
             "custom_vocabulary": ["PaidTerm"],
-            "normal_llm_cleanup": True,  # Free -> Normal; exercise the model prompt
+            "normal_llm_cleanup": True,  # no model on disk -> Normal; exercise the prompt
         }
 
         with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
@@ -1113,8 +1140,13 @@ class TestResidentLlamaFastPath:
         with patch.object(b, "_resident_model", return_value=None):
             b.warm_up()  # must not raise
 
-    def test_module_warm_up_routes_to_local_backend(self, tmp_path):
+    def test_module_warm_up_routes_to_local_backend(self, tmp_path, monkeypatch):
+        import wayfinder.license as license_module
         from wayfinder.core import postprocessor
+
+        # Cleanup models run for Ultra only.
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda *a, **k: gate)
         binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
         model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
         cfg = {"post_processing_backend": "llama_cpp", "post_processing_enabled": True,
@@ -1787,18 +1819,20 @@ class TestPostLlmHygiene:
             "output_tone": "dev",
             "post_processing_enabled": True,
             "post_processing_backend": "llama_cpp",
-            "llama_cpp_model_path": "/tmp/google_gemma-3-1b-it-Q4_K_M.gguf",
+            # A model that passed Dev in the style matrix (Gemma 3 1B falls
+            # back to Normal on this branch, which never reaches the model).
+            "llama_cpp_model_path": "/tmp/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         }
         config.update(config_extra or {})
-        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend):
+        # Styles are licensed: pin the gate so the host's own license can't
+        # drop "dev" to Minimal (which never reaches the model).
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        with patch("wayfinder.core.postprocessor.get_backend", return_value=backend), \
+                patch("wayfinder.license.get_feature_gate", return_value=gate):
             return process_with_config("um can you tell me about how humans work I'm not sure", config)
 
     def test_process_with_config_applies_hygiene_for_standard_cleanup(self):
-        # Gemma 3 1B now falls back to Normal for Dev (STYLE_SUPPORT), which never
-        # reaches the LLM; Qwen3-4B runs the Dev cleanup whose output gets hygiene.
-        out = self._run("Um, can you tell me about HOW HUMANS WORK? I 'm not sure.", {
-            "llama_cpp_model_path": "/tmp/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-        })
+        out = self._run("Um, can you tell me about HOW HUMANS WORK? I 'm not sure.")
         assert out == "Can you tell me about how humans work? I'm not sure."
 
     def test_process_with_config_skips_hygiene_for_caricature(self):

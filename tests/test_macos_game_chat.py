@@ -219,6 +219,7 @@ def test_gamer_overlay_primes_whisper_and_keeps_cleanup_normal():
     assert gc.gamer_asr_overlay(base, None) is base
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 def test_transcriber_primes_whisper_with_gamer_vocabulary_without_ultra():
     from wayfinder.core.transcriber import get_backend
     cfg = {"transcription_backend": "whisper_cpp", "whisper_server_mode": False,

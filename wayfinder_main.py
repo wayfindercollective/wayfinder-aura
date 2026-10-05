@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
@@ -140,6 +141,22 @@ try:
     ctk.ScalingTracker.update_loop_interval = 3_600_000
 except Exception:
     pass
+# CustomTkinter's appearance tracker re-arms a 30 ms `after` forever to
+# follow the system light/dark setting: ~33 wakeups/s, measured as 32 of the
+# 36 Tcl wakeups/s an idle Mac app made (most of its ~2% idle CPU). The app
+# pins dark mode (setup_window), so every tick is a no-op. Hourly, as above.
+try:
+    ctk.AppearanceModeTracker.update_loop_interval = 3_600_000
+except Exception:
+    pass
+# Each CTkTextbox re-arms its own 200 ms "are scrollbars needed?" check for as
+# long as it exists (History log, Ultra vocabulary boxes): 5 wakeups/s apiece,
+# window hidden or not. A scrollbar appearing within a second of the text
+# overflowing is still prompt.
+try:
+    ctk.CTkTextbox._scrollbar_update_time = 1000
+except Exception:
+    pass
 # Microphone picker's first option (matched by the "Auto-detect" substring).
 # No emoji prefix: no emoji as UI chrome (rule 11).
 AUTO_DETECT_MIC_LABEL = "Auto-detect (Recommended)"
@@ -165,7 +182,7 @@ from wayfinder.utils.platform import (
     get_whisper_model_search_dirs,
 )
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, wav_has_speech_activity
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, get_wav_duration_seconds, wav_has_speech_activity
 from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
@@ -360,6 +377,12 @@ def detect_gpu() -> GPUInfo:
     Returns:
         GPUInfo with vendor, name, and driver information.
     """
+    if IS_WINDOWS and not IS_MACOS:
+        # No lspci or /sys: the display adapters Windows lists in the registry.
+        from wayfinder.utils.windows_sysinfo import primary_gpu
+
+        found = primary_gpu()
+        return GPUInfo(found[0], found[1], "windows") if found else GPUInfo("unknown", "Unknown GPU", "")
     # macOS: detect Apple Silicon or Intel GPU
     if sys.platform == "darwin":
         try:
@@ -650,40 +673,81 @@ def _release_cleanup_residency() -> None:
 _WHEEL_SCROLL_ACTIVE = False
 
 
+#: Every ToolTip that has been constructed and not yet destroyed.
+#: A WeakSet so holding a reference here never keeps a dead widget alive.
+#: Tk's event delivery through pack_forget() is the thing that failed here, so
+#: hide_all_tooltips() does not rely on it — the tab switcher calls it directly.
+_LIVE_TOOLTIPS: "weakref.WeakSet[ToolTip]" = weakref.WeakSet()
+
+
+def hide_all_tooltips() -> None:
+    """Dismiss every visible tooltip. Safe to call at any time."""
+    for tip in list(_LIVE_TOOLTIPS):
+        try:
+            tip.on_leave()
+        except Exception:
+            # One stuck tooltip must never stop the others being cleared.
+            pass
+
+
 class ToolTip:
     """
     Modern hover tooltip for CustomTkinter widgets.
     Styled to match Nano Banana design system.
     """
-    
+
     def __init__(self, widget, text, delay=300):
         self.widget = widget
         self.text = text
         self.delay = delay
         self.tooltip_window = None
         self.scheduled_id = None
+        _LIVE_TOOLTIPS.add(self)
 
         widget.bind("<Enter>", self.on_enter)
         widget.bind("<Leave>", self.on_leave)
         widget.bind("<ButtonPress>", self.on_leave)
-    
+        # Switching tabs calls pack_forget() on the pane, which unmaps this
+        # widget without the pointer ever leaving it — so <Leave> never fires
+        # and the tooltip was left stranded. It is an overrideredirect topmost
+        # Toplevel with no chrome, so there is then no way to dismiss it: it
+        # floats over every other tab until the app restarts.
+        widget.bind("<Unmap>", self.on_leave, add="+")
+        widget.bind("<Destroy>", self.on_destroy, add="+")
+
     def on_enter(self, event=None):
         # Pointer is skating across rows during a wheel gesture — scheduling a
         # Toplevel tooltip mid-scroll is a common source of bottom-of-pane jank.
         if _WHEEL_SCROLL_ACTIVE:
             return
         self.scheduled_id = self.widget.after(self.delay, self.show_tooltip)
-    
+
     def on_leave(self, event=None):
         if self.scheduled_id:
-            self.widget.after_cancel(self.scheduled_id)
+            try:
+                self.widget.after_cancel(self.scheduled_id)
+            except Exception:
+                # The widget may already be gone; the timer dies with it.
+                pass
             self.scheduled_id = None
         self.hide_tooltip()
-    
+
+    def on_destroy(self, event=None):
+        self.on_leave()
+        _LIVE_TOOLTIPS.discard(self)
+
     def show_tooltip(self):
         if self.tooltip_window:
             return
         if _WHEEL_SCROLL_ACTIVE:
+            return
+        # The 300ms timer can outlive the widget: hover a row, switch tab, and
+        # this fires against something unmapped or destroyed, stranding a
+        # tooltip from a pane the user already left.
+        try:
+            if not self.widget.winfo_exists() or not self.widget.winfo_ismapped():
+                return
+        except Exception:
             return
 
         # Create tooltip window
@@ -1374,6 +1438,20 @@ def _tray_pulse_interval_ms(platform_name: str | None = None) -> int | None:
     return 50
 
 
+def _update_installs_in_place() -> bool:
+    """True when Install Update can swap this install itself (core/app_installer)."""
+    try:
+        from wayfinder.core.app_installer import install_mode
+        return install_mode() is not None
+    except Exception:
+        return False
+
+
+# Idle poll_events cadence once the macOS event pipe is attached
+# (WakingQueue): every producer wakes Tk itself, so the poll is only a backstop.
+_MACOS_IDLE_SAFETY_POLL_MS = 1000
+
+
 def _settings_preload_interval_ms(platform_name: str | None = None) -> int:
     """Yield time between hidden Settings construction slices.
 
@@ -1528,6 +1606,19 @@ SETTING_TOOLTIPS = {
         "Turn it off if your menu bar is crowded."
     ),
     "ui_scale": "Size of Aura's window and text.",
+    "update_channel": (
+        "Stable: tested releases, every few weeks.\n"
+        "Beta: the newest build, as often as daily. New features sooner, "
+        "and sometimes new bugs.\n"
+        "Going back to Stable keeps your version until the next stable release."
+    ),
+    "crash_reports": (
+        "When Aura crashes or hits an error, send Wayfinder the kind of error, "
+        "where in Aura's code it happened and the app and system versions, so "
+        "it gets fixed. Never the error message, audio, dictated text or your "
+        "settings.\n"
+        "On by default for Beta, off for Stable."
+    ),
     "gamer_mode": (
         "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
         "M+...), keeps your words as said, and sends them to chat: don't press "
@@ -1535,8 +1626,8 @@ SETTING_TOOLTIPS = {
         "dictation: past WoW's 255-character limit, the next part waits in chat "
         "for your Enter.\n"
         "Also set up for Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings "
-        "Online, Albion Online, RuneScape and EVE Online. In games Aura only pastes, "
-        "never types keys, so dictation can't trigger a keybind."
+        "Online, Albion Online, RuneScape and EVE Online. In games Aura pastes "
+        "rather than typing keys, so dictation can't trigger a keybind."
         + (
             "\nDark Age of Camelot (Linux) has no paste: press Enter to open chat "
             "first, then dictate, and Aura types it into the chat box."
@@ -1574,28 +1665,35 @@ SETTING_TOOLTIPS = {
         "straight away, so leave it off if you want to check the text first."
     ),
     "audio_preprocessing": (
-        "Cleans up microphone audio before transcription.\n\n"
-        "Off: audio is left untouched.\n"
-        "Light: evens out quiet or uneven levels. Best for most mics.\n"
-        "Medium: Light plus a filter for hum, rumble and desk bumps.\n"
-        "Heavy: Medium plus quieting steady noise between words. It can swallow "
-        "soft speech, so use it only if noise remains.\n\n"
-        "It can't fix clipping or a wrong mic level."
+        "Sound processing on your mic before Whisper hears it. It never changes "
+        "words; text cleanup is separate (Post-Processing).\n\n"
+        "Off: the raw mic signal.\n"
+        "Light (recommended): raises quiet recordings toward a normal level, at "
+        "most 8x, so faint noise isn't blown up.\n"
+        "Medium: Light plus an 80 Hz filter for hum, rumble and desk bumps. For a "
+        "fan, air conditioning or a mic on the desk.\n"
+        "Heavy: Medium plus turning steady noise between words down. For a noisy "
+        "room when Medium isn't enough; it can swallow soft speech.\n\n"
+        "None of them can fix clipping or a mic set far too loud."
     ),
     "chunked_mode": (
-        "Splits long recordings so most of the work is done by the time you stop.\n\n"
+        "Transcribes long dictations in pieces while you speak, so the text is "
+        "ready soon after you stop. Ultra.\n\n"
         "Off: one pass for the whole recording.\n"
-        "Auto: one pass under 30 s; longer recordings are split. Recommended.\n"
-        "On: split from the start, in 15 s pieces."
+        "Auto: one pass under 30 s; longer recordings go in 15 s pieces that "
+        "overlap by 2 s. Recommended: in testing, 2-minute dictations on Large "
+        "v3 Turbo Q5 lost words in one pass and kept them all on Auto.\n"
+        "On: 15 s pieces from the start."
     ),
     "whisper_model": (
         "The speech model. It runs on your computer; nothing is sent to the cloud."
     ),
     "backend": (
         "Local transcription engine.\n\n"
-        "• Auto / default — Free uses Base on CPU with whisper.cpp. Ultra uses\n"
-        "  whisper.cpp and respects the GPU toggle. Never selects Faster-Whisper.\n\n"
-        "• whisper.cpp — CPU for Free; Vulkan/CUDA/Metal acceleration with Ultra.\n\n"
+        "• Auto / default — always whisper.cpp. Free uses Base on the CPU; Ultra\n"
+        "  follows the GPU toggle. Never selects Faster-Whisper.\n\n"
+        "• whisper.cpp — CPU for Free; with Ultra's GPU toggle, Metal on a Mac\n"
+        "  and Vulkan on Linux and Windows.\n\n"
         "• Faster-Whisper (experimental) — Manual only, NVIDIA hosts only.\n"
         "  CTranslate2 CUDA path; not fully dogfooded. May fall back to slow CPU.\n"
         "  Ultra feature. Manual pick turns Auto off."
@@ -1607,11 +1705,21 @@ SETTING_TOOLTIPS = {
         )
         if IS_MACOS
         else (
-            "Use your GPU for transcription and local cleanup. Ultra.\n"
-            "whisper.cpp: Vulkan (AMD/Intel), CUDA or Metal. "
-            "Faster-Whisper (experimental): NVIDIA CUDA only.\n"
+            "Use your graphics card for transcription. Ultra.\n"
+            "Vulkan on AMD, NVIDIA and Intel GPUs; text cleanup stays on the CPU.\n"
             "Free runs Base on the CPU. Benchmark shows what the GPU would do."
         )
+        if IS_WINDOWS
+        else (
+            "Use your GPU for transcription and local cleanup. Ultra.\n"
+            "whisper.cpp uses Vulkan on AMD, NVIDIA and Intel GPUs. "
+            "Faster-Whisper (experimental, manual): NVIDIA CUDA only.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+    ),
+    "gpu_device": (
+        "Which graphics card transcribes. Automatic picks the dedicated GPU;\n"
+        "choose the integrated one if the big card is busy with games or a local AI model."
     ),
 }
 
@@ -1634,7 +1742,8 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         if selected_name in ("ggml-base.en.bin", "ggml-base.bin"):
             base_text += (
                 "\n\nBase is the Free default: fast and light, but less accurate. "
-                "Large v3 Turbo (Ultra) made 43% fewer mistakes in our tests."
+                "Large v3 Turbo Q5 (Ultra) on a GPU made 43% fewer mistakes in our "
+                "tests, at the same speed; on the CPU it is much slower."
             )
         
         if not benchmark_results:
@@ -1711,7 +1820,7 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
             "whisper_cpp": "whisper.cpp",
             "faster_whisper": "Faster-Whisper (experimental)",
         }.get(active, active)
-        mode = "Auto (safe GPU path)" if auto_on else "Manual (your choice)"
+        mode = "Auto" if auto_on else "Manual (your choice)"
         return (
             f"{base}\n\n"
             f"This PC → Auto picks: {rec_label}\n"
@@ -1914,7 +2023,14 @@ class BenchmarkRunner:
         """Find whisper-cli in source, Flatpak, or the current AppImage mount."""
         from wayfinder.utils.runtime_assets import find_whisper_binary
 
-        return find_whisper_binary(self.config)
+        found = find_whisper_binary(self.config)
+        if IS_WINDOWS and not IS_MACOS and found:
+            # The GPU side of Compare CPU vs GPU runs the bundled Vulkan build
+            # (a benchmark only times it; dictation stays license-gated).
+            from wayfinder.utils.windows_whisper import gpu_twin
+
+            found = gpu_twin(found) or found
+        return found
 
     def _find_whisper_cpu_binary(self) -> str | None:
         """Prefer the independently linked CPU safety twin when packaged."""
@@ -2412,8 +2528,9 @@ class BenchmarkRunner:
 # speed_rating / accuracy_rating are relative 1–5 scores within this catalog
 # (not absolute WER). Calibrated from OpenAI large-v3-turbo guidance + common
 # whisper.cpp practice: tiny→large accuracy climbs, size climbs; turbo is near
-# large-v3 quality at far higher speed; Q5 is the default balance (smaller/faster
-# than full turbo with only a small accuracy tradeoff).
+# large-v3 quality at far higher speed. Q5 is the default balance: measured as
+# accurate as full turbo (6.6% vs 6.7% WER, docs/EVAL-2026-09-24.md) at a third
+# of the download.
 WHISPER_CPP_MODELS = {
     "tiny.en": {
         "name": "Tiny (English)",
@@ -2488,7 +2605,7 @@ WHISPER_CPP_MODELS = {
         "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
         "speed": "Fastest high-quality · best balance",
         "speed_rating": 4,
-        "accuracy_rating": 4,
+        "accuracy_rating": 5,
         "recommended": True,
         # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
         "cdn_object": "whisper/ggml-large-v3-turbo-q5_0.bin",
@@ -2617,7 +2734,7 @@ def format_model_tile_title(name: str, model_id: str | None = None) -> tuple[str
         "tiny.en": ("Tiny", "EN"),
         "medium": ("Medium", "Multi"),
         "small": ("Small", "Multi"),
-        "base": ("Base", "Free default"),
+        "base": ("Base", "Free"),
         "tiny": ("Tiny", "Multi"),
     }
     if cat in id_map:
@@ -2728,9 +2845,9 @@ LLM_GGUF_MODELS = {
         "filename": "google_gemma-3-1b-it-Q4_K_M.gguf",
         "sha256": "12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d",
         "cdn_object": "llm/google_gemma-3-1b-it-Q4_K_M.gguf",
-        "description": "Small and fast. Great for Normal cleanup; for styles use Qwen3 4B (in testing Gemma reworded technical terms).",
+        "description": "Small and fast. Normal needs no model; in styles Gemma changed meaning in testing (\"diff\" became \"difference\"), so styles use Qwen3 4B.",
         "speed": "Very Fast",
-        "accuracy": "Excellent",
+        "accuracy": "Fair",
         # Explicit False: old clients built with it True must drop the flag.
         "recommended": False,
     },
@@ -2742,9 +2859,9 @@ LLM_GGUF_MODELS = {
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
         "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
         "cdn_object": "llm/Qwen3.5-2B-Q4_K_M.gguf",
-        "description": "Leaves text largely unchanged in testing; fine for Normal cleanup only.",
+        "description": "Leaves text almost unchanged in testing, fillers included. Normal already removes um/uh without a model; styles use Qwen3 4B.",
         "speed": "Very Fast",
-        "accuracy": "Excellent",
+        "accuracy": "Fair",
     },
     # 2026-09 lineup refresh — three tiers:
     #   light  = Gemma 3 1B (Free; Normal needs no model since 2026-09)
@@ -2772,7 +2889,7 @@ LLM_GGUF_MODELS = {
         "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "filename": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
-        "description": "Best for styles: the most reliable in every style we tested, at ~0.3 s on Apple silicon. Keeps your meaning.",
+        "description": "Best for styles: the most reliable in every style we tested and the only one here for Strong. About 0.3 s per dictation on an M3 Ultra; slower on smaller Macs.",
         "speed": "Fast",
         "accuracy": "Excellent",
         # Pilot Ultra CDN object (R2). Auth required — see docs/MODELS-CDN-SETUP.md
@@ -2832,6 +2949,12 @@ class ModelDownloader:
     only touches *writable* copies and never the Flatpak-bundled `/app/share/...`.
     """
     
+    # Model ids being downloaded by any instance. Two downloads of one model
+    # share its ".downloading" file, so the second is refused (the Ultra setup
+    # fetches Turbo Q5 in the background while the models panel stays usable).
+    _in_flight: set[str] = set()
+    _in_flight_lock = threading.Lock()
+
     def __init__(self, models_dir: Path = None):
         self.models_dir = models_dir or _get_whisper_models_dir()
         self.models_dir.mkdir(parents=True, exist_ok=True)
@@ -2945,7 +3068,13 @@ class ModelDownloader:
             if error_callback:
                 error_callback(f"Cannot write models dir: {e}")
             return
-        
+        with ModelDownloader._in_flight_lock:
+            if model_id in ModelDownloader._in_flight:
+                if error_callback:
+                    error_callback("This model is already downloading")
+                return
+            ModelDownloader._in_flight.add(model_id)
+
         def download_thread():
             temp_path = None
             try:
@@ -3168,6 +3297,8 @@ class ModelDownloader:
                         temp_path.unlink(missing_ok=True)
                     except Exception:
                         pass
+                with ModelDownloader._in_flight_lock:
+                    ModelDownloader._in_flight.discard(model_id)
         
         self._current_download = threading.Thread(
             target=_macos_keep_awake(download_thread, f"download:{model_id}",
@@ -3586,6 +3717,15 @@ def resolve_status_indicator_target(
     return "none"
 
 
+def visual_overlay_mode(platform: str, overlay_type: str) -> str | None:
+    """Use a separate Qt process when a hidden Mac app needs a visible pill."""
+    if overlay_type == "always_on":
+        return "persistent"
+    if platform == "darwin" and overlay_type == "disappearing":
+        return "transient"
+    return None
+
+
 def normalize_indicator_audio_level(value) -> float:
     """Convert recorder scalar types (including NumPy float32) to finite 0..1."""
     try:
@@ -3644,10 +3784,10 @@ def _cloud_cleanup_models(provider: str) -> list[str]:
 # macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
 # KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
 MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
-# Windows: Right Ctrl (evdev KEY_RIGHTCTRL) and Right Alt / Alt Gr
-# (KEY_RIGHTALT, the Mac's Right Option). Many laptops have no Right Ctrl.
-# Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
-WINDOWS_SOLO_HOTKEYS = {97: "Right Ctrl", 100: "Right Alt (Alt Gr)"}
+# Windows: Right Alt / Alt Gr (KEY_RIGHTALT, the Mac's Right Option; the
+# Windows default) and Right Ctrl (evdev KEY_RIGHTCTRL). Many laptops have no
+# Right Ctrl. Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
+WINDOWS_SOLO_HOTKEYS = {100: "Right Alt (Alt Gr)", 97: "Right Ctrl"}
 
 
 def _solo_hotkeys(platform_name: str | None = None) -> dict:
@@ -3732,11 +3872,10 @@ def hotkey_key_options(
             **_hotkey_key_codes,
         }
     elif active_platform == "win32":
-        # The Windows tap/hold key, offered after the chord keys (the default
-        # stays Ctrl+Alt+Space).
+        # Tap/hold keys first: Right Alt is the Windows default, as on the Mac.
         _hotkey_key_codes = {
-            **_hotkey_key_codes,
             **{name: code for code, name in WINDOWS_SOLO_HOTKEYS.items()},
+            **_hotkey_key_codes,
         }
     if available_pynput_codes is None:
         try:
@@ -4516,14 +4655,24 @@ class FloatingIndicator:
         glow_b = int(34 + b * 0.05)
         inner_glow_color = f"#{glow_r:02x}{glow_g:02x}{glow_b:02x}"
         
-        self.window.configure(fg_color=shadow_color)
+        # Tk's toplevel and CTk's outer frame each have rectangular backing
+        # pixels outside the rounded pill. Key out their shared backdrop on
+        # Windows so only the rounded border and pill remain.
+        window_bg = "#010203" if IS_WINDOWS else shadow_color
+        self.window.configure(fg_color=window_bg)
+        if IS_WINDOWS:
+            try:
+                self.window.attributes("-transparentcolor", window_bg)
+            except tk.TclError:
+                window_bg = shadow_color
+                self.window.configure(fg_color=window_bg)
         
         # Outer frame with blue rim light (pre-blended, no alpha)
         self.glow_frame = ctk.CTkFrame(
             self.window,
-            fg_color=shadow_color,
+            fg_color=window_bg if IS_WINDOWS else shadow_color,
             corner_radius=RADIUS["lg"],  # Squircle feel
-            border_width=1,
+            border_width=0 if IS_WINDOWS else 1,
             border_color=COLORS["border_rim"],  # Pre-blended 10% blue
         )
         self.glow_frame.pack(padx=0, pady=0)
@@ -5044,8 +5193,12 @@ class OverlayController:
         log_callback=None,
         want_tray: bool = False,
         tray_only: bool = False,
+        cancel_hint: str = "",
     ):
         self._process: subprocess.Popen | None = None
+        # "✕ Shift+Esc" above the pill while recording; kept here so a restarted
+        # overlay process gets it again (passed as --cancel-hint).
+        self._cancel_hint = cancel_hint or ""
         # When True, the overlay subprocess hosts a QSystemTrayIcon (used when the main
         # process has no in-process pystray tray — the Flatpak). tray_available is re-set
         # live from the overlay's ready handshake on each (re)start, so it never goes stale.
@@ -5228,6 +5381,8 @@ class OverlayController:
                     cmd_args.append(f"--offset={offset}")
                     cmd_args.append(f"--anchor={anchor}")
                     cmd_args.append(f"--quality={quality}")
+                    if self._cancel_hint:
+                        cmd_args.append(f"--cancel-hint={self._cancel_hint}")
                 def _overlay_preexec() -> None:
                     # If the main process is hard-killed, the overlay (tray) must not
                     # outlive it. Linux PR_SET_PDEATHSIG delivers SIGTERM to the child
@@ -5499,6 +5654,14 @@ class OverlayController:
     def set_quality(self, quality: str):
         """Set the overlay render quality live ('high' | 'performance')."""
         self._send_command({"cmd": "quality", "value": quality})
+
+    def set_cancel_hint(self, hint: str):
+        """The key that discards a recording, shown above the pill while recording."""
+        hint = hint or ""
+        if hint == self._cancel_hint:
+            return
+        self._cancel_hint = hint
+        self._send_command({"cmd": "cancel_hint", "value": hint})
 
     def quit(self):
         """Shut down the overlay subprocess."""
@@ -5906,8 +6069,9 @@ class WayfinderApp(ctk.CTk):
         else:
             self.event_queue = queue.Queue()
         # Menu delegates (especially PyObjC's NSMenu callback) must never call
-        # Tk/AppKit window code inline. poll_events drains this only after the
-        # native menu tracking callback has returned to Tk's main loop.
+        # Tk/AppKit window code inline. Tk drains this only after the native
+        # menu tracking callback has returned to Tk's main loop (see
+        # _dispatch_tray_action).
         self._tray_action_queue = queue.Queue()
         # UI → GlobalShortcuts worker commands. The portal connection and its
         # session live on a private GLib thread, so the Settings button asks
@@ -5969,6 +6133,9 @@ class WayfinderApp(ctk.CTk):
                 "[license] Repaired unavailable settings: "
                 + ", ".join(_entitlement_repairs)
             )
+        # One-time Ultra setup, for a license that turned Ultra outside the app
+        # (the in-app activation runs it directly). Settles the record on Free.
+        self._apply_ultra_defaults()
 
         # Resolve audio device (intelligent selection if not explicitly set). This is a
         # RUNTIME value only — do NOT write it back into config["audio_device"]. Persisting
@@ -5996,6 +6163,9 @@ class WayfinderApp(ctk.CTk):
             # boot-while-mic-off case (USB-hub mic powered on after the app started) —
             # without this, dictation fails with PaErrorCode -9999 until an app restart.
             resolve_device=lambda: resolve_audio_device(self.config),
+            on_restart_required=(
+                self._queue_macos_microphone_relaunch if IS_MACOS else None
+            ),
         )
 
         # Standard recorder for short recordings
@@ -6103,6 +6273,7 @@ class WayfinderApp(ctk.CTk):
             self.config.get("enable_tray_icon", True),
         )
         want_visual = overlay_enabled and not getattr(self, "_game_mode", False)
+        qt_visual_mode = visual_overlay_mode(sys.platform, overlay_type) if want_visual else None
         initial_style = self.config.get("output_tone", "minimal")
 
         def _start_overlay_controller(*, tray_only: bool) -> bool:
@@ -6113,12 +6284,13 @@ class WayfinderApp(ctk.CTk):
                 return False
             self.overlay_controller = OverlayController(
                 audio_level_callback=get_audio_level,
-                mode="persistent",
+                mode=qt_visual_mode if not tray_only else "persistent",
                 initial_style=initial_style,
                 config=self.config,
                 log_callback=self.log,
                 want_tray=want_tray or tray_only,
                 tray_only=tray_only,
+                cancel_hint=self._cancel_hotkey_display() or "",
             )
             self.overlay_controller._start_process()
             if not tray_only:
@@ -6134,10 +6306,14 @@ class WayfinderApp(ctk.CTk):
             # Game Mode: neither the PyQt overlay nor the CTk indicator can render over a
             # fullscreen gamescope game — feedback is audio cues only (feedback/audio.py).
             self.log("🎮 Game Mode: visual overlay disabled (audio cues only)")
-        elif want_visual and overlay_type == "always_on":
+        elif qt_visual_mode is not None:
             if _start_overlay_controller(tray_only=False):
                 self._use_pyqt_overlay = True
-                self.log("✨ Using Always On indicator (PyQt6)")
+                self.log(
+                    "✨ Using Disappearing indicator (PyQt6)"
+                    if qt_visual_mode == "transient"
+                    else "✨ Using Always On indicator (PyQt6)"
+                )
             else:
                 self.log("⚠ PyQt6 not available, using Disappearing indicator")
         elif want_visual:
@@ -6220,6 +6396,14 @@ class WayfinderApp(ctk.CTk):
             # Say once at startup if the record hotkey collides with something
             # (e.g. Magnifier's Ctrl+Alt+Space) - most people never open Settings.
             self.after(2000, self._log_windows_hotkey_conflict)
+            # Some GPU setups hand parts of the window back black after a focus
+            # change ("little black squares"); repaint once after each.
+            try:
+                from wayfinder.ui.windows_window import repaint_after_activation
+
+                repaint_after_activation(self)
+            except Exception:
+                pass
         if WINDOWS_MAC_LOOK:
             # Caption bar in the app's ink, rim-coloured border (the Mac's
             # unified title bar). After mapping: DWM needs the real HWND.
@@ -6283,8 +6467,12 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
         
-        # Only start minimized to tray if the user has enabled this option
-        if self.config.get("start_minimized", False):
+        # LaunchServices' -j hides the app initially, but Tk maps its root during
+        # startup and can make it visible again. Recovery launches pass this
+        # one-shot flag so the native Hide is reapplied after Tk enters its loop.
+        if IS_MACOS and "--minimized" in sys.argv:
+            self.after(0, self.hide_to_tray)
+        elif self.config.get("start_minimized", False):
             self.after(100, self.hide_to_tray)
         
         # Run startup dependency checks
@@ -6294,6 +6482,7 @@ class WayfinderApp(ctk.CTk):
         self.after(2000, self._check_model_updates_background)
         # Check for a newer app release (non-blocking, once per day)
         self.after(2600, self._check_app_update_background)
+        self.after(8000, self._start_crash_report_pass)
 
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay and not IS_MACOS:
@@ -6359,6 +6548,7 @@ class WayfinderApp(ctk.CTk):
                             WhisperServerBackend.shutdown()
                         except Exception:
                             pass
+                    self._apply_ultra_defaults()
                     self._refresh_entitlement_ui()
 
                 self.event_queue.put((EventType.UI_CALLBACK, _apply))
@@ -6545,6 +6735,14 @@ class WayfinderApp(ctk.CTk):
                 from AppKit import NSApplication
 
                 NSApplication.sharedApplication().setApplicationIconImage_(None)
+            except Exception:
+                pass
+        elif IS_WINDOWS and (SCRIPT_DIR / "assets" / "icon.ico").exists():
+            try:
+                # The multi-size app icon the .exe carries (packaging/windows/
+                # make_icon.py): Windows picks the right size per DPI for the
+                # title bar, taskbar and Alt+Tab.
+                self.iconbitmap(default=str(SCRIPT_DIR / "assets" / "icon.ico"))
             except Exception:
                 pass
         elif ICON_PATH.exists():
@@ -7424,8 +7622,13 @@ class WayfinderApp(ctk.CTk):
 
             self._content_pane = self.tab_content_container
             self.tab_content_container = ctk.CTkFrame(self._content_pane, fg_color="transparent")
+            # Tk cannot clip a scroll view to a rounded shape: at the Mac's 6px
+            # inset, a card scrolled under the top/bottom edge was cut square
+            # inside the pane's rounded corner. Half the pane radius, plus the
+            # scroll frame's own corner inset (6), puts the cut where the arc
+            # is within a pixel of the straight edge.
             self.tab_content_container.pack(
-                fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=CONTENT_PANE_INSET)
+                fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=RADIUS["lg"] // 2)
         
         # Create tab frames
         self.tab_frames = {}
@@ -7719,13 +7922,20 @@ class WayfinderApp(ctk.CTk):
         # bitmap on an opaque chip below stays as the fallback (and on Linux).
         if not (IS_MACOS and self._create_macos_brand_mark(title_frame, is_ultra)):
             try:
-                # Cosmic signature: the brand arrow "in space" with a baked, static
-                # stardust trail (placement A · visible). Works for BOTH tiers — the
-                # Ultra gold glow composites on top of the trail inside the helper.
                 if _IS_LINUX:
-                    # The Mac's mark (arrow + a few crisp stardust points), drawn
-                    # for the current zoom so it is never a stretched 24 px bitmap.
+                    # Preserve the Linux mark's sizing at the current zoom.
                     logo_img, display_size = self._linux_brand_mark_image(is_ultra)
+                elif IS_WINDOWS:
+                    from wayfinder.ui.macos_brand_mark import (
+                        MARK_HEIGHT,
+                        MARK_WIDTH,
+                        render_brand_mark,
+                    )
+                    logo_img = render_brand_mark(
+                        ICON_PATH, scale=4.0, is_ultra=is_ultra,
+                        accent=COLORS["accent"], gold=COLORS["accent_yellow"],
+                    )
+                    display_size = (MARK_WIDTH, MARK_HEIGHT)
                 else:
                     logo_img, display_size = self._cosmic_header_logo(ICON_PATH, logo_size, is_ultra)
                 self._header_logo_img = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=display_size)
@@ -8635,6 +8845,10 @@ class WayfinderApp(ctk.CTk):
 
     def _switch_tab(self, tab_id: str, inspection: bool = False) -> None:
         """Switch to the specified tab."""
+        # Before anything else, and before the early returns below: a tooltip
+        # open over the outgoing pane has no owner once that pane is unmapped,
+        # and nothing else will dismiss it.
+        hide_all_tooltips()
         required_feature = None if inspection else feature_for_tab(tab_id)
         if required_feature:
             gate = getattr(self, "feature_gate", None)
@@ -8840,14 +9054,15 @@ class WayfinderApp(ctk.CTk):
             command=self._open_missing_macos_permission,
         )
         self.macos_permission_open_btn.pack(side="right", padx=(SPACING["sm"], 0))
-        ctk.CTkButton(
+        self.macos_permission_recheck_btn = ctk.CTkButton(
             _mp_inner, text="Recheck",
             font=(self.font_body[0], self.font_sizes["small"]),
             height=28, width=76, corner_radius=RADIUS["xs"],
             fg_color=COLORS["bg_hover"], hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
-            command=self._refresh_macos_permission_banner,
-        ).pack(side="right")
+            command=self._recheck_macos_permissions,
+        )
+        self.macos_permission_recheck_btn.pack(side="right")
         self.macos_permission_label.pack(side="left", fill="x", expand=True)
 
         # (D) Persistent "finish setup — download a model" cue.
@@ -8909,9 +9124,9 @@ class WayfinderApp(ctk.CTk):
         ).pack(side="right", padx=(SPACING["sm"], 0))
 
         # (F) Ultra utilization tip — light launch cue for Ultra owners who
-        # haven't switched their upgrades on yet (an activated install starts
-        # exactly like Free: GPU off, Base model, free cleanup model). Built
-        # once, packed on demand like the other banners; text set at show time.
+        # aren't using an upgrade (the one-time Ultra setup can't cover a failed
+        # model download or a later switch-off). Built once, packed on demand
+        # like the other banners; text set at show time.
         self.ultra_tips_banner = ctk.CTkFrame(
             scroll, fg_color=COLORS["bg_elevated"], corner_radius=RADIUS["sm"],
         )
@@ -9020,6 +9235,21 @@ class WayfinderApp(ctk.CTk):
             anchor="w",
         )
         self.transcription_label.pack(fill="x", padx=16, pady=(0, 8))
+        if IS_WINDOWS and not IS_MACOS:
+            # Wrap to the card, capped at a readable measure: the fixed 380
+            # filled a quarter of the card on a wide window. CTkFrame.bind
+            # lands on its canvas, and CTk scales wraplength itself, so pass
+            # design units.
+            def _rewrap_transcription(event, label=self.transcription_label):
+                if event.width <= 40:
+                    return
+                try:
+                    width = event.width / label._get_widget_scaling() - 32
+                    label.configure(wraplength=int(min(760, max(240, width))))
+                except Exception:
+                    pass
+
+            trans_card.bind("<Configure>", _rewrap_transcription, add="+")
 
         # Compact setup row: model · Local/Remote · hotkey (always useful, no dead void).
         setup_row = ctk.CTkFrame(trans_card, fg_color="transparent")
@@ -9510,6 +9740,8 @@ class WayfinderApp(ctk.CTk):
         if IS_MACOS or IS_WINDOWS:
             self._create_login_item_row(system_content)
 
+        self._create_update_channel_row(system_content)
+
         yield "system"
 
         # === BENTO TILE: Status Overlay ===
@@ -9544,7 +9776,7 @@ class WayfinderApp(ctk.CTk):
         self.overlay_type_var = ctk.StringVar(value=overlay_type)
         overlay_type_labels = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
         }
         self.overlay_type_dropdown = self.create_dropdown_row(
             overlay_content, "Indicator Style",
@@ -10870,7 +11102,9 @@ class WayfinderApp(ctk.CTk):
             tooltip=get_dynamic_tooltip("gpu_acceleration", self.config),
             tooltip_key="gpu_acceleration",
         )
-        
+        if IS_WINDOWS and not IS_MACOS and _gpu_unlocked:
+            self._create_windows_gpu_device_row(parent)
+
         # No Accuracy Mode control: beam search never beat greedy decoding in
         # testing (docs/EVAL-2026-09-24.md), so whisper.cpp always runs greedy.
 
@@ -10889,7 +11123,11 @@ class WayfinderApp(ctk.CTk):
         backend = self.config.get("transcription_backend", "whisper_cpp")
         if backend in ("openai_whisper", "groq_whisper"):
             backend = "whisper_cpp"  # Default to local backend
-        show_fw = bool(get_gpu_info().is_nvidia) or backend == "faster_whisper"
+        # The Windows bundle has no Faster-Whisper/PyTorch: never offer it there,
+        # even now that Windows detects an NVIDIA GPU.
+        show_fw = (
+            bool(get_gpu_info().is_nvidia) and not (IS_WINDOWS and not IS_MACOS)
+        ) or backend == "faster_whisper"
         self._backend_display_map = {
             "Auto (whisper.cpp)": "auto",
             "whisper.cpp": "whisper_cpp",
@@ -10953,11 +11191,30 @@ class WayfinderApp(ctk.CTk):
         self.create_toggle_row(
             parent, "Enable Post-Processing",
             self.postproc_enabled_var, self.toggle_post_processing,
-            tooltip="Clean up transcriptions using a local LLM.\nRemoves filler words (um, uh, like) and fixes punctuation.\nRuns 100% on your device — no data sent anywhere.",
+            tooltip=(
+                "Tidies the text after transcription, on this device.\n"
+                "Off: you get Whisper's text as it is.\n"
+                "On, Normal style: removes um/uh instantly, with no model.\n"
+                "Professional, Casual, Dev and Personal (Ultra) rewrite with a local "
+                "model; Qwen3 4B is the one that does them well."
+            ),
         )
         
-        # Post-processing backend and options (only show if enabled)
-        if postproc_enabled:
+        # Post-processing backend and options (only show if enabled). Free runs
+        # no cleanup model (Normal is um/uh removal), so it gets no model manager
+        # to download one into.
+        if postproc_enabled and not self.feature_gate.has_feature("tone_system"):
+            ctk.CTkLabel(
+                parent,
+                text=("Normal removes um/uh instantly, with no model to download. "
+                      "Cleanup models power the writing styles in Ultra."),
+                font=(self.font_body[0], self.font_sizes["small"]),
+                text_color=COLORS["text_secondary"],
+                wraplength=420,
+                justify="left",
+                anchor="w",
+            ).pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
+        elif postproc_enabled:
             postproc_backend = self.config.get("post_processing_backend", "llama_cpp")
             # Ensure we're using llama_cpp for local mode
             if postproc_backend != "llama_cpp":
@@ -11001,8 +11258,10 @@ class WayfinderApp(ctk.CTk):
                 self.residency_var, self._on_residency_changed,
                 tooltip=("Instant: the cleanup model stays loaded, so cleanup takes "
                          f"~0.15s instead of ~0.6s. Holds {_resident_hint} while idle "
-                         "(in video memory when GPU acceleration is on, otherwise in "
-                         "RAM).\n"
+                         + ("(in RAM: cleanup runs on the CPU on Windows).\n"
+                            if IS_WINDOWS and not IS_MACOS else
+                            "(in video memory when GPU acceleration is on, otherwise "
+                            "in RAM).\n") +
                          "Save memory: the model loads for each cleanup and is freed "
                          "afterwards — slower, but nothing is held while you are not "
                          "dictating."),
@@ -11556,7 +11815,7 @@ class WayfinderApp(ctk.CTk):
         # from STYLE_ICONS (wayfinder.ui.icons); the emoji that used to prefix the
         # titles were retired with the icon system.
         tones = [
-            ("minimal", "Normal", "Just removes um/uh. Your exact words, nothing changed."),
+            ("minimal", "Normal", "Removes um/uh when text cleanup is on. Nothing is rewritten."),
             ("professional", "Professional", "Clean + business-appropriate tone"),
             ("casual", "Casual", "Clean + relaxed texting style"),
             ("dev", "Dev", "Developer mode - recognizes git & code terms"),
@@ -11703,7 +11962,9 @@ class WayfinderApp(ctk.CTk):
             ).pack(fill="x", padx=12, pady=(0, 8))
         
         # Add tooltip for strong mode
-        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your exact words.\nNeeds Qwen3 4B or a cloud model (Ultra).")
+        ToolTip(strong_container, "Restructures sentences for clarity. Off = keeps your sentences and "
+                                  "only tidies them in the style (slang like \"gonna\" can still change).\n"
+                                  "Needs Qwen3 4B or a cloud model (Ultra).")
         
         # Caricature mode toggle (right side) - always visible now!
         caricature_container = ctk.CTkFrame(toggles_row, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"])
@@ -12498,7 +12759,7 @@ class WayfinderApp(ctk.CTk):
         return 0.0
 
     def _has_visual_pyqt_overlay(self) -> bool:
-        """True when the Always On PyQt pill is the on-screen status surface.
+        """True when the PyQt pill owns the on-screen status surface.
 
         tray_only controllers host the system tray only — they must NOT steal
         show/hide from FloatingIndicator (Disappearing mode).
@@ -12516,7 +12777,7 @@ class WayfinderApp(ctk.CTk):
 
         state: ``listening`` | ``processing`` | ``ready`` | ``hide``
 
-        Returns the controller show/update result when using PyQt Always On
+        Returns the controller show/update result when using a PyQt pill
         (so callers can retry critical ready transitions); otherwise None.
         """
         ctrl = getattr(self, "overlay_controller", None)
@@ -12570,7 +12831,7 @@ class WayfinderApp(ctk.CTk):
         return want_tray
 
     def _start_live_overlay_controller(self, *, tray_only: bool, want_tray: bool) -> bool:
-        """Start Always On / tray-only subprocess mid-session. Returns True on success."""
+        """Start visual / tray-only subprocess mid-session. Returns True on success."""
         try:
             import PyQt6  # noqa: F401
         except ImportError:
@@ -12578,7 +12839,9 @@ class WayfinderApp(ctk.CTk):
         try:
             self.overlay_controller = OverlayController(
                 audio_level_callback=None if tray_only else self._audio_level_for_overlay,
-                mode="persistent",
+                mode=("persistent" if tray_only else
+                      visual_overlay_mode(sys.platform, self.config.get("overlay_type", "always_on"))
+                      or "persistent"),
                 initial_style=self.config.get("output_tone", "minimal"),
                 config=self.config,
                 log_callback=self.log,
@@ -12842,8 +13105,8 @@ class WayfinderApp(ctk.CTk):
                 self.log("🙈 Status overlay off")
             return
 
-        # Visual on — Always On (PyQt) preferred; CTk disappearing otherwise.
-        if overlay_type == "always_on":
+        # Mac's disappearing pill must live outside the hidden Tk application.
+        if visual_overlay_mode(sys.platform, overlay_type) is not None:
             if self._start_live_overlay_controller(tray_only=False, want_tray=want_tray):
                 self.log("✨ Status overlay on")
                 return
@@ -13096,7 +13359,7 @@ class WayfinderApp(ctk.CTk):
             "Aura hears gamer talk (inc, pull, LFG, M+...) and keeps your words as said.",
             "One message per dictation: if it's too long, the next part waits in chat for your "
             "Enter. Send it before dictating again.",
-            "In games Aura only pastes, never types keys, so dictation can't trigger a keybind.",
+            "In games Aura pastes rather than typing keys, so dictation can't trigger a keybind.",
         ) + ((
             "Dark Age of Camelot has no paste: press Enter to open chat first, then dictate. "
             "Aura types it into the chat box.",
@@ -13411,6 +13674,60 @@ class WayfinderApp(ctk.CTk):
             self.preprocess_desc_label.configure(text=self._get_preprocess_desc(value))
         self.log(f"⚙ Audio processing: {value}")
     
+    def _create_windows_gpu_device_row(self, parent) -> None:
+        """Windows + Ultra: which GPU transcribes, when there is a choice.
+
+        Automatic picks the discrete GPU; a PC may prefer its integrated Radeon
+        while the big card is busy with games or a local LLM. Devices come from
+        the bundled Vulkan whisper build (ggml's own ordering, sub-second probe).
+        """
+        try:
+            from wayfinder.utils.gpu_simple import detect_gpu_devices
+
+            devices = detect_gpu_devices(self.config)
+        except Exception:
+            devices = []
+        if len(devices) < 2:
+            return
+        choices = {"Automatic": "auto"}
+        for device in devices:
+            label = device.name.split(" (")[0]  # drop "(AMD proprietary driver)"
+            if label in choices:
+                label = f"{label} #{device.index}"
+            choices[label] = str(device.index)
+        self._gpu_device_map = choices
+        current = str(self.config.get("gpu_device", "auto"))
+        shown = next((k for k, v in choices.items() if v == current), "Automatic")
+        self.gpu_device_var = ctk.StringVar(value=shown)
+        self.create_dropdown_row(
+            parent, "GPU", list(choices), self.gpu_device_var, self._on_gpu_device_changed,
+            tooltip=SETTING_TOOLTIPS["gpu_device"], width=220,
+        )
+
+    def _on_gpu_device_changed(self, shown: str) -> None:
+        """Apply a GPU choice live: the next dictation respawns whisper-server on it."""
+        value = getattr(self, "_gpu_device_map", {}).get(shown, "auto")
+        self.config["gpu_device"] = value
+        save_config(self.config)
+        if value == "auto":
+            os.environ.pop("GGML_VK_VISIBLE_DEVICES", None)
+            try:
+                from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
+                                 daemon=True).start()
+            except Exception:
+                pass
+        else:
+            os.environ["GGML_VK_VISIBLE_DEVICES"] = value
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+
+            WhisperServerBackend.shutdown()
+        except Exception:
+            pass
+        self.log(f"⚙ GPU: {shown} — applied")
+
     def on_language_changed(self, value: str):
         """Handle language change from dropdown."""
         self.config["language"] = value
@@ -13605,8 +13922,9 @@ class WayfinderApp(ctk.CTk):
     def toggle_gpu(self):
         """Toggle GPU acceleration (applies live, no app restart).
 
-        GPU processing is Ultra-only for every model. The setting remains off on
-        new installs until an Ultra user explicitly enables it.
+        GPU processing is Ultra-only for every model. Installs start on CPU; the
+        first switch to Ultra turns it on once where the hardware suits it
+        (core/ultra_defaults.py), and from then on this switch decides.
         """
         if not hasattr(self, 'gpu_var'):
             return
@@ -13617,6 +13935,21 @@ class WayfinderApp(ctk.CTk):
             return
         self.config["use_gpu"] = want
         save_config(self.config)
+        self._apply_transcription_hardware_change(want)
+        self.log(f"⚙ GPU acceleration: {'enabled (GPU)' if want else 'disabled (CPU)'} — applied")
+
+    def _apply_transcription_hardware_change(self, gpu_on: bool) -> None:
+        """Make a CPU/GPU or speech-model change take effect without a restart."""
+        if gpu_on and IS_WINDOWS and not IS_MACOS:
+            # Startup skips the GPU probe in CPU mode: pick the device now (the
+            # configured gpu_device, else the discrete GPU), off the Tk thread.
+            try:
+                from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
+                                 daemon=True).start()
+            except Exception:
+                pass
         # Apply live: drop the resident whisper-server so the next dictation respawns
         # it in the new CPU/GPU mode — no app restart needed.
         try:
@@ -13630,7 +13963,142 @@ class WayfinderApp(ctk.CTk):
             _release_cleanup_residency()
         except Exception:
             pass
-        self.log(f"⚙ GPU acceleration: {'enabled (GPU)' if want else 'disabled (CPU)'} — applied")
+
+    # === One-time Ultra setup (core/ultra_defaults.py) ===
+
+    def _gpu_default_capable(self) -> bool:
+        """Whether the one-time Ultra setup may switch GPU acceleration on here."""
+        try:
+            from wayfinder.core.ultra_defaults import gpu_is_default_capable
+
+            if not gpu_is_default_capable(get_gpu_info().vendor, sys.platform):
+                return False
+            if IS_WINDOWS and not IS_MACOS:
+                # Windows ships the Vulkan whisper.cpp build beside the CPU one;
+                # without it GPU mode would only ever run the CPU build.
+                from wayfinder.core.transcriber import _resolve_whisper_cli_binary
+                from wayfinder.utils.windows_whisper import gpu_twin
+
+                cli = _resolve_whisper_cli_binary(self.config.get("whisper_binary", ""))
+                return bool(cli and gpu_twin(cli))
+            return True
+        except Exception:
+            return False
+
+    def _recommended_speech_model_on_disk(self) -> str | None:
+        """Large v3 Turbo Q5, if it is already downloaded somewhere Aura looks."""
+        from wayfinder.core.ultra_defaults import RECOMMENDED_SPEECH_MODEL
+
+        home = str(Path.home())
+        for directory in _whisper_model_search_dirs():
+            candidate = directory / RECOMMENDED_SPEECH_MODEL
+            try:
+                if candidate.is_file():
+                    path = str(candidate)
+                    # Stored like _set_active_whisper_model stores it.
+                    return "~" + path[len(home):] if path.startswith(home) else path
+            except OSError:
+                continue
+        return None
+
+    def _apply_ultra_defaults(self, *, activated_now: bool = False) -> list[str]:
+        """Run the one-time Ultra setup if it is due. Returns the changed keys."""
+        gate = getattr(self, "feature_gate", None)
+        # An offline-first read that still needs its online refresh proves
+        # nothing about the tier yet; the background refresh calls this again.
+        if gate is None or getattr(gate, "refresh_pending", False):
+            return []
+        # Never swap the GPU mode or model under a running dictation; the next
+        # launch (or activation) runs it instead.
+        if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+            return []
+        try:
+            from wayfinder.core.ultra_defaults import (
+                apply_ultra_defaults,
+                describe_changes,
+                ultra_setup_due,
+                wants_recommended_speech_model,
+            )
+
+            premium = bool(gate.is_premium)
+            due = ultra_setup_due(self.config, gate, activated_now=activated_now)
+            changed = apply_ultra_defaults(
+                self.config,
+                gate,
+                gpu_capable=premium and self._gpu_default_capable(),
+                recommended_model_path=(
+                    self._recommended_speech_model_on_disk() if premium else None
+                ),
+                activated_now=activated_now,
+            )
+        except Exception as exc:
+            print(f"[license] Ultra setup skipped: {exc}", flush=True)
+            return []
+        # Turbo Q5 is the Ultra speech model: fetch it if it is not on disk yet.
+        if due and wants_recommended_speech_model(self.config, gate):
+            self._download_recommended_speech_model()
+        if not changed:
+            return []
+        save_config(self.config)
+        if "use_gpu" in changed or "model_path" in changed:
+            self._apply_transcription_hardware_change(bool(self.config.get("use_gpu")))
+        if "model_path" in changed and hasattr(self, "model_btn"):
+            try:
+                self.model_btn.configure(text=self.get_model_display())
+            except Exception:
+                pass
+        message = describe_changes(changed)
+        if message:
+            self.log(message)
+        return changed
+
+    def _download_recommended_speech_model(self) -> None:
+        """Ultra setup: download Large v3 Turbo Q5, then switch to it.
+
+        Through the same authenticated downloader as the models panel (which
+        refuses a second copy of the same download). A failure only logs: the
+        Ultra tip keeps offering the model.
+        """
+        from wayfinder.core.ultra_defaults import RECOMMENDED_SPEECH_MODEL_ID
+
+        info = WHISPER_CPP_MODELS.get(RECOMMENDED_SPEECH_MODEL_ID) or {}
+        self.log(f"⬇ Ultra setup: downloading Large v3 Turbo Q5 ({info.get('size', '574 MB')})")
+
+        def _on_ui(fn):
+            self.event_queue.put((EventType.UI_CALLBACK, fn))
+
+        def _complete(path: str) -> None:
+            _on_ui(lambda: self._finish_recommended_speech_model(path))
+
+        def _error(message: str) -> None:
+            _on_ui(lambda: self.log(
+                f"⚠ Large v3 Turbo Q5 download: {message}. "
+                "Get it any time in Settings ▸ Whisper Model."
+            ))
+
+        try:
+            ModelDownloader().download_model(
+                RECOMMENDED_SPEECH_MODEL_ID,
+                complete_callback=_complete,
+                error_callback=_error,
+            )
+        except Exception as exc:
+            _error(str(exc))
+
+    def _finish_recommended_speech_model(self, path: str) -> None:
+        """Switch to the downloaded Turbo Q5 unless the user picked a model meanwhile."""
+        from wayfinder.core.ultra_defaults import (
+            RECOMMENDED_SPEECH_MODEL_ID,
+            wants_recommended_speech_model,
+        )
+
+        if not wants_recommended_speech_model(self.config, self.feature_gate):
+            self.log("✓ Large v3 Turbo Q5 downloaded — keeping the model you chose")
+            return
+        # Deferred to the next IDLE if a dictation is running.
+        self._activate_downloaded_model(
+            "whisper", path, WHISPER_CPP_MODELS.get(RECOMMENDED_SPEECH_MODEL_ID)
+        )
 
     # === Post-Processing Handlers ===
 
@@ -15006,7 +15474,39 @@ class WayfinderApp(ctk.CTk):
 
         threading.Thread(target=_check, daemon=True).start()
 
-    def _check_app_update_background(self) -> None:
+    def _start_crash_report_pass(self) -> None:
+        """Read consent from the live config; send earlier crashes and clear
+        unused update staging in the background."""
+        try:
+            from wayfinder.core import app_installer, crash_reports
+
+            crash_reports.set_config_getter(lambda: self.config)
+
+            def startup_pass() -> None:
+                # The UI is up: an update helper waiting on this launch may
+                # now drop the previous copy.
+                app_installer.confirm_launch()
+                if app_installer.cleanup_stale_staging():
+                    self.event_queue.put((EventType.UI_CALLBACK, lambda: self.log(
+                        "⚠ The last update couldn't install itself; Get Update downloads it instead.")))
+                crash_reports.collect_and_send()
+
+            threading.Thread(target=startup_pass, daemon=True,
+                             name="crash-report-startup").start()
+        except Exception:
+            pass
+
+    def report_callback_exception(self, exc, val, tb):
+        """An error in a Tk callback: print it as Tk does, and report it."""
+        super().report_callback_exception(exc, val, tb)
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.record_exception(exc, val, tb, where="tk-callback")
+        except Exception:
+            pass
+
+    def _check_app_update_background(self, force: bool = False) -> None:
         """Check GitHub for a newer app release in a background thread.
 
         Network and parsing live in core/app_updates (cached, once/day); only
@@ -15015,23 +15515,97 @@ class WayfinderApp(ctk.CTk):
         update nag must never become a startup error."""
         if not self.config.get("check_for_app_updates", True):
             return
+        channel = self.config.get("update_channel") or None
+        generation = self._next_app_update_generation()
 
         def _check():
             try:
                 from wayfinder import __version__ as current_version
                 from wayfinder.core.app_updates import check_for_app_update
 
-                info = check_for_app_update(current_version)
+                info = check_for_app_update(
+                    current_version, force=force, channel=channel)
                 if not info.get("update_available"):
                     return
                 if info.get("latest_version") == self.config.get(
                         "app_update_dismissed_version", ""):
                     return
-                self.after(0, lambda: self._show_app_update_banner(info))
+                self.after(0, lambda: self._show_app_update_banner_if_current(info, generation))
             except Exception:
                 pass  # Silent failure - don't annoy user
 
         threading.Thread(target=_check, daemon=True).start()
+
+    _UPDATE_CHANNEL_CHOICES = {"Stable": "stable", "Beta": "beta"}
+
+    def _create_update_channel_row(self, parent) -> None:
+        """Settings ▸ System: which releases this install is offered."""
+        from wayfinder import __version__ as current_version
+        from wayfinder.core.app_updates import channel_label
+
+        self._update_channel_var = ctk.StringVar(
+            value=channel_label(current_version, self.config.get("update_channel"))
+        )
+        self.create_dropdown_row(
+            parent, "Updates", list(self._UPDATE_CHANNEL_CHOICES),
+            self._update_channel_var, self._on_update_channel_changed,
+            tooltip=SETTING_TOOLTIPS["update_channel"], width=160,
+        )
+        from wayfinder.core.crash_reports import reports_enabled
+
+        self._crash_reports_var = ctk.BooleanVar(
+            value=reports_enabled(self.config, current_version))
+        self.create_toggle_row(
+            parent, "Send crash reports", self._crash_reports_var,
+            self._on_crash_reports_toggled, tooltip=SETTING_TOOLTIPS["crash_reports"],
+        )
+
+    def _on_crash_reports_toggled(self) -> None:
+        """An explicit choice; turning reports off also deletes unsent ones."""
+        enabled = bool(self._crash_reports_var.get())
+        self.config["crash_reports"] = "on" if enabled else "off"
+        save_config(self.config)
+        self.log(f"Crash reports: {'on' if enabled else 'off'}")
+        if not enabled:
+            try:
+                from wayfinder.core import crash_reports
+
+                crash_reports.clear_queue()
+            except Exception:
+                pass
+
+    def _on_update_channel_changed(self, choice: str) -> None:
+        """Persist the update channel and look for that channel's newest
+        release right away (the daily check would otherwise wait a day)."""
+        channel = self._UPDATE_CHANNEL_CHOICES.get(choice)
+        if channel is None or channel == self.config.get("update_channel"):
+            return
+        self.config["update_channel"] = channel
+        save_config(self.config)
+        self.log(f"⟳ Updates: {choice}")
+        var = getattr(self, "_crash_reports_var", None)
+        if var is not None and not self.config.get("crash_reports"):
+            # Reports follow the channel until the user picks: show the new default.
+            try:
+                from wayfinder import __version__ as current_version
+                from wayfinder.core.crash_reports import reports_enabled
+
+                var.set(reports_enabled(self.config, current_version))
+            except Exception:
+                pass
+        self._next_app_update_generation()  # answers for the old channel are void
+        self._hide_app_update_banner()
+        self._check_app_update_background(force=True)
+
+    def _next_app_update_generation(self) -> int:
+        """Each check (and a channel change) starts a new generation; only the
+        newest check's answer may change the banner."""
+        self._app_update_generation = getattr(self, "_app_update_generation", 0) + 1
+        return self._app_update_generation
+
+    def _show_app_update_banner_if_current(self, info: dict, generation: int) -> None:
+        if generation == getattr(self, "_app_update_generation", 0):
+            self._show_app_update_banner(info)
 
     def _show_app_update_banner(self, info: dict) -> None:
         """Show the app-update banner on the Dictate tab (Tk thread only).
@@ -15047,7 +15621,13 @@ class WayfinderApp(ctk.CTk):
             latest = info.get("latest_version", "")
             self._app_update_info = dict(info)
             text = f"Update available: {latest} (you have {current_version})."
-            if _IS_LINUX and info.get("download_url"):
+            in_place = bool(info.get("download_url")) and _update_installs_in_place()
+            button = getattr(self, "app_update_button", None)
+            if button is not None:
+                button.configure(text="Install Update" if in_place else "Get Update")
+            if in_place:
+                text += " Install Update restarts Aura into it."
+            elif _IS_LINUX and info.get("download_url"):
                 # The GitHub bundle has no update channel (not on Flathub yet):
                 # the new file is downloaded and opened by the user.
                 if IS_FLATPAK:
@@ -15055,9 +15635,9 @@ class WayfinderApp(ctk.CTk):
                 else:
                     text += " Get Update downloads the new AppImage; make it executable (file Properties, or chmod +x), then run it instead of this one."
             label.configure(text=text)
-            if IS_MACOS or IS_WINDOWS:
-                # A manual check may have hidden Get Update for a status line.
-                self._set_app_update_button_visible(True)
+            # A manual check or an install attempt may have hidden the button
+            # for a status line.
+            self._set_app_update_button_visible(True)
             if not banner.winfo_manager():
                 anchor = getattr(self, "_dictate_banner_anchor", None)
                 if anchor is not None:
@@ -15091,10 +15671,14 @@ class WayfinderApp(ctk.CTk):
             self.log(f"⚠ Could not persist update dismissal: {e}")
 
     def _open_app_update_page(self) -> None:
-        """Get Update button: open the release page. The banner stays up until
-        dismissed or the new version is actually running."""
+        """Get Update button: install in place where this install can
+        (core/app_installer), else open the download or release page. The
+        banner stays up until dismissed or the new version is actually running."""
         from wayfinder.core.app_updates import RELEASES_PAGE
         info = getattr(self, "_app_update_info", {})
+        if info.get("download_url") and _update_installs_in_place():
+            self._install_app_update(info)
+            return
         url = info.get("release_url") or RELEASES_PAGE
         if IS_MACOS or IS_WINDOWS or _IS_LINUX:
             # Mac/Windows updates always carry a DMG / Setup exe, Linux
@@ -15102,6 +15686,77 @@ class WayfinderApp(ctk.CTk):
             # download it in one click, falling back to the release page.
             url = info.get("download_url") or url
         self._open_url(url)
+
+    def _install_app_update(self, info: dict) -> None:
+        """Install Update: download, verify and stage off the Tk thread, then
+        restart into the new version (core/app_installer)."""
+        if getattr(self, "_app_update_installing", False):
+            return
+        self._app_update_installing = True
+        url = info.get("download_url", "")
+        self._show_app_update_status("Downloading the update…")
+        shown = {"percent": -1}
+
+        def progress(fraction: float) -> None:
+            percent = int(fraction * 100)
+            if percent != shown["percent"]:  # at most ~100 UI updates per download
+                shown["percent"] = percent
+                self.event_queue.put((EventType.UI_CALLBACK, lambda p=percent:
+                    self._show_app_update_status(f"Downloading the update… {p}%")))
+
+        def work() -> None:
+            from wayfinder.core.app_installer import Outcome, prepare_update
+            try:
+                outcome = prepare_update(url, progress)
+            except Exception as exc:  # prepare_update shouldn't raise; be sure
+                outcome = Outcome(message=f"Couldn't install the update ({exc}).")
+            self.event_queue.put((EventType.UI_CALLBACK,
+                                  lambda: self._on_app_update_prepared(info, outcome)))
+
+        threading.Thread(target=work, daemon=True, name="app-update-install").start()
+
+    def _on_app_update_prepared(self, info: dict, outcome) -> None:
+        """Tk thread: restart into a staged update, or hand over the download."""
+        self._app_update_installing = False
+        if outcome.ready:
+            if self.app_state == AppState.IDLE:
+                self._finish_app_update(outcome)
+            else:
+                # Never cut a dictation short: update_state() finishes it at IDLE.
+                self._pending_app_update = outcome
+                self._show_app_update_status(
+                    "Update ready: Aura restarts when this dictation finishes.")
+            return
+        from wayfinder.core.app_updates import RELEASES_PAGE
+        if outcome.message:
+            self.log(f"⚠ {outcome.message}")
+        if outcome.fallback_path:
+            self._open_url(Path(outcome.fallback_path).as_uri())
+            note = "Opened the downloaded update so you can install it yourself."
+        else:
+            self._open_url(info.get("download_url") or info.get("release_url") or RELEASES_PAGE)
+            note = "Opened the download in your browser."
+        self._show_app_update_status(" ".join(filter(None, (outcome.message, note))))
+
+    def _finish_pending_app_update(self) -> None:
+        """At IDLE: install the update staged mid-dictation. A recording that
+        started before this ran keeps it waiting for the next IDLE."""
+        outcome = getattr(self, "_pending_app_update", None)
+        if outcome is None or self.app_state != AppState.IDLE:
+            return
+        self._pending_app_update = None
+        self._finish_app_update(outcome)
+
+    def _finish_app_update(self, outcome) -> None:
+        """Hand over to the update helper, then quit so it can swap and relaunch."""
+        try:
+            outcome.finish()
+        except Exception as exc:
+            self.log(f"⚠ Couldn't restart into the update: {exc}")
+            self._show_app_update_status("Couldn't restart into the update. Try again later.")
+            return
+        self.log("⟳ Installing the update and restarting Aura")
+        self.quit_app()
 
     # ── macOS "Check for Updates…" (menu-bar item) ──────────────────────────
 
@@ -15115,17 +15770,21 @@ class WayfinderApp(ctk.CTk):
         The request runs off the Tk thread and the verdict returns through
         event_queue. Unlike the daily check it ignores the settings toggle and
         a dismissed version — the user asked."""
+        channel = self.config.get("update_channel") or None
+        generation = self._next_app_update_generation()
+
         def _check():
             try:
                 from wayfinder import __version__ as current_version
                 from wayfinder.core.app_updates import check_for_app_update
 
-                info = check_for_app_update(current_version, force=True)
+                info = check_for_app_update(
+                    current_version, force=True, channel=channel)
             except Exception as exc:
                 info = {"update_available": False, "error": str(exc)}
-            self.event_queue.put(
-                (EventType.UI_CALLBACK, lambda: self._report_app_update_check(info))
-            )
+            self.event_queue.put((EventType.UI_CALLBACK, lambda: (
+                self._report_app_update_check(info)
+                if generation == getattr(self, "_app_update_generation", 0) else None)))
 
         threading.Thread(target=_check, daemon=True, name="app-update-check").start()
 
@@ -16451,7 +17110,7 @@ class WayfinderApp(ctk.CTk):
         
         type_names = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
         }
         self.log(f"⚙ Status indicator: {type_names.get(value, value)}")
         
@@ -16591,9 +17250,13 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             install_ready = True
         accessibility, input_monitoring = self._macos_permission_state()
+        # The listener's own check outranks the switches: keys reaching the
+        # tap ("live") need no relaunch; none reaching it with every switch
+        # on ("refused"/"deaf") does (DarwinTapHealth).
+        health = getattr(self, "_macos_hotkey_health", None)
         input_relaunch_required = bool(
             getattr(self, "_macos_input_relaunch_required", False)
-        )
+        ) and health != "live"
         try:
             from wayfinder.utils.macos_permissions import (
                 MIC_DENIED, MIC_RESTRICTED, microphone_authorization,
@@ -16606,8 +17269,16 @@ class WayfinderApp(ctk.CTk):
             else "microphone" if mic_blocked
             else "accessibility" if accessibility is not True
             else "input_monitoring" if input_monitoring is not True or input_relaunch_required
+            else "hotkey_relaunch" if health in ("refused", "deaf")
             else None
         )
+        try:
+            self._log_macos_permission_state(
+                install_ready, mic_blocked, accessibility, input_monitoring,
+                input_relaunch_required, health,
+            )
+        except Exception:
+            pass
         if self._missing_macos_permission is None:
             try:
                 banner.pack_forget()
@@ -16636,6 +17307,12 @@ class WayfinderApp(ctk.CTk):
                 "(the copy in Applications), then quit and reopen it."
             )
             button_text = "Open Accessibility"
+        elif self._missing_macos_permission == "hotkey_relaunch":
+            text = (
+                f"{hotkey} isn't reaching Wayfinder Aura yet. macOS applies new "
+                "permissions after a restart: relaunch Aura."
+            )
+            button_text = "Relaunch Aura"
         else:
             if input_monitoring is True and input_relaunch_required:
                 text = "Input Monitoring is on. Relaunch Wayfinder Aura to activate the hotkey."
@@ -16654,6 +17331,61 @@ class WayfinderApp(ctk.CTk):
                     banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
                 else:
                     banner.pack(fill="x", pady=(0, SPACING["md"]))
+        except Exception:
+            pass
+
+    def _log_macos_permission_state(self, install_ready, mic_blocked, accessibility,
+                                    input_monitoring, relaunch_required, health) -> None:
+        """One activity-log line whenever a macOS grant changes: the trail a
+        "permissions didn't work" report needs."""
+        def word(value):
+            return "on" if value is True else "off" if value is False else "unknown"
+
+        state = (install_ready, mic_blocked, accessibility, input_monitoring,
+                 relaunch_required, health)
+        if state == getattr(self, "_macos_permission_logged", None):
+            return
+        first = getattr(self, "_macos_permission_logged", None) is None
+        self._macos_permission_logged = state
+        line = (f"macOS permissions: Accessibility {word(accessibility)}, "
+                f"Input Monitoring {word(input_monitoring)}, "
+                f"microphone {'blocked' if mic_blocked else 'ok'}, "
+                f"hotkey tap {health or 'starting'}"
+                + (", relaunch pending" if relaunch_required else "")
+                + ("" if install_ready else ", NOT in Applications"))
+        if first:
+            try:
+                import platform
+
+                line += f" (macOS {platform.mac_ver()[0] or '?'}, {platform.machine()})"
+            except Exception:
+                pass
+        self.log(line)
+
+    def _queue_macos_hotkey_health(self, state: str) -> None:
+        """Listener thread: hand a tap-health change to the Tk thread."""
+        self.event_queue.put(
+            (EventType.UI_CALLBACK, lambda: self._on_macos_hotkey_health(state))
+        )
+
+    def _on_macos_hotkey_health(self, state: str) -> None:
+        self._macos_hotkey_health = state
+        if state == "live":
+            # Keys demonstrably reach Aura: no relaunch is owed any more.
+            self._macos_input_relaunch_required = False
+        self._refresh_macos_permission_banner()
+
+    def _recheck_macos_permissions(self) -> None:
+        """Recheck: re-read every grant, and answer visibly when nothing changed."""
+        before = getattr(self, "_missing_macos_permission", None)
+        self._refresh_macos_permission_banner()
+        missing = getattr(self, "_missing_macos_permission", None)
+        button = getattr(self, "macos_permission_recheck_btn", None)
+        if missing is None or missing != before or button is None:
+            return
+        try:
+            button.configure(text="Still off")
+            self.after(2000, lambda: button.winfo_exists() and button.configure(text="Recheck"))
         except Exception:
             pass
 
@@ -16721,6 +17453,8 @@ class WayfinderApp(ctk.CTk):
             permission = getattr(self, "_missing_macos_permission", None)
         if permission is None:
             return
+        if permission == "hotkey_relaunch" and self.relaunch_app():
+            return
         if (permission == "input_monitoring"
                 and getattr(self, "_macos_input_relaunch_required", False)):
             _, input_monitoring = self._macos_permission_state()
@@ -16759,11 +17493,14 @@ class WayfinderApp(ctk.CTk):
         welcome = getattr(self, "_welcome_pane", None)
         if getattr(self, "_welcome_active", False) and welcome is not None:
             try:
-                welcome.show_permissions_step()
-                return True
+                if welcome.show_permissions_step():
+                    return True
             except Exception:
-                return False
-        if getattr(self, "_permissions_pane", None) is not None:
+                pass  # a finished tour: fall through to the checklist
+        pane = getattr(self, "_permissions_pane", None)
+        if pane is not None and getattr(pane, "_destroyed", False):
+            self._permissions_pane = pane = None
+        if pane is not None:
             self._switch_tab("dictate")
             return True
         try:
@@ -16804,7 +17541,7 @@ class WayfinderApp(ctk.CTk):
             if restart_event is not None:
                 restart_event.set()
             if old_thread is not None and old_thread.is_alive():
-                old_thread.join(timeout=2.0)  # loop wakes every 0.1 s
+                old_thread.join(timeout=2.0)  # loop wakes at least every 0.5 s
             if self.stop_event.is_set():
                 return
             self._pynput_listener_started = False
@@ -17291,15 +18028,16 @@ class WayfinderApp(ctk.CTk):
     # License tile) — one list so the copy never drifts. Lucide row markers
     # (CLAUDE.md: no decorative emoji as UI chrome).
     # Claims are measured (docs/EVAL-2026-09-24.md): Turbo Q5 6.6% vs Base 11.5%
-    # WER; Qwen3 4B was the most reliable cleanup model in every style and kept
-    # meaning (Professional/Standard scored C on metrics, fine on reading).
+    # WER, at Base's CPU speed on the GPU; Qwen3 4B was the most reliable cleanup
+    # model in every style and kept meaning (Professional/Standard scored C on
+    # metrics, fine on reading). Chunking: docs/EVAL-2026-09-30-chunking.md.
     ULTRA_BENEFITS = [
-        ("check", "Higher Accuracy", "Large v3 Turbo made 43% fewer mistakes than Base in our tests"),
+        ("check", "Higher Accuracy", "Large v3 Turbo Q5 on a GPU: 43% fewer mistakes than Base, same speed"),
         ("pen-line", "Writing Styles", "Four styles, tested to keep your meaning"),
         ("message-circle", "Your Vocabulary", "Names and terms spelled your way, plus your own corrections"),
         ("sparkles", "GPU Acceleration", "Faster transcription and local cleanup on supported GPUs"),
         ("download", "Cloud Processing", "Optional cloud speed and polish with your own keys"),
-        ("audio-waveform", "Chunked Recording", "Unlimited length with live feedback"),
+        ("audio-waveform", "Chunk Processing", "Long dictations transcribe while you speak"),
     ]
 
     def _build_ultra_benefit_rows(self, parent, icon_color: str | None = None) -> None:
@@ -17801,6 +18539,8 @@ class WayfinderApp(ctk.CTk):
         self._write_status_breadcrumb()
         if result.is_valid and self.feature_gate.is_premium:
             self.log("😇 Ultra activated — halo on. Thanks for supporting Wayfinder!")
+            # Before the UI refresh, so Settings shows the new GPU/chunking state.
+            self._apply_ultra_defaults(activated_now=True)
             self._rebuild_header()
             self._refresh_entitlement_ui()
             # Replace the activation form with persistent confirmation.
@@ -17859,13 +18599,41 @@ class WayfinderApp(ctk.CTk):
             pass
 
     def _deactivate_license(self) -> None:
-        """Remove the locally stored license after the inline confirmation."""
-        from wayfinder.license import remove_license, get_feature_gate
-        remove_license()
+        """Remove the license after the inline confirmation.
+
+        Freeing the activation slot is a call to the licensing service, so it
+        runs off the Tk thread; _finish_license_removal updates the UI.
+        """
+        feedback = getattr(self, "_license_feedback", None)
+        if feedback is not None:
+            try:
+                feedback.configure(text="Removing the license…",
+                                   text_color=COLORS["text_muted"])
+            except Exception:
+                pass
+
+        def _release() -> None:
+            from wayfinder.license import LicenseRelease, release_license, remove_license
+
+            try:
+                result = release_license()
+            except Exception:
+                remove_license()
+                result = LicenseRelease(False, "error", "License removed from this device.")
+            self.event_queue.put(
+                (EventType.UI_CALLBACK, lambda: self._finish_license_removal(result)))
+
+        threading.Thread(target=_release, daemon=True, name="license-release").start()
+
+    def _finish_license_removal(self, result) -> None:
+        """Tk thread: the license is gone; show Free and say whether the slot was freed."""
+        from wayfinder.license import get_feature_gate
         self.feature_gate = get_feature_gate(force_refresh=True)
         # Entitlements changed — republish so locked_tabs is not stale.
         self._write_status_breadcrumb()
-        self.log("License removed from this device")
+        self.log("License removed from this device"
+                 + ("; activation slot freed" if result.released
+                    else f"; activation slot not freed ({result.status})"))
         from wayfinder.config import enforce_license_config
         repaired = enforce_license_config(self.config, self.feature_gate)
         if repaired:
@@ -17895,7 +18663,7 @@ class WayfinderApp(ctk.CTk):
         feedback = getattr(self, "_license_feedback", None)
         if feedback is not None:
             feedback.configure(
-                text="License removed from this device.",
+                text=result.message,
                 text_color=COLORS["text_muted"],
             )
 
@@ -18111,7 +18879,9 @@ class WayfinderApp(ctk.CTk):
             return lbl
 
         intro = _label("Names, brands and jargon Aura should always get right — "
-                       "they steer the speech model and are never \"cleaned\" away.")
+                       "they steer the speech model, close misspellings of them are "
+                       "respelled your way, and they are never \"cleaned\" away. For a "
+                       "word Aura keeps hearing as a real one (Iran), add a correction.")
         body.bind("<Configure>", lambda e, l=intro: l.configure(wraplength=max(200, e.width - 8)), add="+")
 
         if not unlocked:
@@ -18325,8 +19095,11 @@ class WayfinderApp(ctk.CTk):
         """The key that discards a recording from any app, or None if unbound.
 
         Linux portal sessions bind the cancel-dictation shortcut, so the
-        desktop's own trigger is the truth; every other listener (macOS,
-        Windows, X11 pynput, evdev) takes a bare Escape.
+        desktop's own trigger is the truth. Every other listener (macOS,
+        Windows, X11 pynput, evdev) cancels on Escape with or without Shift,
+        so Shift+Esc is the one key taught everywhere (overlay hint, hero,
+        welcome guide). None when no listener outside this window hears it:
+        no backend, or KDE owns the record key and evdev was skipped.
         """
         backend = getattr(self, "_hotkey_backend", None)
         if backend == "unavailable":
@@ -18335,9 +19108,9 @@ class WayfinderApp(ctk.CTk):
             # KDE owns the record key (evdev skipped) or evdev is missing:
             # nothing outside this window hears Esc, so promise nothing.
             thread = getattr(self, "_hotkey_thread", None)
-            return "Esc" if thread is not None and thread.is_alive() else None
+            return "Shift+Esc" if thread is not None and thread.is_alive() else None
         if backend != "portal":
-            return "Esc"
+            return "Shift+Esc"
         triggers = getattr(self, "_portal_triggers", None)
         if triggers is None:  # bind still in flight: what the app asked for
             from wayfinder.hotkeys.dbus import encode_trigger
@@ -18534,6 +19307,12 @@ class WayfinderApp(ctk.CTk):
             return
         from wayfinder.hotkeys.dbus import parse_trigger_description
         self._portal_triggers = dict(triggers)
+        controller = getattr(self, "overlay_controller", None)
+        if controller is not None:
+            try:
+                controller.set_cancel_hint(self._cancel_hotkey_display() or "")
+            except Exception:
+                pass
         changed = []
         for shortcut_id, key_field, mods_field, target in (
             ("record-toggle", "hotkey_key", "hotkey_modifiers", "record"),
@@ -19833,8 +20612,9 @@ class WayfinderApp(ctk.CTk):
         """Make a model the user just fetched with Get/Download the active one.
 
         ``role`` names the list it came from: ``"whisper"`` (speech model) or
-        ``"llm"`` (cleanup model). Only the user's own download buttons call
-        this; nothing that downloads in the background switches models.
+        ``"llm"`` (cleanup model). The user's own download buttons call this,
+        and the one-time Ultra setup's Turbo Q5 download (the user's switch to
+        Ultra); nothing else that downloads in the background switches models.
 
         Mid-dictation (any state but IDLE) the switch is queued and applied on
         the next IDLE transition, so a model is never swapped under a running
@@ -21163,6 +21943,10 @@ class WayfinderApp(ctk.CTk):
         # NSMenu delegate and can abort in PyEval_RestoreThread. queue.Queue.put
         # is native-thread-safe and poll_events owns all later UI work.
         self._tray_action_queue.put(callback)
+        if IS_MACOS:
+            # The event queue's put() only writes a byte to its wake-up pipe
+            # (no Tcl), so the idle poll no longer bounds menu latency.
+            self.event_queue.put((EventType.UI_CALLBACK, self._schedule_tray_actions))
 
     def _refresh_tray_menu(self) -> None:
         try:
@@ -21316,12 +22100,45 @@ class WayfinderApp(ctk.CTk):
         """Tray 'Reset' action — abandon any stuck/in-flight dictation and return to idle."""
         self._dispatch_tray_action(self.force_reset)
 
-    def relaunch_app(self) -> bool:
+    def _queue_macos_microphone_relaunch(self, reason: str) -> None:
+        """Marshal a native-audio recovery request onto Tk's main thread."""
+        self.event_queue.put((
+            EventType.UI_CALLBACK,
+            lambda reason=reason: self._recover_macos_microphone(reason),
+        ))
+
+    def _recover_macos_microphone(self, reason: str) -> None:
+        """Relaunch a packaged Mac app after an unrecoverable CoreAudio close.
+
+        PortAudio is process-global.  Once its close call has timed out, trying
+        another stream or rescan beside that native worker risks the callback
+        crash seen in the field.  A fresh process is the only safe recovery.
+        """
+        if getattr(self, "_microphone_relaunch_pending", False):
+            return
+        self._microphone_relaunch_pending = True
+        self.log(f"⚠ {reason} — restarting Wayfinder Aura")
+        try:
+            self._show_error_banner("Microphone stopped responding — restarting Aura…")
+        except Exception:
+            pass
+
+        def relaunch() -> None:
+            if self.relaunch_app(background=True):
+                return
+            self._microphone_relaunch_pending = False
+            self.on_error(f"{reason}. Restart Wayfinder Aura to continue.")
+
+        self.after(150, relaunch)
+
+    def relaunch_app(self, *, background: bool = False) -> bool:
         """macOS: quit, then reopen the bundle through LaunchServices.
 
         Input Monitoring grants reach a *new* process only (macOS itself offers
         "Quit & Reopen"). A helper shell waits for this PID to exit before
-        ``open`` so the old instance can't just be re-activated.
+        ``open`` so the old instance can't just be re-activated. Audio recovery
+        launches hidden in the background: a new process cannot restore its
+        window to the previous macOS Space, and must not steal the active one.
         """
         if not IS_MACOS:
             return False
@@ -21334,9 +22151,14 @@ class WayfinderApp(ctk.CTk):
         if not bundle.endswith(".app"):
             return False  # a source run has no bundle to reopen
         try:
+            open_command = (
+                'exec /usr/bin/open -gj "$2" --args --minimized'
+                if background else 'exec /usr/bin/open "$2"'
+            )
             subprocess.Popen(
                 ["/bin/sh", "-c",
-                 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2"',
+                 'while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; '
+                 + open_command,
                  "wayfinder-relaunch", str(os.getpid()), bundle],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, start_new_session=True,
@@ -21350,6 +22172,13 @@ class WayfinderApp(ctk.CTk):
 
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
+        # A deliberate quit is not a crash: drop this launch's native crash file.
+        try:
+            from wayfinder.core import crash_reports
+
+            crash_reports.mark_clean_exit()
+        except Exception:
+            pass
         # Signal all background threads to stop
         self.stop_event.set()
         if hasattr(self, '_evdev_stop_event'):
@@ -21558,6 +22387,13 @@ class WayfinderApp(ctk.CTk):
                 self._start_recording_watchdog()
             elif old_state == AppState.RECORDING:
                 self._cancel_recording_watchdog()
+
+        # An app update finished downloading mid-dictation: restart into it now.
+        if new_state == AppState.IDLE and getattr(self, "_pending_app_update", None):
+            try:
+                self.after(0, self._finish_pending_app_update)
+            except Exception:
+                pass
 
         # A model download the user started finished mid-dictation: apply it now
         # that the pipeline is idle (after this transition's own work settles).
@@ -21871,6 +22707,15 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
+        if IS_WINDOWS and not IS_MACOS:
+            # Buried under another window (the Mac's compositor stops drawing an
+            # occluded window by itself): hold the frame, look again in 0.5 s.
+            from wayfinder.ui.windows_window import window_exposure
+
+            if window_exposure(self) == "covered":
+                self._idle_breath_job = self.after(500, self._animate_idle_breath)
+                return
+
         # Also skip if the hero canvas is not visible (e.g. on a different tab)
         try:
             if not self.hero_canvas.winfo_viewable():
@@ -22322,7 +23167,9 @@ class WayfinderApp(ctk.CTk):
                     style_toggle_key, style_toggle_modifiers,
                     config_ref=self.config,
                     capture_state=_HOTKEY_CAPTURE,
-                    **({"restart_event": restart_event} if restart_event is not None else {}),
+                    **({"restart_event": restart_event,
+                        "on_health": self._queue_macos_hotkey_health}
+                       if restart_event is not None else {}),
                 )
             except Exception as e:
                 print(f"[Hotkey] pynput listener crashed: {e}", flush=True)
@@ -22557,6 +23404,23 @@ class WayfinderApp(ctk.CTk):
                     self.handle_event(event_type, data)
             except queue.Empty:
                 pass
+        self._drain_tray_actions()
+        # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
+        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
+        # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
+        # capture is applied promptly without a sub-100ms self-rearming poll.
+        if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
+            interval = 100
+        elif getattr(self, "_event_wakeup_attached", False):
+            # macOS: worker events and menu actions wake Tk through the event
+            # pipe as they are queued, so idle polling is only a safety net.
+            interval = _MACOS_IDLE_SAFETY_POLL_MS
+        else:
+            interval = 250
+        self.after(interval, self.poll_events)
+
+    def _drain_tray_actions(self) -> None:
+        """Run queued status-menu actions on the Tk thread."""
         try:
             while True:
                 callback = self._tray_action_queue.get_nowait()
@@ -22569,15 +23433,12 @@ class WayfinderApp(ctk.CTk):
                 self.after(100, self._refresh_tray_menu)
         except queue.Empty:
             pass
-        # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
-        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
-        # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
-        # capture is applied promptly without a sub-100ms self-rearming poll.
-        if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
-            interval = 100
-        else:
-            interval = 250
-        self.after(interval, self.poll_events)
+
+    def _schedule_tray_actions(self) -> None:
+        """Pipe wake-up for a menu action: run it on a 100 ms one-shot, the
+        cadence the 250 ms idle poll used to give it, so the native menu has
+        long closed before Tk/AppKit window code runs."""
+        self.after(100, self._drain_tray_actions)
 
     @staticmethod
     def _split_gen(data):
@@ -23129,7 +23990,11 @@ class WayfinderApp(ctk.CTk):
                         if len(store) >= chunk_index:
                             prev_text = store[chunk_index - 1]
                             if prev_text and prev_text not in ("[error]", "[empty]"):
-                                context = prev_text
+                                # Minus its cut edge, so this chunk re-hears the
+                                # overlap and the join can match it.
+                                from wayfinder.core.chunking import chunk_prompt_context
+
+                                context = chunk_prompt_context(prev_text)
                                 break
                             if prev_text in ("[error]", "[empty]"):
                                 break  # prior chunk is terminal; no useful context
@@ -23149,6 +24014,23 @@ class WayfinderApp(ctk.CTk):
                 context=context,
                 skip_post_processing=True,
             )
+            if context:
+                # A prompt can make Whisper return a fragment for a whole chunk
+                # of speech; hear it once more without one and keep the fuller.
+                from wayfinder.core.chunking import (
+                    chunk_text_looks_truncated,
+                    prefer_fuller_chunk_text,
+                )
+
+                if chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
+                    retry = transcribe_with_config(
+                        chunk_path, asr_cfg, context="", skip_post_processing=True,
+                    )
+                    fuller = prefer_fuller_chunk_text(text, retry)
+                    if fuller is not text:
+                        self.log(f"↻ Chunk {chunk_index + 1} re-heard without context "
+                                 f"({len(text.split())} → {len(fuller.split())} words)")
+                    text = fuller
             # Write into this session's private store — never touches a newer session's list.
             with self.chunk_transcription_lock:
                 while len(store) <= chunk_index:
@@ -23240,19 +24122,23 @@ class WayfinderApp(ctk.CTk):
         )
         if not has_speech:
             self.recorder.cleanup()
-            self.on_error(self._silence_error_message(), gen)
+            self.on_error(self._silence_error_message(self.recorder), gen)
             return
 
         self._maybe_show_gpu_nudge(duration)
         self.executor.submit(self.transcribe_and_inject, audio_path, gen)
 
-    def _silence_error_message(self) -> str:
+    def _silence_error_message(self, recorder=None) -> str:
         """Actionable 'no audio' message that NAMES the selected mic.
 
         The recording was pure/near silence (whisper would hallucinate on it). Naming the
         device makes the common cause obvious — the right mic IS selected but it's muted at
         the hardware (e.g. a Shure MV7's touch-mute / gain knob), which reads as digital zero.
         Without the name, users assume it's a wrong-device bug and never check the mic itself.
+
+        When *recorder* reports exact digital silence (every sample 0 — a muted USB headset,
+        a headset switched off with its dongle still plugged in, a dead virtual device),
+        say the mic sent nothing at all; "speak closer" is wrong advice for a mic that is off.
         """
         if IS_MACOS:
             # A blocked microphone records pure digital silence; don't send
@@ -23294,6 +24180,14 @@ class WayfinderApp(ctk.CTk):
                     pass
                 return message
         name = self.config.get("audio_device_name")
+        try:
+            digital_silence = bool(recorder.is_digital_silence())
+        except Exception:
+            digital_silence = False
+        if digital_silence:
+            mic = f"Your mic “{name}”" if name else "Your mic"
+            return (f"{mic} sent no sound at all — it may be muted or switched off "
+                    "(Settings → Audio)")
         if name:
             return (f"No speech detected from “{name}” — check the mic's mute/gain, "
                     "reduce steady background noise, or pick another in Settings → Audio")
@@ -23350,7 +24244,7 @@ class WayfinderApp(ctk.CTk):
             recorder.cleanup()
             if self.chunked_recorder is recorder:
                 self.chunked_recorder = None
-            self.on_error(self._silence_error_message(), gen)
+            self.on_error(self._silence_error_message(recorder), gen)
             return
 
         self._maybe_show_gpu_nudge(duration)
@@ -23986,7 +24880,7 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         self._processing_start_time = None
-        # Return overlay to ready (Always On) or hide Disappearing CTk pill.
+        # Return overlay to ready (Always On) or hide Disappearing pill.
         # Verify critical PyQt ready reaches the subprocess so it isn't stuck "Listening…".
         try:
             ok = self._set_status_indicator("ready")
@@ -24026,6 +24920,13 @@ class WayfinderApp(ctk.CTk):
         def has(*needles: str) -> bool:
             return any(n in m for n in needles)
 
+        # Silence messages embed the mic's name, which can contain words the
+        # checks below key on ("USB Type-C Headset" would read as a paste
+        # failure via "type"), so classify them first.
+        if has("sent no sound at all"):
+            return message.strip()
+        if has("no speech"):
+            return "No speech detected — try again, a bit closer to the mic."
         if has("wayfinder aura was frontmost"):
             return message.split("Injection: ", 1)[-1]
         if has("inject", "ydotool", "wtype", "type"):
@@ -24050,8 +24951,6 @@ class WayfinderApp(ctk.CTk):
             return "Cloud service is rate-limited — try again shortly."
         if has("network", "connection", "timeout", "internet"):
             return "No internet — can't reach the cloud service."
-        if has("no speech"):
-            return "No speech detected — try again, a bit closer to the mic."
         if has("model", "not found"):
             return "No speech model yet — finish setup to download one."
         return (message or "").strip()

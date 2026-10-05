@@ -86,7 +86,7 @@ detected before pasting.
 
 1. Sequence the two Flatpak dialogs and announce them in the tour (one line
    before they fire, start the typing session after the shortcut bind).
-   Decided 2026-10-04: ships as a known issue in 1.2.0-beta.1.
+   Decided 2026-10-04: ships as a known issue in the 1.2.0 betas.
 2. AppImage: register a host app id with the portal (`org.freedesktop.host.portal.Registry`)
    and confirm the restore token survives a restart.
 3. Retry a typing session that failed to start (not only the probe).

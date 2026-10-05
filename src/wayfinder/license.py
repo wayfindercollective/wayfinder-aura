@@ -55,6 +55,23 @@ LICENSE_API_URL = os.environ.get(
 )
 LICENSE_HTTP_TIMEOUT = 10  # seconds for the activation request
 
+
+def _sibling_endpoint(activate_url: str, name: str) -> str:
+    """The licensing service's other route on the same deployment
+    (``…/activate`` -> ``…/deactivate``)."""
+    base = activate_url.rstrip("/")
+    if base.endswith("/activate"):
+        base = base[: -len("/activate")]
+    return f"{base}/{name}"
+
+
+# Frees this computer's activation slot ("Remove license"). Same deployment as
+# activation, so the two can never point at different license databases.
+LICENSE_DEACTIVATE_URL = os.environ.get(
+    "WAYFINDER_LICENSE_DEACTIVATE_URL",
+    _sibling_endpoint(LICENSE_API_URL, "deactivate"),
+)
+
 SUPPORT_EMAIL = "support@wayfindercoaching.net"
 
 # Server `reason` -> what the customer should actually DO about it.
@@ -68,6 +85,8 @@ _ACTIVATION_ERRORS = {
         "for a typo, then contact {support} with your order number — your key "
         "may have been issued before a server change."
     ),
+    # Keep pointing at support until the licensing service frees slots on
+    # "Remove license" (deactivate_online answers "unsupported" before then).
     "activation_limit": (
         "Activation limit reached. Contact {support} with your order number to "
         "recover a device slot."
@@ -153,10 +172,17 @@ PREMIUM_FEATURES = {
     ),
     "gpu_acceleration": (
         "GPU Acceleration",
-        "Use Vulkan, CUDA, ROCm, or Metal acceleration for much faster transcription and local cleanup",
+        "Metal on a Mac, Vulkan on Linux and Windows: much faster transcription, "
+        "and local cleanup on Mac and Linux",
     ),
-    "cloud_backends": ("Cloud Processing", "Groq/OpenAI Whisper transcription + GPT/Claude text cleanup — best quality for Strong & Caricature modes"),
-    "chunked_recording": ("Chunked Recording", "Unlimited duration with real-time feedback"),
+    "cloud_backends": (
+        "Cloud Processing",
+        "Groq/OpenAI Whisper transcription and GPT/Claude text cleanup, with your own API keys",
+    ),
+    "chunked_recording": (
+        "Chunk Processing",
+        "Long dictations transcribe in pieces while you speak, so the text is ready sooner",
+    ),
     # Note: advanced_preprocessing / high_beam_search / typing_speeds were paper
     # tigers (never enforced) and are intentionally free — not listed here.
     "custom_vocabulary": ("Custom Vocabulary", "Add your own terms and names"),
@@ -178,7 +204,7 @@ FREE_FEATURES = {
     "light_preprocessing": ("Light Audio Processing", "Gain normalization"),
     "instant_typing": ("Instant Paste", "Clipboard-based text injection"),
     "basic_overlay": ("Status Overlay", "Real-time recording status display"),
-    "basic_postprocessing": ("LLM Cleanup", "Local llama.cpp text post-processing"),
+    "basic_postprocessing": ("Text Cleanup", "Normal style: instant um/uh removal, no model"),
 }
 
 
@@ -539,10 +565,93 @@ def store_license(key: str) -> LicenseInfo:
 
 
 def remove_license() -> None:
-    """Remove stored license."""
+    """Remove the stored license file (local only; see release_license)."""
     license_path = get_license_path()
     if license_path.exists():
         license_path.unlink()
+
+
+# deactivate_online() outcomes.
+RELEASED = "released"        # the server freed (or had already freed) this computer's slot
+UNSUPPORTED = "unsupported"  # this license server has no /deactivate route yet
+OFFLINE = "offline"          # the server could not be reached
+REJECTED = "rejected"        # the server refused (unknown key, wrong computer, …)
+
+
+def deactivate_online(key: str, machine_id: str, token: Optional[str] = None) -> str:
+    """Ask the licensing service to free this computer's activation slot.
+
+    Sends the same key and machine id as activation, plus this computer's
+    signed token when there is one, so the server can check the request comes
+    from a computer that really holds the activation rather than from anyone
+    who knows the key. Returns RELEASED, UNSUPPORTED, OFFLINE or REJECTED;
+    never raises.
+    """
+    if not key or not machine_id:
+        return REJECTED
+    payload = {"key": key, "machineId": machine_id}
+    if token:
+        payload["token"] = token
+    try:
+        import requests
+
+        resp = requests.post(LICENSE_DEACTIVATE_URL, json=payload,
+                             timeout=LICENSE_HTTP_TIMEOUT)
+    except Exception:
+        return OFFLINE
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        # Convex answers an unknown route with a plain-text 404.
+        return UNSUPPORTED if resp.status_code == 404 else OFFLINE
+    if data.get("released") is True or data.get("reason") == "not_active":
+        return RELEASED
+    return REJECTED
+
+
+@dataclass
+class LicenseRelease:
+    """What "Remove license" did: the local file is always gone; ``released``
+    says whether the server also freed this computer's activation slot."""
+
+    released: bool
+    status: str
+    message: str
+
+
+def release_license() -> LicenseRelease:
+    """Remove the license from this computer and free its activation slot.
+
+    The local license is removed whatever the server says, so removal always
+    works offline; the message says whether the slot was freed too. Makes a
+    network call: never run it on the UI thread.
+    """
+    key, machine_id, token = "", "", None
+    license_path = get_license_path()
+    if license_path.exists():
+        try:
+            data = json.loads(license_path.read_text())
+            key = str(data.get("license_key") or "")
+            machine_id = str(data.get("machine_id") or "") or get_machine_id()
+            token = data.get("token") or None
+        except Exception:
+            pass
+    status = deactivate_online(key, machine_id, token) if key else RELEASED
+    remove_license()
+    if status == RELEASED:
+        message = ("License removed. This computer's activation is free again, so "
+                   "you can use the key on another Mac, Windows or Linux computer.")
+    elif status == OFFLINE:
+        message = ("License removed from this computer. The license server couldn't "
+                   "be reached, so its activation slot is still counted; contact "
+                   f"{SUPPORT_EMAIL} if you run out of activations.")
+    else:
+        message = ("License removed from this computer. Its activation slot is still "
+                   f"counted on the license server; contact {SUPPORT_EMAIL} if you "
+                   "run out of activations.")
+    return LicenseRelease(released=status == RELEASED, status=status, message=message)
 
 
 # === Feature Gating ===
@@ -637,10 +746,12 @@ class FeatureGate:
             self._license_info = result
         return result
 
-    def deactivate(self) -> None:
-        """Remove current license."""
-        remove_license()
+    def deactivate(self) -> LicenseRelease:
+        """Remove the current license and free this computer's activation slot
+        (network call: not on the UI thread)."""
+        result = release_license()
         self.refresh()
+        return result
 
 
 # === Singleton for app-wide access ===

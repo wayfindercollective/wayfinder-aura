@@ -5,7 +5,7 @@ never swapped for Base.en silently.
 Flatpak/XDG tests are ``linux_only``. Outside the Flatpak (Linux host, macOS,
 Windows) the Flatpak fix must not move any download/lookup dir; the only
 host changes are the ones the macOS and Windows branches made on purpose
-(Application Support on macOS, AppData\\Local for Windows GGUF downloads).
+(Application Support on macOS, AppData\\Local for Windows model downloads).
 Those guards run on every platform and simulate the others through
 ``sys.platform``.
 """
@@ -192,6 +192,7 @@ def host_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.delenv("FLATPAK_ID", raising=False)
     monkeypatch.delenv("WAYFINDER_FLATPAK", raising=False)
@@ -201,7 +202,7 @@ def host_home(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
-def test_host_app_model_dirs_are_unchanged(host_home, monkeypatch, platform):
+def test_host_app_model_dirs_preserve_platform_storage(host_home, monkeypatch, platform):
     home = host_home
     with monkeypatch.context() as m:
         m.setattr(sys, "platform", platform)
@@ -221,17 +222,20 @@ def test_host_app_model_dirs_are_unchanged(host_home, monkeypatch, platform):
         assert whisper_dir == app_support / "whisper-models"
         assert llm_dir == app_support / "llm-models"
         assert search_dirs == [app_support / "whisper-models", *host_dirs]
+    elif platform == "win32":
+        local_data = home / "AppData" / "Local" / "wayfinder-aura"
+        assert whisper_dir == local_data / "whisper-models"
+        assert llm_dir == local_data / "llm-models"
+        # Keep models from earlier installs visible after moving downloads.
+        assert search_dirs == [local_data / "whisper-models", *host_dirs]
     else:
         assert whisper_dir == home / "whisper.cpp" / "models"
-        if platform == "win32":
-            assert llm_dir == home / "AppData" / "Local" / "wayfinder-aura" / "llm-models"
-        else:
-            assert llm_dir == home / ".local" / "share" / "wayfinder-aura" / "llm-models"
+        assert llm_dir == home / ".local" / "share" / "wayfinder-aura" / "llm-models"
         assert search_dirs == host_dirs
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
-def test_host_setup_wizard_dirs_are_unchanged(host_home, monkeypatch, platform):
+def test_host_setup_wizard_preserves_platform_storage(host_home, monkeypatch, platform):
     from wayfinder.core import setup
 
     home = host_home
@@ -244,22 +248,16 @@ def test_host_setup_wizard_dirs_are_unchanged(host_home, monkeypatch, platform):
     base = home / "whisper.cpp" / "models" / "ggml-base.en.bin"
     base.parent.mkdir(parents=True)
     base.write_bytes(b"x" * 10)
-    gemma_key = "google_gemma-3-1b-it-Q4_K_M"
 
     with monkeypatch.context() as m:
         m.setattr(sys, "platform", platform)
         setup.download_whisper_model("base.en", lambda _m: None, lambda _ok, _d: None)
-        setup.download_llm_model(gemma_key, lambda _m: None, lambda _ok, _d: None)
     # Outside the platform patch: the licence check behind it is platform-aware.
     status = setup.check_whisper_model({"model_path": str(home / "gone" / "ggml-base.en.bin")})
 
     assert targets == [
-        home / "whisper.cpp" / "models" / "ggml-base.en.bin",
-        # The wizard's GGUF dir: ~/.local/share (macOS included); Windows uses
-        # AppData\\Local like its config default and the in-app downloader.
-        (home / "AppData" / "Local" if platform == "win32" else home / ".local" / "share")
-        / "wayfinder-aura" / "llm-models"
-        / setup.LLM_MODELS[gemma_key]["filename"],
+        (home / "AppData" / "Local" / "wayfinder-aura" / "whisper-models"
+         if platform == "win32" else home / "whisper.cpp" / "models") / "ggml-base.en.bin",
     ]
     assert status.installed and "ggml-base.en.bin" in status.detail
 

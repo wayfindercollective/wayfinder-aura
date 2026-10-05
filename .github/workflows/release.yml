@@ -9,7 +9,7 @@ on:
       artifacts:
         description: "Artifacts to build"
         type: choice
-        options: [appimage, hosted-flatpak, windows, macos, all]
+        options: [appimage, flatpak, windows, macos, all]
         default: appimage
 
 concurrency:
@@ -21,6 +21,9 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  BUILD_JOBS: "2"
+  QT_QPA_PLATFORM: offscreen
 
 jobs:
   quality:
@@ -28,7 +31,8 @@ jobs:
 
   release-readiness:
     name: Release Readiness
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
     needs: [quality]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
@@ -41,13 +45,16 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
       - name: Verify production license defaults
         run: python scripts/ci/check-release-license-defaults.py
 
       - name: Install storefront browser checker
         run: |
           python -m pip install playwright
-          python -m playwright install --with-deps chromium
+          python -m playwright install chromium
 
       - name: Verify storefront readiness
         run: python scripts/ci/check-storefront-readiness.py --browser --timeout 30
@@ -61,12 +68,36 @@ jobs:
 
   build-appimage:
     name: Build (AppImage)
-    # Pin the AppImage build to an older glibc baseline for wider distro
-    # compatibility. Keep the other CI jobs on ubuntu-latest.
-    runs-on: ubuntu-22.04
+    # Preserve the older glibc baseline inside a bounded local container.
+    runs-on: [self-hosted, Linux, X64, aura-build]
+    timeout-minutes: 120
+    container:
+      image: ubuntu:22.04
+      options: --cpus 2 --memory 12g --memory-swap 13g
+    # No terminal in the container: a package that asks a question (tzdata's
+    # time zone) would wait forever. v1.2.0-beta.1 hung 2 h on it.
+    # AGENT_TOOLSDIRECTORY keeps setup-python's jammy Python inside the
+    # container: in the runner's shared tool cache its scripts point at
+    # /__w/_tool/..., which breaks every host job that picks that version up
+    # (beta.1 broke pip for the host's Quality job that way).
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+      AGENT_TOOLSDIRECTORY: /opt/hostedtoolcache
+    defaults:
+      run:
+        shell: bash
     needs: [quality, release-readiness]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'appimage' || inputs.artifacts == 'all'))
     steps:
+      - name: Prepare Jammy container
+        run: |
+          ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime
+          echo Etc/UTC > /etc/timezone
+          apt-get update
+          apt-get install -y sudo git curl ca-certificates libicu70 tzdata
+          printf 'AURA_WORKSPACE_OWNER=%s\n' "$(stat -c '%u:%g' "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       - name: Set up Python
@@ -74,22 +105,38 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Create isolated Python environment
+        run: python scripts/ci/prepare-python.py
+
       - name: Install system dependencies
         # spirv-headers/spirv-tools: whisper.cpp/llama.cpp GGML_VULKAN cmake
         # configure hard-requires SPIRV-Headers — without it the build script
         # SILENTLY falls back to CPU-only inference binaries (smoke test below
         # now asserts Vulkan). libgirepository/libdbus/libcairo dev: build deps
-        # for the pip PyGObject/dbus-python below.
+        # for the pip PyGObject/dbus-python below. Font packages: the build's
+        # Tk renderer probe (src/wayfinder/utils/tk_renderer.py) wants >= 10
+        # font families, its sign of a working Xft Tk; the bare jammy
+        # container has only DejaVu (3), so v1.2.0-beta.2 stopped there. They
+        # are build-time only: the AppImage bundles its own product fonts.
+        # fonts-dejavu-core must be named: it only came in as fontconfig's
+        # default font, and with other fonts listed apt picks one of those
+        # instead, so "DejaVu Sans" resolved to Nimbus Sans (v1.2.0-beta.3).
+        # wget: build-appimage.sh fetches its pinned appimagetool with it.
+        # file: appimagetool refuses to run without it ("file command is
+        # missing but required"; v1.2.0-beta.2..4 never published).
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk portaudio19-dev \
+          # sudo resets the environment: pass the non-interactive frontend on.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-tk portaudio19-dev \
             cmake make gcc g++ git pkg-config \
             libvulkan-dev vulkan-tools glslang-tools \
             spirv-headers spirv-tools \
             libgirepository1.0-dev libdbus-1-dev libcairo2-dev \
             wtype \
             xvfb libxft2 pulseaudio libasound2-plugins \
-            libfuse2 desktop-file-utils appstream
+            libfuse2 desktop-file-utils appstream \
+            fonts-dejavu-core fonts-liberation fonts-freefont-ttf fonts-urw-base35 wget \
+            file
 
       - name: Install glslc for Vulkan builds
         # glslc from shaderc; glslangValidator from apt glslang-tools (required by
@@ -108,18 +155,6 @@ jobs:
           cmake -S /tmp/vulkan-headers -B /tmp/vulkan-headers/build \
             -DCMAKE_INSTALL_PREFIX=/usr/local
           sudo cmake --install /tmp/vulkan-headers/build
-
-      - name: Expand memory headroom for Vulkan shader generation
-        # Same prophylaxis as the Flatpak job: vulkan-shaders-gen forks glslc
-        # from a large parent; default heuristic overcommit can ENOMEM those
-        # forks on runners.
-        run: |
-          sudo sysctl vm.overcommit_memory=1
-          sudo fallocate -l 8G /mnt/wf-swap || sudo dd if=/dev/zero of=/mnt/wf-swap bs=1M count=8192
-          sudo chmod 600 /mnt/wf-swap
-          sudo mkswap /mnt/wf-swap
-          sudo swapon /mnt/wf-swap
-          free -h
 
       - name: Install Python dependencies
         # PyGObject/dbus-python: setup-python is hermetic — without these pip
@@ -205,7 +240,7 @@ jobs:
             || { echo "bundle is missing Tk runtime data" >&2; exit 1; }
           grep -Eq "lib(tcl[^/ ]*tk|tk)[^/ ]*\.so" /tmp/pyi-contents.txt \
             || { echo "bundle is missing the Tk native library" >&2; exit 1; }
-          HOME=$(mktemp -d) xvfb-run -a squashfs-root/AppRun \
+          XDG_CONFIG_HOME=$(mktemp -d) xvfb-run -a squashfs-root/AppRun \
             --ui-renderer-self-test | tee /tmp/ui-renderer-self-test.log
           grep -Fq "UI_RENDERER_SELF_TEST_OK" /tmp/ui-renderer-self-test.log
           # Design fonts MUST ship: without them fontconfig substitutes a random
@@ -223,7 +258,9 @@ jobs:
           # for the packaged playback probe; actual AppImage launch is tested
           # on Bazzite before tagging because Xvfb cannot emulate evdev, ALSA,
           # D-Bus, a compositor, GameMode, or a tray coherently.
-          pulseaudio --daemonize=yes --exit-idle-time=-1 || true
+          export PULSE_SERVER=unix:/tmp/aura-ci-pulse
+          pulseaudio --system --daemonize=yes --exit-idle-time=-1 \
+            --load="module-native-protocol-unix socket=/tmp/aura-ci-pulse auth-anonymous=1"
           pactl load-module module-null-sink sink_name=ci_null || true
           pactl load-module module-null-source source_name=ci_mic || true
           pactl set-default-sink ci_null || true
@@ -232,23 +269,23 @@ jobs:
           # real 16 kHz recording rate. A GUI boot does not catch a broken ALSA
           # plugin, default sink, or native-rate fallback.
           AUDIO_HOME=$(mktemp -d)
-          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
+          XDG_CONFIG_HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-output-self-test | tee /tmp/audio-self-test.log
           grep -Fq "AUDIO_OUTPUT_SELF_TEST_OK" /tmp/audio-self-test.log
           grep -Fq "PulseAudio/PipeWire" /tmp/audio-self-test.log
-          PULSE_SERVER="unix:/run/user/$(id -u)/pulse/native" HOME="$AUDIO_HOME" \
+          XDG_CONFIG_HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-input-self-test | tee /tmp/audio-input-self-test.log
           grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/audio-input-self-test.log
           # Medium depends on a dynamically imported scipy.signal module, and
           # preprocessing's stationary-noise guard is a release-critical defense
           # against confident Whisper hallucinations. Exercise the packaged path.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
+          XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \
             --audio-processing-self-test | tee /tmp/audio-processing-self-test.log
           grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" /tmp/audio-processing-self-test.log
           # Import the complete frozen application module. This catches missing
           # PyInstaller hidden imports/native extensions without constructing
           # fake desktop hardware inside Xvfb.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
+          XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \
             --app-import-self-test | tee /tmp/app-import-self-test.log
           grep -Fq "APP_IMPORT_SELF_TEST_OK" /tmp/app-import-self-test.log
           # Portal typing (Gio) and Gamer mode (python-xlib) degrade silently
@@ -269,7 +306,7 @@ jobs:
           # Exercise a real verified handshake from the finished AppImage.
           # The CDN may reject an anonymous request; an HTTP response still
           # proves the packaged OpenSSL trusted its certificate chain.
-          HOME=$(mktemp -d) squashfs-root/AppRun \
+          XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \
             --tls-self-test | tee /tmp/tls-self-test.log
           grep -Fq "TLS_SELF_TEST_OK" /tmp/tls-self-test.log
           desktop-file-validate squashfs-root/io.wayfindercollective.WayfinderAura.desktop
@@ -290,22 +327,24 @@ jobs:
             echo "appstreamcli non-zero exit ($VALIDATE_RC) with only warnings/info/pedantic — accepting for jammy CI"
           fi
 
-  # Routine candidates are built directly on mini-inf with the documented SSH
-  # helper. This hosted path is retained for tags and explicit emergencies so
-  # publishing never depends on the private server.
+      - name: Restore workspace ownership
+        if: always()
+        run: |
+          if [[ -n "${AURA_WORKSPACE_OWNER:-}" ]]; then
+            chown -R "$AURA_WORKSPACE_OWNER" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          fi
+
   build-flatpak:
     name: Build (Flatpak)
     needs: [quality, release-readiness]
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'hosted-flatpak' || inputs.artifacts == 'all'))
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'flatpak' || inputs.artifacts == 'all'))
     uses: ./.github/workflows/flatpak-build.yml
     with:
       source_sha: ${{ github.sha }}
 
-  # Windows builds run with the release gates, but the installer is NOT attached
-  # to the public release: owner decision (2026-09-21) keeps Windows internal
-  # until it is fully tested and signed off. The build uploads an artifact the
-  # team can install from. Re-attaching lives on
-  # release/windows-public-pending-signoff.
+  # Windows builds run with the release gates; publish-windows attaches the
+  # installer (public since 2026-10-04, owner decision). Not a dependency of
+  # `release`, so the Linux assets never wait on the Windows runner.
   build-windows:
     name: Build (Windows)
     needs: [quality, release-readiness]
@@ -321,29 +360,46 @@ jobs:
   # Deliberately NOT a dependency of `release`: a slow or failing Mac build can
   # never delay or block the Linux assets. `publish-macos` attaches the signed
   # DMG afterwards. Setup: packaging/macos/README.md ("Releasing a signed DMG").
+  # A tag's unsigned DMG is never published, so on tags the long Mac build only
+  # runs once the signing secrets exist; until then the release's DMG is built
+  # on the Mac with scripts/release/attach_mac_dmg.sh (docs/RELEASING.md).
+  # Nightly betas would otherwise spend the shared Mac on a DMG nobody gets.
+  # Any secret present counts, so a half-configured set still fails loudly below.
+  macos-signing:
+    name: macOS signing
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 5
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'macos' || inputs.artifacts == 'all'))
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Look for signing secrets
+        id: check
+        env:
+          SECRETS_SEEN: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 != '' || secrets.MACOS_CERTIFICATE_PASSWORD != '' || secrets.MACOS_KEYCHAIN_PASSWORD != '' || secrets.APPLE_API_KEY_P8_BASE64 != '' || secrets.APPLE_API_KEY_ID != '' || secrets.APPLE_API_ISSUER_ID != '' }}
+        run: |
+          echo "configured=$SECRETS_SEEN" >> "$GITHUB_OUTPUT"
+          if [ "$SECRETS_SEEN" != "true" ]; then
+            echo "::notice title=Mac DMG built on the Mac::No Mac signing secrets, so this run builds no DMG. Attach it with scripts/release/attach_mac_dmg.sh ${GITHUB_REF_NAME} (docs/RELEASING.md)."
+          fi
+
   build-macos:
     name: Build (macOS)
-    runs-on: macos-latest
-    needs: [quality, release-readiness]
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'macos' || inputs.artifacts == 'all'))
-    # notarytool --wait has no deadline of its own; cap billed macOS minutes.
+    runs-on: [self-hosted, macOS, ARM64, aura-macos]
+    needs: [quality, release-readiness, macos-signing]
+    if: (startsWith(github.ref, 'refs/tags/v') && needs.macos-signing.outputs.configured == 'true') || (!startsWith(github.ref, 'refs/tags/v') && github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'macos' || inputs.artifacts == 'all'))
+    # Bound the time spent waiting for notarization on shared hardware.
     timeout-minutes: 150
     outputs:
       signed: ${{ steps.signing.outputs.signed }}
     env:
       # The macOS UI stack is pinned to this exact Python (packaging/macos/README.md).
-      MACOS_PYTHON_VERSION: "3.12.10"
+      PYTHON_VERSION: "3.12.10"
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ env.MACOS_PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            packaging/macos/constraints.txt
+      - name: Verify provisioned macOS Python and create isolated environment
+        run: bash scripts/ci/prepare-macos-python.sh
 
       - name: Install application and build dependencies
         run: python -m pip install -c packaging/macos/constraints.txt -e '.[dev]'
@@ -515,7 +571,8 @@ jobs:
   # Release job (only on tags)
   release:
     name: Create Release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 45
     needs: [quality, release-readiness, build-appimage, build-flatpak]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -536,7 +593,8 @@ jobs:
           path: dist/
 
       # Published beside the packages so users and release QA can check the
-      # exact downloaded files (the in-app Get Update opens them unverified).
+      # exact downloaded files (the in-app update checks only where a file came
+      # from and that an AppImage is one, not a checksum).
       - name: Checksum the Linux packages
         run: |
           set -o pipefail
@@ -570,7 +628,7 @@ jobs:
   # so an unsigned DMG cannot reach the release even if this `if:` were wrong.
   publish-macos:
     name: Publish (macOS)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, aura-linux]
     needs: [release, build-macos]
     if: startsWith(github.ref, 'refs/tags/v') && needs.build-macos.outputs.signed == 'true'
     permissions:
@@ -588,4 +646,41 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "$GITHUB_REF_NAME" dist/Wayfinder_Aura-*-macOS-*.dmg \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+  # Attach the Windows installer to the release `release` just published, the
+  # same way publish-macos does (see its notes): Linux never waits on Windows,
+  # a failed Linux release is never turned into a Windows-only one, and
+  # `gh release upload` only adds the asset. The installer is not code-signed
+  # yet (SmartScreen: More info -> Run anyway); the in-app updater offers a
+  # release to Windows users only once it carries WayfinderAura-Setup-<v>.exe.
+  publish-windows:
+    name: Publish (Windows)
+    runs-on: [self-hosted, Linux, X64, aura-linux]
+    timeout-minutes: 15
+    needs: [release, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows installer
+        uses: actions/download-artifact@v8
+        with:
+          name: wayfinder-aura-windows-x64
+          path: dist/
+
+      - name: Attach installer to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          installer="$(find dist -type f -name "WayfinderAura-Setup-${version}.exe")"
+          count="$(printf '%s' "$installer" | grep -c . || true)"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected one WayfinderAura-Setup-${version}.exe in the artifact, found ${count}"
+            find dist -type f
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$installer" \
             --repo "$GITHUB_REPOSITORY" --clobber

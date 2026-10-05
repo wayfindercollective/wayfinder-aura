@@ -4,6 +4,7 @@ Pytest configuration and fixtures for Wayfinder Aura tests.
 
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -71,6 +72,13 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+# Child Pythons (subprocess tests) must import this checkout too. A shared
+# venv's editable install can point at another checkout (the main checkout
+# while this runs from a git worktree) and would otherwise win silently.
+_pythonpath = os.environ.get("PYTHONPATH", "")
+if str(src_dir) not in _pythonpath.split(os.pathsep):
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [str(src_dir), _pythonpath]))
 
 
 # =============================================================================
@@ -148,7 +156,7 @@ def mock_online_license():
 
     with patch("wayfinder.license.activate_online", _activate), patch(
         "wayfinder.license._verify_token", _verify
-    ):
+    ), patch("wayfinder.license.deactivate_online", lambda *a, **k: "released"):
         yield
 
 
@@ -371,6 +379,15 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("WAYFINDER_DISABLE_KEYCHAIN", "1")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_windows_local_appdata(monkeypatch: pytest.MonkeyPatch, tmp_path_factory):
+    """Windows keeps app data (speech models, cache) under %LOCALAPPDATA%: tests
+    must never write the developer's real profile (a mocked model download
+    once left zero-filled "models" there)."""
+    if sys.platform == "win32":
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path_factory.mktemp("localappdata")))
+
+
 @pytest.fixture
 def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
     """Set up environment variables to simulate running from an AppImage."""
@@ -413,6 +430,76 @@ def x11_env(monkeypatch: pytest.MonkeyPatch):
 
 
 # =============================================================================
+# Host binary isolation
+# =============================================================================
+
+# Executables that binary discovery searches for (runtime_assets.find_*_binary,
+# config._repair_config_path, transcriber/postprocessor get_backend).
+_DISCOVERABLE_BINARIES = frozenset({
+    "whisper-cli", "whisper-cli-cpu", "whisper-server", "whisper-server-cpu",
+    "llama", "llama-cli", "llama-simple", "llama-server",
+})
+
+
+@pytest.fixture
+def no_host_binaries(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
+    """Hide host-installed whisper.cpp / llama.cpp binaries from discovery.
+
+    Discovery probes ~/whisper.cpp, ~/llama.cpp, /usr/bin, /usr/local/bin,
+    /opt/homebrew/bin and PATH. A clean CI runner has none of them, but on a
+    developer machine a Homebrew llama.cpp or a from-source whisper.cpp build
+    outranks the test's own fakes — so backend/config assertions pass on CI and
+    fail locally, or pass locally against the wrong binary.
+
+    Only files named like a discoverable binary are hidden, and only outside
+    the temp dirs where tests create their fakes; every other path is
+    untouched. Wraps the probes discovery uses: Path.exists / Path.is_file,
+    os.path.exists and shutil.which.
+    """
+    # Both spellings: on macOS tempfile hands out /var/folders/... while
+    # pytest's tmp_path is the resolved /private/var/folders/....
+    roots = {
+        os.path.normcase(form(root))
+        for root in (tmp_path_factory.getbasetemp(), tempfile.gettempdir())
+        for form in (os.path.abspath, os.path.realpath)
+    }
+
+    def hidden(path) -> bool:
+        try:
+            path = os.path.normcase(os.path.abspath(os.fspath(path)))
+        except TypeError:  # os.path.exists(fd)
+            return False
+        name = os.path.basename(path)
+        if name.endswith(".exe"):
+            name = name[:-4]
+        if name not in _DISCOVERABLE_BINARIES:
+            return False
+        return not any(path.startswith(root + os.sep) for root in roots)
+
+    real_path_exists = Path.exists
+    real_path_is_file = Path.is_file
+    real_os_path_exists = os.path.exists
+    real_which = shutil.which
+
+    def which(cmd, mode=os.F_OK | os.X_OK, path=None):
+        found = real_which(cmd, mode, path)
+        return None if found and hidden(found) else found
+
+    monkeypatch.setattr(
+        Path, "exists",
+        lambda self, *a, **kw: not hidden(self) and real_path_exists(self, *a, **kw),
+    )
+    monkeypatch.setattr(
+        Path, "is_file",
+        lambda self, *a, **kw: not hidden(self) and real_path_is_file(self, *a, **kw),
+    )
+    monkeypatch.setattr(
+        os.path, "exists", lambda p: not hidden(p) and real_os_path_exists(p)
+    )
+    monkeypatch.setattr(shutil, "which", which)
+
+
+# =============================================================================
 # Reset global state between tests
 # =============================================================================
 
@@ -449,6 +536,40 @@ def _no_real_desktop_portal(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reset_feature_gate(monkeypatch: pytest.MonkeyPatch):
+    """Reset the license FeatureGate singleton and keep a rebuilt gate Free.
+
+    ``wayfinder.license._feature_gate`` caches the first gate anyone builds, so
+    a premium gate from one test (a mock_online_license activation, a
+    test_gpu_premium Ultra gate) used to leak into later tests and flip their
+    Free/Ultra code paths depending on test order. Clear it on both sides of
+    every test.
+
+    A rebuilt gate runs load_stored_license(), which reads
+    ``CONFIG_DIR/license.json``. Unless the test points CONFIG_DIR at its own
+    directory (temp_config_dir), serve that path from an empty temp dir, so the
+    default gate is Free and tests never read, refresh online, or delete the
+    developer's real license. Tests that need Ultra opt in explicitly:
+    temp_config_dir + mock_online_license, or a patched get_feature_gate.
+    """
+    from wayfinder import config as _config
+    from wayfinder import license as _license
+
+    default_config_dir = _config.CONFIG_DIR
+    real_get_license_path = _license.get_license_path
+    with tempfile.TemporaryDirectory() as no_license_dir:
+        def _hermetic_license_path() -> Path:
+            if _config.CONFIG_DIR != default_config_dir:
+                return real_get_license_path()
+            return Path(no_license_dir) / "license.json"
+
+        monkeypatch.setattr(_license, "get_license_path", _hermetic_license_path)
+        _license._feature_gate = None
+        yield
+        _license._feature_gate = None
+
+
+@pytest.fixture(autouse=True)
 def _no_real_macos_keystrokes(monkeypatch):
     """Tests must never post real Cmd+V to the developer's frontmost app.
 
@@ -468,3 +589,17 @@ def _no_real_macos_keystrokes(monkeypatch):
     monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
     yield
     macos_paste.pending_restore.flush()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_tcc_reset_record(monkeypatch, tmp_path_factory):
+    """ask_for_permission records its one-per-build TCC reset in CONFIG_DIR;
+    keep every test's record out of the developer's Application Support."""
+    try:
+        from wayfinder.utils import macos_permissions as _mp
+    except Exception:
+        yield
+        return
+    record = tmp_path_factory.getbasetemp() / f"tcc-resets-{os.urandom(6).hex()}.json"
+    monkeypatch.setattr(_mp, "_reset_marker_path", lambda: record)
+    yield

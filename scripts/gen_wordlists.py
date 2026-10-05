@@ -26,6 +26,11 @@ OUT = Path(__file__).resolve().parent.parent / "src" / "wayfinder" / "core" / "w
 # margin; MID=20000 makes mid-band words need heavy repetition to surface.
 STOP_CUTOFF = 3000
 MID_CUTOFF = 20000
+# COMMON (2026-09-30): real words a speech model spells right, so a near-miss
+# of a vocabulary term ("Aeron" for "Arawn", rank ~77,500) is never one of
+# them. Measured on /usr/share/dict/words: words that collided with a term's
+# sound ("niece", "consul", "gripe", "yearn", "backhand") sat at 23k-59k.
+COMMON_CUTOFF = 60000
 MIN_LEN = 3  # the vocabulary tokenizer only emits 3+ letter words
 
 
@@ -36,14 +41,19 @@ def main() -> None:
         print(f"downloading {URL} ...")
         text = urllib.request.urlopen(URL, timeout=60).read().decode()
 
-    stop, mid = [], []
+    stop, mid, common = [], [], []
     for rank, line in enumerate(text.splitlines(), 1):
-        if rank > MID_CUTOFF:
+        if rank > COMMON_CUTOFF:
             break
         word = line.split()[0]
         if len(word) < MIN_LEN or not word.isalpha():
             continue
-        (stop if rank <= STOP_CUTOFF else mid).append(word)
+        if rank <= STOP_CUTOFF:
+            stop.append(word)
+        elif rank <= MID_CUTOFF:
+            mid.append(word)
+        else:
+            common.append(word)
 
     body = f'''"""English word-frequency tiers for voice-profile vocabulary extraction.
 
@@ -64,9 +74,15 @@ STOP_WORDS = frozenset("""
 MID_WORDS = frozenset("""
 {_wrap(mid)}
 """.split())
+
+# rank {MID_CUTOFF + 1}..{COMMON_CUTOFF}: still real English. Vocabulary near-miss
+# snapping (transcriber.snap_near_vocabulary) never respells these.
+COMMON_WORDS = frozenset("""
+{_wrap(common)}
+""".split())
 '''
     OUT.write_text(body)
-    print(f"wrote {OUT}: {len(stop)} stop, {len(mid)} mid")
+    print(f"wrote {OUT}: {len(stop)} stop, {len(mid)} mid, {len(common)} common")
 
 
 def _wrap(words, width=76):

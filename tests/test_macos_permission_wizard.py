@@ -47,7 +47,7 @@ class TestShowPermissionsSetup:
         monkeypatch.setattr(mp, "permission_snapshot", lambda: {
             "microphone": True, "accessibility": True, "input_monitoring": True})
         shown = []
-        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True))
+        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True) or True)
         ns = _ns(_welcome_active=True, _welcome_pane=pane)
         assert WayfinderApp.show_permissions_setup(ns, force=True) is True
         assert shown == [True]
@@ -59,7 +59,7 @@ class TestShowPermissionsSetup:
         monkeypatch.setattr(mp, "permission_snapshot", lambda: {
             "microphone": True, "accessibility": False, "input_monitoring": False})
         shown = []
-        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True))
+        pane = SimpleNamespace(show_permissions_step=lambda: shown.append(True) or True)
         ns = _ns(_welcome_active=True, _welcome_pane=pane)
         assert WayfinderApp.show_permissions_setup(ns) is True
         assert shown == [True]
@@ -184,7 +184,7 @@ class TestListenerRestartEventWiring:
         monkeypatch.setattr(wayfinder_main, "_IS_LINUX", not (is_mac or windows))
         monkeypatch.setattr(hk, "pynput_hotkey_listener", fake_listener)
         monkeypatch.setattr(hk, "is_pynput_available", lambda: True)
-        ns = _ns()
+        ns = _ns(_queue_macos_hotkey_health=lambda state: None)
         WayfinderApp._start_pynput_listener(ns)
         assert done.wait(3)
         ns._pynput_thread.join(3)
@@ -195,11 +195,13 @@ class TestListenerRestartEventWiring:
         assert isinstance(seen.get("restart_event"), threading.Event)
         assert seen["restart_event"] is ns._pynput_restart_event
         assert seen["restart_event"] is not ns.stop_event
+        assert seen["on_health"] is ns._queue_macos_hotkey_health
 
     @pytest.mark.parametrize("flatpak, windows", [(True, False), (False, True)])
     def test_flatpak_and_windows_listener_calls_are_unchanged(self, monkeypatch, flatpak, windows):
         ns, seen = self._start(monkeypatch, False, flatpak=flatpak, windows=windows)
         assert "restart_event" not in seen
+        assert "on_health" not in seen
         assert ns._pynput_restart_event is None
 
     def test_native_linux_fallback_gets_its_own_stop_event(self, monkeypatch):
@@ -249,4 +251,18 @@ class TestRelaunch:
         assert args[-1] == "/Applications/Wayfinder Aura.app"
         assert args[-2] == str(wayfinder_main.os.getpid())
         assert kwargs.get("start_new_session") is True
+        assert quit_calls == [True]
+
+    def test_audio_recovery_relaunches_hidden_and_in_background(self, monkeypatch):
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        _stub_bundle(monkeypatch, "/Applications/Wayfinder Aura.app")
+        spawned, quit_calls = [], []
+        monkeypatch.setattr(wayfinder_main.subprocess, "Popen",
+                            lambda args, **k: spawned.append(args))
+        ns = _ns(quit_app=lambda: quit_calls.append(True))
+
+        assert WayfinderApp.relaunch_app(ns, background=True) is True
+
+        assert 'open -gj "$2" --args --minimized' in spawned[0][2]
+        assert spawned[0][-1] == "/Applications/Wayfinder Aura.app"
         assert quit_calls == [True]

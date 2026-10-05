@@ -70,8 +70,9 @@ behaves the same everywhere.
    in place (checked with a throwaway app in an isolated FLATPAK_USER_DIR).
    `.flatpak` files open in Discover, GNOME Software or (Bazzite) Warehouse.
    Real automatic updates need Flathub or a hosted repo + `--repo-url`.
-6. **Release candidate**: version bump, release notes, bundle built and
-   installed from the bundle, smoke-tested.
+6. **Release candidate**: the nightly `v1.2.0-beta.N` after this audit merges
+   (`docs/RELEASING.md`; no hand version bump), its bundle installed from the
+   release and smoke-tested.
 
 ## Off-screen KWin rig
 

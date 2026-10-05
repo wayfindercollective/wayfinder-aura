@@ -85,6 +85,37 @@ for download. This is a simple version check — no audio or transcript is
 involved. There is no switch for it in Settings; to turn it off, set
 `check_for_model_updates` to `false` in `config.json`.
 
+## Crash reports (Beta: on; Stable: off)
+
+When Aura crashes or hits an error it didn't expect, it can send a crash
+report to Wayfinder so the bug gets fixed. **Beta** builds and installs set to
+Beta updates send them unless you turn them off; **Stable** sends nothing
+unless you turn them on. The switch is **Settings → System → Send crash
+reports** (`crash_reports: "on"` / `"off"`).
+
+A report holds the kind of error (for example `KeyError`) and where in Aura's
+own code it happened: file names, function names and line numbers, with your
+home folder and user name removed from any path. It also holds the app
+version and update channel, your operating system's name, version and
+processor type, how Aura was installed, how long it had been running, and a
+random ID made on your machine (not linked to you or your license) so we can
+tell one machine's repeat from many. On the Mac, a crash logged by macOS for
+Aura is summarised the same way: the error kind and the functions it crashed
+in.
+
+A report never contains the error's message or any source code, and never
+audio, dictated or transcribed text, the clipboard, your settings, license
+keys or API keys. Builds run from source code never send reports.
+
+Reports go to Wayfinder's own backend, which runs on Convex (a hosted
+database service), and are used only to find and fix bugs. When a new kind of
+crash arrives, a short summary (the error kind, app and system versions, and
+the first few code locations) is posted to the Wayfinder team's Slack.
+
+The same bug is sent at most once a day, and no more than 20 reports a day.
+Reports wait on your computer when you're offline and are deleted after 14
+days, or right away when you turn reports off.
+
 ## Local diagnostic log
 
 For troubleshooting, the app keeps a local activity log at
@@ -133,8 +164,10 @@ carries your audio or transcripts unless you enable a cloud backend (item 6):
    `check_for_model_updates: false` in `config.json`.
 3. **App-release check, daily** (GitHub Releases API), which shows an "Update
    available" banner. Off with `check_for_app_updates: false` in `config.json`.
-   **Get Update** opens the release's download link in your browser; Aura does
-   not download the file itself.
+   Pressing **Install Update** (or **Get Update**) downloads the new version
+   from this repository's GitHub releases. On the Mac, Windows and the AppImage
+   Aura checks it, installs it and restarts; otherwise (the Flatpak, or a
+   failed check) it opens the downloaded file or the download link for you.
 4. **Model downloads, when you ask for them,** from Hugging Face or the
    Wayfinder Models CDN, depending on the model. Ultra models are served only
    by the CDN, and those requests carry your signed license token as a
@@ -147,6 +180,8 @@ carries your audio or transcripts unless you enable a cloud backend (item 6):
 6. **Cloud transcription/cleanup backends** (off by default; your own keys).
 7. **License activation** (only if you activate an Ultra license), as
    described above.
+8. **Crash reports** (on for Beta, off for Stable; Settings → System → Send
+   crash reports), as described above. They never carry audio or text.
 
 ## Questions
 

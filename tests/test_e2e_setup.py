@@ -39,6 +39,16 @@ from wayfinder.core.setup import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _model_dirs_in_fake_home(monkeypatch, temp_dir: Path):
+    """These tests stage models under a fake home's whisper.cpp/models. The
+    download and search folders come from utils.platform (on Windows
+    %LOCALAPPDATA%), so point them at that fake home too."""
+    fake = temp_dir / "whisper.cpp" / "models"
+    monkeypatch.setattr("wayfinder.utils.platform.get_whisper_download_dir", lambda: fake)
+    monkeypatch.setattr("wayfinder.utils.platform.get_whisper_host_model_dirs", lambda: [fake])
+
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -566,7 +576,7 @@ class TestModelCatalog:
     # is_steam_deck() is mocked False so these exercise the GPU-vendor branch
     # deterministically — on real Deck hardware get_recommended_model() short-circuits
     # to base.en regardless of GPU vendor.
-    # large-v3-turbo is Ultra-gated (large_models): recommending it to an
+    # Turbo Q5 is Ultra-gated (large_models): recommending it to an
     # unlicensed install would leave Setup with a model the transcriber refuses,
     # so the GPU recommendation applies only when the feature gate grants it.
     @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
@@ -575,7 +585,7 @@ class TestModelCatalog:
         gate = MagicMock()
         gate.has_feature.return_value = True
         with patch("wayfinder.license.get_feature_gate", return_value=gate):
-            assert get_recommended_model() == "large-v3-turbo"
+            assert get_recommended_model() == "large-v3-turbo-q5_0"
         gate.has_feature.assert_called_with("large_models")
 
     @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
@@ -584,7 +594,7 @@ class TestModelCatalog:
         gate = MagicMock()
         gate.has_feature.return_value = True
         with patch("wayfinder.license.get_feature_gate", return_value=gate):
-            assert get_recommended_model() == "large-v3-turbo"
+            assert get_recommended_model() == "large-v3-turbo-q5_0"
 
     @patch("wayfinder.core.setup.is_steam_deck", return_value=False)
     @patch("wayfinder.core.setup._detect_gpu_vendor", return_value="nvidia")
@@ -830,7 +840,7 @@ class TestBuildWhisperCpp:
 # =============================================================================
 
 
-def _unpin_digest(monkeypatch, model_name="tiny.en"):
+def _unpin_digest(monkeypatch, model_name="base.en"):
     """Drop a model's pinned sha256 so a stub payload can stand in for weights.
 
     Setup downloads are digest-verified and size-bounded since the 2026-08-17
@@ -857,10 +867,10 @@ class TestModelDigestVerification:
 
         models = temp_dir / "whisper.cpp" / "models"
         models.mkdir(parents=True)
-        entry = dict(WHISPER_MODELS["tiny.en"])
+        entry = dict(WHISPER_MODELS["base.en"])
         entry["sha256"] = hashlib.sha256(b"the real weights").hexdigest()
         entry["bytes"] = 12_000_000  # server returns this many bytes, wrong content
-        monkeypatch.setitem(WHISPER_MODELS, "tiny.en", entry)
+        monkeypatch.setitem(WHISPER_MODELS, "base.en", entry)
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -870,9 +880,13 @@ class TestModelDigestVerification:
         mock_get.return_value = mock_response
 
         done_result, done_event = {}, threading.Event()
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        # The app's own model folder (Windows keeps it under %LOCALAPPDATA%),
+        # so the test never writes into the real profile.
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir",
+                      return_value=temp_dir / "whisper.cpp" / "models"):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
             )
@@ -882,7 +896,7 @@ class TestModelDigestVerification:
         # The user gets prose and a next step, not two hex digests.
         assert "doesn't match" in done_result["detail"]
         assert "sha256" not in done_result["detail"].lower()
-        assert not (models / "ggml-tiny.en.bin").exists()
+        assert not (models / "ggml-base.en.bin").exists()
         assert not list(models.glob("*.part"))
 
     @patch("requests.get")
@@ -894,10 +908,10 @@ class TestModelDigestVerification:
         models = temp_dir / "whisper.cpp" / "models"
         models.mkdir(parents=True)
         payload = b"\x00" * 12_000_000
-        entry = dict(WHISPER_MODELS["tiny.en"])
+        entry = dict(WHISPER_MODELS["base.en"])
         entry["sha256"] = hashlib.sha256(payload).hexdigest()
         entry["bytes"] = len(payload)
-        monkeypatch.setitem(WHISPER_MODELS, "tiny.en", entry)
+        monkeypatch.setitem(WHISPER_MODELS, "base.en", entry)
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -907,16 +921,20 @@ class TestModelDigestVerification:
         mock_get.return_value = mock_response
 
         done_result, done_event = {}, threading.Event()
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        # The app's own model folder (Windows keeps it under %LOCALAPPDATA%),
+        # so the test never writes into the real profile.
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir",
+                      return_value=temp_dir / "whisper.cpp" / "models"):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
             )
             _wait_done(done_event)
 
         assert done_result["success"] is True
-        assert (models / "ggml-tiny.en.bin").exists()
+        assert (models / "ggml-base.en.bin").exists()
 
     @patch("requests.get")
     def test_transport_failure_retries_once(self, mock_get, temp_dir: Path, monkeypatch):
@@ -934,9 +952,13 @@ class TestModelDigestVerification:
         mock_get.side_effect = [_requests.ConnectionError("reset by peer"), good]
 
         done_result, done_event = {}, threading.Event()
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        # The app's own model folder (Windows keeps it under %LOCALAPPDATA%),
+        # so the test never writes into the real profile.
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir",
+                      return_value=temp_dir / "whisper.cpp" / "models"):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
             )
@@ -953,10 +975,10 @@ class TestModelDigestVerification:
         from wayfinder.core.setup import WHISPER_MODELS
 
         (temp_dir / "whisper.cpp" / "models").mkdir(parents=True)
-        entry = dict(WHISPER_MODELS["tiny.en"])
+        entry = dict(WHISPER_MODELS["base.en"])
         entry["sha256"] = hashlib.sha256(b"the real weights").hexdigest()
         entry["bytes"] = 12_000_000
-        monkeypatch.setitem(WHISPER_MODELS, "tiny.en", entry)
+        monkeypatch.setitem(WHISPER_MODELS, "base.en", entry)
 
         resp = MagicMock()
         resp.status_code = 200
@@ -966,9 +988,13 @@ class TestModelDigestVerification:
         mock_get.return_value = resp
 
         done_result, done_event = {}, threading.Event()
-        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
+        # The app's own model folder (Windows keeps it under %LOCALAPPDATA%),
+        # so the test never writes into the real profile.
+        with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir",
+                      return_value=temp_dir / "whisper.cpp" / "models"):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
             )
@@ -1008,7 +1034,7 @@ class TestDownloadWhisperModel:
 
         with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
                 progress=lambda dl, tot: progress_calls.append((dl, tot)),
@@ -1016,10 +1042,10 @@ class TestDownloadWhisperModel:
             _wait_done(done_event)
 
         assert done_result["success"] is True
-        assert "tiny.en" in done_result["detail"]
+        assert "base.en" in done_result["detail"]
         # Verify correct URL
         url = mock_get.call_args[0][0]
-        assert "ggml-tiny.en.bin" in url
+        assert "ggml-base.en.bin" in url
         assert len(progress_calls) > 0
 
     @patch("requests.get", side_effect=Exception("Network error"))
@@ -1032,7 +1058,7 @@ class TestDownloadWhisperModel:
 
         with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s}), done_event.set()),
             )
@@ -1056,10 +1082,10 @@ class TestDownloadWhisperModel:
         done_event = threading.Event()
 
         with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
-            download_whisper_model("tiny.en", lambda m: None, lambda s, d: done_event.set())
+            download_whisper_model("base.en", lambda m: None, lambda s, d: done_event.set())
             _wait_done(done_event)
 
-        part_file = models_dir / "ggml-tiny.en.bin.part"
+        part_file = models_dir / "ggml-base.en.bin.part"
         assert not part_file.exists()
 
     @patch("requests.get")
@@ -1080,7 +1106,7 @@ class TestDownloadWhisperModel:
         done_event = threading.Event()
         with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
             )
@@ -1088,8 +1114,8 @@ class TestDownloadWhisperModel:
 
         assert done_result["success"] is False
         assert "incomplete" in done_result["detail"]
-        assert not (models_dir / "ggml-tiny.en.bin").exists()
-        assert not (models_dir / "ggml-tiny.en.bin.part").exists()
+        assert not (models_dir / "ggml-base.en.bin").exists()
+        assert not (models_dir / "ggml-base.en.bin.part").exists()
 
     @patch("requests.get")
     def test_error_page_rejected(self, mock_get, temp_dir: Path, monkeypatch):
@@ -1109,7 +1135,7 @@ class TestDownloadWhisperModel:
         done_event = threading.Event()
         with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
             )
@@ -1117,7 +1143,7 @@ class TestDownloadWhisperModel:
 
         assert done_result["success"] is False
         assert "too small" in done_result["detail"]
-        assert not (models_dir / "ggml-tiny.en.bin").exists()
+        assert not (models_dir / "ggml-base.en.bin").exists()
 
     @patch("requests.get")
     def test_rate_limit_message(self, mock_get, temp_dir: Path, monkeypatch):
@@ -1133,7 +1159,7 @@ class TestDownloadWhisperModel:
         done_event = threading.Event()
         with patch("wayfinder.core.setup.Path.home", return_value=temp_dir):
             download_whisper_model(
-                "tiny.en",
+                "base.en",
                 lambda m: None,
                 lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
             )
@@ -1219,6 +1245,88 @@ class TestSetupConfigIntegration:
 # =============================================================================
 
 
+class TestUltraModelDownloads:
+    """Setup fetches Ultra speech models like the app's model manager does: only
+    from the Models CDN with the licence bearer, never from a public mirror."""
+
+    def _download(self, model, gate, temp_dir, mock_get):
+        done_result, done_event = {}, threading.Event()
+        models = temp_dir / "whisper.cpp" / "models"
+        models.mkdir(parents=True, exist_ok=True)
+        entry = dict(WHISPER_MODELS.get(model, {}))
+        entry.pop("sha256", None)
+        entry.pop("bytes", None)
+        with patch("wayfinder.license.get_feature_gate", return_value=gate), \
+                patch("wayfinder.core.setup.get_user_whisper_models_dir", return_value=models), \
+                patch.dict(WHISPER_MODELS, {model: entry}):
+            download_whisper_model(
+                model, lambda m: None,
+                lambda s, d: (done_result.update({"success": s, "detail": d}), done_event.set()),
+            )
+            _wait_done(done_event)
+        return done_result
+
+    @staticmethod
+    def _ok_response():
+        response = MagicMock(status_code=200, headers={"content-length": "12000000"})
+        response.iter_content.return_value = [b"\x00" * 12_000_000]
+        return response
+
+    @patch("requests.get")
+    def test_ultra_model_is_refused_without_a_licence(self, mock_get, temp_dir: Path):
+        free = MagicMock(has_feature=lambda f: False, get_bearer_token=lambda: None)
+        result = self._download("large-v3-turbo-q5_0", free, temp_dir, mock_get)
+        assert result["success"] is False
+        assert "requires Wayfinder Ultra" in result["detail"]
+        mock_get.assert_not_called()
+
+    @patch("requests.get")
+    def test_ultra_model_comes_from_the_cdn_with_the_bearer(self, mock_get, temp_dir: Path,
+                                                             monkeypatch):
+        monkeypatch.delenv("WAYFINDER_MODELS_CDN_BASE", raising=False)
+        mock_get.return_value = self._ok_response()
+        ultra = MagicMock(has_feature=lambda f: True, get_bearer_token=lambda: "tok")
+        result = self._download("large-v3-turbo-q5_0", ultra, temp_dir, mock_get)
+        assert result["success"] is True, result
+        url = mock_get.call_args.args[0]
+        assert url.endswith("/v1/objects/whisper/ggml-large-v3-turbo-q5_0.bin")
+        assert "huggingface" not in url
+        assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer tok"
+
+    @patch("requests.get")
+    def test_bearer_never_follows_a_redirect_off_the_cdn(self, mock_get, temp_dir: Path,
+                                                          monkeypatch):
+        monkeypatch.delenv("WAYFINDER_MODELS_CDN_BASE", raising=False)
+        hop = MagicMock(status_code=302,
+                        url="https://wayfinder-models-cdn.peter-7b5.workers.dev/v1/objects/x",
+                        headers={"Location": "https://storage.example.com/ggml.bin"})
+        mock_get.side_effect = [hop, self._ok_response()]
+        ultra = MagicMock(has_feature=lambda f: True, get_bearer_token=lambda: "tok")
+        result = self._download("large-v3-turbo-q5_0", ultra, temp_dir, mock_get)
+        assert result["success"] is True, result
+        first, second = mock_get.call_args_list
+        assert first.kwargs["headers"]["Authorization"] == "Bearer tok"
+        assert second.args[0] == "https://storage.example.com/ggml.bin"
+        assert "Authorization" not in (second.kwargs["headers"] or {})
+
+    @patch("requests.get")
+    def test_free_model_stays_on_the_pinned_public_url(self, mock_get, temp_dir: Path):
+        mock_get.return_value = self._ok_response()
+        free = MagicMock(has_feature=lambda f: False, get_bearer_token=lambda: None)
+        result = self._download("base.en", free, temp_dir, mock_get)
+        assert result["success"] is True, result
+        url = mock_get.call_args.args[0]
+        assert url.startswith("https://huggingface.co/ggerganov/whisper.cpp/resolve/")
+        assert "Authorization" not in (mock_get.call_args.kwargs.get("headers") or {})
+
+    def test_only_base_is_free(self):
+        from wayfinder.core.setup import whisper_download_info
+
+        for model in WHISPER_MODELS:
+            gated = bool(whisper_download_info(model).get("requires_feature"))
+            assert gated is (model != "base.en"), model
+
+
 class TestFullSetupFlow:
     """
     End-to-end test of the complete setup sequence:
@@ -1300,7 +1408,9 @@ class TestFullSetupFlow:
             for k, v in WHISPER_MODELS["large-v3-turbo"].items()
             if k not in ("sha256", "bytes")
         }
+        ultra = MagicMock(has_feature=lambda f: True, get_bearer_token=lambda: "tok")
         with patch("wayfinder.core.setup.Path.home", return_value=temp_dir), \
+             patch("wayfinder.license.get_feature_gate", return_value=ultra), \
              patch.dict(WHISPER_MODELS, {"large-v3-turbo": unpinned}):
             dl_event = threading.Event()
             dl_result = {}
@@ -1500,3 +1610,18 @@ def test_windows_whisper_provision_downloads_prebuilt(mock_get, tmp_path, monkey
     assert (binp / "whisper-server.exe").exists()  # resident-server (instant) mode binary
     assert (binp / "ggml.dll").exists()            # DLLs are kept (both binaries need them)
     assert not (binp / "bench.exe").exists()       # other tools are not
+
+
+def test_setup_pane_maps_each_menu_label_to_its_own_model():
+    """"Large v3 Turbo" is a prefix of "Large v3 Turbo Q5": matching by prefix
+    could download the 1.6 GB model when Q5 was chosen, or the reverse."""
+    from types import SimpleNamespace
+
+    from wayfinder.ui.setup_pane import SetupPane
+
+    for key, info in WHISPER_MODELS.items():
+        pane = SimpleNamespace(
+            _model_var=SimpleNamespace(get=lambda i=info: f"{i['label']} ({i['size']})"),
+            _model_choices=dict(WHISPER_MODELS),
+        )
+        assert SetupPane._get_selected_model(pane) == key

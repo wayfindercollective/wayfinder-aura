@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestTranscriptionBackends:
     """Test transcription backend selection."""
 
@@ -1770,6 +1771,7 @@ class TestGpuRecoveryProbe:
         assert backend.transcribe(audio) == "cpu-text"
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestWhisperServerWarmup:
     """whisper-server backend: instant first dictation via startup warm-up."""
 
@@ -1893,6 +1895,7 @@ class TestWhisperServerTranscribeParsing:
         assert text == "hello world"
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestServerModeDefaultAndFallback:
     """Server mode is the default, but falls back to CLI when the binary is absent."""
 
@@ -1916,16 +1919,15 @@ class TestServerModeDefaultAndFallback:
                "model_path": str(model)}
         assert isinstance(get_backend(cfg), WhisperServerBackend)
 
-    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path, monkeypatch):
+    def test_get_backend_falls_back_to_cli_when_server_missing(self, tmp_path):
         from wayfinder.core.transcriber import get_backend, WhisperCppBackend
-        # Host isolation: discovery must not find a developer's ~/whisper.cpp
-        # build (which has a whisper-server beside it).
-        import wayfinder.utils.runtime_assets as runtime_assets
-        monkeypatch.setattr(runtime_assets, "find_whisper_binary", lambda *_a, **_k: None)
         # Only whisper-cli exists, no whisper-server next to it.
         cli = tmp_path / "whisper-cli"
         cli.write_text("#!/bin/sh\n")
-        model = tmp_path / "m.bin"
+        # A Free-tier model name, so the result doesn't hinge on whatever
+        # license gate an earlier test left cached: a gated name gets swapped
+        # for a missing Base path, which disables server mode for the wrong reason.
+        model = tmp_path / "ggml-base.en.bin"
         model.write_bytes(b"\x00")
         cfg = {"whisper_server_mode": True, "whisper_binary": str(cli),
                "model_path": str(model)}
@@ -2014,9 +2016,6 @@ class TestServerModeDefaultAndFallback:
 
         monkeypatch.setattr(transcriber, "IS_FLATPAK", True)
         monkeypatch.setattr(transcriber, "_existing_file", lambda path: path == "/app/bin/whisper-cli")
-        # Host isolation: a developer's ~/whisper.cpp build must not win discovery.
-        import wayfinder.utils.runtime_assets as runtime_assets
-        monkeypatch.setattr(runtime_assets, "find_whisper_binary", lambda *_a, **_k: None)
 
         assert transcriber._resolve_whisper_cli_binary("") == "/app/bin/whisper-cli"
 
@@ -2125,13 +2124,16 @@ class TestServerReuseIdentity:
 
     MODEL = "/models/ggml-base.en.bin"
 
-    def _set_state(self, alive=True, model=MODEL, gpu=False):
+    def _set_state(self, alive=True, model=MODEL, gpu=False, threads=4):
         from wayfinder.core.transcriber import WhisperServerBackend
         proc = MagicMock()
         proc.poll.return_value = None if alive else 1
         WhisperServerBackend._server_process = proc
         WhisperServerBackend._server_model_path = model
         WhisperServerBackend._server_use_gpu = gpu
+        # macOS/Windows also match -t (the backend's default is 4); set it
+        # rather than inherit whatever an earlier test left on the class.
+        WhisperServerBackend._server_threads = threads
 
     def _backend(self, gpu=False, model=MODEL):
         from wayfinder.core.transcriber import WhisperServerBackend
@@ -2142,6 +2144,7 @@ class TestServerReuseIdentity:
         WhisperServerBackend._server_process = None
         WhisperServerBackend._server_model_path = ""
         WhisperServerBackend._server_use_gpu = None
+        WhisperServerBackend._server_threads = None
 
     def test_same_model_same_mode_is_reusable(self):
         self._set_state(gpu=False)
@@ -2282,6 +2285,7 @@ class TestMacServerRequestFields:
         assert b"no_timestamps" not in body
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestGreedyDecoding:
     """docs/EVAL-2026-09-24.md: beam search never beat greedy on whisper.cpp."""
 
@@ -2298,11 +2302,20 @@ class TestGreedyDecoding:
         assert whisper_decoding({"whisper_beam_size": value}) == expected
 
     @pytest.mark.parametrize("server_mode", [True, False])
-    def test_server_and_cli_backends_get_greedy(self, server_mode):
-        from wayfinder.core.transcriber import get_backend
+    def test_server_and_cli_backends_get_greedy(self, server_mode, tmp_path):
+        from wayfinder.core.transcriber import WhisperServerBackend, get_backend
+        # Its own binaries: without a whisper-server, server mode quietly falls
+        # back to the CLI and the server case would test the CLI twice.
+        for name in ("whisper-cli", "whisper-server"):
+            (tmp_path / name).write_text("#!/bin/sh\n")
+            (tmp_path / name).chmod(0o755)
+        (tmp_path / "ggml-base.en.bin").write_bytes(b"\x00")
         cfg = {"transcription_backend": "whisper_cpp", "accuracy_mode": "high",
-               "beam_size": 8, "best_of": 5, "whisper_server_mode": server_mode}
+               "beam_size": 8, "best_of": 5, "whisper_server_mode": server_mode,
+               "whisper_binary": str(tmp_path / "whisper-cli"),
+               "model_path": str(tmp_path / "ggml-base.en.bin")}
         backend = get_backend(cfg)
+        assert isinstance(backend, WhisperServerBackend) is server_mode
         assert (backend.beam_size, backend.best_of) == (1, 1)
 
 

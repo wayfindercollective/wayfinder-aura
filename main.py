@@ -303,10 +303,15 @@ if "--audio-processing-self-test" in sys.argv:
         import numpy as np
         from wayfinder.core import recorder as _recorder
 
-        if _recorder._get_scipy_signal_functions() is None:
-            raise RuntimeError("scipy.signal unavailable; Medium rumble filter is disabled")
-
         _rate = 16000
+        # The Medium rumble filter must really run (SciPy, or the NumPy twins the
+        # Windows bundle ships instead): a 20 Hz hum under a 300 Hz tone.
+        _t = np.arange(_rate) / _rate
+        _hum = (0.2 * np.sin(2 * np.pi * 20 * _t) + 0.2 * np.sin(2 * np.pi * 300 * _t)).astype(np.float32)
+        _spectrum = np.abs(np.fft.rfft(_recorder.preprocess_audio(_hum, _rate, "medium")))
+        if _spectrum[20] > _spectrum[300] * 0.2:
+            raise RuntimeError("Medium rumble filter did not remove a 20 Hz hum")
+
         _rng = np.random.default_rng(20260731)
         _noise = _rng.normal(0.0, 0.002, _rate * 2).astype(np.float32)
         _light = _recorder.preprocess_audio(_noise, _rate, "light")
@@ -847,6 +852,15 @@ def _check_venv_health(venv_dir: Path | None = None, smoke_imports: tuple[str, .
 
 def main():
     """Run Wayfinder Aura."""
+    # An update's swap helper starts the new copy with a one-off token; take
+    # it out of the environment before any child process can inherit it.
+    try:
+        from wayfinder.core import app_installer
+
+        app_installer.take_update_token()
+    except Exception:
+        pass
+
     # Desktop actions / Flatpak CLI: send control-socket verbs and exit
     # (do not take the single-instance lock or start a second UI).
     _cli_exit = _dispatch_cli_control_verb()
@@ -860,6 +874,23 @@ def main():
     # flock-based: if another instance holds the lock, signal show and exit
     if _signal_existing_instance():
         sys.exit(0)
+
+    # Crash reports for this (GUI) process: Beta sends by default, Stable only
+    # when turned on (Settings > System). Installed early to catch startup crashes.
+    try:
+        from wayfinder import __version__ as _aura_version
+        from wayfinder.core import crash_reports
+
+        crash_reports.install(_aura_version)
+    except Exception:
+        pass
+
+    # The bundle starts every process without a Dock icon (LSUIElement), so
+    # the overlay helper never shows a second one; the app asks for its own.
+    if sys.platform == "darwin":
+        from wayfinder.utils.macos_dock import show_in_dock
+
+        show_in_dock()
 
     # Delete audio remnants left by a prior crash before any recorder can
     # create files for this process. The legacy wayfinder_main.py entry point
