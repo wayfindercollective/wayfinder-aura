@@ -7124,6 +7124,8 @@ class WayfinderApp(ctk.CTk):
                 pass
         self._active_dropdown_panel = None
         self._active_dropdown_owner = None
+        if IS_MACOS:
+            WayfinderApp._sync_macos_hero_visibility(self)
 
     def _dropdown_row_selected(self, option_menu, value):
         self.log(f"[dropdown] row clicked: {value!r}")
@@ -7278,6 +7280,9 @@ class WayfinderApp(ctk.CTk):
         self._active_dropdown_owner = option_menu
         self._ensure_dropdown_dismiss_bindings()
         if IS_MACOS:
+            # The list may open upward over the hero card: the native layer
+            # (above every Tk pixel) steps aside until it closes.
+            WayfinderApp._sync_macos_hero_visibility(self)
             # Aqua Tk delivers keys only to the focus widget; after clicking a
             # CTk option menu nothing holds focus, so Escape never reached the
             # dismiss binding. Focus the panel so Escape closes it.
@@ -8434,24 +8439,42 @@ class WayfinderApp(ctk.CTk):
             native_layer.set_hidden(True)
 
     def _macos_hero_is_occluded(self) -> bool:
-        """Whether Tk currently owns a surface above the native hero layer."""
-        return (
-            getattr(self, "active_tab", "dictate") != "dictate"
-            or getattr(self, "_premium_banner", None) is not None
-        )
+        """Whether Tk is drawing something over the hero card right now.
+
+        The native layer sits above every Tk pixel, so it steps aside for what
+        Tk places over the window: the Ultra scrim, a custom dropdown list (one
+        can open upward over the card) and the caricature toast. Tab pages are
+        packed below the hero card and never overlap it, so a tab alone is no
+        reason for the Tk fallback, which redraws the ribbon in Python at 15 fps
+        (37% of a core on the Mac Studio, 2026-10-05) where the native layer
+        costs ~0.5%.
+        """
+        if getattr(self, "_premium_banner", None) is not None:
+            return True
+        if getattr(self, "_active_dropdown_panel", None) is not None:
+            return True
+        toast = getattr(self, "_confetti_overlay", None)
+        return toast is not None and not getattr(toast, "_destroyed", True)
 
     def _sync_macos_hero_visibility(self) -> None:
-        """Keep the native layer behind tabs and animate its visible Tk fallback."""
+        """Hide the native layer under Tk overlays and animate its Tk fallback."""
         native_layer = getattr(self, "_macos_hero_layer", None)
         if native_layer is not None:
             occluded = WayfinderApp._macos_hero_is_occluded(self)
             native_layer.set_hidden(occluded)
             if occluded:
-                # Tabs and scrims can draw over the independent Metal layer.
-                # Seed the Tk canvas now; the idle/active loop advances it on
-                # other tabs, since the hero card itself remains visible.
+                # A scrim, dropdown or toast draws over the independent Metal
+                # layer. Seed the Tk canvas now; the idle/active loop advances
+                # it while the overlay is up, since the hero card stays visible.
                 try:
                     self._draw_hero_waveform(force_canvas=True)
+                except Exception:
+                    pass
+            if getattr(self, "app_state", None) == AppState.IDLE:
+                # Occluded: start the Tk loop. Clear: its next pass hands the
+                # frames back to the native timer and stops.
+                try:
+                    self._start_idle_breath()
                 except Exception:
                     pass
 
@@ -8490,8 +8513,8 @@ class WayfinderApp(ctk.CTk):
             return
 
         # The hero card sits above every tab. On macOS the native layer must
-        # stay below tab surfaces, so keep its Tk fallback moving there.
-        if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate":
+        # stay below Tk overlays, so keep its Tk fallback moving under them.
+        if IS_MACOS and WayfinderApp._macos_hero_is_occluded(self):
             force_canvas = True
 
         # Initialize on first call
@@ -8945,9 +8968,9 @@ class WayfinderApp(ctk.CTk):
         
         self._write_status_breadcrumb()
         if IS_MACOS and getattr(self, "app_state", None) == AppState.IDLE:
-            # The native renderer owns Dictate's idle frames and leaves no
-            # Python timer behind. Re-seed the Tk timer for the always-visible
-            # hero when switching to another tab.
+            # The native renderer owns the idle frames on every tab and leaves
+            # no Python timer behind; one pass re-seeds whichever renderer the
+            # hero needs now (the Tk one only under an overlay).
             self._start_idle_breath()
 
     def show_setup_pane(self, on_done=None) -> None:
@@ -12273,6 +12296,15 @@ class WayfinderApp(ctk.CTk):
             
             # Inline toast placed over the main container (no Toplevel).
             self._confetti_overlay = ConfettiOverlay(self, main_container=self.main_container)
+            if IS_MACOS:
+                # It sits over the hero card: the native layer steps aside
+                # while it is up and returns when it is destroyed.
+                WayfinderApp._sync_macos_hero_visibility(self)
+                self._confetti_overlay.bind(
+                    "<Destroy>",
+                    lambda _e: self.after_idle(
+                        lambda: WayfinderApp._sync_macos_hero_visibility(self)),
+                    add="+")
         except Exception as e:
             print(f"[Easter Egg] Couldn't show confetti: {e}")
     
@@ -22761,6 +22793,13 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
         
+        if IS_MACOS and getattr(self, "_premium_banner", None) is not None:
+            # The opaque Ultra scrim covers the whole window, hero card
+            # included: nothing to animate (it cost 16% of a core). Dismissing
+            # it re-syncs the hero, which restarts this loop.
+            self._idle_breath_job = None
+            return
+
         # Linux: while another app has focus (LINUX-FOLLOWUPS 3.1) the calm
         # ribbon drifts at a third of its speed on a low frame rate: still
         # alive beside a side-by-side window, at a fraction of the ~10% of a
@@ -22791,7 +22830,7 @@ class WayfinderApp(ctk.CTk):
         if (
             native_layer is not None
             and native_layer.native_renderer is not None
-            and (not IS_MACOS or getattr(self, "active_tab", "dictate") == "dictate")
+            and (not IS_MACOS or not WayfinderApp._macos_hero_is_occluded(self))
         ):
             # The native Objective-C timer owns all 30 fps idle frames. Python
             # wakes again only on a state/tab/window event.
@@ -22799,7 +22838,7 @@ class WayfinderApp(ctk.CTk):
             return
 
         interval = (
-            66 if IS_MACOS and getattr(self, "active_tab", "dictate") != "dictate"
+            66 if IS_MACOS and WayfinderApp._macos_hero_is_occluded(self)
             else _HERO_BACKGROUND_INTERVAL_MS if background
             else _hero_idle_interval_ms()
         )
