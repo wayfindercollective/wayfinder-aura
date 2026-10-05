@@ -146,7 +146,9 @@ artifact; see [packaging/windows/README.md](packaging/windows/README.md).
 ### From source
 
 ```bash
-# System deps (Fedora/Bazzite shown; see INSTALL-UBUNTU.md for Debian/Ubuntu)
+# System deps (Fedora shown; see INSTALL-UBUNTU.md for Debian/Ubuntu).
+# Bazzite/Silverblue/Kinoite: rpm-ostree install python3-tkinter, then reboot
+# (or use the Flatpak); Arch: pacman -S tk; openSUSE: zypper install python3-tk.
 sudo dnf install python3-tkinter
 
 # whisper.cpp

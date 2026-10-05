@@ -114,7 +114,8 @@ import tkinter
 PY
 then
     echo "❌ Tkinter support not found for $PYTHON_BIN. Install the matching Tk package first:"
-    echo "   Fedora/Bazzite: sudo dnf install python3-tkinter"
+    echo "   Fedora:         sudo dnf install python3-tkinter"
+    echo "   Bazzite/Silverblue/Kinoite: rpm-ostree install python3-tkinter (then reboot)"
     echo "   Ubuntu/Debian:  sudo apt install python3-tk"
     exit 1
 fi

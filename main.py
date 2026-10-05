@@ -834,8 +834,11 @@ def _check_venv_health(venv_dir: Path | None = None, smoke_imports: tuple[str, .
             if _has_tkinter_failure(missing_imports):
                 print("")
                 print("  If tkinter is missing, install the OS Tk package first:")
-                print("    Fedora/Bazzite: sudo dnf install python3-tkinter")
+                print("    Fedora: sudo dnf install python3-tkinter")
+                print("    Bazzite/Silverblue/Kinoite: rpm-ostree install python3-tkinter"
+                      " (then reboot), or use the Flatpak")
                 print("    Debian/Ubuntu: sudo apt install python3-tk")
+                print("    Arch: sudo pacman -S tk    openSUSE: sudo zypper install python3-tk")
             print(f"{'='*60}\n")
             sys.exit(1)
     except Exception:
