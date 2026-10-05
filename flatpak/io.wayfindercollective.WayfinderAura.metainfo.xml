@@ -32,7 +32,7 @@
     <p>
       Free tier includes Base/Base.en transcription on CPU, local minimal cleanup, hotkeys,
       text injection, the status overlay, and audio-processing controls. Wayfinder Aura Ultra
-      is an optional one-time purchase ($29.99 until 31 December 2026, then $60) that unlocks
+      is an optional one-time purchase ($29.99 until 31 December 2026, then $60 from 1 January 2027) that unlocks
       GPU acceleration, additional speech and cleanup models, styles and voice profiles,
       custom vocabulary, chunked long-form recording, and optional cloud backends. Ultra is
       sold on wayfindercollective.io (not through Flathub billing); enter a license key in
@@ -58,7 +58,7 @@
 
   <screenshots>
     <screenshot type="default">
-      <caption>Dictate into any app — hotkey recording with live waveform feedback</caption>
+      <caption>Dictate into X11, XWayland and KDE Wayland apps — hotkey recording with live waveform feedback</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/main-window.png</image>
     </screenshot>
     <screenshot>
@@ -230,9 +230,9 @@
       <description>
         <p>First public release of Wayfinder Aura</p>
         <ul>
-          <li>Press Super+F2 to dictate — your words appear at the cursor in any app</li>
+          <li>Press Super+F2 to dictate — your words appear at the cursor in X11 and XWayland apps, and in native Wayland apps on KDE Plasma</li>
           <li>Local-first transcription with whisper.cpp; optional tone cleanup on-device</li>
-          <li>Works on Wayland and X11, including KDE and GNOME</li>
+          <li>Works on Wayland and X11; native Wayland injection is verified on KDE Plasma</li>
           <li>Game-aware hotkeys pause while a GameMode game is running</li>
           <li>Steam Deck workflow: bind a back button and dictate from Game Mode</li>
           <li>System tray integration and configurable typing speeds</li>
