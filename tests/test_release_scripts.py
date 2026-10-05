@@ -150,7 +150,15 @@ class TestChangelog:
 
     def test_the_real_changelog_has_an_unreleased_section(self):
         text = (REPO / versioning.CHANGELOG).read_text(encoding="utf-8")
-        assert versioning.bullet_titles(versioning.unreleased_body(text))
+        assert "## [Unreleased]" in text
+        if versioning.bullet_titles(versioning.unreleased_body(text)):
+            return
+        # Empty only right after a stable release: promote.py moves every note
+        # under that version (v1.2.0's own release commit failed this check).
+        version = versioning.read_version()
+        parsed = versioning.parse(version)
+        assert parsed and parsed[1] is None, "a beta needs Unreleased notes"
+        assert f"## [{version}]" in text
 
 
 class TestCutBeta:
