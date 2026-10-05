@@ -200,11 +200,11 @@ python main.py
 
 1. Launch Wayfinder Aura — it lives in your system tray.
 2. Press **Ctrl+Alt+Space**, speak, press **Ctrl+Alt+Space** again. To discard a
-   recording instead, press **Shift+Esc** in the Flatpak (rebindable in your
-   desktop's shortcut settings) or a bare **Esc** on AppImage and source
-   installs; nothing is typed.
-3. Your raw transcript is typed at the cursor. Enable local LLM cleanup in
-   Settings when you want filler removal, punctuation cleanup, or styles.
+   recording instead, press **Shift+Esc** (in the Flatpak it is a desktop
+   shortcut you can rebind; AppImage and source installs also take a bare
+   **Esc**); nothing is typed.
+3. Your transcript is typed at the cursor. The default Normal style removes
+   um/uh and doubled small words instantly, with no model.
 4. With Ultra, press **Ctrl+Alt+Enter** to cycle output styles (Normal →
    Professional → Casual → Dev → Personal).
 

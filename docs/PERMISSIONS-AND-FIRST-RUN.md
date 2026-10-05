@@ -70,11 +70,12 @@ Bazzite/Silverblue, zypper on openSUSE), builds whisper.cpp, then the tour.
 macOS asks for Microphone, Accessibility and Input Monitoring through the
 Welcome checklist on a true first run. Fixed here: a `~/Applications` install
 counts as installed, and a failed Keychain read can no longer delete stored
-cloud API keys. Open (needs a Mac): returning users get bare system prompts at
-launch before any window; the tour's first card does not check the install
-location before asking; the shortcut step has no way forward while a
-permission is missing; the hotkey does not recover after a late Accessibility
-grant; whether Input Monitoring is needed at all.
+cloud API keys. Fixed on main (#41): the hotkey retries by itself, so a late
+Accessibility grant takes effect without a restart (still to confirm on a real
+Mac). Open (needs a Mac): returning users get bare system prompts at launch
+before any window; the tour's first card does not check the install location
+before asking; the shortcut step has no way forward while a permission is
+missing; whether Input Monitoring is needed at all.
 
 Windows asks for nothing at install (per-user, no UAC). Fixed here: a failed
 paste leaves the dictation on the clipboard. Open: the installer is unsigned

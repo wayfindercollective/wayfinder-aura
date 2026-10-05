@@ -20,8 +20,9 @@
     <p>
       Wayfinder Aura is a local-first voice dictation and speech recognition application for
       Linux. Press a hotkey, speak, and your words are typed wherever your cursor is: in X11
-      and XWayland apps, and in native Wayland apps on KDE Plasma and GNOME through the
-      desktop's remote-control portal (the desktop asks once). No cloud required: by default,
+      and XWayland apps, and in native Wayland apps on KDE Plasma through the desktop's
+      remote-control portal (the desktop asks once; GNOME 45+ is expected to work but is not
+      yet verified). No cloud required: by default,
       speech-to-text transcription runs
       offline on your device with whisper.cpp — in local mode your voice never leaves your
       computer.
@@ -41,7 +42,7 @@
     <ul>
       <li>Local-first &amp; Private — transcribed on your device by default; optional cloud backends if you choose them</li>
       <li>Hotkey Triggered — Press a key to start/stop recording</li>
-      <li>Wayland &amp; X11 Support — X11 and XWayland apps directly; native Wayland apps on KDE Plasma and GNOME through the desktop's remote-control portal</li>
+      <li>Wayland &amp; X11 Support — X11 and XWayland apps directly; native Wayland apps on KDE Plasma through the desktop's remote-control portal (GNOME 45+ not yet verified)</li>
       <li>System Tray Integration — Runs quietly in the background</li>
       <li>Base Dictation — Free local CPU transcription with optional minimal cleanup</li>
       <li>Ultra Acceleration — GPU inference, additional models, styles, and long-form chunking</li>

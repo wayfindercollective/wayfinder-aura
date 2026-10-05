@@ -10,8 +10,10 @@ Out of the box, Wayfinder Aura runs the entire dictation pipeline on your
 device:
 
 - **Transcription** runs locally with [whisper.cpp](https://github.com/ggerganov/whisper.cpp).
-- **Cleanup** (grammar, punctuation, tone) runs locally with a small
-  [llama.cpp](https://github.com/ggerganov/llama.cpp) model.
+- **Cleanup** runs locally. The default Normal style removes um/uh and
+  doubled small words with simple rules; the other styles (grammar,
+  punctuation, tone) use a small [llama.cpp](https://github.com/ggerganov/llama.cpp)
+  model on your device.
 
 In this default mode (`processing_mode: "local"`, `post_processing_backend:
 "llama_cpp"`), your audio and its transcript never leave your computer.
@@ -168,10 +170,13 @@ carries your audio or transcripts unless you enable a cloud backend (item 6):
    from this repository's GitHub releases. On the Mac, Windows and the AppImage
    Aura checks it, installs it and restarts; otherwise (the Flatpak, or a
    failed check) it opens the downloaded file or the download link for you.
-4. **Model downloads, when you ask for them,** from Hugging Face or the
-   Wayfinder Models CDN, depending on the model. Ultra models are served only
-   by the CDN, and those requests carry your signed license token as a
-   `Bearer` header. The token is never sent to Hugging Face.
+4. **Model downloads, when you ask for them, and once at Ultra setup.** When
+   Ultra is first set up with GPU acceleration on and the free Base model
+   still selected, Aura downloads the Ultra speech model (Large v3 Turbo Q5)
+   by itself. Models come from Hugging Face or the Wayfinder Models CDN,
+   depending on the model. Ultra models are served only by the CDN, and those
+   requests carry your signed license token as a `Bearer` header. The token is
+   never sent to Hugging Face.
 5. **The feedback form, only when you press Send feedback.** It sends your
    message, your email address if you typed one, the app version, your plan
    (free or ultra), and your operating system description to the Wayfinder

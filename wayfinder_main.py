@@ -12784,6 +12784,13 @@ class WayfinderApp(ctk.CTk):
         ctrl_result = None
         if ctrl is not None:
             if state == "listening":
+                # The cancel key can change after the overlay starts (KDE takes
+                # the record key and evdev stops; an overlay turned on
+                # mid-session starts without one): name the current key.
+                try:
+                    ctrl.set_cancel_hint(self._cancel_hotkey_display() or "")
+                except Exception:
+                    pass
                 ctrl_result = ctrl.show("listening")
             elif state == "processing":
                 # Never hard-restart mid-dictation: remapping the overlay/tray

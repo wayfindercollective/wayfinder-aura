@@ -122,3 +122,31 @@ def test_overlay_controller_passes_the_hint_on_every_start():
     ctl.set_cancel_hint("Ctrl+Esc")
     assert sent == [{"cmd": "cancel_hint", "value": "Ctrl+Esc"}]
     assert ctl._cancel_hint == "Ctrl+Esc"
+
+
+class _Overlay:
+    def __init__(self):
+        self.calls = []
+
+    def set_cancel_hint(self, hint):
+        self.calls.append(("cancel_hint", hint))
+
+    def show(self, state):
+        self.calls.append(("show", state))
+        return True
+
+
+def test_overlay_hint_follows_the_listener_at_each_recording():
+    # The overlay is started with "Shift+Esc"; KDE then takes the record key
+    # and evdev stops. The next recording's pill must not still promise Esc.
+    app = _app("evdev")
+    app._hotkey_thread = _Thread(alive=True)
+    app.overlay_controller = _Overlay()
+    app._has_visual_pyqt_overlay = lambda: True
+    wm.WayfinderApp._set_status_indicator(app, "listening")
+    app._hotkey_thread = None  # KDE owns the key now
+    wm.WayfinderApp._set_status_indicator(app, "listening")
+    assert app.overlay_controller.calls == [
+        ("cancel_hint", "Shift+Esc"), ("show", "listening"),
+        ("cancel_hint", ""), ("show", "listening"),
+    ]
