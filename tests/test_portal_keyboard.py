@@ -757,3 +757,55 @@ def test_a_portal_not_up_yet_at_login_is_asked_again(monkeypatch):
 def test_a_desktop_without_the_portal_settles_for_xdotool(monkeypatch):
     _, starts, logs = _start_portal(monkeypatch, [False] * 4)
     assert starts == [] and "no remote-control keyboard" in logs[0]
+
+
+# ── Setup and the startup primer leave typing to the portal ─────────────────
+
+def _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.WAITING, offered=True):
+    from types import SimpleNamespace
+    from wayfinder.core import setup
+    monkeypatch.setattr(setup, "_PORTAL_OFFERED", {})
+    monkeypatch.setattr(pk, "host_is_wayland_desktop", lambda: True)
+    monkeypatch.setattr(pk, "keyboard", lambda: SimpleNamespace(state=state))
+    monkeypatch.setattr(pk, "ready", lambda: state == pk.PortalKeyboard.READY)
+    monkeypatch.setattr(pk, "portal_keyboard_offered", lambda *a: offered)
+    monkeypatch.setattr(setup, "IS_APPIMAGE", False)
+    monkeypatch.setattr(setup, "IS_FLATPAK", False)
+    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+    monkeypatch.setattr(setup.sys, "platform", "linux")
+    return setup
+
+
+def test_setup_installs_no_ydotool_while_the_portal_will_type(monkeypatch):
+    setup = _setup_on_a_portal_desktop(monkeypatch)
+    monkeypatch.setattr("wayfinder.utils.platform.get_text_injector", lambda: "wtype")
+    assert "ydotool" not in setup.get_missing_system_packages()
+    status = setup.check_text_injection()
+    assert status.installed and "portal" in status.detail
+
+
+def test_setup_offers_ydotool_after_a_declined_portal(monkeypatch):
+    setup = _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.DECLINED)
+    assert "ydotool" in setup.get_missing_system_packages()
+
+
+def test_setup_offers_ydotool_where_no_portal_keyboard_exists(monkeypatch):
+    setup = _setup_on_a_portal_desktop(monkeypatch, offered=False)
+    assert "ydotool" in setup.get_missing_system_packages()
+
+
+def test_wtype_primer_waits_while_the_portal_is_in_play(monkeypatch):
+    from types import SimpleNamespace
+    import wayfinder_main as wm
+    monkeypatch.setattr(wm, "_IS_LINUX", True)
+    monkeypatch.setattr(wm, "IS_MACOS", False)
+    monkeypatch.setattr(wm, "IS_WINDOWS", False)
+    monkeypatch.setattr(wm, "_portal_desktop", lambda: True)
+    app = SimpleNamespace(config={"linux_portal_typing": True})
+    for state, in_play in ((pk.PortalKeyboard.WAITING, True), (pk.PortalKeyboard.READY, True),
+                           (pk.PortalKeyboard.DECLINED, False), (pk.PortalKeyboard.FAILED, False)):
+        monkeypatch.setattr(pk, "keyboard", lambda s=state: SimpleNamespace(state=s))
+        assert wm.WayfinderApp._portal_typing_in_play(app) is in_play, state
+    app._portal_not_offered = True
+    monkeypatch.setattr(pk, "keyboard", lambda: SimpleNamespace(state=pk.PortalKeyboard.IDLE))
+    assert wm.WayfinderApp._portal_typing_in_play(app) is False

@@ -168,6 +168,30 @@ def check_audio() -> DependencyStatus:
         return DependencyStatus(False, error=f"Audio system error: {e}")
 
 
+_PORTAL_OFFERED: dict = {}
+
+
+def _portal_typing_expected() -> bool:
+    """A Wayland desktop whose RemoteDesktop portal will type for Aura (asked
+    once at launch). ydotool and its daemon are only a fallback there, so Setup
+    must not install a package, enable a service or ask for a password for them
+    unless the user declined the portal or it failed."""
+    try:
+        from wayfinder.core import portal_keyboard
+        if not portal_keyboard.host_is_wayland_desktop():
+            return False
+        pk = portal_keyboard.PortalKeyboard
+        if portal_keyboard.keyboard().state in (pk.DECLINED, pk.FAILED, pk.CLOSED):
+            return False
+        if portal_keyboard.ready():
+            return True
+        if "offered" not in _PORTAL_OFFERED:
+            _PORTAL_OFFERED["offered"] = bool(portal_keyboard.portal_keyboard_offered())
+        return _PORTAL_OFFERED["offered"]
+    except Exception:
+        return False
+
+
 def check_text_injection() -> DependencyStatus:
     """Check for an available text-injection backend (platform/session aware).
 
@@ -198,6 +222,9 @@ def check_text_injection() -> DependencyStatus:
     tool = get_text_injector()
     if tool == "portal":
         return DependencyStatus(True, detail="desktop portal (types into every app)")
+    if tool in ("wtype", "ydotool", "none") and _portal_typing_expected():
+        return DependencyStatus(
+            True, detail="desktop portal (approve the desktop's Remote Control request)")
     if tool == "xdotool":
         return DependencyStatus(True, detail="xdotool (X11)")
     if tool == "wtype":
@@ -1280,6 +1307,7 @@ def get_missing_system_packages() -> list[str]:
         sys.platform != "darwin"
         and not (IS_APPIMAGE or IS_FLATPAK)
         and not shutil.which("ydotool")
+        and not _portal_typing_expected()   # the portal types; ydotool is a fallback
     ):
         packages.append("ydotool")
     # git/cmake/compilers/CUDA exist only to build whisper.cpp/llama.cpp from

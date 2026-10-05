@@ -12667,6 +12667,7 @@ class WayfinderApp(ctk.CTk):
                 if portal_keyboard.portal_keyboard_offered():
                     break
             else:
+                self._portal_not_offered = True
                 try:
                     from wayfinder.utils.platform import get_text_injector
                     tool = get_text_injector()
@@ -12687,6 +12688,23 @@ class WayfinderApp(ctk.CTk):
             kb.start(parent_window=parent, ask_again=ask_again, log=self.log)
 
         threading.Thread(target=_go, daemon=True, name="wayfinder-portal-start").start()
+
+    def _portal_typing_in_play(self) -> bool:
+        """The RemoteDesktop portal is (or is about to be) Aura's typing path:
+        starting, waiting for the user's approval, or ready. Declined, failed,
+        closed or not offered means the fallback tools type instead."""
+        if not (_IS_LINUX and not (IS_MACOS or IS_WINDOWS)):
+            return False
+        if not self.config.get("linux_portal_typing", True) or not _portal_desktop():
+            return False
+        if getattr(self, "_portal_not_offered", False):
+            return False
+        try:
+            from wayfinder.core.portal_keyboard import PortalKeyboard, keyboard
+            return keyboard().state not in (
+                PortalKeyboard.DECLINED, PortalKeyboard.FAILED, PortalKeyboard.CLOSED)
+        except Exception:
+            return False
 
     def _on_portal_keyboard_state(self, state: str, detail: str) -> None:
         """Portal keyboard state changes (session thread; self.log is thread-safe)."""
@@ -22130,6 +22148,8 @@ class WayfinderApp(ctk.CTk):
             # dictation on a fresh install/rebuild and garble the output. No-op unless wtype
             # is the active injector (the Flatpak/Wayland path); the desktop's ydotool needs
             # no approval, so this does nothing there.
+            if self._portal_typing_in_play():
+                return  # the portal asks once itself; a wtype prompt would be a second one
             try:
                 from wayfinder.core.injector import prime_wayland_injection
                 ran, msg = prime_wayland_injection()
