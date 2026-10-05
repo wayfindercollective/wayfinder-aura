@@ -15207,7 +15207,9 @@ class WayfinderApp(ctk.CTk):
                 # intentionally absent (deferred to the compositor to stop the
                 # F3→Find-bar leak), so `_hotkey_thread is None` is the correct
                 # steady state — restarting would spam a defer-and-return every 10s.
-                if (HAS_EVDEV and not IS_FLATPAK and not self._compositor_owns_hotkeys()
+                if (HAS_EVDEV and not IS_FLATPAK
+                        and getattr(self, "_hotkey_backend", "evdev") == "evdev"
+                        and not self._compositor_owns_hotkeys()
                         and (self._hotkey_thread is None or not self._hotkey_thread.is_alive())):
                     self.log("🔄 Hotkey listener not running - restarting...")
                     self.restart_evdev_listener("supervisor: listener was not alive")
@@ -15247,7 +15249,8 @@ class WayfinderApp(ctk.CTk):
                     self.log("🔄 pynput hotkey listener not running - restarting...")
                     self._start_pynput_listener()
                 elif (
-                    sys.platform in ("darwin", "win32")
+                    (sys.platform in ("darwin", "win32")
+                     or getattr(self, "_hotkey_backend", None) == "pynput")  # X11 fallback
                     and not getattr(self, '_pynput_listener_started', False)
                 ):
                     self.log("🔄 Global hotkey listener stopped - restarting...")
@@ -22328,10 +22331,30 @@ class WayfinderApp(ctk.CTk):
         config_mods = self.config.get("hotkey_modifiers", []) or []
         return kde_binding_matches_config(active, config_code, config_mods)
 
+    @staticmethod
+    def _x11_without_input_devices() -> bool:
+        """An X11 session where no /dev/input device is readable (the user is not
+        in the 'input' group): evdev would hear nothing, while X11's XRecord
+        (pynput) needs no group."""
+        if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or not os.environ.get("DISPLAY"):
+            return False
+        import glob
+        events = glob.glob("/dev/input/event*")
+        return bool(events) and not any(os.access(path, os.R_OK) for path in events)
+
     def _start_evdev_listener(self):
         """Start (or restart) the evdev hotkey listener thread, cleanly stopping any prior one."""
         if not HAS_EVDEV:
             self.log("⚠️ evdev not installed — hotkeys limited to socket/D-Bus methods")
+            return
+        if self._x11_without_input_devices():
+            # AppImage/source on X11 without the 'input' group: the record
+            # shortcut was dead (only a log line said why). XRecord works.
+            if not getattr(self, "_pynput_listener_started", False):
+                self.log("🖥️ X11 — input devices are not readable (not in the 'input' "
+                         "group); using the X11 global listener instead")
+                self._hotkey_backend = "pynput"
+                self._start_pynput_listener()
             return
 
         # Defer to the compositor when KDE owns the record hotkey: binding it here
