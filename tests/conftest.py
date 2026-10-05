@@ -428,6 +428,27 @@ def reset_voice_profile():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_desktop_portal(monkeypatch):
+    """Tests must never ask the developer's real RemoteDesktop portal.
+
+    Setup's typing check probes the portal on a Wayland desktop, which made
+    its tests pass or fail with the host. Default to "not offered" and a fresh
+    cache; tests that need a portal patch over this.
+    """
+    if not sys.platform.startswith("linux"):
+        yield
+        return
+    try:
+        from wayfinder.core import portal_keyboard, setup as setup_module
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(portal_keyboard, "portal_keyboard_offered", lambda *a, **k: False)
+    monkeypatch.setattr(setup_module, "_PORTAL_OFFERED", {})
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_real_macos_keystrokes(monkeypatch):
     """Tests must never post real Cmd+V to the developer's frontmost app.
 

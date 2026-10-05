@@ -7,6 +7,7 @@ and guides users through setup on first launch.
 Supports Ubuntu/Debian (apt), with graceful fallback to manual instructions.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -171,11 +172,24 @@ def check_audio() -> DependencyStatus:
 _PORTAL_OFFERED: dict = {}
 
 
+def _portal_typing_enabled() -> bool:
+    """The saved "Type into every app" switch (default on), read without
+    load_config()'s migrations and saves."""
+    try:
+        from wayfinder import config as config_module
+        data = json.loads(config_module.CONFIG_FILE.read_text())
+    except Exception:
+        return True
+    return not isinstance(data, dict) or bool(data.get("linux_portal_typing", True))
+
+
 def _portal_typing_expected() -> bool:
     """A Wayland desktop whose RemoteDesktop portal will type for Aura (asked
     once at launch). ydotool and its daemon are only a fallback there, so Setup
     must not install a package, enable a service or ask for a password for them
     unless the user declined the portal or it failed."""
+    if not _portal_typing_enabled():
+        return False  # the user switched "Type into every app" off
     try:
         from wayfinder.core import portal_keyboard
         if not portal_keyboard.host_is_wayland_desktop():

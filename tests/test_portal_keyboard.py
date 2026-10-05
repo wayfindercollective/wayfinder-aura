@@ -821,6 +821,17 @@ def test_setup_offers_ydotool_where_no_portal_keyboard_exists(monkeypatch):
     assert "ydotool" in setup.get_missing_system_packages()
 
 
+def test_setup_offers_ydotool_when_typing_into_every_app_is_off(monkeypatch, tmp_path):
+    import json
+    import wayfinder.config as config_module
+    setup = _setup_on_a_portal_desktop(monkeypatch, state=pk.PortalKeyboard.IDLE)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
+    (tmp_path / "config.json").write_text(json.dumps({"linux_portal_typing": False}))
+    assert "ydotool" in setup.get_missing_system_packages()
+    (tmp_path / "config.json").write_text(json.dumps({"linux_portal_typing": True}))
+    assert "ydotool" not in setup.get_missing_system_packages()
+
+
 def test_wtype_primer_waits_while_the_portal_is_in_play(monkeypatch):
     from types import SimpleNamespace
     import wayfinder_main as wm
