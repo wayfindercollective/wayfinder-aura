@@ -2968,6 +2968,11 @@ def run_overlay():
                 "screen": None if screen is None else screen.name(),
                 "dpr": None if screen is None else round(float(screen.devicePixelRatio()), 2),
                 "avail": None if avail is None else [avail.x(), avail.y(), avail.width(), avail.height()],
+                "full": None if screen is None else [screen.geometry().x(), screen.geometry().y(),
+                                                     screen.geometry().width(), screen.geometry().height()],
+                # Starting up (faded in after the boot hold) or about to be
+                # shown (parked off-screen for 50 ms): not a fault yet.
+                "settling": bool(getattr(overlay, "_boot_hold_reveal", False)) or geo.x() <= -5000,
             }
             _diag_state["paints"] = paints
             return diag

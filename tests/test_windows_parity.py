@@ -1912,9 +1912,14 @@ def _pill_controller(lines):
 def _ack(state, **diag):
     base = {"frames": 30, "last_frame_ms": 20, "visible": True, "minimized": False,
             "opacity": 1.0, "rect": [600, 816, 262, 52], "screen": "DISPLAY1",
-            "dpr": 1.75, "avail": [0, 0, 1463, 866]}
+            "dpr": 1.75, "avail": [0, 0, 1463, 866], "full": [0, 0, 1463, 914],
+            "settling": False}
     base.update(diag)
-    return {"ack": True, "nonce": "1", "state": state, "diag": base}
+    _ACK_SEQ[0] += 1
+    return {"ack": True, "nonce": str(_ACK_SEQ[0]), "state": state, "diag": base}
+
+
+_ACK_SEQ = [0]
 
 
 def test_pill_line_is_quiet_when_the_pill_is_drawing_on_screen():
@@ -1933,6 +1938,21 @@ def test_pill_line_flags_a_pill_that_stopped_drawing_or_left_the_screen():
     ctl._log_pill_diag(_ack("processing", frames=0))
     assert "⚠" in lines[1] and "painted nothing while listening" in lines[1]
     ctl._log_pill_diag(_ack("ready", rect=[600, 1428, 262, 52]))
-    assert "outside the display's usable area" in lines[2]
+    assert "outside the display" in lines[2]
     ctl._log_pill_diag(_ack("listening", visible=False))
     assert "window hidden" in lines[3]
+
+
+def test_pill_line_no_false_alarms_for_glow_offset_startup_or_resends():
+    lines = []
+    ctl = _pill_controller(lines)
+    # Glow hanging below the usable area / pill moved over the taskbar: fine.
+    ctl._log_pill_diag(_ack("ready", rect=[600, 840, 262, 66]))
+    # Fading in at start-up (opacity 0, boot hold): "starting up", no warning.
+    ctl._log_pill_diag(_ack("ready", opacity=0.0, settling=True))
+    assert "⚠" not in "".join(lines) and "starting up" in lines[1]
+    # A resent command acked twice logs once.
+    ack = _ack("listening")
+    ctl._log_pill_diag(ack)
+    ctl._log_pill_diag(ack)
+    assert len(lines) == 3

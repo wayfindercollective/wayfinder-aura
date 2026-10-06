@@ -5331,22 +5331,31 @@ class OverlayController:
         frames it painted during the previous state. Flags a pill that should
         be on screen but is hidden, off its display, or painted nothing."""
         try:
+            nonce = data.get("nonce")
+            if nonce is not None and nonce == getattr(self, "_diag_last_nonce", None):
+                return  # a resent command's second ack
+            self._diag_last_nonce = nonce
             d = data["diag"]
             state = data.get("state", "?")
             prev = getattr(self, "_diag_prev_state", None)
             self._diag_prev_state = state
             x, y, w, h = d.get("rect") or (0, 0, 0, 0)
             ax, ay, aw, ah = d.get("avail") or (x, y, w, h)
-            on_display = x >= ax - 4 and y >= ay - 4 and x + w <= ax + aw + 4 and y + h <= ay + ah + 4
+            # The glow may hang below the usable area (and a user offset can
+            # move the pill over the taskbar): only leaving the display counts.
+            fx, fy, fw, fh = d.get("full") or (ax, ay, aw, ah)
+            on_display = x >= fx - 4 and y >= fy - 4 and x + w <= fx + fw + 4 and y + h <= fy + fh + 4
+            settling = bool(d.get("settling"))
             problems = []
-            if not d.get("visible"):
-                problems.append("window hidden")
-            if d.get("minimized"):
-                problems.append("minimized")
-            if d.get("opacity") is not None and d["opacity"] < 0.05:
-                problems.append("fully transparent")
-            if not on_display:
-                problems.append("outside the display's usable area")
+            if not settling:
+                if not d.get("visible"):
+                    problems.append("window hidden")
+                if d.get("minimized"):
+                    problems.append("minimized")
+                if d.get("opacity") is not None and d["opacity"] < 0.05:
+                    problems.append("fully transparent")
+                if not on_display:
+                    problems.append("outside the display")
             frames = d.get("frames")
             if prev in ("listening", "processing") and frames == 0:
                 problems.append(f"painted nothing while {prev}")
@@ -5358,6 +5367,8 @@ class OverlayController:
                 + (f" during {prev}" if prev else "")
                 + ("" if last is None else f", last {last / 1000:.1f}s ago")
             )
+            if settling:
+                line += " · starting up"
             if problems:
                 line += " · " + ", ".join(problems)
             self._log(line)
