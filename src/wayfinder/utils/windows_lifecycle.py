@@ -25,6 +25,13 @@ _WM_SETTINGCHANGE = 0x001A
 _WM_POWERBROADCAST = 0x0218
 _PBT_APMSUSPEND = 0x0004
 _PBT_APMRESUMEAUTOMATIC = 0x0012
+_PBT_APMRESUMESUSPEND = 0x0007      # resumed by the user (after APMRESUMEAUTOMATIC)
+_PBT_POWERSETTINGCHANGE = 0x8013
+# GUID_CONSOLE_DISPLAY_STATE {6FE69556-704A-47A0-8F24-C28D936FDA47}: the
+# display turning off/on/dimming. Modern Standby laptops can sleep and wake
+# with only these (no APMSUSPEND), so they are logged for diagnostics.
+_GUID_CONSOLE_DISPLAY_STATE = bytes.fromhex("5695e66f4a70a0478f24c28d936fda47")
+_DISPLAY_STATES = {0: "display off", 1: "display on", 2: "display dimmed"}
 _SPI_SETWORKAREA = 0x002F
 
 _LRESULT = ctypes.c_ssize_t
@@ -43,9 +50,26 @@ class _WNDCLASSW(ctypes.Structure):
     ]
 
 
+def _read_power_setting(lparam: int):
+    """(GUID bytes, first DWORD of data) from a POWERBROADCAST_SETTING*, or None."""
+    if not lparam:
+        return None
+    try:
+        guid = ctypes.string_at(lparam, 16)
+        length = int.from_bytes(ctypes.string_at(lparam + 16, 4), "little")
+        if length < 4:
+            return guid, None
+        return guid, int.from_bytes(ctypes.string_at(lparam + 20, 4), "little")
+    except Exception:
+        return None
+
+
 def dispatch(msg: int, wparam: int, lparam: int, *, on_sleep=None, on_wake=None,
-             on_screens_changed=None, on_end_session=None) -> None:
-    """Map one window message to a callback (pure; unit-tested)."""
+             on_screens_changed=None, on_end_session=None, on_power_event=None) -> None:
+    """Map one window message to a callback (pure; unit-tested).
+
+    *on_power_event(text)* is diagnostics only: every sleep/wake and display
+    on/off/dimmed, so a Modern Standby wake the app missed shows in the log."""
     if msg == _WM_ENDSESSION:
         # Sign-out, shutdown, or an installer's Restart Manager closing Aura
         # (ENDSESSION_CLOSEAPP). The window's X only hides to the tray, so this
@@ -53,6 +77,17 @@ def dispatch(msg: int, wparam: int, lparam: int, *, on_sleep=None, on_wake=None,
         if wparam and on_end_session:
             on_end_session()
     elif msg == _WM_POWERBROADCAST:
+        if on_power_event:
+            if wparam == _PBT_APMSUSPEND:
+                on_power_event("going to sleep")
+            elif wparam == _PBT_APMRESUMEAUTOMATIC:
+                on_power_event("woke up")
+            elif wparam == _PBT_APMRESUMESUSPEND:
+                on_power_event("woke up (user present)")
+            elif wparam == _PBT_POWERSETTINGCHANGE:
+                setting = _read_power_setting(lparam)
+                if setting and setting[0] == _GUID_CONSOLE_DISPLAY_STATE:
+                    on_power_event(_DISPLAY_STATES.get(setting[1], f"display state {setting[1]}"))
         if wparam == _PBT_APMSUSPEND and on_sleep:
             on_sleep()
         elif wparam == _PBT_APMRESUMEAUTOMATIC and on_wake:
@@ -76,12 +111,13 @@ class WindowsLifecycleObserver:
 
     @classmethod
     def start(cls, *, on_sleep=None, on_wake=None, on_screens_changed=None,
-              on_end_session=None):
+              on_end_session=None, on_power_event=None):
         if sys.platform != "win32":
             return None
         observer = cls({"on_sleep": on_sleep, "on_wake": on_wake,
                         "on_screens_changed": on_screens_changed,
-                        "on_end_session": on_end_session})
+                        "on_end_session": on_end_session,
+                        "on_power_event": on_power_event})
         observer._thread.start()
         observer._ready.wait(timeout=2.0)
         return observer if observer._hwnd else None
@@ -129,6 +165,17 @@ class WindowsLifecycleObserver:
             self._ready.set()
         if not self._hwnd:
             return
+        if self._callbacks.get("on_power_event"):
+            # Display on/off/dimmed arrive only to windows that ask for them.
+            try:
+                user32.RegisterPowerSettingNotification.restype = wintypes.HANDLE
+                user32.RegisterPowerSettingNotification.argtypes = [
+                    wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+                self._display_guid = ctypes.create_string_buffer(_GUID_CONSOLE_DISPLAY_STATE, 16)
+                self._power_notify = user32.RegisterPowerSettingNotification(
+                    self._hwnd, self._display_guid, 0)  # DEVICE_NOTIFY_WINDOW_HANDLE
+            except Exception:
+                self._power_notify = None
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             user32.TranslateMessage(ctypes.byref(msg))

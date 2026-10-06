@@ -2303,6 +2303,10 @@ class GlassmorphicOverlay(QWidget):
     
     def paintEvent(self, event):
         """Custom paint for glassmorphic overlay."""
+        # Pill diagnostics (Windows): frames painted, reported with each state
+        # ack so a pill that stops drawing (seen after Modern Standby) shows up.
+        self._diag_paints = getattr(self, "_diag_paints", 0) + 1
+        self._diag_last_paint = time.monotonic()
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -2941,6 +2945,36 @@ def run_overlay():
         except Exception as _e:
             _debug_log(f"tray: state update failed: {_e}")
 
+    _diag_state = {"paints": 0}
+
+    def _pill_diag() -> dict | None:
+        """Windows: where the pill window is and whether it has been painting
+        (frames since the previous state ack, age of the last frame)."""
+        if sys.platform != "win32" or tray_only:
+            return None
+        try:
+            paints = int(getattr(overlay, "_diag_paints", 0))
+            last = getattr(overlay, "_diag_last_paint", None)
+            geo = overlay.frameGeometry()
+            screen = overlay.screen()
+            avail = screen.availableGeometry() if screen is not None else None
+            diag = {
+                "frames": paints - _diag_state["paints"],
+                "last_frame_ms": None if last is None else int((time.monotonic() - last) * 1000),
+                "visible": bool(overlay.isVisible()),
+                "minimized": bool(overlay.isMinimized()),
+                "opacity": round(float(overlay.windowOpacity()), 2),
+                "rect": [geo.x(), geo.y(), geo.width(), geo.height()],
+                "screen": None if screen is None else screen.name(),
+                "dpr": None if screen is None else round(float(screen.devicePixelRatio()), 2),
+                "avail": None if avail is None else [avail.x(), avail.y(), avail.width(), avail.height()],
+            }
+            _diag_state["paints"] = paints
+            return diag
+        except Exception as e:
+            _debug_log(f"pill diag failed: {e}")
+            return None
+
     def _emit_cmd_ack(cmd: dict, *, ok: bool = True, state_name: str | None = None):
         """Emit a Qt-thread ack on stdout when the parent sent a nonce.
 
@@ -2962,18 +2996,17 @@ def run_overlay():
                 )
             except Exception:
                 state_name = "unknown"
+        payload = {
+            "ack": True,
+            "nonce": nonce,
+            "state": state_name,
+            "ok": bool(ok),
+        }
+        diag = _pill_diag()
+        if diag is not None:
+            payload["diag"] = diag
         try:
-            print(
-                json.dumps(
-                    {
-                        "ack": True,
-                        "nonce": nonce,
-                        "state": state_name,
-                        "ok": bool(ok),
-                    }
-                ),
-                flush=True,
-            )
+            print(json.dumps(payload), flush=True)
         except Exception as e:
             _debug_log(f"ack emit failed: {e}")
 
@@ -3154,6 +3187,36 @@ def run_overlay():
     cmd_timer = QTimer()
     cmd_timer.timeout.connect(process_commands)
     cmd_timer.start(50)  # Check every 50ms (20Hz - responsive enough for state changes)
+
+    if sys.platform == "win32" and not tray_only:
+        # Pill diagnostics: report display changes (added/removed/resized/DPI)
+        # to the main process, which logs them beside the pill state lines.
+        def _emit_screen_event(kind: str, screen=None):
+            try:
+                info = {"event": "screen", "kind": kind}
+                if screen is not None:
+                    g = screen.geometry()
+                    info.update(name=screen.name(), rect=[g.x(), g.y(), g.width(), g.height()],
+                                dpr=round(float(screen.devicePixelRatio()), 2))
+                print(json.dumps(info), flush=True)
+            except Exception as e:
+                _debug_log(f"screen event emit failed: {e}")
+
+        def _watch_screen(screen):
+            try:
+                screen.geometryChanged.connect(lambda _g, s=screen: _emit_screen_event("resized", s))
+                screen.logicalDotsPerInchChanged.connect(lambda _d, s=screen: _emit_screen_event("scale", s))
+            except Exception:
+                pass
+
+        try:
+            for _s in app.screens():
+                _watch_screen(_s)
+            app.screenAdded.connect(lambda s: (_watch_screen(s), _emit_screen_event("added", s)))
+            app.screenRemoved.connect(lambda s: _emit_screen_event("removed", s))
+            app.primaryScreenChanged.connect(lambda s: _emit_screen_event("primary", s))
+        except Exception as e:
+            _debug_log(f"screen watch setup failed: {e}")
 
     # Send ready signal. Report tray availability so the main app's hide-to-tray guard
     # never withdraws the window when there is no tray to restore it from.

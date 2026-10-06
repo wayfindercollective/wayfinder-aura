@@ -5314,6 +5314,53 @@ class OverlayController:
                 if data.get("ack") and data.get("nonce") is not None:
                     with self._ack_lock:
                         self._received_acks.add(str(data["nonce"]))
+                    if data.get("diag"):
+                        self._log_pill_diag(data)
+                if data.get("event") == "screen":
+                    self._log(
+                        f"🖥 Pill sees a display change: {data.get('kind')} "
+                        f"{data.get('name') or ''} {data.get('rect') or ''} "
+                        f"scale {data.get('dpr') or '?'}".rstrip()
+                    )
+        except Exception:
+            pass
+
+    def _log_pill_diag(self, data: dict) -> None:
+        """Windows: one "🫧 Pill" activity-log line per state change, from the
+        overlay's own report: where its window is, which display, and how many
+        frames it painted during the previous state. Flags a pill that should
+        be on screen but is hidden, off its display, or painted nothing."""
+        try:
+            d = data["diag"]
+            state = data.get("state", "?")
+            prev = getattr(self, "_diag_prev_state", None)
+            self._diag_prev_state = state
+            x, y, w, h = d.get("rect") or (0, 0, 0, 0)
+            ax, ay, aw, ah = d.get("avail") or (x, y, w, h)
+            on_display = x >= ax - 4 and y >= ay - 4 and x + w <= ax + aw + 4 and y + h <= ay + ah + 4
+            problems = []
+            if not d.get("visible"):
+                problems.append("window hidden")
+            if d.get("minimized"):
+                problems.append("minimized")
+            if d.get("opacity") is not None and d["opacity"] < 0.05:
+                problems.append("fully transparent")
+            if not on_display:
+                problems.append("outside the display's usable area")
+            frames = d.get("frames")
+            if prev in ("listening", "processing") and frames == 0:
+                problems.append(f"painted nothing while {prev}")
+            last = d.get("last_frame_ms")
+            line = (
+                f"🫧 Pill {'⚠ ' if problems else ''}→ {state} · window {x},{y} {w}x{h} "
+                f"on {d.get('screen') or '?'} (usable {ax},{ay} {aw}x{ah}, scale {d.get('dpr')})"
+                f" · {frames} frames"
+                + (f" during {prev}" if prev else "")
+                + ("" if last is None else f", last {last / 1000:.1f}s ago")
+            )
+            if problems:
+                line += " · " + ", ".join(problems)
+            self._log(line)
         except Exception:
             pass
 
@@ -6424,6 +6471,9 @@ class WayfinderApp(ctk.CTk):
                     # Sign-out/shutdown or an installer closing Aura: quit for
                     # real (closing the window only hides it to the tray).
                     on_end_session=self._on_windows_end_session,
+                    # Diagnostics: every sleep/wake and display off/on/dimmed,
+                    # including Modern Standby wakes the handlers above miss.
+                    on_power_event=lambda what: self.log(f"💤 Windows: {what}"),
                 )
             except Exception as exc:
                 self.log(f"⚠ Windows sleep/wake integration unavailable: {exc}")
