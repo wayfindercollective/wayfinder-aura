@@ -127,6 +127,16 @@
   </supports>
 
   <releases>
+    <release version="1.2.1-beta.2" date="2026-10-06" type="development">
+      <description>
+        <p>Beta built from main on 2026-10-06. Changes since the last stable release:</p>
+        <ul>
+          <li>The desktop asks one question at a time on first run, and the tour says what is coming.</li>
+          <li>Typing into every app recovers by itself.</li>
+          <li>The AppImage tells the desktop who is asking.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-10-05">
       <description>
         <p>Linux: dictation for gamers on every desktop.</p>
