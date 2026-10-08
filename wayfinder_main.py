@@ -6513,6 +6513,8 @@ class WayfinderApp(ctk.CTk):
         # Hotkey listeners were started early (see top of __init__); just supervise + poll now.
         self._start_hotkey_supervisor()
         self.poll_events()
+        if IS_WINDOWS and not IS_MACOS:
+            self._start_windows_poll_watchdog()
         self.after(350, self._refresh_model_catalog_background)
         if IS_MACOS:
             # Linux/Windows already refreshed online in main.py before the UI.
@@ -23770,6 +23772,8 @@ class WayfinderApp(ctk.CTk):
             self._draining_events = False
 
     def poll_events(self):
+        # Heartbeat for the Windows poll watchdog (_start_windows_poll_watchdog).
+        self._poll_heartbeat = time.monotonic()
         if IS_MACOS and not getattr(self, "_event_wakeup_attached", False):
             attach = getattr(self.event_queue, "attach", None)
             self._event_wakeup_attached = bool(
@@ -23797,7 +23801,85 @@ class WayfinderApp(ctk.CTk):
             interval = _MACOS_IDLE_SAFETY_POLL_MS
         else:
             interval = 250
-        self.after(interval, self.poll_events)
+        self._poll_after_id = self.after(interval, self.poll_events)
+
+    def _start_windows_poll_watchdog(self) -> None:
+        """Windows: log (and offer a restart) if poll_events stops running.
+
+        8 Oct 2026 the poll chain stopped after a sleep/wake while Tk kept
+        pumping messages: hotkey presses were queued and never handled, with
+        nothing logged (utils/windows_poll_watchdog.py).
+        """
+        try:
+            from wayfinder.utils.windows_poll_watchdog import PollWatchdog
+
+            self._poll_watchdog = PollWatchdog(
+                heartbeat=lambda: getattr(self, "_poll_heartbeat", None),
+                log=self.log,
+                probe=self._windows_poll_probe,
+                pending_hotkey=self._hotkey_press_waiting,
+                offer_restart=self._offer_windows_restart,
+            ).start()
+        except Exception as exc:
+            self.log(f"⚠ Hotkey watchdog unavailable: {exc}")
+
+    def _windows_poll_probe(self) -> str:
+        """During a stall (off the Tk thread): is the poll timer still scheduled,
+        and do new timer / idle callbacks still run? Every Tk call is bounded."""
+        from wayfinder.utils.windows_poll_watchdog import ask_with_timeout
+
+        parts = []
+        poll_id = getattr(self, "_poll_after_id", None)
+        ok, ids = ask_with_timeout(lambda: self.tk.splitlist(self.tk.call("after", "info")), 3.0)
+        if not ok:
+            return "Tk did not answer a direct call within 3s"
+        if isinstance(ids, Exception):
+            parts.append(f"after info failed ({ids})")
+        else:
+            state = "still scheduled" if poll_id in ids else "NOT scheduled"
+            parts.append(f"{len(ids)} Tk timers pending, poll timer {state}")
+        for label, schedule in (("new 0 ms timer", self.after), ("idle callback", None)):
+            ran = threading.Event()
+            if schedule is None:
+                sent, _ = ask_with_timeout(lambda: self.after_idle(ran.set), 2.0)
+            else:
+                sent, _ = ask_with_timeout(lambda: schedule(0, ran.set), 2.0)
+            parts.append(f"{label} {'ran' if sent and ran.wait(2.0) else 'did NOT run'}")
+        return "; ".join(parts)
+
+    def _hotkey_press_waiting(self) -> bool:
+        """Whether a record-hotkey press is sitting unhandled in the event queue."""
+        q = self.event_queue
+        with q.mutex:
+            items = list(q.queue)
+        return any(isinstance(e, tuple) and e and e[0] == EventType.HOTKEY_PRESSED for e in items)
+
+    def _offer_windows_restart(self) -> None:
+        """Ask (native dialog, off the stuck Tk thread) to restart Aura."""
+        import ctypes
+
+        flags = 0x4 | 0x30 | 0x10000 | 0x40000  # YESNO, WARNING, SETFOREGROUND, TOPMOST
+        answer = ctypes.windll.user32.MessageBoxW(
+            None,
+            "Wayfinder Aura stopped responding to your hotkey.\n\n"
+            "Restart Aura now? It's ready again in about 20 seconds.",
+            "Wayfinder Aura", flags)
+        if answer != 6:  # IDYES
+            self.log("ℹ Restart declined — Aura will keep ignoring the hotkey until it restarts")
+            return
+        if not getattr(sys, "frozen", False):
+            self.log("ℹ Running from source: restart Aura yourself")
+            return
+        self.log("🔄 Restarting Aura (hotkey checks had stopped)")
+        # Relaunch after this process has gone, or the new copy would find the
+        # old one still answering and just raise its window.
+        subprocess.Popen(
+            f'cmd /c ping -n 4 127.0.0.1 >nul & start "" "{sys.executable}"',
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+        _flush_windows_clipboard_restore()
+        os._exit(0)
 
     def _drain_tray_actions(self) -> None:
         """Run queued status-menu actions on the Tk thread."""
