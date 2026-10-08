@@ -7,6 +7,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Windows: Aura offers a restart when it stops answering the hotkey.** If
+  Aura stops handling key presses (seen once after the laptop woke from sleep),
+  it logs when it happened and why, and a press now brings up a Restart
+  dialog instead of doing nothing. The dialog closes by itself if Aura
+  recovers.
+- **Windows: diagnostics for the dictation pill and for sleep.** The activity
+  log records where the pill is, which screen it is on and whether it is
+  drawing, plus display on, off and dimmed, sleep and wake, so a pill that
+  goes missing can be explained.
+
 ### Fixed
 
 - **The desktop asks one question at a time on first run, and the tour says

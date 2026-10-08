@@ -1876,3 +1876,83 @@ def test_a_failed_ctrl_v_leaves_the_dictation_and_schedules_no_restore(monkeypat
         iw.inject_text_paste_windows("dictated")
     iw._pending_restore.flush()
     assert clip["v"] == "dictated"   # the user can still press Ctrl+V
+
+
+# --- Pill + power diagnostics (overlay acks, windows_lifecycle) -------------
+
+def test_power_events_are_reported_without_changing_sleep_and_wake():
+    import ctypes
+
+    from wayfinder.utils import windows_lifecycle as lc
+
+    seen, slept, woke = [], [], []
+    kw = dict(on_power_event=seen.append, on_sleep=lambda: slept.append(1),
+              on_wake=lambda: woke.append(1))
+    lc.dispatch(lc._WM_POWERBROADCAST, lc._PBT_APMSUSPEND, 0, **kw)
+    lc.dispatch(lc._WM_POWERBROADCAST, lc._PBT_APMRESUMEAUTOMATIC, 0, **kw)
+    for state in (0, 1, 2):
+        buf = ctypes.create_string_buffer(
+            lc._GUID_CONSOLE_DISPLAY_STATE + (4).to_bytes(4, "little") + state.to_bytes(4, "little"))
+        lc.dispatch(lc._WM_POWERBROADCAST, lc._PBT_POWERSETTINGCHANGE, ctypes.addressof(buf), **kw)
+    assert seen == ["going to sleep", "woke up", "display off", "display on", "display dimmed"]
+    assert slept == [1] and woke == [1]      # the existing handlers, unchanged
+    # Without the diagnostics callback nothing new happens.
+    lc.dispatch(lc._WM_POWERBROADCAST, lc._PBT_POWERSETTINGCHANGE, 0, on_wake=lambda: woke.append(2))
+    assert woke == [1]
+
+
+def _pill_controller(lines):
+    import wayfinder_main
+
+    ctl = wayfinder_main.OverlayController.__new__(wayfinder_main.OverlayController)
+    ctl._log_callback = lines.append
+    return ctl
+
+
+def _ack(state, **diag):
+    base = {"frames": 30, "last_frame_ms": 20, "visible": True, "minimized": False,
+            "opacity": 1.0, "rect": [600, 816, 262, 52], "screen": "DISPLAY1",
+            "dpr": 1.75, "avail": [0, 0, 1463, 866], "full": [0, 0, 1463, 914],
+            "settling": False}
+    base.update(diag)
+    _ACK_SEQ[0] += 1
+    return {"ack": True, "nonce": str(_ACK_SEQ[0]), "state": state, "diag": base}
+
+
+_ACK_SEQ = [0]
+
+
+def test_pill_line_is_quiet_when_the_pill_is_drawing_on_screen():
+    lines = []
+    ctl = _pill_controller(lines)
+    ctl._log_pill_diag(_ack("listening"))
+    ctl._log_pill_diag(_ack("processing"))
+    assert lines[1].startswith("🫧 Pill → processing · window 600,816 262x52 on DISPLAY1")
+    assert "30 frames during listening" in lines[1] and "⚠" not in "".join(lines)
+
+
+def test_pill_line_flags_a_pill_that_stopped_drawing_or_left_the_screen():
+    lines = []
+    ctl = _pill_controller(lines)
+    ctl._log_pill_diag(_ack("listening"))
+    ctl._log_pill_diag(_ack("processing", frames=0))
+    assert "⚠" in lines[1] and "painted nothing while listening" in lines[1]
+    ctl._log_pill_diag(_ack("ready", rect=[600, 1428, 262, 52]))
+    assert "outside the display" in lines[2]
+    ctl._log_pill_diag(_ack("listening", visible=False))
+    assert "window hidden" in lines[3]
+
+
+def test_pill_line_no_false_alarms_for_glow_offset_startup_or_resends():
+    lines = []
+    ctl = _pill_controller(lines)
+    # Glow hanging below the usable area / pill moved over the taskbar: fine.
+    ctl._log_pill_diag(_ack("ready", rect=[600, 840, 262, 66]))
+    # Fading in at start-up (opacity 0, boot hold): "starting up", no warning.
+    ctl._log_pill_diag(_ack("ready", opacity=0.0, settling=True))
+    assert "⚠" not in "".join(lines) and "starting up" in lines[1]
+    # A resent command acked twice logs once.
+    ack = _ack("listening")
+    ctl._log_pill_diag(ack)
+    ctl._log_pill_diag(ack)
+    assert len(lines) == 3
