@@ -6514,7 +6514,9 @@ class WayfinderApp(ctk.CTk):
         self._start_hotkey_supervisor()
         self.poll_events()
         if IS_WINDOWS and not IS_MACOS:
-            self._start_windows_poll_watchdog()
+            # Via after(): runs once mainloop is up, so the start-up work in
+            # main.py before it can't look like a stall.
+            self.after(2000, self._start_windows_poll_watchdog)
         self.after(350, self._refresh_model_catalog_background)
         if IS_MACOS:
             # Linux/Windows already refreshed online in main.py before the UI.
@@ -15795,6 +15797,13 @@ class WayfinderApp(ctk.CTk):
     def report_callback_exception(self, exc, val, tb):
         """An error in a Tk callback: print it as Tk does, and report it."""
         super().report_callback_exception(exc, val, tb)
+        if IS_WINDOWS and not IS_MACOS:
+            # The traceback goes to app.log; put a pointer in the activity log
+            # too (8 Oct: a stopped hotkey poll left no trace in it).
+            try:
+                self.log(f"⚠ Internal error: {exc.__name__}: {val} (traceback in app.log)")
+            except Exception:
+                pass
         try:
             from wayfinder.core import crash_reports
 
@@ -23813,12 +23822,14 @@ class WayfinderApp(ctk.CTk):
         try:
             from wayfinder.utils.windows_poll_watchdog import PollWatchdog
 
+            self._restart_offer_lock = threading.Lock()
             self._poll_watchdog = PollWatchdog(
                 heartbeat=lambda: getattr(self, "_poll_heartbeat", None),
                 log=self.log,
                 probe=self._windows_poll_probe,
                 pending_hotkey=self._hotkey_press_waiting,
                 offer_restart=self._offer_windows_restart,
+                on_recover=self._dismiss_windows_restart_offer,
             ).start()
         except Exception as exc:
             self.log(f"⚠ Hotkey watchdog unavailable: {exc}")
@@ -23855,31 +23866,84 @@ class WayfinderApp(ctk.CTk):
         return any(isinstance(e, tuple) and e and e[0] == EventType.HOTKEY_PRESSED for e in items)
 
     def _offer_windows_restart(self) -> None:
-        """Ask (native dialog, off the stuck Tk thread) to restart Aura."""
+        """Ask (native dialog, off the stuck Tk thread) to restart Aura.
+
+        Only one dialog at a time; if the poll recovers while it is up, the
+        watchdog answers it "No" (_dismiss_windows_restart_offer) and nothing
+        is restarted.
+        """
         import ctypes
 
-        flags = 0x4 | 0x30 | 0x10000 | 0x40000  # YESNO, WARNING, SETFOREGROUND, TOPMOST
-        answer = ctypes.windll.user32.MessageBoxW(
-            None,
-            "Wayfinder Aura stopped responding to your hotkey.\n\n"
-            "Restart Aura now? It's ready again in about 20 seconds.",
-            "Wayfinder Aura", flags)
-        if answer != 6:  # IDYES
-            self.log("ℹ Restart declined — Aura will keep ignoring the hotkey until it restarts")
+        lock = getattr(self, "_restart_offer_lock", None)
+        if lock is None or not lock.acquire(blocking=False):
             return
-        if not getattr(sys, "frozen", False):
-            self.log("ℹ Running from source: restart Aura yourself")
+        try:
+            self._restart_offer_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+            busy = self.app_state != AppState.IDLE
+            text = ("Wayfinder Aura stopped responding to your hotkey.\n\n"
+                    + ("The dictation in progress will be lost.\n\n" if busy else "")
+                    + "Restart Aura now? It's ready again in about 20 seconds.")
+            flags = 0x4 | 0x30 | 0x10000 | 0x40000  # YESNO, WARNING, SETFOREGROUND, TOPMOST
+            answer = ctypes.windll.user32.MessageBoxW(None, text, "Wayfinder Aura", flags)
+            self._restart_offer_thread = None
+            watchdog = getattr(self, "_poll_watchdog", None)
+            if watchdog is not None and not watchdog.stalled:
+                self.log("ℹ Aura recovered by itself — restart skipped")
+                return
+            if answer != 6:  # IDYES
+                self.log("ℹ Restart declined — the hotkey does nothing until Aura "
+                         "recovers or is restarted")
+                return
+            if not getattr(sys, "frozen", False):
+                self.log("ℹ Running from source: restart Aura yourself")
+                return
+            self.log("🔄 Restarting Aura (hotkey checks had stopped)")
+            # Relaunch after this process has gone, or the new copy would find
+            # the old one still answering and just raise its window.
+            subprocess.Popen(
+                f'cmd /c ping -n 4 127.0.0.1 >nul & start "" "{sys.executable}"',
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+            )
+            # quit_app's cleanup that doesn't need the (stuck) Tk thread.
+            try:
+                from wayfinder.core import crash_reports
+
+                crash_reports.mark_clean_exit()
+            except Exception:
+                pass
+            try:
+                self._close_audio_ducking()
+            except Exception:
+                pass
+            _flush_windows_clipboard_restore()
+            os._exit(0)
+        finally:
+            self._restart_offer_thread = None
+            lock.release()
+
+    def _dismiss_windows_restart_offer(self) -> None:
+        """The poll recovered: answer an open restart dialog "No"."""
+        thread_id = getattr(self, "_restart_offer_thread", None)
+        if not thread_id:
             return
-        self.log("🔄 Restarting Aura (hotkey checks had stopped)")
-        # Relaunch after this process has gone, or the new copy would find the
-        # old one still answering and just raise its window.
-        subprocess.Popen(
-            f'cmd /c ping -n 4 127.0.0.1 >nul & start "" "{sys.executable}"',
-            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
-            close_fds=True,
-        )
-        _flush_windows_clipboard_restore()
-        os._exit(0)
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _each(hwnd, _):
+            name = ctypes.create_unicode_buffer(16)
+            user32.GetClassNameW(hwnd, name, 16)
+            if name.value == "#32770":  # the MessageBox dialog
+                found.append(hwnd)
+            return True
+
+        user32.EnumThreadWindows(thread_id, _each, 0)
+        for hwnd in found:
+            user32.PostMessageW(hwnd, 0x0111, 7, 0)  # WM_COMMAND, IDNO
 
     def _drain_tray_actions(self) -> None:
         """Run queued status-menu actions on the Tk thread."""

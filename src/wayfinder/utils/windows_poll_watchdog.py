@@ -8,7 +8,8 @@ log. This watchdog runs on its own thread and:
 * logs when the poll goes quiet, with what the main thread is doing and (via
   ``probe``) what Tcl still has scheduled;
 * logs when the poll comes back;
-* if a hotkey press is waiting during a stall, offers a restart once.
+* if a hotkey press is waiting during a stall, offers a restart once per
+  stall (``on_recover`` lets the app withdraw the offer if the poll returns).
 
 It only observes. ``tick`` is the whole decision so tests drive it with a
 fake clock.
@@ -51,6 +52,7 @@ class PollWatchdog:
         probe: Callable[[], str],
         pending_hotkey: Callable[[], bool],
         offer_restart: Callable[[], None],
+        on_recover: Callable[[], None] = lambda: None,
         stack: Callable[[], str] = main_thread_stack,
         clock: Callable[[], float] = time.monotonic,
         spawn: Optional[Callable[[Callable[[], None], str], None]] = None,
@@ -60,6 +62,7 @@ class PollWatchdog:
         self._probe = probe
         self._pending_hotkey = pending_hotkey
         self._offer_restart = offer_restart
+        self._on_recover = on_recover
         self._stack = stack
         self._clock = clock
         self._spawn = spawn or _spawn_daemon
@@ -96,6 +99,10 @@ class PollWatchdog:
         if beat > self._stalled_at:
             self._log(f"✓ Hotkey checks resumed after {beat - self._stalled_at:.0f}s")
             self._stalled_at = None
+            try:
+                self._on_recover()  # e.g. take down a restart offer still on screen
+            except Exception:
+                pass
             return
         if not self._offered and quiet >= PROMPT_AFTER_S and _safe_bool(self._pending_hotkey):
             self._offered = True
