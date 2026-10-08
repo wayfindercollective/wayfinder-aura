@@ -25,7 +25,10 @@ from typing import Callable, Optional
 
 CHECK_EVERY_S = 2.0
 STALL_AFTER_S = 10.0     # poll runs every 100-250 ms; 10 s quiet is not a hiccup
-PROMPT_AFTER_S = 15.0    # a press waiting this long into a stall gets the restart offer
+# A press waiting this long into a stall gets the restart offer. Above the
+# 19-34 s start-up stalls seen on a memory-starved laptop (settings preload),
+# which recover by themselves.
+PROMPT_AFTER_S = 30.0
 # A tick gap this long means the machine slept or this thread was starved:
 # the poll needs a moment after that before its silence means anything.
 _ASLEEP_GAP_S = CHECK_EVERY_S * 2.5

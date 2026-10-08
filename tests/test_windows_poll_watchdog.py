@@ -97,6 +97,17 @@ def test_restart_offered_once_only_when_a_press_is_waiting():
     assert spawned.count("poll-watchdog-restart") == 1
 
 
+def test_slow_start_up_stall_gets_no_restart_offer():
+    """A 19-34 s stall (start-up on a starved laptop) recovers by itself."""
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, _, offers = make(clock, beat, pending=lambda: True)
+    run_for(dog, clock, 28)
+    assert dog.stalled and offers == []
+    run_for(dog, clock, 4)
+    assert offers == [1]
+
+
 def test_broken_pending_check_never_offers():
     clock = Clock()
     beat = [clock.t]
