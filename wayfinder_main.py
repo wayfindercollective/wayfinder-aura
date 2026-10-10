@@ -11214,11 +11214,9 @@ class WayfinderApp(ctk.CTk):
             parent, "Raw Transcript",
             self.raw_transcription_var, self._on_raw_transcription_changed,
             tooltip=(
-                "Return the recognizer's text without Aura's artifact filtering, "
-                "repetition removal, capitalization, punctuation fixes, vocabulary "
-                "substitutions or LLM cleanup. Other cleanup controls are hidden "
-                "while this is on. Long recordings still join raw chunks and may "
-                "repeat overlap text. Line breaks become spaces before display or paste."
+                "Use the speech model's output without Aura's text cleanup, "
+                "vocabulary substitutions, or LLM rewriting. Long recordings "
+                "may repeat words where chunks overlap."
             ),
         )
 
