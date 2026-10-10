@@ -365,7 +365,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ensure_punctuation": False,  # Additional punctuation fixes (optional, most models do this well)
     # Opt-in: return the recognizer's text without Aura's text cleanup,
     # substitutions, punctuation fixes or LLM pass. Chunked recordings still
-    # join their raw pieces without overlap deduplication.
+    # join their raw pieces without overlap deduplication. Final dictation
+    # converts line breaks to spaces so model output cannot send Enter.
     "raw_transcription": False,
     # Keep the existing Whisper repetition-loop cleanup unless the user turns it
     # off. Lists of short spoken items can otherwise be mistaken for a loop.

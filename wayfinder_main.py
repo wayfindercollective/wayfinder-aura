@@ -10,6 +10,7 @@ import json
 import math
 import os
 import queue
+import re
 import signal
 import socket
 import subprocess
@@ -117,6 +118,14 @@ def _game_chat_module():
 def _device_noun() -> str:
     """How user-facing copy names this computer."""
     return "PC" if IS_WINDOWS else "Mac" if IS_MACOS else "computer"
+
+
+_DICTATION_LINE_BREAKS = re.compile(r"[\r\n\v\f\x85\u2028\u2029]+")
+
+
+def _flatten_dictation_line_breaks(text: str) -> str:
+    """Keep model line breaks from becoming Enter during dictation injection."""
+    return _DICTATION_LINE_BREAKS.sub(" ", text)
 
 
 def _footer_tagline(is_macos: bool | None = None, is_windows: bool | None = None) -> str:
@@ -6358,7 +6367,10 @@ class WayfinderApp(ctk.CTk):
         )
         want_visual = overlay_enabled and not getattr(self, "_game_mode", False)
         qt_visual_mode = visual_overlay_mode(sys.platform, overlay_type) if want_visual else None
-        initial_style = self.config.get("output_tone", "minimal")
+        initial_style = (
+            "minimal" if self.config.get("raw_transcription", False)
+            else self.config.get("output_tone", "minimal")
+        )
 
         def _start_overlay_controller(*, tray_only: bool) -> bool:
             """Start Always On / tray-only subprocess. Returns True on success."""
@@ -8758,6 +8770,11 @@ class WayfinderApp(ctk.CTk):
             self.tab_buttons[tab_id] = btn
             self.tab_colors[tab_id] = COLORS["accent"]
 
+        if self.config.get("raw_transcription", False):
+            # Style/Strong/Caricature do not run in Raw mode. Keep the button
+            # allocated so the saved style workspace can return immediately.
+            self.tab_buttons["style"].pack_forget()
+
         # Footer pinned to the sidebar bottom: intentional Free pill or Ultra badge.
         is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         footer_pill = ctk.CTkFrame(
@@ -8971,6 +8988,9 @@ class WayfinderApp(ctk.CTk):
         # open over the outgoing pane has no owner once that pane is unmapped,
         # and nothing else will dismiss it.
         hide_all_tooltips()
+        if (tab_id == "style" and not inspection
+                and self.config.get("raw_transcription", False)):
+            return
         required_feature = None if inspection else feature_for_tab(tab_id)
         if required_feature:
             gate = getattr(self, "feature_gate", None)
@@ -9638,40 +9658,6 @@ class WayfinderApp(ctk.CTk):
         )
         self.mode_selector.pack(fill="x")
 
-        # Shared transcription controls live outside the rebuilt Local/Remote
-        # content. Raw Transcript overrides the cleanup switches for the next
-        # dictation without discarding the user's saved preferences.
-        self.raw_transcription_var = ctk.BooleanVar(
-            value=bool(self.config.get("raw_transcription", False))
-        )
-        self.create_toggle_row(
-            mode_tile, "Raw Transcript",
-            self.raw_transcription_var, self._on_raw_transcription_changed,
-            tooltip=(
-                "Return the recognizer's text without Aura's artifact filtering, "
-                "repetition removal, capitalization, punctuation fixes, vocabulary "
-                "substitutions or LLM cleanup. Overrides the cleanup switches below. "
-                "Long recordings still join raw chunks and may repeat overlap text. "
-                "Line breaks are injected as-is and may submit in some apps."
-            ),
-        )
-
-        # This is Aura's built-in Whisper text cleanup, not the optional LLM
-        # Post-Processing switch below. Keep it visible in both Local and
-        # Remote modes so users can opt out when it mistakes a list for a loop.
-        self.repetition_cleanup_var = ctk.BooleanVar(
-            value=bool(self.config.get("collapse_whisper_repetitions", True))
-        )
-        self.create_toggle_row(
-            mode_tile, "Remove Repetition Loops",
-            self.repetition_cleanup_var, self._on_repetition_cleanup_changed,
-            tooltip=(
-                "Removes near-duplicate phrases when speech recognition loops. "
-                "On by default. Turn off if it drops intended words, letters, "
-                "or lists. Ignored while Raw Transcript is on."
-            ),
-        )
-        
         # Dynamic content container for mode-specific settings
         self.mode_settings_container = ctk.CTkFrame(mode_tile, fg_color="transparent")
         self.mode_settings_container.pack(fill="x", padx=4, pady=(0, SPACING["tile_pad_y"]))
@@ -11218,7 +11204,39 @@ class WayfinderApp(ctk.CTk):
             self._build_local_mode_settings(self.mode_settings_container)
         elif mode == "remote":
             self._build_remote_mode_settings(self.mode_settings_container)
-    
+
+    def _build_raw_transcription_controls(self, parent) -> None:
+        """Place Raw and loop cleanup between ASR options and LLM cleanup."""
+        self.raw_transcription_var = ctk.BooleanVar(
+            value=bool(self.config.get("raw_transcription", False))
+        )
+        self.create_toggle_row(
+            parent, "Raw Transcript",
+            self.raw_transcription_var, self._on_raw_transcription_changed,
+            tooltip=(
+                "Return the recognizer's text without Aura's artifact filtering, "
+                "repetition removal, capitalization, punctuation fixes, vocabulary "
+                "substitutions or LLM cleanup. Other cleanup controls are hidden "
+                "while this is on. Long recordings still join raw chunks and may "
+                "repeat overlap text. Line breaks become spaces before display or paste."
+            ),
+        )
+
+        self.repetition_cleanup_var = ctk.BooleanVar(
+            value=bool(self.config.get("collapse_whisper_repetitions", True))
+        )
+        self._repetition_cleanup_row = self.create_toggle_row(
+            parent, "Remove Repetition Loops",
+            self.repetition_cleanup_var, self._on_repetition_cleanup_changed,
+            tooltip=(
+                "Removes near-duplicate phrases when speech recognition loops. "
+                "On by default. Turn off if it drops intended words, letters, "
+                "or lists."
+            ),
+        )
+        if self.config.get("raw_transcription", False):
+            self._repetition_cleanup_row.pack_forget()
+
     def _build_local_mode_settings(self, parent) -> None:
         """Build settings panel for Local mode (100% private, on-device processing)."""
         # Privacy indicator
@@ -11335,17 +11353,23 @@ class WayfinderApp(ctk.CTk):
             tooltip_key="chunked_mode",
             width=210,
         )
+
+        self._build_raw_transcription_controls(parent)
+
+        postproc_parent = ctk.CTkFrame(parent, fg_color="transparent")
+        postproc_parent.pack(fill="x")
+        self._postproc_controls_frame = postproc_parent
         
         # === Post-Processing Section ===
         # Kept so "Turn on / download a model" hints can scroll straight here.
         self._postproc_section_anchor = self._create_mode_section_header(
-            parent, "Post-Processing (LLM Cleanup)")
+            postproc_parent, "Post-Processing (LLM Cleanup)")
         
         # Post-processing toggle
         postproc_enabled = self.config.get("post_processing_enabled", False)
         self.postproc_enabled_var = ctk.BooleanVar(value=postproc_enabled)
         self.create_toggle_row(
-            parent, "Enable Post-Processing",
+            postproc_parent, "Enable Post-Processing",
             self.postproc_enabled_var, self.toggle_post_processing,
             tooltip=(
                 "Controls optional cleanup after transcription.\n"
@@ -11362,7 +11386,7 @@ class WayfinderApp(ctk.CTk):
         # to download one into.
         if postproc_enabled and not self.feature_gate.has_feature("tone_system"):
             ctk.CTkLabel(
-                parent,
+                postproc_parent,
                 text=("Normal removes um/uh instantly, with no model to download. "
                       "Cleanup models power the writing styles in Ultra."),
                 font=(self.font_body[0], self.font_sizes["small"]),
@@ -11380,7 +11404,7 @@ class WayfinderApp(ctk.CTk):
                 save_config(self.config)
             
             # Inline model management section (no popups)
-            self._build_inline_model_section(parent, postproc_backend)
+            self._build_inline_model_section(postproc_parent, postproc_backend)
 
             # Residency: keep the cleanup model loaded between dictations, or
             # reload it per use. MEASURED on Qwen3-4B/Vulkan: 0.15s warm vs 0.61s
@@ -11410,7 +11434,7 @@ class WayfinderApp(ctk.CTk):
             self.residency_var = ctk.StringVar(
                 value=self._residency_reverse.get(residency, "Instant (keeps model loaded)"))
             self.residency_dropdown = self.create_dropdown_row(
-                parent, "Cleanup speed",
+                postproc_parent, "Cleanup speed",
                 list(self._residency_map.keys()),
                 self.residency_var, self._on_residency_changed,
                 tooltip=("Instant: the cleanup model stays loaded, so cleanup takes "
@@ -11426,6 +11450,9 @@ class WayfinderApp(ctk.CTk):
             )
 
             # Note: Format template removed - now uses Style tab settings (output_tone + smart_formatting)
+
+        if self.config.get("raw_transcription", False):
+            postproc_parent.pack_forget()
     
     def _build_remote_mode_settings(self, parent) -> None:
         """Build settings panel for Remote mode (full cloud transcription)."""
@@ -11541,9 +11568,15 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         self.api_benchmark_status_label.pack(side="left", padx=(15, 0))
+
+        self._build_raw_transcription_controls(parent)
+
+        postproc_parent = ctk.CTkFrame(parent, fg_color="transparent")
+        postproc_parent.pack(fill="x")
+        self._postproc_controls_frame = postproc_parent
         
         # === Post-Processing Section (LLM text cleanup for caricature mode, etc.) ===
-        postproc_header = ctk.CTkFrame(parent, fg_color="transparent")
+        postproc_header = ctk.CTkFrame(postproc_parent, fg_color="transparent")
         postproc_header.pack(fill="x", padx=SPACING["tile_pad"], pady=(16, 8))
         ctk.CTkLabel(
             postproc_header, text="POST-PROCESSING",
@@ -11555,7 +11588,7 @@ class WayfinderApp(ctk.CTk):
         postproc_enabled = self.config.get("post_processing_enabled", False)
         self.postproc_enabled_var = ctk.BooleanVar(value=postproc_enabled)
         self.create_toggle_row(
-            parent, "Enable Text Cleanup",
+            postproc_parent, "Enable Text Cleanup",
             self.postproc_enabled_var, self.toggle_post_processing,
             tooltip="Use cloud LLM (GPT-4o-mini or Claude) to clean up transcriptions.\nRequired for Caricature mode, Strong mode, and advanced style options.",
         )
@@ -11572,7 +11605,7 @@ class WayfinderApp(ctk.CTk):
             
             # Provider dropdown (OpenAI vs Anthropic)
             self.postproc_backend_dropdown = self.create_dropdown_row(
-                parent, "LLM Provider", ["openai", "anthropic"],
+                postproc_parent, "LLM Provider", ["openai", "anthropic"],
                 self.postproc_backend_var, self.on_postproc_backend_changed,
                 tooltip="openai: GPT-4o-mini - Fast and affordable\nanthropic: Claude Haiku - High quality",
                 width=140,
@@ -11586,10 +11619,13 @@ class WayfinderApp(ctk.CTk):
             
             postproc_api_status = "Configured ✓" if api_key else "Not configured"
             self.postproc_config_btn = self.create_setting_row(
-                parent, "LLM API Settings", postproc_api_status,
+                postproc_parent, "LLM API Settings", postproc_api_status,
                 self.open_postproc_settings,
                 tooltip="Configure API key and model for LLM post-processing",
             )
+
+        if self.config.get("raw_transcription", False):
+            postproc_parent.pack_forget()
     
     def _create_mode_section_header(self, parent, text: str):
         """Create a section header within mode settings.
@@ -14232,7 +14268,58 @@ class WayfinderApp(ctk.CTk):
         enabled = bool(self.raw_transcription_var.get())
         self.config["raw_transcription"] = enabled
         save_config(self.config)
+        WayfinderApp._refresh_raw_settings_visibility(self)
         self.log(f"⚙ Raw Transcript: {'on' if enabled else 'off'} — next dictation")
+
+    def _refresh_raw_settings_visibility(self) -> None:
+        """Hide controls bypassed by Raw; retain their saved settings for later."""
+        raw = bool(self.config.get("raw_transcription", False))
+        style_btn = getattr(self, "tab_buttons", {}).get("style")
+        if style_btn is not None:
+            if raw:
+                style_btn.pack_forget()
+            elif not style_btn.winfo_manager():
+                following = (
+                    self.tab_buttons.get("games")
+                    or self.tab_buttons.get("history")
+                )
+                style_btn.pack(before=following, fill="x", pady=4)
+
+        postproc = getattr(self, "_postproc_controls_frame", None)
+        if postproc is not None:
+            if raw:
+                postproc.pack_forget()
+            elif not postproc.winfo_manager():
+                postproc.pack(fill="x")
+
+        repetition = getattr(self, "_repetition_cleanup_row", None)
+        if repetition is not None:
+            if raw:
+                repetition.pack_forget()
+            elif not repetition.winfo_manager():
+                pack_options = {"fill": "x", "padx": 16, "pady": 10}
+                if postproc is not None:
+                    pack_options["before"] = postproc
+                repetition.pack(**pack_options)
+
+        corrections = getattr(self, "_vocabulary_corrections_section", None)
+        if corrections is not None:
+            if raw:
+                corrections.pack_forget()
+            elif not corrections.winfo_manager():
+                corrections.pack(
+                    before=self._vocabulary_save_row, fill="x"
+                )
+
+        controller = getattr(self, "overlay_controller", None)
+        if controller is not None:
+            controller.send_command({
+                "cmd": "style",
+                "value": "minimal" if raw else self.config.get("output_tone", "minimal"),
+            })
+        sync_residency = getattr(self, "_sync_cleanup_residency", None)
+        if sync_residency is not None:
+            sync_residency()
 
     def _on_repetition_cleanup_changed(self) -> None:
         """Keep the existing loop filter optional without affecting other cleanup."""
@@ -17380,6 +17467,7 @@ class WayfinderApp(ctk.CTk):
             corner_radius=RADIUS["md"],
         )
         switch.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        return _shell
 
     def create_dropdown_row(self, parent, label, values, variable, command, tooltip=None, width=140, tooltip_key=None):
         """Create a premium dropdown row with improved typography.
@@ -19266,6 +19354,8 @@ class WayfinderApp(ctk.CTk):
         tile = getattr(self, "_vocabulary_tile", None)
         if tile is None:
             return
+        self._vocabulary_corrections_section = None
+        self._vocabulary_save_row = None
         try:
             for child in tile.winfo_children():
                 child.destroy()
@@ -19289,19 +19379,19 @@ class WayfinderApp(ctk.CTk):
         body = ctk.CTkFrame(tile, fg_color="transparent")
         body.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
 
-        def _label(text, *, muted=True, top=0):
+        def _label(text, *, muted=True, top=0, parent=None):
             lbl = ctk.CTkLabel(
-                body, text=text, font=(fam, fs["small"]), anchor="w", justify="left",
+                body if parent is None else parent,
+                text=text, font=(fam, fs["small"]), anchor="w", justify="left",
                 text_color=COLORS["text_muted"] if muted else COLORS["text_primary"],
                 wraplength=440,
             )
             lbl.pack(fill="x", pady=(top, 4))
             return lbl
 
-        intro = _label("Names, brands and jargon Aura should always get right — "
-                       "they steer the speech model, close misspellings of them are "
-                       "respelled your way, and they are never \"cleaned\" away. For a "
-                       "word Aura keeps hearing as a real one (Iran), add a correction.")
+        intro = _label("Words and names steer speech recognition. With Raw Transcript "
+                       "off, Aura can also respell close misses and apply saved "
+                       "Heard → Write as corrections.")
         body.bind("<Configure>", lambda e, l=intro: l.configure(wraplength=max(200, e.width - 8)), add="+")
 
         if not unlocked:
@@ -19328,13 +19418,16 @@ class WayfinderApp(ctk.CTk):
         if words:
             words_box.insert("1.0", "\n".join(words))
 
+        corrections_section = ctk.CTkFrame(body, fg_color="transparent")
+        corrections_section.pack(fill="x")
+        self._vocabulary_corrections_section = corrections_section
         _label("Corrections — when Aura hears the left, it writes the right",
-               muted=False, top=SPACING["md"])
+               muted=False, top=SPACING["md"], parent=corrections_section)
         from wayfinder.core.transcriber import parse_vocabulary_replacements
         fixes = parse_vocabulary_replacements(self.config.get("vocabulary_replacements") or [])
 
         # Two fields per correction (no "heard -> write" syntax to type).
-        fixes_grid = ctk.CTkFrame(body, fg_color="transparent")
+        fixes_grid = ctk.CTkFrame(corrections_section, fg_color="transparent")
         fixes_grid.pack(fill="x")
         fixes_grid.grid_columnconfigure(0, weight=1, uniform="vocab_fix")
         fixes_grid.grid_columnconfigure(2, weight=1, uniform="vocab_fix")
@@ -19409,7 +19502,7 @@ class WayfinderApp(ctk.CTk):
         if not fix_rows:
             _add_row()
         ctk.CTkButton(
-            body, text="+ Add correction", font=(fam, fs["small"]), anchor="w",
+            corrections_section, text="+ Add correction", font=(fam, fs["small"]), anchor="w",
             fg_color="transparent", hover_color=COLORS["bg_elevated"],
             text_color=COLORS["accent"], height=28, corner_radius=RADIUS["sm"],
             command=lambda: _add_row(focus=True),
@@ -19417,6 +19510,7 @@ class WayfinderApp(ctk.CTk):
 
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", pady=(SPACING["md"], 0))
+        self._vocabulary_save_row = row
         status = ctk.CTkLabel(row, text="", font=(fam, fs["small"]), text_color=COLORS["text_muted"])
 
         def _save():
@@ -19425,13 +19519,25 @@ class WayfinderApp(ctk.CTk):
             # One per line, but "Wayfinder, Aura, Kubernetes" on one line works too.
             new_words = normalize_vocabulary_terms(
                 _re.split(r"[\n,;]+", words_box.get("1.0", "end")))
-            pairs, incomplete = _collect_vocabulary_corrections(
-                [(row["heard"].get(), row["write"].get()) for row in fix_rows])
             self.config["custom_vocabulary"] = new_words
-            self.config["vocabulary_replacements"] = [[h, w] for h, w in pairs]
+            raw = bool(self.config.get("raw_transcription", False))
+            if not raw:
+                pairs, incomplete = _collect_vocabulary_corrections(
+                    [(item["heard"].get(), item["write"].get()) for item in fix_rows]
+                )
+                self.config["vocabulary_replacements"] = [[h, w] for h, w in pairs]
+            else:
+                # Hidden correction fields must not overwrite saved corrections
+                # when the user saves only the visible word list.
+                pairs = parse_vocabulary_replacements(
+                    self.config.get("vocabulary_replacements") or []
+                )
+                incomplete = 0
             save_config(self.config)
             skipped = incomplete
-            msg = f"Saved · {len(new_words)} words · {len(pairs)} corrections"
+            msg = f"Saved · {len(new_words)} words"
+            if not raw:
+                msg += f" · {len(pairs)} corrections"
             if skipped:
                 msg += f" · {skipped} need both Heard and Write as"
             status.configure(text=msg, text_color=COLORS["error"] if skipped else COLORS["accent"])
@@ -19443,6 +19549,8 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["bg_base"], corner_radius=RADIUS["sm"], command=_save,
         ).pack(side="left")
         status.pack(side="left", padx=(SPACING["sm"], 0))
+        if self.config.get("raw_transcription", False):
+            corrections_section.pack_forget()
 
     def _refresh_entitlement_ui(self) -> None:
         """Refresh controls whose lock state can change after live activation."""
@@ -24205,6 +24313,8 @@ class WayfinderApp(ctk.CTk):
         Args:
             target_style: If None, cycle to next style. Otherwise set to specified style.
         """
+        if self.config.get("raw_transcription", False):
+            return
         if not self.feature_gate.has_feature("tone_system"):
             self._show_premium_prompt("tone_system")
             return
@@ -24269,6 +24379,14 @@ class WayfinderApp(ctk.CTk):
             self.config, bool(getattr(self, "_game_mode", False))
         )))
         config["raw_transcription"] = WayfinderApp._raw_session_enabled(self)
+        if config["raw_transcription"]:
+            # Hidden style and Heard → Write as controls must not continue to
+            # steer the recognizer prompt while Raw is selected.
+            config["output_tone"] = "minimal"
+            config["strong_mode"] = False
+            config["caricature_mode"] = False
+            config["prompt"] = TONE_PROMPTS["minimal"]
+            config["vocabulary_replacements"] = []
         if not (
             IS_WINDOWS and not IS_MACOS and config.get("use_gpu", False)
             and config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
@@ -25061,6 +25179,9 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             self.log("⏭ Ignoring stale transcription (session changed)")
             return
+        # Even Raw Transcript is a single-line dictation. A recognizer newline
+        # must never turn into Enter or an accidental form submission.
+        text = _flatten_dictation_line_breaks(text)
         if not text.strip():
             self.on_error("No speech detected", gen)
             return
@@ -25069,7 +25190,8 @@ class WayfinderApp(ctk.CTk):
         # NOT during caricature mode: the text here is post-processed, so learning
         # from parody output would poison the voice profile (and that profile is
         # re-injected into future transcription prompts).
-        if (self.config.get("output_tone") == "personal"
+        if (not WayfinderApp._raw_session_enabled(self)
+                and self.config.get("output_tone") == "personal"
                 and not self.config.get("caricature_mode", False)):
             self._add_to_voice_learning(text.strip())
 
@@ -25117,12 +25239,10 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         try:
-            # Normal mode collapses whitespace for safe typed injection.
-            # Raw Transcript is opt-in and must not quietly rewrite the model's
-            # line breaks or spaces before native paste/typing.
+            # Guard this boundary too, including callers that bypass the usual
+            # transcription-done handoff. Raw preserves other whitespace.
+            text = _flatten_dictation_line_breaks(text)
             if not WayfinderApp._raw_session_enabled(self):
-                import re
-                text = text.replace("\n", " ").replace("\r", " ")
                 text = re.sub(r'\s+', ' ', text).strip()
 
             if not text:

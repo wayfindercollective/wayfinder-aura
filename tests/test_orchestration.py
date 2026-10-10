@@ -81,6 +81,9 @@ class FakeOverlay:
         self.commands.append(("update", state))
         return True
 
+    def send_command(self, payload):
+        self.commands.append(("command", payload))
+
 
 class FakeRecorder:
     """Simple (non-chunked) recorder stub."""
@@ -607,19 +610,36 @@ class TestHappyPath:
         app.pump_events()
         assert injected == ["line one line two end"]
 
-    def test_raw_transcript_reaches_history_and_injector_unchanged(self, app, monkeypatch):
+    def test_raw_transcript_flattens_line_breaks_for_history_and_injection(
+        self, app, monkeypatch
+    ):
         injected = []
         monkeypatch.setattr(wayfinder_main, "inject_text",
                             lambda text, **_k: injected.append(text))
         app.config["raw_transcription"] = True
         app._raw_transcription_for_session = True
-        raw = "  A, B, C\nD, E  "
+        raw = "  A, B, C\r\nD, E\u2028F  "
 
         app.on_transcription_done(raw, app.session_generation)
         app.pump_events()
 
-        assert app.last_transcription == raw
-        assert injected == [raw]
+        assert app.last_transcription == "  A, B, C D, E F  "
+        assert injected == ["  A, B, C D, E F  "]
+
+    def test_raw_injection_flattens_line_breaks_even_without_handoff(
+        self, app, monkeypatch
+    ):
+        injected = []
+        monkeypatch.setattr(wayfinder_main, "inject_text",
+                            lambda text, **_k: injected.append(text))
+        app.config["raw_transcription"] = True
+        app._raw_transcription_for_session = True
+        app.update_state(AppState.PASTING)
+
+        app.do_inject("first\r\nsecond\nthird\u2029fourth", app.session_generation)
+        app.pump_events()
+
+        assert injected == ["first second third fourth"]
 
     def test_tray_only_controller_receives_recording_and_processing_states(
         self, app
@@ -883,14 +903,60 @@ class TestCleanupControls:
         app._raw_transcription_for_session = True
         assert WApp._raw_session_enabled(app) is True
 
+    def test_raw_hides_bypassed_controls_and_restores_saved_choices(self, app):
+        class Packed:
+            def __init__(self):
+                self.managed = True
+                self.last_pack = None
+
+            def pack_forget(self):
+                self.managed = False
+
+            def winfo_manager(self):
+                return "pack" if self.managed else ""
+
+            def pack(self, **kwargs):
+                self.managed = True
+                self.last_pack = kwargs
+
+        style, games, history = Packed(), Packed(), Packed()
+        repetition, postproc, corrections, save_row = (
+            Packed(), Packed(), Packed(), Packed()
+        )
+        app.tab_buttons = {"style": style, "games": games, "history": history}
+        app._repetition_cleanup_row = repetition
+        app._postproc_controls_frame = postproc
+        app._vocabulary_corrections_section = corrections
+        app._vocabulary_save_row = save_row
+
+        app.config["raw_transcription"] = True
+        WApp._refresh_raw_settings_visibility(app)
+        assert not any((style.managed, repetition.managed,
+                        postproc.managed, corrections.managed))
+
+        app.config["raw_transcription"] = False
+        WApp._refresh_raw_settings_visibility(app)
+        assert all((style.managed, repetition.managed,
+                    postproc.managed, corrections.managed))
+        assert style.last_pack["before"] is games
+        assert repetition.last_pack["before"] is postproc
+        assert corrections.last_pack["before"] is save_row
+
     def test_recording_snapshots_raw_choice_for_its_transcription(self, app):
         app.config["raw_transcription"] = True
+        app.config["output_tone"] = "dev"
+        app.config["prompt"] = wayfinder_main.TONE_PROMPTS["dev"]
+        app.config["vocabulary_replacements"] = [["heard", "write"]]
         app.start_recording()
         assert app._raw_transcription_for_session is True
 
         app.config["raw_transcription"] = False  # changed while recording
         asr_config = WApp._asr_config_for_dictation(app)
         assert asr_config["raw_transcription"] is True
+        assert asr_config["output_tone"] == "minimal"
+        assert asr_config["prompt"] == wayfinder_main.TONE_PROMPTS["minimal"]
+        assert asr_config["vocabulary_replacements"] == []
+        assert app.config["output_tone"] == "dev"  # saved preference survives
 
 
 # ===========================================================================
