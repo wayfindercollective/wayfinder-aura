@@ -171,3 +171,16 @@ def deduplicate_overlap_text(transcriptions: list[str]) -> str:
         combined += " " + next_chunk
 
     return re.sub(r"\s+", " ", combined).strip()
+
+
+def join_raw_chunks(transcriptions: list[str]) -> str:
+    """Join recognizer outputs without overlap or whitespace cleanup.
+
+    Only the recorder's terminal error/empty sentinels are omitted. The space
+    between chunks is structural; repeated overlap words are intentionally
+    preserved for Raw Transcript mode.
+    """
+    return " ".join(
+        text for text in transcriptions
+        if text and text.strip() and text.strip() not in _TERMINAL_MARKERS
+    )

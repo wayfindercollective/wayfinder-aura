@@ -363,6 +363,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "accuracy_mode": "balanced",  # fast | balanced | high
     "audio_preprocessing": "light",  # off | light | medium | heavy
     "ensure_punctuation": False,  # Additional punctuation fixes (optional, most models do this well)
+    # Opt-in: return the recognizer's text without Aura's text cleanup,
+    # substitutions, punctuation fixes or LLM pass. Chunked recordings still
+    # join their raw pieces without overlap deduplication. Final dictation
+    # converts line breaks to spaces so model output cannot send Enter.
+    "raw_transcription": False,
+    # Keep the existing Whisper repetition-loop cleanup unless the user turns it
+    # off. Lists of short spoken items can otherwise be mistaken for a loop.
+    "collapse_whisper_repetitions": True,
     
     # Vocabulary and hallucination suppression
     "custom_vocabulary": [],  # User's personal terms appended to prompt
