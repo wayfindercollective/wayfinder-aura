@@ -16910,12 +16910,13 @@ class WayfinderApp(ctk.CTk):
         # Store hidden children so we can restore them
         hidden = []
         for child in container.winfo_children():
-            info = (
-                _logical_pack_info_for_restore(child, child.pack_info())
-                if child.winfo_manager() == "pack"
-                else None
-            )
-            child.pack_forget()
+            if child.winfo_manager() == "pack":
+                info = _logical_pack_info_for_restore(child, child.pack_info())
+                child.pack_forget()
+            else:
+                # Raw Transcript deliberately leaves some rows unpacked. They
+                # are not part of this panel's visible layout to restore.
+                info = None
             hidden.append((child, info))
 
         # Panel wrapper
@@ -16969,10 +16970,8 @@ class WayfinderApp(ctk.CTk):
         panel.destroy()
 
         for child, pack_info in hidden:
-            if pack_info:
+            if pack_info is not None:
                 child.pack(**pack_info)
-            else:
-                child.pack()
 
     def _begin_form_row(self, parent, padx=16, pady=10):
         """Full-width shell + centered form measure for label/control rows.
