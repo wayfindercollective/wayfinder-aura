@@ -607,6 +607,20 @@ class TestHappyPath:
         app.pump_events()
         assert injected == ["line one line two end"]
 
+    def test_raw_transcript_reaches_history_and_injector_unchanged(self, app, monkeypatch):
+        injected = []
+        monkeypatch.setattr(wayfinder_main, "inject_text",
+                            lambda text, **_k: injected.append(text))
+        app.config["raw_transcription"] = True
+        app._raw_transcription_for_session = True
+        raw = "  A, B, C\nD, E  "
+
+        app.on_transcription_done(raw, app.session_generation)
+        app.pump_events()
+
+        assert app.last_transcription == raw
+        assert injected == [raw]
+
     def test_tray_only_controller_receives_recording_and_processing_states(
         self, app
     ):
@@ -842,6 +856,43 @@ class TestFailurePaths:
         assert injected == []
 
 
+class TestCleanupControls:
+    def test_defaults_preserve_existing_filter_but_leave_raw_off(self):
+        from wayfinder.config import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["collapse_whisper_repetitions"] is True
+        assert DEFAULT_CONFIG["raw_transcription"] is False
+
+    def test_switches_persist_separately_and_raw_choice_is_session_stable(
+        self, app, monkeypatch
+    ):
+        saves = []
+        monkeypatch.setattr(wayfinder_main, "save_config",
+                            lambda config: saves.append(dict(config)))
+        app.raw_transcription_var = SimpleNamespace(get=lambda: True)
+        app.repetition_cleanup_var = SimpleNamespace(get=lambda: False)
+
+        WApp._on_raw_transcription_changed(app)
+        WApp._on_repetition_cleanup_changed(app)
+
+        assert app.config["raw_transcription"] is True
+        assert app.config["collapse_whisper_repetitions"] is False
+        assert len(saves) == 2
+        app._raw_transcription_for_session = False
+        assert WApp._raw_session_enabled(app) is False
+        app._raw_transcription_for_session = True
+        assert WApp._raw_session_enabled(app) is True
+
+    def test_recording_snapshots_raw_choice_for_its_transcription(self, app):
+        app.config["raw_transcription"] = True
+        app.start_recording()
+        assert app._raw_transcription_for_session is True
+
+        app.config["raw_transcription"] = False  # changed while recording
+        asr_config = WApp._asr_config_for_dictation(app)
+        assert asr_config["raw_transcription"] is True
+
+
 # ===========================================================================
 # Chunked finalize
 # ===========================================================================
@@ -907,6 +958,24 @@ class TestChunkedFinalize:
         text, _ = app._split_gen(data)
         assert text.lower().count("over the lazy") == 1
         assert text.endswith("dog and keeps running")
+
+    def test_raw_chunks_keep_overlap_and_skip_cleanup_model(self, app, monkeypatch):
+        from wayfinder.core import postprocessor
+
+        app.config.update({"raw_transcription": True, "post_processing_enabled": True})
+        app._raw_transcription_for_session = True
+        monkeypatch.setattr(postprocessor, "process_with_config",
+                            lambda *_a, **_k: pytest.fail("Raw Transcript invoked cleanup"))
+        store = ["first over the lazy", "over the lazy second"]
+
+        app._finalize_chunked_transcription(
+            len(store), app.session_generation, store, FakeChunkedRecorder()
+        )
+
+        event_type, data = app.event_queue.get_nowait()
+        text, _ = app._split_gen(data)
+        assert event_type == wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE
+        assert text == "first over the lazy over the lazy second"
 
     def test_all_chunks_empty_emits_error(self, app):
         app.config["post_processing_enabled"] = False

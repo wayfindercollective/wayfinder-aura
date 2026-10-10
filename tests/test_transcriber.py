@@ -1402,6 +1402,17 @@ class TestTranscriptionPostProcessing:
 class TestWhisperArtifactCleanup:
     """Regression coverage for stock Whisper silence/noise hallucinations."""
 
+    def test_repetition_cleanup_defaults_on_but_can_be_disabled(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        alphabet = "A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, and Z."
+        assert clean_whisper_artifacts(alphabet) != alphabet  # established default
+        assert clean_whisper_artifacts(alphabet, collapse_repetitions=False) == alphabet
+        # The switch affects only loop removal, not other basic artifact guards.
+        assert clean_whisper_artifacts(
+            "Hello [MUSIC] world.", collapse_repetitions=False
+        ) == "Hello world."
+
     @pytest.mark.parametrize("text", [
         "I'll see you next time.",
         "We'll see you next time.",
@@ -1449,6 +1460,55 @@ class TestWhisperArtifactCleanup:
 
 class TestTranscribeWithConfig:
     """Test the high-level transcribe_with_config function."""
+
+    @patch("wayfinder.core.transcriber.get_backend")
+    def test_raw_transcript_bypasses_every_aura_text_pass(
+        self, mock_get_backend, sample_config: dict, sample_audio_file: Path
+    ):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        raw = "  A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, and Z.\n"
+        backend = MagicMock()
+        backend.transcribe.return_value = raw
+        mock_get_backend.return_value = backend
+        sample_config.update({
+            "raw_transcription": True,
+            "collapse_whisper_repetitions": True,
+            "post_processing_enabled": True,
+            "ensure_punctuation": True,
+        })
+
+        with patch("wayfinder.core.transcriber.clean_whisper_artifacts") as cleanup, patch(
+            "wayfinder.core.transcriber.normalize_whisper_caps"
+        ) as caps, patch("wayfinder.core.postprocessor.process_with_config") as llm:
+            result = transcribe_with_config(str(sample_audio_file), sample_config)
+
+        assert result == raw
+        cleanup.assert_not_called()
+        caps.assert_not_called()
+        llm.assert_not_called()
+
+    @patch("wayfinder.core.transcriber.get_backend")
+    def test_only_repetition_switch_off_keeps_alphabet_with_other_cleanup_on(
+        self, mock_get_backend, sample_config: dict, sample_audio_file: Path
+    ):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        backend = MagicMock()
+        backend.transcribe.return_value = "A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, and Z."
+        mock_get_backend.return_value = backend
+        sample_config.update({
+            "raw_transcription": False,
+            "collapse_whisper_repetitions": False,
+            "post_processing_enabled": False,
+            "output_tone": "professional",
+            "ensure_punctuation": False,
+        })
+
+        result = transcribe_with_config(str(sample_audio_file), sample_config)
+
+        assert "c, d, e" in result.lower()
+        assert "x, y, and z" in result.lower()
 
     @patch("wayfinder.core.transcriber.get_backend")
     def test_transcribe_with_config_basic(self, mock_get_backend, sample_config: dict, sample_audio_file: Path):

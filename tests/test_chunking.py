@@ -1,6 +1,6 @@
 """Headless tests for the exact text boundary logic used by chunked ASR."""
 
-from wayfinder.core.chunking import deduplicate_overlap_text, find_text_overlap
+from wayfinder.core.chunking import deduplicate_overlap_text, find_text_overlap, join_raw_chunks
 
 
 def test_exact_overlap_ignores_case_and_punctuation():
@@ -21,6 +21,12 @@ def test_markers_and_blank_chunks_do_not_leak_into_output():
     assert deduplicate_overlap_text(
         ["first", "", "[empty]", "[error]", "second"]
     ) == "first second"
+
+
+def test_raw_join_keeps_boundary_repetitions_and_model_whitespace():
+    assert join_raw_chunks([" first over the lazy ", "over the lazy second\n", "[empty]"]) == (
+        " first over the lazy  over the lazy second\n"
+    )
 
 
 # --- Ragged cut edges (docs/EVAL-2026-09-30-chunking.md) --------------------

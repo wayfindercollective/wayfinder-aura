@@ -2559,7 +2559,9 @@ def whisper_decoding(config: dict) -> tuple[int, int]:
     return beam, (1 if beam == 1 else min(beam, 5))
 
 
-def clean_whisper_artifacts(text: str) -> str:
+def clean_whisper_artifacts(
+    text: str, *, collapse_repetitions: bool = True
+) -> str:
     """
     Clean up common Whisper transcription artifacts.
 
@@ -2660,11 +2662,11 @@ def clean_whisper_artifacts(text: str) -> str:
     # e.g., ". . ." at the end becomes nothing
     text = re.sub(r'\s+\.\s*$', '.', text)
     
-    # Detect and remove Whisper repetition loops
-    # Whisper sometimes gets stuck repeating a phrase with slight variations:
-    # "Loud noise Lud noise Lou noise Brd usic Bir muic Bird usi Bird muic"
-    # Strategy: find repeated 2-3 word phrases and keep only the first occurrence
-    text = _collapse_whisper_repetitions(text)
+    # This heuristic can mistake deliberately dictated lists for repetition.
+    # Keep its established default, but let the user opt out without disabling
+    # the other artifact/silence guards in this function.
+    if collapse_repetitions:
+        text = _collapse_whisper_repetitions(text)
 
     # Clean up multiple spaces
     text = re.sub(r'\s+', ' ', text)
@@ -3139,7 +3141,8 @@ def transcribe_with_config(
         Transcribed text string
     """
     # Build enhanced prompt if punctuation is enabled
-    ensure_punct = config.get("ensure_punctuation", True)
+    raw_transcription = bool(config.get("raw_transcription", False))
+    ensure_punct = not raw_transcription and config.get("ensure_punctuation", True)
     
     # Start with copy to avoid modifying original
     config = config.copy()
@@ -3156,6 +3159,12 @@ def transcribe_with_config(
     backend = get_backend(config)
     text = backend.transcribe(audio_path, context=context)
 
+    # Raw Transcript is an explicit opt-in to the recognizer's output. Keep
+    # entitlement checks in get_backend(), but bypass every Aura text rewrite
+    # below, including the repetition heuristic and optional LLM cleanup.
+    if raw_transcription:
+        return text
+
     # Compatibility guard for a prompt marker used by older server-mode code.
     # Run before punctuation/caps cleanup so the marker remains exact.
     text = drop_whisper_prompt_leak(
@@ -3165,7 +3174,10 @@ def transcribe_with_config(
     # ALWAYS clean up Whisper artifacts (dots, [BLANK_AUDIO], <>, caps, etc.)
     # This runs regardless of post-processing settings
     if text:
-        text = clean_whisper_artifacts(text)
+        text = clean_whisper_artifacts(
+            text,
+            collapse_repetitions=bool(config.get("collapse_whisper_repetitions", True)),
+        )
         text = normalize_whisper_caps(text)
         # Ultra "heard -> write" corrections and near-miss snapping run LAST,
         # after caps normalisation, so the user's exact spelling (GitHub, iOS,

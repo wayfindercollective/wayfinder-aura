@@ -9637,6 +9637,40 @@ class WayfinderApp(ctk.CTk):
             command=self._on_processing_mode_changed,
         )
         self.mode_selector.pack(fill="x")
+
+        # Shared transcription controls live outside the rebuilt Local/Remote
+        # content. Raw Transcript overrides the cleanup switches for the next
+        # dictation without discarding the user's saved preferences.
+        self.raw_transcription_var = ctk.BooleanVar(
+            value=bool(self.config.get("raw_transcription", False))
+        )
+        self.create_toggle_row(
+            mode_tile, "Raw Transcript",
+            self.raw_transcription_var, self._on_raw_transcription_changed,
+            tooltip=(
+                "Return the recognizer's text without Aura's artifact filtering, "
+                "repetition removal, capitalization, punctuation fixes, vocabulary "
+                "substitutions or LLM cleanup. Overrides the cleanup switches below. "
+                "Long recordings still join raw chunks and may repeat overlap text. "
+                "Line breaks are injected as-is and may submit in some apps."
+            ),
+        )
+
+        # This is Aura's built-in Whisper text cleanup, not the optional LLM
+        # Post-Processing switch below. Keep it visible in both Local and
+        # Remote modes so users can opt out when it mistakes a list for a loop.
+        self.repetition_cleanup_var = ctk.BooleanVar(
+            value=bool(self.config.get("collapse_whisper_repetitions", True))
+        )
+        self.create_toggle_row(
+            mode_tile, "Remove Repetition Loops",
+            self.repetition_cleanup_var, self._on_repetition_cleanup_changed,
+            tooltip=(
+                "Removes near-duplicate phrases when speech recognition loops. "
+                "On by default. Turn off if it drops intended words, letters, "
+                "or lists. Ignored while Raw Transcript is on."
+            ),
+        )
         
         # Dynamic content container for mode-specific settings
         self.mode_settings_container = ctk.CTkFrame(mode_tile, fg_color="transparent")
@@ -11314,9 +11348,10 @@ class WayfinderApp(ctk.CTk):
             parent, "Enable Post-Processing",
             self.postproc_enabled_var, self.toggle_post_processing,
             tooltip=(
-                "Tidies the text after transcription, on this device.\n"
-                "Off: you get Whisper's text as it is.\n"
-                "On, Normal style: removes um/uh instantly, with no model.\n"
+                "Controls optional cleanup after transcription.\n"
+                "Off: no LLM rewrite; basic artifact cleanup and Normal-style "
+                "um/uh removal can still run.\n"
+                "Raw Transcript above bypasses all Aura text cleanup.\n"
                 "Professional, Casual, Dev and Personal (Ultra) rewrite with a local "
                 "model; Qwen3 4B is the one that does them well."
             ),
@@ -14191,6 +14226,20 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         status = "on" if self.punctuation_var.get() else "off"
         self.log(f"⚙ Punctuation: {status}")
+
+    def _on_raw_transcription_changed(self) -> None:
+        """Persist the no-cleanup preference for the next dictation."""
+        enabled = bool(self.raw_transcription_var.get())
+        self.config["raw_transcription"] = enabled
+        save_config(self.config)
+        self.log(f"⚙ Raw Transcript: {'on' if enabled else 'off'} — next dictation")
+
+    def _on_repetition_cleanup_changed(self) -> None:
+        """Keep the existing loop filter optional without affecting other cleanup."""
+        enabled = bool(self.repetition_cleanup_var.get())
+        self.config["collapse_whisper_repetitions"] = enabled
+        save_config(self.config)
+        self.log(f"⚙ Remove Repetition Loops: {'on' if enabled else 'off'} — next dictation")
 
     def toggle_gpu(self):
         """Toggle GPU acceleration (applies live, no app restart).
@@ -24205,13 +24254,21 @@ class WayfinderApp(ctk.CTk):
         from wayfinder.core.macos_game_chat import gamer_asr_overlay
         return gamer_asr_overlay(config, profile)
 
+    def _raw_session_enabled(self) -> bool:
+        """Keep a recording's cleanup choice stable if Settings changes mid-run."""
+        return bool(getattr(
+            self, "_raw_transcription_for_session",
+            self.config.get("raw_transcription", False),
+        ))
+
     def _asr_config_for_dictation(self) -> dict:
         """Snapshot one dictation's ASR mode while Windows finishes GPU setup."""
         from wayfinder.core.gm_asr import effective_asr_config
 
-        config = WayfinderApp._gamer_asr_config(self, effective_asr_config(
+        config = dict(WayfinderApp._gamer_asr_config(self, effective_asr_config(
             self.config, bool(getattr(self, "_game_mode", False))
-        ))
+        )))
+        config["raw_transcription"] = WayfinderApp._raw_session_enabled(self)
         if not (
             IS_WINDOWS and not IS_MACOS and config.get("use_gpu", False)
             and config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
@@ -24280,6 +24337,10 @@ class WayfinderApp(ctk.CTk):
                         "and download the Free Base model."
                     )
                     return
+
+            self._raw_transcription_for_session = bool(
+                self.config.get("raw_transcription", False)
+            )
 
             # Remember the record-start window only as a fallback. The window focused at
             # injection time is authoritative: users commonly click a different text box while
@@ -24581,7 +24642,8 @@ class WayfinderApp(ctk.CTk):
                 context=context,
                 skip_post_processing=True,
             )
-            if context:
+            raw_session = WayfinderApp._raw_session_enabled(self)
+            if context and not raw_session:
                 # A prompt can make Whisper return a fragment for a whole chunk
                 # of speech; hear it once more without one and keep the fuller.
                 from wayfinder.core.chunking import (
@@ -24602,7 +24664,9 @@ class WayfinderApp(ctk.CTk):
             with self.chunk_transcription_lock:
                 while len(store) <= chunk_index:
                     store.append("")
-                store[chunk_index] = text.strip() if text.strip() else "[empty]"
+                store[chunk_index] = (
+                    text if raw_session else text.strip()
+                ) if text.strip() else "[empty]"
             
             # Log with context indicator for chunks after the first
             if chunk_index > 0 and context:
@@ -24870,13 +24934,21 @@ class WayfinderApp(ctk.CTk):
             if gen is not None and gen != self.session_generation:
                 return
 
-            # Combine all transcriptions with overlap deduplication
+            # Raw Transcript keeps each model response as-is. The user chose
+            # to retain chunking, so only join the pieces; overlapping words
+            # may appear twice. The normal path still deduplicates boundaries.
+            raw_transcription = WayfinderApp._raw_session_enabled(self)
             with self.chunk_transcription_lock:
-                combined_text = self._deduplicate_overlap_text(store)
+                if raw_transcription:
+                    from wayfinder.core.chunking import join_raw_chunks
+                    combined_text = join_raw_chunks(store)
+                else:
+                    combined_text = self._deduplicate_overlap_text(store)
 
             # Apply post-processing to the final combined text (not per-chunk)
             # This gives the LLM full context and avoids per-chunk prompt leakage issues
-            if combined_text.strip() and self.config.get("post_processing_enabled", False):
+            if (combined_text.strip() and not raw_transcription
+                    and self.config.get("post_processing_enabled", False)):
                 try:
                     from wayfinder.core.postprocessor import process_with_config
                     self.log("🔧 Post-processing combined text...")
@@ -25003,7 +25075,9 @@ class WayfinderApp(ctk.CTk):
 
         # Note: Post-processing is already applied in transcribe_with_config()
         # The text received here is already fully processed
-        processed_text = text.strip()
+        processed_text = (
+            text if WayfinderApp._raw_session_enabled(self) else text.strip()
+        )
         
         # Store and display in Dictate tab
         self.last_transcription = processed_text
@@ -25043,12 +25117,13 @@ class WayfinderApp(ctk.CTk):
         if gen is not None and gen != self.session_generation:
             return
         try:
-            # Replace newlines with spaces to avoid sending Enter keys via ydotool
-            # This prevents unwanted line breaks and accidental form submissions
-            # Collapse multiple spaces and strip whitespace
-            import re
-            text = text.replace("\n", " ").replace("\r", " ")
-            text = re.sub(r'\s+', ' ', text).strip()
+            # Normal mode collapses whitespace for safe typed injection.
+            # Raw Transcript is opt-in and must not quietly rewrite the model's
+            # line breaks or spaces before native paste/typing.
+            if not WayfinderApp._raw_session_enabled(self):
+                import re
+                text = text.replace("\n", " ").replace("\r", " ")
+                text = re.sub(r'\s+', ' ', text).strip()
 
             if not text:
                 self.event_queue.put((EventType.LOG_MESSAGE, "⚠ Empty text after cleanup — nothing to inject"))
