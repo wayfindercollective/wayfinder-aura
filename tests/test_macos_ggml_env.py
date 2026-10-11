@@ -10,9 +10,11 @@ def test_cpu_mode_registers_no_metal_device(monkeypatch):
     assert env.whisper_metal_env(gpu=False) == {"GGML_METAL_DEVICES": "0"}
 
 
-def test_gpu_mode_keeps_metal_without_residency_heartbeat(monkeypatch):
+def test_gpu_mode_keeps_default_metal_residency(monkeypatch):
     monkeypatch.setattr(env.sys, "platform", "darwin")
-    assert env.whisper_metal_env(["whisper-server", "-m", "m.bin"]) == {"GGML_METAL_NO_RESIDENCY": "1"}
+    assert env.whisper_metal_env(["whisper-server", "-m", "m.bin"]) == {}
+    assert env.whisper_metal_env(["whisper-cli", "-m", "m.bin"]) == {}
+    assert env.whisper_metal_env(gpu=True) == {}
 
 
 def test_other_platforms_are_untouched(monkeypatch):

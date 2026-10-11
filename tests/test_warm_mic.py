@@ -25,6 +25,30 @@ def _make_warm(device=None, idle_secs=30.0, **kwargs):
 
 
 class TestWarmMicLifecycle:
+    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=16000)
+    @patch("wayfinder.core.recorder.sd")
+    def test_macos_first_frame_timing_is_once_per_acquisition(
+        self, mock_sd, _rate, monkeypatch, capsys
+    ):
+        from wayfinder.core import recorder
+
+        monkeypatch.setattr(recorder.sys, "platform", "darwin")
+        warm = _make_warm(device=7)
+        sink = MagicMock()
+        warm.acquire(sink)
+        capsys.readouterr()
+        warm._first_frame_started_at = 100.0
+        monkeypatch.setattr(recorder.time, "perf_counter", lambda: 100.25)
+        data = np.ones((160, 1), dtype=np.float32)
+        warm._callback(data, 160, None, None)
+        warm._callback(data, 160, None, None)
+
+        assert capsys.readouterr().out == "[Microphone Start] first_frame=0.250s\n"
+        assert sink.call_count == 2
+        assert warm._first_frame_started_at is None
+        warm.release()
+        assert warm._first_frame_started_at is None
+
     @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_opens_once_and_reuses_across_recordings(self, mock_sd, _rate):

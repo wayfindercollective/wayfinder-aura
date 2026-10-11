@@ -472,5 +472,14 @@ def test_free_settings_show_no_cleanup_model_manager():
     body = source[source.index("def _build_local_mode_settings"):]
     body = body[: body.index("def _build_remote_mode_settings")]
     free = body.index('if postproc_enabled and not self.feature_gate.has_feature("tone_system"):')
-    manager = body.index("self._build_inline_model_section(parent, postproc_backend)")
+    manager = body.index("self._build_inline_model_section(postproc_parent, postproc_backend)")
     assert free < body.index("elif postproc_enabled:") < manager
+
+
+def test_raw_controls_follow_chunk_processing_and_precede_llm_cleanup():
+    source = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
+    local = source[source.index("def _build_local_mode_settings"):]
+    local = local[: local.index("def _build_remote_mode_settings")]
+    assert (local.index('"Chunk Processing"')
+            < local.index("self._build_raw_transcription_controls(parent)")
+            < local.index('"Post-Processing (LLM Cleanup)"'))

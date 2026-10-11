@@ -1,6 +1,8 @@
 """Headless tests for the exact text boundary logic used by chunked ASR."""
 
-from wayfinder.core.chunking import deduplicate_overlap_text, find_text_overlap
+import pytest
+
+from wayfinder.core.chunking import deduplicate_overlap_text, find_text_overlap, join_raw_chunks
 
 
 def test_exact_overlap_ignores_case_and_punctuation():
@@ -21,6 +23,58 @@ def test_markers_and_blank_chunks_do_not_leak_into_output():
     assert deduplicate_overlap_text(
         ["first", "", "[empty]", "[error]", "second"]
     ) == "first second"
+
+
+def test_raw_join_removes_only_the_exact_seam_with_original_character_spans():
+    # Uneven whitespace must not make character slicing delete a new word.
+    assert join_raw_chunks([
+        " first over the lazy ", "  OVER\tTHE\nLAZY second  second\n", "[empty]"
+    ]) == " first over the lazy  second  second\n"
+
+
+def test_raw_join_keeps_intentional_repetition_inside_each_chunk():
+    assert join_raw_chunks([
+        "say go go over the lazy", "over the lazy go go later over the lazy again"
+    ]) == "say go go over the lazy go go later over the lazy again"
+
+
+@pytest.mark.parametrize("chunks", [
+    ["finish the configuration", "the documentation works"],
+    ["keep all four original words today", "keep all four original words tomorrow"],
+    ["I said no", "no is what I said"],
+    [". .", ". ."],
+])
+def test_raw_join_preserves_uncertain_or_non_boundary_matches(chunks):
+    assert join_raw_chunks(chunks) == " ".join(chunks)
+
+
+@pytest.mark.parametrize("gap", ["", " \n ", "[empty]", "[error]"])
+def test_raw_join_never_deduplicates_across_a_missing_chunk(gap):
+    assert join_raw_chunks([
+        "we walked over the lazy", gap, "over the lazy dog"
+    ]) == "we walked over the lazy over the lazy dog"
+
+
+def test_raw_join_uses_only_the_previous_original_chunk_at_each_seam():
+    chunks = ["alpha beta", "beta gamma", "alpha beta beta gamma tail"]
+    assert join_raw_chunks(chunks) == " ".join(chunks)
+
+
+def test_raw_join_handles_a_wholly_duplicated_tail_chunk():
+    assert join_raw_chunks(["we said two words", " TWO WORDS "]) == "we said two words"
+
+
+def test_raw_join_does_not_remove_speech_when_audio_did_not_overlap():
+    chunks = ["we said two words", "two words are worth repeating"]
+    assert join_raw_chunks(chunks, overlap_seconds=0) == " ".join(chunks)
+
+
+def test_raw_join_preserves_one_shot_text_and_the_alphabet():
+    assert join_raw_chunks(["  untouched\n text  "]) == "  untouched\n text  "
+    alphabet = "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z"
+    assert join_raw_chunks([alphabet, "Y Z and again A B C"]) == (
+        alphabet + " and again A B C"
+    )
 
 
 # --- Ragged cut edges (docs/EVAL-2026-09-30-chunking.md) --------------------

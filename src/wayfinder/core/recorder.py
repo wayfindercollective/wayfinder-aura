@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 from math import gcd
 from pathlib import Path
@@ -978,6 +979,7 @@ class WarmMic:
         self._close_done.set()
         self._closing_stream = False
         self._abandoned_close = False
+        self._first_frame_started_at: float | None = None
 
     @property
     def sample_rate(self) -> int:
@@ -994,6 +996,12 @@ class WarmMic:
         # a swap at the boundary at worst mis-routes a single frame, which is harmless.
         sink = self._sink
         if sink is not None:
+            started_at = self._first_frame_started_at
+            if started_at is not None:
+                self._first_frame_started_at = None
+                if sys.platform == "darwin":
+                    print(f"[Microphone Start] first_frame={time.perf_counter() - started_at:.3f}s",
+                          flush=True)
             sink(indata, frames, time_info, status)
 
     def _open(self) -> None:
@@ -1084,7 +1092,9 @@ class WarmMic:
         last_err = None
         for dev in fallbacks:
             def _probe_and_open(dev=dev):
+                started_at = time.perf_counter()
                 rate = get_supported_sample_rate(device=dev, target_rate=self.target_sample_rate)
+                probed_at = time.perf_counter()
                 stream = sd.InputStream(
                     samplerate=rate,
                     channels=self.channels,
@@ -1099,7 +1109,12 @@ class WarmMic:
                     # PortAudio teardown abort. Capture latency is irrelevant for dictation.
                     latency="high",
                 )
+                prepared_at = time.perf_counter()
                 stream.start()
+                if sys.platform == "darwin":
+                    print(f"[Microphone Start] probe={probed_at - started_at:.3f}s "
+                          f"prepare={prepared_at - probed_at:.3f}s "
+                          f"start={time.perf_counter() - prepared_at:.3f}s", flush=True)
                 return stream, rate
             try:
                 # Cap the probe+open with a watchdog: a wedged device (e.g. a
@@ -1172,11 +1187,13 @@ class WarmMic:
 
             if not close_inactive:
                 self._sink = sink
+                self._first_frame_started_at = time.perf_counter()
                 try:
                     if self._stream is None:
                         self._open()
                 except Exception:
                     self._sink = None
+                    self._first_frame_started_at = None
                     raise
                 return self.device
 
@@ -1207,6 +1224,7 @@ class WarmMic:
         """Detach the current sink and arm the idle-close timer. Leaves the stream warm."""
         with self._lock:
             self._sink = None
+            self._first_frame_started_at = None
             self._arm_idle_timer()
 
     def _arm_idle_timer(self) -> None:

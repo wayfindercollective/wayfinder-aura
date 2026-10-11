@@ -3690,6 +3690,8 @@ def cleanup_model_needed(config: dict) -> bool:
     1-3 GB model resident for them (measured: 2.6 GB for Qwen 3.5 2B) buys
     nothing. Styled tones, caricature, and Normal-via-model do need it.
     """
+    if config.get("raw_transcription", False):
+        return False
     if not config.get("post_processing_enabled", True):
         return False
     if config.get("post_processing_backend", "llama_cpp") != "llama_cpp":

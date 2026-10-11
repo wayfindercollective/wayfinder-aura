@@ -171,3 +171,39 @@ def deduplicate_overlap_text(transcriptions: list[str]) -> str:
         combined += " " + next_chunk
 
     return re.sub(r"\s+", " ", combined).strip()
+
+
+def join_raw_chunks(
+    transcriptions: list[str], *, overlap_seconds: float = 2.0
+) -> str:
+    """Join raw outputs, removing exact repeats only at adjacent audio seams.
+
+    Match the previous chunk's suffix against the next chunk's prefix, ignoring
+    case and common punctuation. Require at least two matching words and use
+    the original character spans to remove that prefix; all other text remains
+    untouched. There is no fuzzy splice or search inside a chunk.
+
+    A missing/failed chunk breaks adjacency. Recordings with no audio overlap
+    have no duplicated seam to remove. Neither is a user cleanup preference.
+    """
+    pieces = []
+    previous = None
+    for text in transcriptions:
+        if not text or not text.strip() or text.strip() in _TERMINAL_MARKERS:
+            previous = None
+            continue
+
+        remainder = text
+        if overlap_seconds > 0 and previous is not None:
+            overlap = find_text_overlap(previous, text)
+            if overlap:
+                skip = len(overlap.split())
+                spans = list(re.finditer(r"\S+", text))
+                remainder = text[spans[skip].start():] if skip < len(spans) else ""
+
+        if remainder:
+            pieces.append(remainder)
+        # Use this original chunk at the next seam, not the accumulated output.
+        previous = text
+
+    return " ".join(pieces)

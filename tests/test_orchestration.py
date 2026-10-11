@@ -81,6 +81,9 @@ class FakeOverlay:
         self.commands.append(("update", state))
         return True
 
+    def send_command(self, payload):
+        self.commands.append(("command", payload))
+
 
 class FakeRecorder:
     """Simple (non-chunked) recorder stub."""
@@ -123,6 +126,7 @@ class FakeChunkedRecorder:
         self._peak = peak
         self._chunk_count = chunk_count
         self._final_path = final_path
+        self.chunk_overlap = kwargs.get("chunk_overlap", 2.0)
         self.kwargs = kwargs
         self.started = False
         self.stopped = False
@@ -381,6 +385,59 @@ class TestRecordButtonDispatch:
 # ===========================================================================
 
 class TestStartRecording:
+    def test_macos_holds_user_activity_before_mic_initialization(self, app, monkeypatch):
+        from wayfinder.utils import macos_activity
+
+        calls = []
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(WApp, "_gamer_profile_now", lambda self: calls.append(("context", None)))
+        monkeypatch.setattr(macos_activity, "begin", lambda key, reason: calls.append(("begin", key)) or True)
+        monkeypatch.setattr(macos_activity, "end", lambda key: calls.append(("end", key)))
+        monkeypatch.setattr(app.recorder, "start", lambda: calls.append(("capture", None)))
+        monkeypatch.setattr(app, "_set_status_indicator", lambda state: calls.append(("indicator", state)))
+
+        app.start_recording()
+
+        assert calls == [
+            ("begin", "recording-startup"), ("context", None), ("capture", None),
+            ("indicator", "listening"), ("end", "recording-startup"),
+        ]
+        assert app.app_state == AppState.RECORDING
+
+    @pytest.mark.parametrize("failure", ["no_model", "mic_failure"])
+    def test_macos_startup_activity_is_released_on_early_exit(self, app, monkeypatch, failure):
+        from wayfinder.core import setup
+        from wayfinder.utils import macos_activity
+
+        calls = []
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(WApp, "_gamer_profile_now", lambda self: None)
+        monkeypatch.setattr(macos_activity, "begin", lambda key, reason: calls.append(("begin", key)) or True)
+        monkeypatch.setattr(macos_activity, "end", lambda key: calls.append(("end", key)))
+        if failure == "no_model":
+            monkeypatch.setattr(setup, "check_whisper_model", lambda config: SimpleNamespace(installed=False))
+        else:
+            def fail():
+                raise RuntimeError("no microphone")
+
+            monkeypatch.setattr(app.recorder, "start", fail)
+
+        app.start_recording()
+
+        assert calls == [("begin", "recording-startup"), ("end", "recording-startup")]
+
+    def test_linux_has_no_new_native_startup_activity(self, app, monkeypatch, capsys):
+        from wayfinder.utils import macos_activity
+
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(macos_activity, "begin", lambda *args: pytest.fail("Mac activity on Linux"))
+        app.start_recording()
+        assert app.recorder.started
+        assert "[Recording Start]" not in capsys.readouterr().out
+
     def test_simple_mode_transitions_to_recording_and_starts_recorder(self, app):
         app.config["chunked_mode"] = "off"
         app.on_hotkey()  # from IDLE
@@ -606,6 +663,37 @@ class TestHappyPath:
         app.do_inject("line one\nline two   \r\n  end", app.session_generation)
         app.pump_events()
         assert injected == ["line one line two end"]
+
+    def test_raw_transcript_flattens_line_breaks_for_history_and_injection(
+        self, app, monkeypatch
+    ):
+        injected = []
+        monkeypatch.setattr(wayfinder_main, "inject_text",
+                            lambda text, **_k: injected.append(text))
+        app.config["raw_transcription"] = True
+        app._raw_transcription_for_session = True
+        raw = "  A, B, C\r\nD, E\u2028F  "
+
+        app.on_transcription_done(raw, app.session_generation)
+        app.pump_events()
+
+        assert app.last_transcription == "  A, B, C D, E F  "
+        assert injected == ["  A, B, C D, E F  "]
+
+    def test_raw_injection_flattens_line_breaks_even_without_handoff(
+        self, app, monkeypatch
+    ):
+        injected = []
+        monkeypatch.setattr(wayfinder_main, "inject_text",
+                            lambda text, **_k: injected.append(text))
+        app.config["raw_transcription"] = True
+        app._raw_transcription_for_session = True
+        app.update_state(AppState.PASTING)
+
+        app.do_inject("first\r\nsecond\nthird\u2029fourth", app.session_generation)
+        app.pump_events()
+
+        assert injected == ["first second third fourth"]
 
     def test_tray_only_controller_receives_recording_and_processing_states(
         self, app
@@ -842,6 +930,89 @@ class TestFailurePaths:
         assert injected == []
 
 
+class TestCleanupControls:
+    def test_defaults_preserve_existing_filter_but_leave_raw_off(self):
+        from wayfinder.config import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["collapse_whisper_repetitions"] is True
+        assert DEFAULT_CONFIG["raw_transcription"] is False
+
+    def test_switches_persist_separately_and_raw_choice_is_session_stable(
+        self, app, monkeypatch
+    ):
+        saves = []
+        monkeypatch.setattr(wayfinder_main, "save_config",
+                            lambda config: saves.append(dict(config)))
+        app.raw_transcription_var = SimpleNamespace(get=lambda: True)
+        app.repetition_cleanup_var = SimpleNamespace(get=lambda: False)
+
+        WApp._on_raw_transcription_changed(app)
+        WApp._on_repetition_cleanup_changed(app)
+
+        assert app.config["raw_transcription"] is True
+        assert app.config["collapse_whisper_repetitions"] is False
+        assert len(saves) == 2
+        app._raw_transcription_for_session = False
+        assert WApp._raw_session_enabled(app) is False
+        app._raw_transcription_for_session = True
+        assert WApp._raw_session_enabled(app) is True
+
+    def test_raw_hides_bypassed_controls_and_restores_saved_choices(self, app):
+        class Packed:
+            def __init__(self):
+                self.managed = True
+                self.last_pack = None
+
+            def pack_forget(self):
+                self.managed = False
+
+            def winfo_manager(self):
+                return "pack" if self.managed else ""
+
+            def pack(self, **kwargs):
+                self.managed = True
+                self.last_pack = kwargs
+
+        style, games, history = Packed(), Packed(), Packed()
+        repetition, postproc, corrections, save_row = (
+            Packed(), Packed(), Packed(), Packed()
+        )
+        app.tab_buttons = {"style": style, "games": games, "history": history}
+        app._repetition_cleanup_row = repetition
+        app._postproc_controls_frame = postproc
+        app._vocabulary_corrections_section = corrections
+        app._vocabulary_save_row = save_row
+
+        app.config["raw_transcription"] = True
+        WApp._refresh_raw_settings_visibility(app)
+        assert not any((style.managed, repetition.managed,
+                        postproc.managed, corrections.managed))
+
+        app.config["raw_transcription"] = False
+        WApp._refresh_raw_settings_visibility(app)
+        assert all((style.managed, repetition.managed,
+                    postproc.managed, corrections.managed))
+        assert style.last_pack["before"] is games
+        assert repetition.last_pack["before"] is postproc
+        assert corrections.last_pack["before"] is save_row
+
+    def test_recording_snapshots_raw_choice_for_its_transcription(self, app):
+        app.config["raw_transcription"] = True
+        app.config["output_tone"] = "dev"
+        app.config["prompt"] = wayfinder_main.TONE_PROMPTS["dev"]
+        app.config["vocabulary_replacements"] = [["heard", "write"]]
+        app.start_recording()
+        assert app._raw_transcription_for_session is True
+
+        app.config["raw_transcription"] = False  # changed while recording
+        asr_config = WApp._asr_config_for_dictation(app)
+        assert asr_config["raw_transcription"] is True
+        assert asr_config["output_tone"] == "minimal"
+        assert asr_config["prompt"] == wayfinder_main.TONE_PROMPTS["minimal"]
+        assert asr_config["vocabulary_replacements"] == []
+        assert app.config["output_tone"] == "dev"  # saved preference survives
+
+
 # ===========================================================================
 # Chunked finalize
 # ===========================================================================
@@ -907,6 +1078,52 @@ class TestChunkedFinalize:
         text, _ = app._split_gen(data)
         assert text.lower().count("over the lazy") == 1
         assert text.endswith("dog and keeps running")
+
+    def test_raw_chunks_join_the_seam_and_skip_cleanup_model(self, app, monkeypatch):
+        from wayfinder.core import postprocessor
+
+        app.config.update({
+            "raw_transcription": True,
+            "post_processing_enabled": True,
+            "collapse_whisper_repetitions": False,
+        })
+        app._raw_transcription_for_session = True
+        monkeypatch.setattr(postprocessor, "process_with_config",
+                            lambda *_a, **_k: pytest.fail("Raw Transcript invoked cleanup"))
+        store = ["first go go over the lazy", "over the lazy go go second"]
+
+        app._finalize_chunked_transcription(
+            len(store), app.session_generation, store, FakeChunkedRecorder()
+        )
+
+        event_type, data = app.event_queue.get_nowait()
+        text, _ = app._split_gen(data)
+        assert event_type == wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE
+        assert text == "first go go over the lazy go go second"
+
+    @pytest.mark.parametrize("recorded_overlap, expected", [
+        (2.0, "first over the lazy second"),
+        (0.0, "first over the lazy over the lazy second"),
+    ])
+    def test_raw_seam_join_uses_the_recording_overlap_not_later_settings(
+        self, app, recorded_overlap, expected
+    ):
+        app.config.update({
+            "raw_transcription": True,
+            "chunk_overlap": 0 if recorded_overlap else 2,
+        })
+        app._raw_transcription_for_session = True
+        store = ["first over the lazy", "over the lazy second"]
+
+        app._finalize_chunked_transcription(
+            len(store), app.session_generation, store,
+            FakeChunkedRecorder(chunk_overlap=recorded_overlap),
+        )
+
+        event_type, data = app.event_queue.get_nowait()
+        text, _ = app._split_gen(data)
+        assert event_type == wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE
+        assert text == expected
 
     def test_all_chunks_empty_emits_error(self, app):
         app.config["post_processing_enabled"] = False

@@ -203,7 +203,21 @@ the switches ("Gamer mode", "Send game messages"; `gamer_mode`,
   first-session thread count), faster again on Metal.
 - **ggml environment** (`utils/macos_ggml_env.py`): CPU mode doesn't pay a
   7-8 s Metal shader compile it never uses; GPU mode is Ultra-gated as on
-  every platform.
+  every platform. GPU mode retains Metal's default memory residency. Disabling
+  it reduced idle CPU but allowed the speech model to swap out under memory
+  pressure, delaying the next dictation. On a 24 GB M4 (2026-10-11), matched
+  servers transcribing the same 3.94 s public test clip after 30 s idle took
+  6.28 s without residency and 1.33 s with it. Normal residency kept roughly
+  600 MB of model buffers resident at an idle cost of 0.37% of one CPU core.
+- **No hidden decoding retries** (`core/transcriber.py`): whisper-server
+  v1.9.1 accepts `-nf` but does not apply it to decoding. Aura now explicitly
+  sends `temperature_inc=0.0` on every inference request, matching the existing
+  no-retry CLI policy (the older Linux server supports this field too). On the
+  same M4/Turbo Q5 model, a 14.81 s synthetic alphabet took 2.73–3.48 s with
+  the ignored flag alone versus 1.19–1.43 s with the explicit field. Three
+  alphabet runs dropped from 1,115 to 186 decoder steps. This does not change
+  the model, audio, GPU entitlement, or transcript cleanup. Server timings are
+  logged without audio, prompts, or dictated text.
 - **Resident cleanup** (`core/llama_server.py`): the bundled `llama-server`
   with the model's chat template and thinking disabled cleans a dictation in
   ~0.3 s median (the `llama-simple` path took ~2 s and returned the text
@@ -272,7 +286,15 @@ fallback has not yet been profiled on the packaged build:
   cleanly before sleep; on wake the mic and pill are re-established; screen
   changes reposition the pill and native layers.
 - **No App Nap mid-task** (`utils/macos_activity.py`): user-initiated activity
-  assertions keep the Mac awake during a dictation or a model download.
+  assertions keep the Mac awake during a dictation or a model download. Recording
+  startup has its own bounded hold before the microphone opens, rather than
+  waiting until capture succeeds and `RECORDING` is displayed. It ends on success,
+  no-model refusal, and microphone failure; it does not open a mic at startup or
+  keep an idle capture stream alive. Timing-only logs separate context, model
+  validation, device lookup, capture open, UI state, and indicator delivery, plus
+  PortAudio preparation/start and the first audio callback. This guards the
+  previously uncovered startup interval; elimination of every intermittent
+  2–3 s stall still requires a slow-case trace on the installed build.
 - **Quit Apple events:** the pill helper forwards Quit to the main app, so
   logout/shutdown never stalls on Aura.
 - **Control socket** (`hotkeys/socket.py`): `toggle`, `show`, `hide`,

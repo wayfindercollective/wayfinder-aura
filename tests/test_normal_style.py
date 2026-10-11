@@ -93,6 +93,15 @@ class TestCleanupResidency:
         assert P.cleanup_model_needed({"post_processing_enabled": True,
                                        "output_tone": "minimal"}) is False
 
+    def test_raw_never_keeps_a_cleanup_model_resident(self, monkeypatch):
+        self._gate(monkeypatch, True)
+        assert P.cleanup_model_needed({
+            "raw_transcription": True,
+            "post_processing_enabled": True,
+            "output_tone": "dev",
+            "normal_llm_cleanup": True,
+        }) is False
+
     def test_free_never_needs_a_model(self, monkeypatch):
         self._gate(monkeypatch, False)
         assert P.cleanup_model_needed({"post_processing_enabled": True,
