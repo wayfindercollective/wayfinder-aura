@@ -203,7 +203,12 @@ the switches ("Gamer mode", "Send game messages"; `gamer_mode`,
   first-session thread count), faster again on Metal.
 - **ggml environment** (`utils/macos_ggml_env.py`): CPU mode doesn't pay a
   7-8 s Metal shader compile it never uses; GPU mode is Ultra-gated as on
-  every platform.
+  every platform. GPU mode retains Metal's default memory residency. Disabling
+  it reduced idle CPU but allowed the speech model to swap out under memory
+  pressure, delaying the next dictation. On a 24 GB M4 (2026-10-11), matched
+  servers transcribing the same 3.94 s public test clip after 30 s idle took
+  6.28 s without residency and 1.33 s with it. Normal residency kept roughly
+  600 MB of model buffers resident at an idle cost of 0.37% of one CPU core.
 - **Resident cleanup** (`core/llama_server.py`): the bundled `llama-server`
   with the model's chat template and thinking disabled cleans a dictation in
   ~0.3 s median (the `llama-simple` path took ~2 s and returned the text
