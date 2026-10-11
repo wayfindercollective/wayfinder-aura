@@ -385,6 +385,59 @@ class TestRecordButtonDispatch:
 # ===========================================================================
 
 class TestStartRecording:
+    def test_macos_holds_user_activity_before_mic_initialization(self, app, monkeypatch):
+        from wayfinder.utils import macos_activity
+
+        calls = []
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(WApp, "_gamer_profile_now", lambda self: calls.append(("context", None)))
+        monkeypatch.setattr(macos_activity, "begin", lambda key, reason: calls.append(("begin", key)) or True)
+        monkeypatch.setattr(macos_activity, "end", lambda key: calls.append(("end", key)))
+        monkeypatch.setattr(app.recorder, "start", lambda: calls.append(("capture", None)))
+        monkeypatch.setattr(app, "_set_status_indicator", lambda state: calls.append(("indicator", state)))
+
+        app.start_recording()
+
+        assert calls == [
+            ("begin", "recording-startup"), ("context", None), ("capture", None),
+            ("indicator", "listening"), ("end", "recording-startup"),
+        ]
+        assert app.app_state == AppState.RECORDING
+
+    @pytest.mark.parametrize("failure", ["no_model", "mic_failure"])
+    def test_macos_startup_activity_is_released_on_early_exit(self, app, monkeypatch, failure):
+        from wayfinder.core import setup
+        from wayfinder.utils import macos_activity
+
+        calls = []
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(WApp, "_gamer_profile_now", lambda self: None)
+        monkeypatch.setattr(macos_activity, "begin", lambda key, reason: calls.append(("begin", key)) or True)
+        monkeypatch.setattr(macos_activity, "end", lambda key: calls.append(("end", key)))
+        if failure == "no_model":
+            monkeypatch.setattr(setup, "check_whisper_model", lambda config: SimpleNamespace(installed=False))
+        else:
+            def fail():
+                raise RuntimeError("no microphone")
+
+            monkeypatch.setattr(app.recorder, "start", fail)
+
+        app.start_recording()
+
+        assert calls == [("begin", "recording-startup"), ("end", "recording-startup")]
+
+    def test_linux_has_no_new_native_startup_activity(self, app, monkeypatch, capsys):
+        from wayfinder.utils import macos_activity
+
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(macos_activity, "begin", lambda *args: pytest.fail("Mac activity on Linux"))
+        app.start_recording()
+        assert app.recorder.started
+        assert "[Recording Start]" not in capsys.readouterr().out
+
     def test_simple_mode_transitions_to_recording_and_starts_recorder(self, app):
         app.config["chunked_mode"] = "off"
         app.on_hotkey()  # from IDLE

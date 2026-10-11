@@ -286,7 +286,15 @@ fallback has not yet been profiled on the packaged build:
   cleanly before sleep; on wake the mic and pill are re-established; screen
   changes reposition the pill and native layers.
 - **No App Nap mid-task** (`utils/macos_activity.py`): user-initiated activity
-  assertions keep the Mac awake during a dictation or a model download.
+  assertions keep the Mac awake during a dictation or a model download. Recording
+  startup has its own bounded hold before the microphone opens, rather than
+  waiting until capture succeeds and `RECORDING` is displayed. It ends on success,
+  no-model refusal, and microphone failure; it does not open a mic at startup or
+  keep an idle capture stream alive. Timing-only logs separate context, model
+  validation, device lookup, capture open, UI state, and indicator delivery, plus
+  PortAudio preparation/start and the first audio callback. This guards the
+  previously uncovered startup interval; elimination of every intermittent
+  2–3 s stall still requires a slow-case trace on the installed build.
 - **Quit Apple events:** the pill helper forwards Quit to the main app, so
   logout/shutdown never stalls on Aura.
 - **Control socket** (`hotkeys/socket.py`): `toggle`, `show`, `hide`,

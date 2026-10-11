@@ -24415,18 +24415,43 @@ class WayfinderApp(ctk.CTk):
         return config
 
     def start_recording(self):
-        # Gamer mode follows the game in front when dictation starts.
-        self._gamer_profile = WayfinderApp._gamer_profile_now(self)
-        if self._gamer_profile is not None:
-            self.log(f"🎮 Gamer mode: {self._gamer_profile.name}")
-        if IS_MACOS:
-            # Pick up a keyboard-layout switch before this dictation's paste.
-            try:
-                from wayfinder.core import macos_paste
-                self.after_idle(macos_paste.refresh_layout_cache)
-            except Exception:
-                pass
+        started_at = time.perf_counter()
+        stage_started_at = started_at
+        start_phases = {}
+        startup_activity = None
+
+        def mark_start_phase(name):
+            nonlocal stage_started_at
+            if IS_MACOS:
+                now = time.perf_counter()
+                start_phases[name] = round(now - stage_started_at, 3)
+                stage_started_at = now
+
         try:
+            if IS_MACOS:
+                # A hidden app may be napping when the menu/hotkey requests a
+                # recording. update_state(RECORDING) holds a user activity, but
+                # that used to happen only AFTER CoreAudio opened the mic. Cover
+                # initialization too; release on success, denial, or any failure.
+                try:
+                    from wayfinder.utils import macos_activity
+
+                    if macos_activity.begin("recording-startup", "Preparing dictation microphone"):
+                        startup_activity = macos_activity
+                except Exception:
+                    pass
+            # Gamer mode follows the game in front when dictation starts.
+            self._gamer_profile = WayfinderApp._gamer_profile_now(self)
+            if self._gamer_profile is not None:
+                self.log(f"🎮 Gamer mode: {self._gamer_profile.name}")
+            if IS_MACOS:
+                # Pick up a keyboard-layout switch before this dictation's paste.
+                try:
+                    from wayfinder.core import macos_paste
+                    self.after_idle(macos_paste.refresh_layout_cache)
+                except Exception:
+                    pass
+            mark_start_phase("context")
             self.log("🎤 Listening...")
             # A new dictation clears any stale runtime-error banner from the last run.
             try:
@@ -24505,6 +24530,7 @@ class WayfinderApp(ctk.CTk):
                 # must never turn a premium path on.
                 chunked_unlocked = False
             use_chunked = chunked_requested and chunked_unlocked and not is_remote
+            mark_start_phase("validation")
 
             def _begin_capture():
                 if use_chunked:
@@ -24523,21 +24549,25 @@ class WayfinderApp(ctk.CTk):
                     self._macos_follow_default_input()
                 elif IS_WINDOWS:
                     self._windows_follow_default_input()
+                mark_start_phase("device_lookup")
                 # Capture FIRST: the RECORDING overlay waits for the Qt
                 # thread's acknowledgement (~150-300 ms), and every word spoken
                 # in that window used to be lost. The mic is warm, so starting
                 # it costs microseconds and the feedback follows immediately.
                 # Windows' overlay is the same Qt subprocess with the same ack.
                 _begin_capture()
+                mark_start_phase("capture_open")
 
             # Update state FIRST for immediate feedback
             self.update_state(AppState.RECORDING)
+            mark_start_phase("ui_state")
             
             # Show floating indicator / overlay (Never route tray_only → pill)
             try:
                 self._set_status_indicator("listening")
             except Exception as e:
                 self.log(f"⚠ Indicator error: {e}")
+            mark_start_phase("indicator")
 
             if not (IS_MACOS or IS_WINDOWS):
                 _begin_capture()
@@ -24552,6 +24582,13 @@ class WayfinderApp(ctk.CTk):
             # monotonic guard catches every stale toggle without delaying recovery.
             self._record_toggle_suppress_until = time.monotonic() + 0.75
             self.on_error(f"Microphone: {e}")
+        finally:
+            if startup_activity is not None:
+                startup_activity.end("recording-startup")
+            if IS_MACOS:
+                # Timing metadata only: no device names, audio, prompts, or text.
+                print(f"[Recording Start] elapsed={time.perf_counter() - started_at:.3f}s "
+                      f"phases={json.dumps(start_phases, sort_keys=True)}", flush=True)
     
     # macOS warm-mic window: long enough for a quick follow-up dictation, short
     # enough that the orange mic indicator does not linger (Core Audio opens in
