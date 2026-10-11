@@ -1378,6 +1378,14 @@ class WhisperServerBackend(TranscriptionBackend):
                 body += f"--{boundary}\r\n".encode()
                 body += f'Content-Disposition: form-data; name="{_field}"\r\n\r\n'.encode()
                 body += f"{int(_value)}\r\n".encode()
+            # Enforce the same no-temperature-retry policy as whisper-cli.
+            # The server accepts -nf but v1.7.2/v1.9.1 never consult that flag
+            # when constructing whisper_full_params: without this field it
+            # silently uses a 0.2 increment and re-decodes uncertain speech
+            # repeatedly. The multipart setting is supported by both pins.
+            body += f"--{boundary}\r\n".encode()
+            body += b'Content-Disposition: form-data; name="temperature_inc"\r\n\r\n'
+            body += b"0.0\r\n"
             if sys.platform in ("darwin", "win32"):
                 # Only the text is read. The server otherwise computes per-token
                 # timestamps: MEASURED 3-14% slower (base.en, M3 Ultra), same WER;
@@ -1401,8 +1409,13 @@ class WhisperServerBackend(TranscriptionBackend):
                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
                     method="POST",
                 )
+                request_started = time.perf_counter()
                 resp = urlopen_loopback(req, timeout=_timeout)
-                return json.loads(resp.read().decode("utf-8")).get("text", "").strip()
+                text = json.loads(resp.read().decode("utf-8")).get("text", "").strip()
+                # Timings only: never include the recording, prompt, or text.
+                print(f"[Whisper Server] Inference completed in "
+                      f"{time.perf_counter() - request_started:.3f}s")
+                return text
 
             try:
                 # Initial attempt. ANY failure — connection refused/reset, a wedged or
@@ -1424,7 +1437,6 @@ class WhisperServerBackend(TranscriptionBackend):
                 # CLI salvage gets a separate, fixed window below: sharing this
                 # deadline starved salvage whenever the retry consumed the last
                 # second, producing a false "No speech detected" after valid audio.
-                import time
                 recovery_deadline = time.monotonic() + float(self.timeout)
                 print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
                 try:

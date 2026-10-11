@@ -209,6 +209,15 @@ the switches ("Gamer mode", "Send game messages"; `gamer_mode`,
   servers transcribing the same 3.94 s public test clip after 30 s idle took
   6.28 s without residency and 1.33 s with it. Normal residency kept roughly
   600 MB of model buffers resident at an idle cost of 0.37% of one CPU core.
+- **No hidden decoding retries** (`core/transcriber.py`): whisper-server
+  v1.9.1 accepts `-nf` but does not apply it to decoding. Aura now explicitly
+  sends `temperature_inc=0.0` on every inference request, matching the existing
+  no-retry CLI policy (the older Linux server supports this field too). On the
+  same M4/Turbo Q5 model, a 14.81 s synthetic alphabet took 2.73–3.48 s with
+  the ignored flag alone versus 1.19–1.43 s with the explicit field. Three
+  alphabet runs dropped from 1,115 to 186 decoder steps. This does not change
+  the model, audio, GPU entitlement, or transcript cleanup. Server timings are
+  logged without audio, prompts, or dictated text.
 - **Resident cleanup** (`core/llama_server.py`): the bundled `llama-server`
   with the model's chat template and thinking disabled cleans a dictation in
   ~0.3 s median (the `llama-simple` path took ~2 s and returned the text

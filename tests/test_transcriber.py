@@ -2310,7 +2310,7 @@ class TestServerReuseThreadsOnMacOS:
 class TestMacServerRequestFields:
     """macOS asks whisper-server for text only (no per-token timestamps)."""
 
-    def _body_for(self, platform, sample_audio_file, monkeypatch):
+    def _body_for(self, platform, sample_audio_file, monkeypatch, use_gpu=False):
         import json as _json
         from unittest.mock import MagicMock, patch
         from wayfinder.core import transcriber
@@ -2318,7 +2318,7 @@ class TestMacServerRequestFields:
 
         monkeypatch.setattr(transcriber.sys, "platform", platform)
         WhisperServerBackend._server_disabled = False
-        backend = WhisperServerBackend(use_gpu=False, timeout=5)
+        backend = WhisperServerBackend(use_gpu=use_gpu, timeout=5)
         resp = MagicMock()
         resp.read.return_value = _json.dumps({"text": "hello"}).encode()
         urlopen = MagicMock(return_value=resp)
@@ -2387,6 +2387,50 @@ class TestServerRequestDecoding(TestMacServerRequestFields):
         body = self._body_for(platform, sample_audio_file, monkeypatch)
         assert b'name="beam_size"\r\n\r\n' in body
         assert b'name="best_of"\r\n\r\n' in body
+
+    @pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+    @pytest.mark.parametrize("use_gpu", [False, True])
+    def test_no_temperature_retries_is_explicit_in_request(
+        self, platform, use_gpu, sample_audio_file, monkeypatch
+    ):
+        """The native server accepts -nf but ignores it; its HTTP default is
+        temperature_inc=0.2. Explicit zero matches Aura's existing CLI policy
+        and avoids repeatedly decoding low-confidence speech such as A–Z.
+        """
+        body = self._body_for(platform, sample_audio_file, monkeypatch, use_gpu=use_gpu)
+        assert body.count(b'name="temperature_inc"') == 1
+        assert b'name="temperature_inc"\r\n\r\n0.0\r\n' in body
+
+    def test_restart_retry_keeps_no_temperature_retries(self, sample_audio_file, monkeypatch):
+        from wayfinder.core import transcriber
+
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_server_disabled", False)
+        backend = cls(use_gpu=True)
+        response = MagicMock()
+        response.read.return_value = b'{"text":"hello"}'
+        urlopen = MagicMock(side_effect=[TimeoutError("stalled"), response])
+
+        def fake_start(*args, **kwargs):
+            cls._server_port = 8179 if kwargs.get("force") else 8178
+
+        with patch.object(cls, "_start_server", side_effect=fake_start), \
+             patch("urllib.request.urlopen", urlopen):
+            assert backend.transcribe(str(sample_audio_file)) == "hello"
+
+        assert urlopen.call_count == 2
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        assert [request.full_url for request in requests] == [
+            "http://127.0.0.1:8178/inference", "http://127.0.0.1:8179/inference",
+        ]
+        assert all(b'name="temperature_inc"\r\n\r\n0.0\r\n' in request.data
+                   for request in requests)
+
+    def test_inference_timing_does_not_log_transcript(self, sample_audio_file, monkeypatch, capsys):
+        self._body_for("darwin", sample_audio_file, monkeypatch)
+        output = capsys.readouterr().out
+        assert "[Whisper Server] Inference completed in " in output
+        assert "hello" not in output
 
 
 class TestSoundAnnotations:
