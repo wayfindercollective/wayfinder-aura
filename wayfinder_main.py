@@ -11215,8 +11215,8 @@ class WayfinderApp(ctk.CTk):
             self.raw_transcription_var, self._on_raw_transcription_changed,
             tooltip=(
                 "Use the speech model's output without Aura's text cleanup, "
-                "vocabulary substitutions, or LLM rewriting. Long recordings "
-                "may repeat words where chunks overlap."
+                "vocabulary substitutions, or LLM rewriting. Overlapping chunks "
+                "are joined automatically."
             ),
         )
 
@@ -25049,14 +25049,19 @@ class WayfinderApp(ctk.CTk):
             if gen is not None and gen != self.session_generation:
                 return
 
-            # Raw Transcript keeps each model response as-is. The user chose
-            # to retain chunking, so only join the pieces; overlapping words
-            # may appear twice. The normal path still deduplicates boundaries.
+            # Seam joining is structural, independent of text cleanup. Raw
+            # removes only exact suffix/prefix repeats between adjacent chunks.
             raw_transcription = WayfinderApp._raw_session_enabled(self)
             with self.chunk_transcription_lock:
                 if raw_transcription:
                     from wayfinder.core.chunking import join_raw_chunks
-                    combined_text = join_raw_chunks(store)
+                    combined_text = join_raw_chunks(
+                        store,
+                        overlap_seconds=getattr(
+                            recorder_instance, "chunk_overlap",
+                            self.config.get("chunk_overlap", 2),
+                        ),
+                    )
                 else:
                     combined_text = self._deduplicate_overlap_text(store)
 

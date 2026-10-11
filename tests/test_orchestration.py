@@ -126,6 +126,7 @@ class FakeChunkedRecorder:
         self._peak = peak
         self._chunk_count = chunk_count
         self._final_path = final_path
+        self.chunk_overlap = kwargs.get("chunk_overlap", 2.0)
         self.kwargs = kwargs
         self.started = False
         self.stopped = False
@@ -1025,14 +1026,18 @@ class TestChunkedFinalize:
         assert text.lower().count("over the lazy") == 1
         assert text.endswith("dog and keeps running")
 
-    def test_raw_chunks_keep_overlap_and_skip_cleanup_model(self, app, monkeypatch):
+    def test_raw_chunks_join_the_seam_and_skip_cleanup_model(self, app, monkeypatch):
         from wayfinder.core import postprocessor
 
-        app.config.update({"raw_transcription": True, "post_processing_enabled": True})
+        app.config.update({
+            "raw_transcription": True,
+            "post_processing_enabled": True,
+            "collapse_whisper_repetitions": False,
+        })
         app._raw_transcription_for_session = True
         monkeypatch.setattr(postprocessor, "process_with_config",
                             lambda *_a, **_k: pytest.fail("Raw Transcript invoked cleanup"))
-        store = ["first over the lazy", "over the lazy second"]
+        store = ["first go go over the lazy", "over the lazy go go second"]
 
         app._finalize_chunked_transcription(
             len(store), app.session_generation, store, FakeChunkedRecorder()
@@ -1041,7 +1046,31 @@ class TestChunkedFinalize:
         event_type, data = app.event_queue.get_nowait()
         text, _ = app._split_gen(data)
         assert event_type == wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE
-        assert text == "first over the lazy over the lazy second"
+        assert text == "first go go over the lazy go go second"
+
+    @pytest.mark.parametrize("recorded_overlap, expected", [
+        (2.0, "first over the lazy second"),
+        (0.0, "first over the lazy over the lazy second"),
+    ])
+    def test_raw_seam_join_uses_the_recording_overlap_not_later_settings(
+        self, app, recorded_overlap, expected
+    ):
+        app.config.update({
+            "raw_transcription": True,
+            "chunk_overlap": 0 if recorded_overlap else 2,
+        })
+        app._raw_transcription_for_session = True
+        store = ["first over the lazy", "over the lazy second"]
+
+        app._finalize_chunked_transcription(
+            len(store), app.session_generation, store,
+            FakeChunkedRecorder(chunk_overlap=recorded_overlap),
+        )
+
+        event_type, data = app.event_queue.get_nowait()
+        text, _ = app._split_gen(data)
+        assert event_type == wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE
+        assert text == expected
 
     def test_all_chunks_empty_emits_error(self, app):
         app.config["post_processing_enabled"] = False
