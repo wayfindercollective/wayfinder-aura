@@ -182,9 +182,8 @@ class TestWelcomeModuleImport:
         flow = mod.WelcomeFlow()
         assert flow.current == "mic"
         flow.pass_mic_test()
-        flow.advance()
-        flow.advance()
-        flow.advance()
+        for _ in flow.steps:
+            assert flow.advance() is True
         assert flow.is_complete is True
 
 
