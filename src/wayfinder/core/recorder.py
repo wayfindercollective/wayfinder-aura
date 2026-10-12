@@ -13,6 +13,8 @@ import tempfile
 import threading
 import time
 import wave
+from collections.abc import Mapping
+from numbers import Real
 from math import gcd
 from pathlib import Path
 from typing import Callable
@@ -250,6 +252,7 @@ def is_output_device(device_name: str) -> bool:
 
 
 _IS_STEAM_DECK: bool | None = None
+_PA_DEVICE_EPOCH = 0
 
 
 def _is_steam_deck() -> bool:
@@ -279,9 +282,11 @@ def _pa_rescan() -> bool:
     library is re-initialized. sounddevice exposes that as _terminate/_initialize.
     Only call this with no streams open: re-init invalidates existing streams.
     """
+    global _PA_DEVICE_EPOCH
     try:
         sd._terminate()
         sd._initialize()
+        _PA_DEVICE_EPOCH += 1
         return True
     except Exception as e:
         print(f"PortAudio rescan failed: {e}")
@@ -758,7 +763,8 @@ def _run_with_timeout(fn: Callable, timeout_s: float):
     return box.get("result")
 
 
-def get_supported_sample_rate(device: int | None = None, target_rate: int = 16000) -> int:
+def get_supported_sample_rate(device: int | None = None, target_rate: int = 16000,
+                              channels: int = 1) -> int:
     """
     Find a supported sample rate for the given device.
     
@@ -790,13 +796,106 @@ def get_supported_sample_rate(device: int | None = None, target_rate: int = 1600
     for rate in sample_rates_to_try:
         try:
             # Test if this rate works by checking device compatibility
-            sd.check_input_settings(device=device, samplerate=rate, channels=1)
+            sd.check_input_settings(device=device, samplerate=rate, channels=channels, dtype="float32")
             return rate
         except sd.PortAudioError:
             continue
     
     # Fallback to 44100 which is most universally supported
     return 44100
+
+
+def get_capture_sample_rate(device: int | None = None, target_rate: int = 16000,
+                            device_info: Mapping | None = None) -> int:
+    """First real-open candidate, not a redundant test stream.
+
+    Every platform tries actual capture directly. CoreAudio's format probe is
+    itself an OpenStream/CloseStream, so Mac uses live native-rate metadata to
+    avoid a throwaway audio unit and unnecessary host-rate conversion. Shared
+    resampling still supplies Whisper's 16 kHz input.
+    """
+    if sys.platform == "darwin":
+        try:
+            if device_info is None:
+                device_info = sd.query_devices(device) if device is not None else sd.query_devices(kind="input")
+            name = device_info.get("name") if isinstance(device_info, Mapping) else None
+            if isinstance(name, str) and name:
+                from wayfinder.utils.macos_audio import input_sample_rate
+                rate = input_sample_rate(name)
+                if rate is not None:
+                    return rate
+        except Exception:
+            pass  # Opening the requested rate remains valid if HAL is unavailable.
+    return target_rate
+
+
+def _open_capture_stream(device, target_rate, channels, callback, *, rate_cache=None):
+    """Open once on the normal path; probe alternatives only on a rate rejection.
+
+    Cache only a successful real open, keyed by device metadata + rescan epoch.
+    Device/default changes invalidate it; a cached/native rate rejection falls
+    back to the existing rate search for THAT microphone. Errors unrelated to
+    sample rate keep the existing outer device-healing path.
+    """
+    selected_at = time.perf_counter()
+    try:
+        info = sd.query_devices(device) if device is not None else sd.query_devices(kind="input")
+    except Exception:
+        info = None
+    initial = get_capture_sample_rate(device, target_rate, device_info=info)
+    key = None
+    if isinstance(info, Mapping) and isinstance(info.get("name"), str):
+        key = (device, info["name"], info.get("hostapi"), info.get("max_input_channels"),
+               info.get("default_samplerate"), channels, target_rate, initial, _PA_DEVICE_EPOCH)
+    rate = rate_cache.get(key, initial) if rate_cache is not None and key is not None else initial
+    timings = {"selection": time.perf_counter() - selected_at, "prepare": 0.0, "start": 0.0, "attempts": 0}
+
+    def open_at(candidate):
+        stream = None
+        before = time.perf_counter()
+        timings["attempts"] += 1
+        try:
+            stream = sd.InputStream(samplerate=candidate, channels=channels, device=device,
+                                    dtype=np.float32, callback=callback, latency="high")
+            prepared_at = time.perf_counter()
+            timings["prepare"] += prepared_at - before
+            try:
+                stream.start()
+            finally:
+                timings["start"] += time.perf_counter() - prepared_at
+            actual = getattr(stream, "samplerate", candidate)
+            actual = round(actual) if isinstance(actual, Real) and 0 < actual < 1000000 else candidate
+            return stream, actual
+        except Exception:
+            if stream is None:
+                timings["prepare"] += time.perf_counter() - before
+            else:
+                # The WarmMic watchdog also bounds this cleanup. Never retry
+                # another rate/open beside a failed or stuck native close.
+                try:
+                    stream.close()
+                except Exception as exc:
+                    raise MicrophoneRestartRequired("Microphone could not release a failed stream; restart Aura") from exc
+            raise
+
+    try:
+        stream, actual = open_at(rate)
+    except Exception as exc:
+        if rate_cache is not None and key is not None:
+            rate_cache.pop(key, None)
+        # paInvalidSampleRate is -9997 in PortAudio's public API. Permission,
+        # unavailable-device, and start errors must NOT launch extra rate tests.
+        if len(exc.args) < 2 or exc.args[1] != -9997:
+            raise
+        probed_at = time.perf_counter()
+        fallback = get_supported_sample_rate(device, target_rate, channels=channels)
+        timings["selection"] += time.perf_counter() - probed_at
+        if fallback == rate:
+            raise
+        stream, actual = open_at(fallback)
+    if rate_cache is not None and key is not None:
+        rate_cache[key] = actual
+    return stream, actual, timings
 
 
 def resample_audio(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.ndarray:
@@ -961,6 +1060,7 @@ class WarmMic:
         self._restart_required_notified = False
         self._stream: object | None = None
         self._recording_sample_rate: int | None = None
+        self._sample_rate_cache: dict = {}
         self._sink: Callable | None = None
         # RLock so acquire() can cancel the idle timer and open the stream while holding it,
         # and the idle-timer thread can take the same lock without self-deadlock.
@@ -1035,6 +1135,9 @@ class WarmMic:
             # The subprocess has already been terminated safely. A PortAudio
             # rescan/retry would cross back into the raw-device deadlock path.
             raise
+        except MicrophoneRestartRequired:
+            self._abandoned_close = True
+            raise  # do not rescan underneath an unsafe failed-stream cleanup
         except Exception as first_err:
             if self._abandoned_open:
                 # A watchdog-abandoned open may still be inside PortAudio; terminating
@@ -1092,29 +1195,14 @@ class WarmMic:
         last_err = None
         for dev in fallbacks:
             def _probe_and_open(dev=dev):
-                started_at = time.perf_counter()
-                rate = get_supported_sample_rate(device=dev, target_rate=self.target_sample_rate)
-                probed_at = time.perf_counter()
-                stream = sd.InputStream(
-                    samplerate=rate,
-                    channels=self.channels,
-                    device=dev,
-                    dtype=np.float32,
-                    callback=self._callback,
-                    # 'high' latency = a larger input ring buffer, so a momentary stall
-                    # (audio ducking reconfiguring the PipeWire graph at record start, or
-                    # general system jitter) can't overrun it. Without this, PortAudio's
-                    # default small buffer overflowed on EVERY recording ("input overflow"),
-                    # which occasionally cascaded into a wedged whisper-server request or a
-                    # PortAudio teardown abort. Capture latency is irrelevant for dictation.
-                    latency="high",
+                stream, rate, phases = _open_capture_stream(
+                    dev, self.target_sample_rate, self.channels, self._callback,
+                    rate_cache=self._sample_rate_cache,
                 )
-                prepared_at = time.perf_counter()
-                stream.start()
                 if sys.platform == "darwin":
-                    print(f"[Microphone Start] probe={probed_at - started_at:.3f}s "
-                          f"prepare={prepared_at - probed_at:.3f}s "
-                          f"start={time.perf_counter() - prepared_at:.3f}s", flush=True)
+                    print(f"[Microphone Start] selection={phases['selection']:.3f}s "
+                          f"prepare={phases['prepare']:.3f}s start={phases['start']:.3f}s "
+                          f"attempts={phases['attempts']}", flush=True)
                 return stream, rate
             try:
                 # Cap the probe+open with a watchdog: a wedged device (e.g. a
@@ -1137,6 +1225,9 @@ class WarmMic:
                 # concurrently only creates more uncancellable opens and eventually
                 # wedges PipeWire itself.  Fail this recording immediately and let a
                 # process restart clear the one abandoned call.
+                raise
+            except MicrophoneRestartRequired:
+                self._abandoned_close = True
                 raise
             except Exception as e:
                 last_err = e
@@ -1351,6 +1442,7 @@ class WarmMic:
         with self._lock:
             self.device = device
             self.preferred_name = preferred_name
+            self._sample_rate_cache.clear()
         self._close_stream()
 
     @property
@@ -1420,6 +1512,7 @@ class AudioRecorder:
         self.channels = channels
         self.device = device
         self.recording_sample_rate = None  # Will be set when starting
+        self._sample_rate_cache: dict = {}
         # Convert bool to level string for backwards compatibility
         if preprocessing is True:
             self.preprocessing = "light"
@@ -1495,6 +1588,8 @@ class AudioRecorder:
                 self.device = dev
                 self._active = True
                 return
+            except MicrophoneRestartRequired:
+                raise
             except Exception as e:
                 last_err = e
                 if dev is not None:
@@ -1502,24 +1597,14 @@ class AudioRecorder:
         raise last_err if last_err else RuntimeError("No audio input device could be opened")
 
     def _open_stream(self, device: int | None) -> None:
-        # Find a supported sample rate for this device
-        self.recording_sample_rate = get_supported_sample_rate(
-            device=device,
-            target_rate=self.target_sample_rate
+        self.stream, self.recording_sample_rate, _ = _open_capture_stream(
+            device, self.target_sample_rate, self.channels, self._audio_callback,
+            rate_cache=self._sample_rate_cache,
         )
 
         if self.recording_sample_rate != self.target_sample_rate:
             print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
 
-        self.stream = sd.InputStream(
-            samplerate=self.recording_sample_rate,
-            channels=self.channels,
-            device=device,
-            dtype=np.float32,
-            callback=self._audio_callback,
-            latency="high",  # larger input buffer — tolerate duck/jitter stalls (see WarmMic)
-        )
-        self.stream.start()
 
     def stop(self, apply_preprocessing: bool | str | None = None) -> str:
         """
@@ -1699,6 +1784,7 @@ class ChunkedRecorder:
         """
         self.target_sample_rate = sample_rate  # What we want (for Whisper)
         self.recording_sample_rate = None  # Will be set when starting
+        self._sample_rate_cache: dict = {}
         self.channels = channels
         self.device = device
         # Convert bool to level string for backwards compatibility
@@ -1938,9 +2024,9 @@ class ChunkedRecorder:
             _last_err = None
             for _dev in _devices:
                 try:
-                    self.recording_sample_rate = get_supported_sample_rate(
-                        device=_dev,
-                        target_rate=self.target_sample_rate
+                    self._stream, self.recording_sample_rate, _ = _open_capture_stream(
+                        _dev, self.target_sample_rate, self.channels, self._audio_callback,
+                        rate_cache=self._sample_rate_cache,
                     )
                     if self.recording_sample_rate != self.target_sample_rate:
                         print(f"Note: Recording at {self.recording_sample_rate}Hz, will resample to {self.target_sample_rate}Hz")
@@ -1950,17 +2036,10 @@ class ChunkedRecorder:
                         self.first_chunk_duration * self.recording_sample_rate
                     )
                     self._overlap_samples = int(self.chunk_overlap * self.recording_sample_rate)
-                    self._stream = sd.InputStream(
-                        samplerate=self.recording_sample_rate,
-                        channels=self.channels,
-                        device=_dev,
-                        dtype=np.float32,
-                        callback=self._audio_callback,
-                        latency="high",  # larger input buffer — tolerate duck/jitter stalls (see WarmMic)
-                    )
-                    self._stream.start()
                     self.device = _dev
                     break
+                except MicrophoneRestartRequired:
+                    raise
                 except Exception as e:
                     _last_err = e
                     if _dev is not None:
@@ -2300,6 +2379,7 @@ class AudioCalibrator:
         self.target_sample_rate = sample_rate
         self.device = device
         self.recording_sample_rate = None
+        self._sample_rate_cache: dict = {}
         self._frames: list[np.ndarray] = []
         self._stream: sd.InputStream | None = None
     
@@ -2313,21 +2393,10 @@ class AudioCalibrator:
         """Start recording for calibration."""
         self._frames = []
         
-        # Find supported sample rate
-        self.recording_sample_rate = get_supported_sample_rate(
-            device=self.device,
-            target_rate=self.target_sample_rate,
+        self._stream, self.recording_sample_rate, _ = _open_capture_stream(
+            self.device, self.target_sample_rate, 1, self._audio_callback,
+            rate_cache=self._sample_rate_cache,
         )
-        
-        self._stream = sd.InputStream(
-            samplerate=self.recording_sample_rate,
-            channels=1,
-            device=self.device,
-            dtype=np.float32,
-            callback=self._audio_callback,
-            latency="high",  # larger input buffer — tolerate duck/jitter stalls (see WarmMic)
-        )
-        self._stream.start()
     
     def stop_and_analyze(self) -> AudioCalibrationResult:
         """Stop recording and analyze the audio."""

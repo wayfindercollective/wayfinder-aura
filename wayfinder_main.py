@@ -14395,6 +14395,10 @@ class WayfinderApp(ctk.CTk):
             _release_cleanup_residency()
         except Exception:
             pass
+        if IS_MACOS:
+            warm = getattr(self, "_warm_up_transcription", None)
+            if callable(warm):
+                warm()
 
     # === One-time Ultra setup (core/ultra_defaults.py) ===
 
@@ -21130,6 +21134,10 @@ class WayfinderApp(ctk.CTk):
             self.log("⚙ Free transcription uses Base on CPU; GPU requires Ultra.")
             if hasattr(self, "gpu_var"):
                 self.gpu_var.set(False)
+        if IS_MACOS:
+            warm = getattr(self, "_warm_up_transcription", None)
+            if callable(warm):
+                warm()
 
     def _activate_downloaded_model(
         self, role: str, path: str, model_info: dict | None = None,
@@ -22111,6 +22119,8 @@ class WayfinderApp(ctk.CTk):
             relative_path = "~" + path_str[len(home):] if path_str.startswith(home) else path_str
             self.config["model_path"] = relative_path
             save_config(self.config)
+            if IS_MACOS:
+                self._warm_up_transcription()
             self.log(f"⚙ Model: {model_name}")
             # Update the button in main UI if visible
             if hasattr(self, 'model_btn'):
@@ -22856,6 +22866,9 @@ class WayfinderApp(ctk.CTk):
     def update_state(self, new_state: AppState):
         old_state = self.app_state
         self.app_state = new_state
+        if IS_MACOS:
+            from wayfinder.utils.macos_coreml import set_dictation_active
+            set_dictation_active(new_state != AppState.IDLE)
         self._write_status_breadcrumb()
         color = STATE_COLORS[new_state]
 
@@ -24415,6 +24428,9 @@ class WayfinderApp(ctk.CTk):
         return config
 
     def start_recording(self):
+        if IS_MACOS:
+            from wayfinder.utils.macos_coreml import set_dictation_active
+            set_dictation_active(True)
         started_at = time.perf_counter()
         stage_started_at = started_at
         start_phases = {}
@@ -24586,6 +24602,7 @@ class WayfinderApp(ctk.CTk):
             if startup_activity is not None:
                 startup_activity.end("recording-startup")
             if IS_MACOS:
+                set_dictation_active(getattr(self, "app_state", AppState.IDLE) != AppState.IDLE)
                 # Timing metadata only: no device names, audio, prompts, or text.
                 print(f"[Recording Start] elapsed={time.perf_counter() - started_at:.3f}s "
                       f"phases={json.dumps(start_phases, sort_keys=True)}", flush=True)
@@ -25652,12 +25669,13 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
 
-        # Ensure processing state was visible for at least 800ms
-        # This prevents the overlay from flashing too quickly
+        # Native macOS completion follows the actual paste, without holding a
+        # completed dictation open for an artificial 800ms minimum. Preserve
+        # the existing Linux/Windows indicator timing.
         import time as time_module
         if hasattr(self, '_processing_start_time') and self._processing_start_time:
             elapsed_ms = (time_module.time() - self._processing_start_time) * 1000
-            min_display_ms = 800
+            min_display_ms = 0 if IS_MACOS else 800
             if elapsed_ms < min_display_ms:
                 remaining_ms = int(min_display_ms - elapsed_ms)
                 # Schedule the ready state after remaining time. Capture gen so a stale delayed

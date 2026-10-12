@@ -21,6 +21,7 @@ NATIVE_BIN_DIR = BUILD_ROOT / "bin"
 NATIVE_LIB_DIR = BUILD_ROOT / "lib"
 WHISPER_SOURCE_DIR = BUILD_ROOT / "src" / "whisper.cpp"
 WHISPER_BUILD_DIR = BUILD_ROOT / "whisper-build"
+WHISPER_COREML_BUILD_DIR = BUILD_ROOT / "whisper-coreml-build"
 LLAMA_SOURCE_DIR = BUILD_ROOT / "src" / "llama.cpp"
 LLAMA_BUILD_DIR = BUILD_ROOT / "llama-build"
 APP_PATH = PROJECT_ROOT / "dist" / "Wayfinder Aura.app"
@@ -134,6 +135,42 @@ def build_whisper() -> None:
         shutil.copy2(source, NATIVE_BIN_DIR / name)
 
 
+def build_whisper_coreml() -> None:
+    """Optional Core ML twin; never replace the Metal/CPU release binaries."""
+    if not WHISPER_SOURCE_DIR.is_dir():
+        raise SystemExit("Build the pinned Whisper checkout before its Core ML twin")
+    if output(["git", "-C", WHISPER_SOURCE_DIR, "rev-parse", "HEAD"]) != WHISPER_COMMIT:
+        raise SystemExit("Core ML requires the same pinned whisper.cpp source")
+    run([
+        "cmake", "-S", WHISPER_SOURCE_DIR, "-B", WHISPER_COREML_BUILD_DIR,
+        "-DCMAKE_BUILD_TYPE=Release",
+        f"-DCMAKE_OSX_DEPLOYMENT_TARGET={MINIMUM_MACOS}",
+        "-DBUILD_SHARED_LIBS=OFF", "-DGGML_NATIVE=OFF", "-DGGML_METAL=ON",
+        "-DWHISPER_COREML=ON", "-DWHISPER_COREML_ALLOW_FALLBACK=ON",
+        "-DWHISPER_BUILD_EXAMPLES=ON", "-DWHISPER_BUILD_TESTS=OFF",
+    ])
+    run([
+        "cmake", "--build", WHISPER_COREML_BUILD_DIR, "--config", "Release",
+        "--parallel", os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL") or "2",
+        "--target", *WHISPER_BINARIES,
+    ])
+    destination = NATIVE_BIN_DIR / "whisper-coreml"
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in WHISPER_BINARIES:
+        source = WHISPER_COREML_BUILD_DIR / "bin" / name
+        if not source.is_file():
+            raise SystemExit(f"Core ML build did not produce {source}")
+        shutil.copy2(source, destination / name)
+
+
+def build_coreml_compiler() -> None:
+    """Small native wrapper: end users never need Xcode to convert a model."""
+    NATIVE_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    run(["xcrun", "clang", "-Os", "-fobjc-arc", f"-mmacosx-version-min={MINIMUM_MACOS}",
+         "-framework", "Foundation", "-framework", "CoreML",
+         PROJECT_ROOT / "packaging/macos/coreml_compile.m", "-o", NATIVE_BIN_DIR / "coreml-compile"])
+
+
 def build_llama() -> None:
     """Build the pinned llama.cpp cleanup CLI and resident server with Metal."""
     if not LLAMA_SOURCE_DIR.exists():
@@ -224,7 +261,7 @@ def remove_previous_app() -> None:
     print(f"Previous app bundle is protected by macOS; moved it to {target}", flush=True)
 
 
-def build_app() -> None:
+def build_app(*, coreml: bool = True) -> None:
     pyinstaller = Path(sys.executable).with_name("pyinstaller")
     if not pyinstaller.is_file():
         raise SystemExit(
@@ -234,6 +271,7 @@ def build_app() -> None:
     remove_previous_app()
     env = os.environ.copy()
     env.setdefault("AURA_MACOS_ARCH", platform.machine())
+    env["AURA_MACOS_COREML"] = "1" if coreml else "0"
     run([
         pyinstaller,
         PROJECT_ROOT / "wayfinder-aura-macos.spec",
@@ -279,7 +317,7 @@ def validate_native_deployment_targets(root: Path, declared: str) -> None:
         )
 
 
-def validate_app() -> None:
+def validate_app(*, coreml: bool = False) -> None:
     if not APP_PATH.is_dir():
         raise SystemExit(f"Bundle was not created: {APP_PATH}")
 
@@ -310,6 +348,15 @@ def validate_app() -> None:
         bundled = resources / "bin" / name
         if not bundled.is_file() or not os.access(bundled, os.X_OK):
             raise SystemExit(f"Bundle is missing executable {bundled}")
+    if coreml:
+        for name in ("coreml-compile", "whisper-coreml/whisper-cli", "whisper-coreml/whisper-server"):
+            bundled = resources / "bin" / name
+            if not bundled.is_file() or not os.access(bundled, os.X_OK):
+                raise SystemExit(f"Bundle is missing local Core ML helper {bundled}")
+        for name in ("coreml/turbo/bindings.json", "coreml/turbo/Data/com.apple.CoreML/model.mlmodel",
+                     "benchmarks/coreml_probe.wav"):
+            if not (resources / "assets" / name).is_file():
+                raise SystemExit(f"Bundle is missing local Core ML asset {name}")
     hero_renderer = resources / "lib" / "libwayfinder_hero.dylib"
     if not hero_renderer.is_file():
         raise SystemExit(f"Bundle is missing native hero renderer {hero_renderer}")
@@ -326,6 +373,8 @@ def validate_app() -> None:
     run([executable, "--runtime-assets-self-test"])
     run([executable, "--macos-native-renderers-self-test"])
     run([resources / "bin" / "whisper-cli", "--help"])
+    if coreml:
+        run([resources / "bin" / "coreml-compile", "--help"])
 
 
 def create_dmg() -> Path:
@@ -466,6 +515,9 @@ def notarize_dmg(dmg_path: Path, auth: list[str]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-native-build", action="store_true", help="reuse build/macos-native/bin")
+    parser.add_argument("--coreml", action="store_true", help="include the experimental Core ML Whisper twin")
+    parser.add_argument("--no-coreml", dest="coreml", action="store_false", help="omit the optional Core ML twin")
+    parser.set_defaults(coreml=True)
     parser.add_argument("--no-dmg", action="store_true", help="stop after validating the .app")
     parser.add_argument(
         "--notarize-profile",
@@ -491,13 +543,20 @@ def main() -> int:
             raise SystemExit("Notarization requires MACOS_CODESIGN_IDENTITY")
     if not args.skip_native_build:
         build_whisper()
+        if args.coreml:
+            build_whisper_coreml()
         build_llama()
     build_hero_renderer()
     for name in NATIVE_BINARIES:
         if not (NATIVE_BIN_DIR / name).is_file():
             raise SystemExit(f"Missing {NATIVE_BIN_DIR / name}; build without --skip-native-build")
-    build_app()
-    validate_app()
+    if args.coreml:
+        build_coreml_compiler()
+        for name in WHISPER_BINARIES:
+            if not (NATIVE_BIN_DIR / "whisper-coreml" / name).is_file():
+                raise SystemExit("Missing Core ML twin; build with --coreml without --skip-native-build")
+    build_app(coreml=args.coreml)
+    validate_app(coreml=args.coreml)
     # Apple's order: notarize + staple the app, THEN build the DMG around the
     # stapled app, then notarize + staple the (signed) DMG. Ad-hoc builds (no
     # credentials) skip both steps exactly as before.

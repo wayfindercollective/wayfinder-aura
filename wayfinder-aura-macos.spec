@@ -39,6 +39,7 @@ ENTITLEMENTS_FILE = str(PROJECT_ROOT / 'packaging' / 'macos' / 'entitlements.pli
 # packaging/macos/build.py requires and verifies the complete runtime.
 NATIVE_BIN_DIR = PROJECT_ROOT / 'build' / 'macos-native' / 'bin'
 macos_binaries = []
+coreml_enabled = os.environ.get('AURA_MACOS_COREML', '1') != '0'
 for binary_name in (
     'whisper-cli', 'whisper-server',
     'llama-simple', 'llama-server',
@@ -47,6 +48,13 @@ for binary_name in (
     if binary_path.is_file():
         macos_binaries.append((str(binary_path), 'bin'))
 hero_renderer = PROJECT_ROOT / 'build' / 'macos-native' / 'lib' / 'libwayfinder_hero.dylib'
+coreml_compiler = NATIVE_BIN_DIR / 'coreml-compile'
+if coreml_enabled and coreml_compiler.is_file():
+    macos_binaries.append((str(coreml_compiler), 'bin'))
+for binary_name in ('whisper-cli', 'whisper-server'):
+    binary_path = NATIVE_BIN_DIR / 'whisper-coreml' / binary_name
+    if coreml_enabled and binary_path.is_file():
+        macos_binaries.append((str(binary_path), 'bin/whisper-coreml'))
 if hero_renderer.is_file():
     macos_binaries.append((str(hero_renderer), 'lib'))
 
@@ -60,6 +68,8 @@ a = Analysis(
         ('assets/icon.icns', 'assets'),
         ('assets/icons', 'assets/icons'),
         ('assets/fonts', 'assets/fonts'),
+        *([('assets/coreml', 'assets/coreml'), ('assets/benchmarks', 'assets/benchmarks')]
+          if coreml_enabled else []),
         # Include the wayfinder package source (needed for overlay subprocess)
         ('src/wayfinder', 'wayfinder'),
         # Include overlay.py at top level of Resources for subprocess access

@@ -2194,6 +2194,7 @@ class TestServerReuseIdentity:
         # macOS/Windows also match -t (the backend's default is 4); set it
         # rather than inherit whatever an earlier test left on the class.
         WhisperServerBackend._server_threads = threads
+        WhisperServerBackend._server_binary = None
 
     def _backend(self, gpu=False, model=MODEL):
         from wayfinder.core.transcriber import WhisperServerBackend
@@ -2205,6 +2206,7 @@ class TestServerReuseIdentity:
         WhisperServerBackend._server_model_path = ""
         WhisperServerBackend._server_use_gpu = None
         WhisperServerBackend._server_threads = None
+        WhisperServerBackend._server_binary = None
 
     def test_same_model_same_mode_is_reusable(self):
         self._set_state(gpu=False)

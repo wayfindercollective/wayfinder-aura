@@ -16,6 +16,7 @@ ctypes only; every call is best-effort and returns None on failure.
 from __future__ import annotations
 
 import ctypes
+import math
 import sys
 from dataclasses import dataclass
 
@@ -30,6 +31,10 @@ _DEFAULT_OUTPUT = _fourcc("dOut")
 _VIRTUAL_MAIN_VOLUME = _fourcc("vmvc")
 _SCOPE_OUTPUT = _fourcc("outp")
 _DEVICE_NAME = _fourcc("lnam")
+_DEVICES = _fourcc("dev#")
+_STREAMS = _fourcc("stm#")
+_NOMINAL_RATE = _fourcc("nsrt")
+_SCOPE_INPUT = _fourcc("inpt")
 _TRANSPORT = _fourcc("tran")
 _SCOPE_GLOBAL = _fourcc("glob")
 _ELEMENT_MAIN = 0
@@ -62,6 +67,11 @@ def _load():
             ca.AudioObjectGetPropertyData.argtypes = [
                 ctypes.c_uint32, ctypes.POINTER(_Address), ctypes.c_uint32, ctypes.c_void_p,
                 ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p,
+            ]
+            ca.AudioObjectGetPropertyDataSize.restype = ctypes.c_int32
+            ca.AudioObjectGetPropertyDataSize.argtypes = [
+                ctypes.c_uint32, ctypes.POINTER(_Address), ctypes.c_uint32, ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint32),
             ]
             ca.AudioObjectHasProperty.restype = ctypes.c_bool
             ca.AudioObjectHasProperty.argtypes = [ctypes.c_uint32, ctypes.POINTER(_Address)]
@@ -126,6 +136,61 @@ def default_input_device() -> InputDevice | None:
             return None
         transport = _get_u32(ca, device_id, _TRANSPORT)
         return InputDevice(device_id, name, transport in _TRANSPORT_BLUETOOTH)
+    except Exception:
+        return None
+
+
+def _get_ids(ca, obj: int, selector: int, scope: int = _SCOPE_GLOBAL) -> list[int]:
+    address = _Address(selector, scope, _ELEMENT_MAIN)
+    size = ctypes.c_uint32()
+    status = ca.AudioObjectGetPropertyDataSize(obj, ctypes.byref(address), 0, None, ctypes.byref(size))
+    if status or not size.value or size.value % 4 or size.value > 16384:
+        return []
+    capacity = size.value
+    values = (ctypes.c_uint32 * (capacity // 4))()
+    status = ca.AudioObjectGetPropertyData(obj, ctypes.byref(address), 0, None,
+                                         ctypes.byref(size), values)
+    if status or size.value > capacity or size.value % 4:
+        return []
+    return [int(values[i]) for i in range(size.value // 4)]
+
+
+def input_sample_rate(name: str | None = None) -> int | None:
+    """Read the current native input rate without opening/testing any stream.
+
+    PortAudio's CoreAudio format check creates a throwaway audio unit, which
+    can stall for seconds on first use. Use HAL metadata instead, then let the
+    actual capture open validate it. Explicit device names must match uniquely
+    among inputs: never silently substitute the system default microphone.
+    """
+    if sys.platform != "darwin":
+        return None
+    libs = _load()
+    if libs is None:
+        return None
+    ca, cf = libs
+    try:
+        if name is None:
+            device_id = _get_u32(ca, _SYSTEM_OBJECT, _DEFAULT_INPUT)
+        else:
+            if not isinstance(name, str) or not name:
+                return None
+            matches = [device for device in _get_ids(ca, _SYSTEM_OBJECT, _DEVICES)
+                       if _get_name(ca, cf, device) == name and _get_ids(ca, device, _STREAMS, _SCOPE_INPUT)]
+            if len(matches) != 1:
+                return None
+            device_id = matches[0]
+        if not device_id:
+            return None
+        value = ctypes.c_double()
+        size = ctypes.c_uint32(ctypes.sizeof(value))
+        address = _Address(_NOMINAL_RATE, _SCOPE_GLOBAL, _ELEMENT_MAIN)
+        status = ca.AudioObjectGetPropertyData(device_id, ctypes.byref(address), 0, None,
+                                             ctypes.byref(size), ctypes.byref(value))
+        rate = value.value
+        if status or size.value != ctypes.sizeof(value) or not math.isfinite(rate) or not 8000 <= rate <= 384000:
+            return None
+        return round(rate)
     except Exception:
         return None
 

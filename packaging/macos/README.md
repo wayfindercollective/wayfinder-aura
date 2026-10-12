@@ -44,6 +44,56 @@ builds use an ad-hoc signature and are suitable for development/QA only.
 Use `--skip-native-build` to reuse the pinned native build, or `--no-dmg` when
 iterating on the app bundle.
 
+## Automatic Turbo Core ML encoder
+
+Mac builds include a Core ML twin by default (`--no-coreml` omits it).
+It can run Turbo's full 30-second encoder on the Apple Neural Engine while
+retaining the existing Whisper decoder, Raw Transcript behavior, and GPU
+entitlement check. It lives under `bin/whisper-coreml`, never replacing the
+standard Metal/CPU executables. Missing/unverified assets select Metal; the
+native twin also permits Metal fallback when Core ML fails to load.
+
+**Download once; convert locally.** The ordinary Turbo GGML download (F16,
+Q5_0, or Q8_0) is immediately usable. A background worker extracts/dequantizes
+its encoder weights into a bundled, **weight-free ~1 MiB architecture graph**.
+The native `coreml-compile` helper compiles it using macOS's Core ML framework.
+No second model/encoder download, Torch, coremltools, Xcode or network connection
+is needed by the installed app. Every learned tensor comes from the downloaded
+model; the decoder still uses that same original GGML file. Derived weights
+take about 1.2 GiB in a per-revision/precision cache. Conversion requires
+temporary free disk space and otherwise keeps Metal. Other model architectures
+currently stay on Metal; this first automatic path targets Turbo.
+
+`export_coreml_encoder.py` and `export_coreml_template.py` are **maintainer-only
+graph regeneration tools**, not customer setup steps. They verify the pinned
+Whisper converter and official checkpoint, and verify all 487 local tensor
+bindings against its export before extracting only architecture/layout. The
+normalization parameters are loaded as float32 before the ANE bias/weight
+division (one Turbo coefficient exceeds float16's range). Core ML retains
+overflow-sensitive operations at full precision and uses float16 elsewhere;
+input/output remain float32 for the native bridge. The graph ships no weights.
+
+`whisper_coreml_encoder` defaults to true only on Mac. A background startup
+worker compares Metal and Core ML using bundled public synthetic speech, never
+the microphone. It requires identical normalized words and at least a 10% /
+25 ms improvement, caches timings only for the current model/binaries/chip/OS,
+and hands off the already-warm winner only while idle. Synthetic tests run on
+separate, supervised children, never on the user's dictation server. They yield
+to recording and retry after it finishes. Metal remains usable throughout;
+device compilation can continue while recording. Changing models/settings
+supersedes old preparation. Hotkeys never convert, compile, benchmark, or wait
+for device preparation.
+Setting it to false and restarting is the advanced Metal-only escape hatch.
+Local weight population/package compilation took 6.6 seconds on a 24 GiB M4.
+First device specialization took another ~59 seconds, in the background;
+native child startup is bounded to 120 seconds. Inference/recovery deadlines
+are unchanged. Public-clip tests of locally converted Q5 weights measured
+~0.51–0.64 seconds versus
+~0.97–1.19 on Metal Q5, with identical normalized words across five clips.
+This is experimental, not a claim of instant completion or broad accuracy
+validation. Selection remains conditional on that Mac's local accuracy/speed
+check and the existing Ultra GPU entitlement.
+
 ## Developer ID signing and notarization
 
 Import the Developer ID Application certificate into the login keychain, then

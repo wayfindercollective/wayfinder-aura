@@ -407,6 +407,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # first switch to Ultra turns it on once on Apple Silicon/NVIDIA/AMD
     # (core/ultra_defaults.py); after that it is the user's choice.
     "use_gpu": False,
+    # Automatically prefer a prepared Core ML encoder on macOS only when a
+    # local comparison proves it faster. Existing GPU entitlement still applies.
+    "whisper_coreml_encoder": sys.platform == "darwin",
     # None = not decided yet, False = seen on Free, True = the one-time Ultra
     # setup has run (or the install was Ultra before it existed).
     "ultra_defaults_applied": None,

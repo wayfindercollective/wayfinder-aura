@@ -741,6 +741,7 @@ class WhisperServerBackend(TranscriptionBackend):
     _server_port: int = 0
     _server_lock = None  # Initialized lazily
     _server_model_path: str = ""
+    _server_binary: Optional[str] = None
     # CPU/GPU mode the resident server was spawned with. Part of the server's
     # identity for reuse checks: the flags are fixed at spawn, so a use_gpu
     # change (e.g. the toggle right after an Ultra activation) must MISS reuse
@@ -788,12 +789,14 @@ class WhisperServerBackend(TranscriptionBackend):
         temperature: float = 0.0,
         temperature_fallback: float = 0.0,
         gpu_layers: int = 0,
+        startup_timeout: float = 30.0,
     ):
         self.whisper_server_binary = _expand_path(whisper_server_binary)
         self.model_path = _expand_path(model_path)
         self.port = port
         self.threads = threads
         self.timeout = timeout
+        self.startup_timeout = startup_timeout
         self.use_gpu = use_gpu
         self.beam_size = beam_size
         self.best_of = best_of
@@ -1005,6 +1008,8 @@ class WhisperServerBackend(TranscriptionBackend):
             WhisperServerBackend._server_process is not None
             and WhisperServerBackend._server_process.poll() is None
             and WhisperServerBackend._server_model_path == self.model_path
+            and (WhisperServerBackend._server_binary is None
+                 or WhisperServerBackend._server_binary == self.whisper_server_binary)
             # Unknown mode (None: adopted server / reset state) never matches.
             and WhisperServerBackend._server_use_gpu is not None
             and WhisperServerBackend._server_use_gpu == bool(self.use_gpu)
@@ -1124,6 +1129,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
                 WhisperServerBackend._server_use_gpu = self.use_gpu
+                WhisperServerBackend._server_binary = self.whisper_server_binary
                 WhisperServerBackend._server_threads = self.threads
                 # Start draining BEFORE readiness probes. A chatty startup or repeated
                 # requests must never be able to fill stdout and deadlock inference.
@@ -1137,11 +1143,13 @@ class WhisperServerBackend(TranscriptionBackend):
                 # macOS/Windows poll every 0.1s: with a warm Metal cache (or the
                 # OS file cache on Windows) the server is up in ~0.2s, so the
                 # 0.5s first sleep was pure latency on every (re)start. Same ~30s
-                # ceiling either way.
+                # ceiling either way. The explicitly opted-in Core ML encoder
+                # needs a longer first-load budget for Apple's device compilation;
+                # inference/recovery still obey the original request deadline.
                 poll = 0.1 if sys.platform in ("darwin", "win32") else 0.5
                 started = time.monotonic()
                 died = False
-                for i in range(int(30 / poll)):  # up to ~30s (None) — or until the deadline
+                for i in range(int(self.startup_timeout / poll)):
                     if deadline is not None:
                         rem = _left()
                         if rem <= 0:
@@ -1167,7 +1175,8 @@ class WhisperServerBackend(TranscriptionBackend):
                     # Startup hang with budget still available — a real fault; stop trying.
                     self._stop_server_internal(deadline=deadline)
                     WhisperServerBackend._server_disabled = True
-                    raise TranscriptionError("whisper-server timed out during startup (30s)")
+                    raise TranscriptionError(
+                        f"whisper-server timed out during startup ({self.startup_timeout:g}s)")
 
             WhisperServerBackend._server_process = None
             WhisperServerBackend._server_model_path = ""
@@ -1206,6 +1215,7 @@ class WhisperServerBackend(TranscriptionBackend):
         # reuse check for a server we do not control (Codex review).
         cls._server_process = None
         cls._server_model_path = ""
+        cls._server_binary = None
         cls._server_use_gpu = None
 
     @classmethod
@@ -2145,7 +2155,16 @@ def warm_up_transcription(config: dict) -> bool:
         backend = get_backend(config)
         warm = getattr(backend, "warm_up", None)
         if callable(warm):
-            return warm() is not False
+            loaded = warm() is not False
+            if (loaded and isinstance(backend, WhisperServerBackend)
+                    and sys.platform == "darwin" and backend.use_gpu
+                    and config.get("whisper_coreml_encoder", True)):
+                try:
+                    from wayfinder.utils.macos_coreml import schedule_preparation
+                    schedule_preparation(config, backend)
+                except Exception as exc:
+                    print(f"[Whisper] Encoder comparison deferred ({type(exc).__name__}); keeping Metal")
+            return loaded
     except Exception as e:
         print(f"[Transcription] Warm-up skipped: {e}")
     return False
@@ -2390,18 +2409,31 @@ def get_backend(config: dict) -> TranscriptionBackend:
             from wayfinder.utils.windows_whisper import gpu_twin
 
             cli_binary = gpu_twin(cli_binary) or cli_binary
+        coreml_selected = False
+        selected_model_path = config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin")
+        if (sys.platform == "darwin" and use_gpu_effective
+                and config.get("whisper_coreml_encoder", True)):
+            from wayfinder.utils.macos_coreml import coreml_twin, converted_model_path
+
+            coreml_binary = coreml_twin(cli_binary, config.get("model_path", ""))
+            if coreml_binary:
+                cli_binary = coreml_binary
+                selected_model_path = str(converted_model_path(config.get("model_path", "")))
+                coreml_selected = True
+                print("[Whisper] macOS encoder: Core ML (automatic)")
         _wc_beam, _wc_best_of = whisper_decoding(config)
         if config.get("whisper_server_mode", True):
             server_binary = _derive_whisper_server_binary(cli_binary)
             server_backend = WhisperServerBackend(
                 whisper_server_binary=server_binary,
-                model_path=config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"),
+                model_path=selected_model_path,
                 port=config.get("whisper_server_port", 8178),
                 threads=config.get("threads", 4),
                 # Short, dedicated timeout (see config: whisper_server_timeout) so a
                 # wedged inference worker is caught fast → restart + retry can salvage
                 # the dictation before the 120s PROCESSING watchdog abandons it.
                 timeout=config.get("whisper_server_timeout", 30),
+                startup_timeout=120.0 if coreml_selected else 30.0,
                 use_gpu=use_gpu_effective,
                 beam_size=_wc_beam,
                 best_of=_wc_best_of,
@@ -2425,7 +2457,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
                       "(per-dictation model load). Build whisper-server for instant mode.")
         return WhisperCppBackend(
             whisper_binary=cli_binary,
-            model_path=config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"),
+            model_path=selected_model_path,
             prompt=_effective_prompt or "Dictation with natural speech.",
             threads=config.get("threads", 6),
             timeout=config.get("timeout", 120),

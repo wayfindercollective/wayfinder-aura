@@ -25,7 +25,7 @@ def _make_warm(device=None, idle_secs=30.0, **kwargs):
 
 
 class TestWarmMicLifecycle:
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=16000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=16000)
     @patch("wayfinder.core.recorder.sd")
     def test_macos_first_frame_timing_is_once_per_acquisition(
         self, mock_sd, _rate, monkeypatch, capsys
@@ -49,7 +49,7 @@ class TestWarmMicLifecycle:
         warm.release()
         assert warm._first_frame_started_at is None
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_opens_once_and_reuses_across_recordings(self, mock_sd, _rate):
         """The stream is opened on first acquire and reused on the next — no second open.
@@ -66,7 +66,7 @@ class TestWarmMicLifecycle:
         assert mock_sd.InputStream.call_count == 1
         assert warm.is_open
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_sample_rate_reflects_open_stream(self, mock_sd, _rate):
         warm = _make_warm(device=7)
@@ -74,7 +74,7 @@ class TestWarmMicLifecycle:
         warm.acquire(MagicMock())
         assert warm.sample_rate == 48000  # the device's supported rate after open
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_routes_frames_to_attached_sink_only(self, mock_sd, _rate):
         """While acquired, frames reach the sink; after release, they are dropped."""
@@ -92,7 +92,7 @@ class TestWarmMicLifecycle:
 
 
 class TestWarmMicDeviceHealing:
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder._system_default_input_index", return_value=6)
     @patch("wayfinder.core.recorder.sd")
     def test_falls_back_past_dead_index_and_remembers_working_one(self, mock_sd, _sys, _rate):
@@ -110,7 +110,7 @@ class TestWarmMicDeviceHealing:
         assert actual == 6
         assert warm.device == 6  # healed — next open uses 6 directly, no dead probe
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder._system_default_input_index", return_value=None)
     @patch("wayfinder.core.recorder.sd")
     def test_falls_back_to_system_default_none(self, mock_sd, _sys, _rate):
@@ -151,7 +151,7 @@ class TestWarmMicOpenTimeout:
     """A wedged audio device must never block the caller (Tk main thread)."""
 
     @patch("wayfinder.core.recorder._MIC_OPEN_TIMEOUT", 0.3)
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder._system_default_input_index", return_value=6)
     @patch("wayfinder.core.recorder.sd")
     def test_wedged_device_trips_circuit_breaker(self, mock_sd, _sys, _rate):
@@ -177,7 +177,7 @@ class TestWarmMicOpenTimeout:
         blocker.set()               # release the abandoned watchdog worker
 
     @patch("wayfinder.core.recorder._MIC_OPEN_TIMEOUT", 0.2)
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder._system_default_input_index", return_value=None)
     @patch("wayfinder.core.recorder.sd")
     def test_all_devices_wedged_raises_instead_of_freezing(self, mock_sd, _sys, _rate):
@@ -196,7 +196,7 @@ class TestWarmMicOpenTimeout:
 
 
 class TestWarmMicIdleClose:
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_release_arms_timer_acquire_cancels_it(self, mock_sd, _rate):
         warm = _make_warm(device=7)
@@ -207,7 +207,7 @@ class TestWarmMicIdleClose:
         warm.acquire(MagicMock())
         assert warm._idle_timer is None  # cancelled — back in use
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_idle_fire_closes_when_still_idle(self, mock_sd, _rate):
         warm = _make_warm(device=7)
@@ -216,7 +216,7 @@ class TestWarmMicIdleClose:
         warm._on_idle()  # the timer's target
         assert not warm.is_open
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_idle_fire_is_noop_when_reacquired(self, mock_sd, _rate):
         """If a recording started after the timer fired but before it ran, don't close."""
@@ -228,7 +228,7 @@ class TestWarmMicIdleClose:
         assert warm.is_open
 
     @patch("wayfinder.core.recorder._MIC_CLOSE_TIMEOUT", 0.1)
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_stuck_idle_close_never_holds_shared_lock_or_freezes_acquire(
         self, mock_sd, _rate
@@ -270,7 +270,7 @@ class TestWarmMicIdleClose:
         idle.join(timeout=1)
 
     @patch("wayfinder.core.recorder._MIC_CLOSE_TIMEOUT", 0.1)
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_timed_out_close_quarantines_portaudio(self, mock_sd, _rate):
         blocker = threading.Event()
@@ -294,7 +294,7 @@ class TestWarmMicIdleClose:
         assert mock_sd.InputStream.call_count == 1
         blocker.set()
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_set_device_drops_warm_stream(self, mock_sd, _rate):
         """Changing the mic in settings must drop the warm stream so the next recording
@@ -306,7 +306,7 @@ class TestWarmMicIdleClose:
         assert warm.device == 9
         assert not warm.is_open
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_close_is_idempotent(self, mock_sd, _rate):
         warm = _make_warm(device=7)
@@ -315,7 +315,7 @@ class TestWarmMicIdleClose:
         warm.close()
         assert not warm.is_open
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_close_stream_detaches_before_teardown(self, mock_sd, _rate):
         """Regression 2026-07-13: double-close of the same PortAudio handle SEGV'd in
@@ -343,7 +343,7 @@ class TestWarmMicIdleClose:
         assert seen == [None]  # detached before teardown
         stream.close.assert_called_once()
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_close_stream_prefers_abort_over_stop(self, mock_sd, _rate):
         warm = _make_warm(device=7)
@@ -358,7 +358,7 @@ class TestWarmMicIdleClose:
         stream.stop.assert_not_called()
         stream.close.assert_called_once()
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_concurrent_close_only_tears_down_once(self, mock_sd, _rate):
         warm = _make_warm(device=7)
@@ -379,7 +379,7 @@ class TestWarmMicIdleClose:
         assert stream.close.call_count == 1
         assert warm._stream is None
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder._system_default_input_index", return_value=None)
     @patch("wayfinder.core.recorder.sd")
     def test_abandoned_open_skips_pa_rescan(self, mock_sd, _sys, _rate):
@@ -391,7 +391,7 @@ class TestWarmMicIdleClose:
             rescan.assert_not_called()
 
     @patch("wayfinder.core.recorder._MIC_OPEN_TIMEOUT", 0.2)
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder._system_default_input_index", return_value=None)
     @patch("wayfinder.core.recorder.sd")
     def test_later_open_still_skips_pa_rescan_after_abandon(self, mock_sd, _sys, _rate):
@@ -489,7 +489,7 @@ class TestWindowsSlowCloseRecovery:
         assert warm._close_done.wait(timeout=2)
         return warm
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_windows_recovers_when_the_slow_close_finishes(self, mock_sd, _rate, monkeypatch):
         warm = self._slow_close(monkeypatch, mock_sd, "win32")
@@ -497,7 +497,7 @@ class TestWindowsSlowCloseRecovery:
         warm.acquire(MagicMock())                      # records again, no restart
         assert mock_sd.InputStream.call_count == 2
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_mac_still_requires_a_restart(self, mock_sd, _rate, monkeypatch):
         warm = self._slow_close(monkeypatch, mock_sd, "darwin")
@@ -513,7 +513,7 @@ class TestWindowsSlowCloseRecovery:
         assert recorder._MIC_CLOSE_TIMEOUT == (5.0 if real_sys.platform == "win32" else 1.0)
 
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_windows_acquire_retries_when_the_close_finished_during_the_wait(
         self, mock_sd, _rate, monkeypatch
@@ -532,7 +532,7 @@ class TestWindowsSlowCloseRecovery:
         warm.acquire(MagicMock())
         assert warm._abandoned_close is False and mock_sd.InputStream.call_count == 1
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_windows_no_stale_restart_notice_after_recovery(self, mock_sd, _rate, monkeypatch):
         from wayfinder.core import recorder
@@ -548,7 +548,7 @@ class TestWindowsSlowCloseRecovery:
         assert notices == ["stuck"]
 
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_windows_hotkey_during_a_normal_idle_close_still_records(
         self, mock_sd, _rate, monkeypatch
@@ -584,7 +584,7 @@ class TestWindowsSlowCloseRecovery:
         warm.acquire(MagicMock())
         assert warm._abandoned_close is False and mock_sd.InputStream.call_count == 1
 
-    @patch("wayfinder.core.recorder.get_supported_sample_rate", return_value=48000)
+    @patch("wayfinder.core.recorder.get_capture_sample_rate", return_value=48000)
     @patch("wayfinder.core.recorder.sd")
     def test_windows_close_finishing_right_after_the_watchdog_is_not_quarantined(
         self, mock_sd, _rate, monkeypatch
