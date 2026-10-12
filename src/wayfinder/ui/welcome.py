@@ -4,7 +4,7 @@ First-run welcome tour for Wayfinder Aura.
 Two layers:
 
 - ``WelcomeFlow`` — a tiny, pure state machine (optional free model download,
-  then mic -> hotkey -> dictate).
+  then mic -> hotkey -> dictate -> preferences).
   It has NO Tk/customtkinter dependency and is headless-testable.
 - ``WelcomePane`` — the in-window card that renders the flow over the tab content
   area. It imports customtkinter lazily (inside the builder), so importing this
@@ -91,7 +91,7 @@ class WelcomeFlow:
     skipped.
     """
 
-    STEPS = ("mic", "hotkey", "dictate")
+    STEPS = ("mic", "hotkey", "dictate", "preferences")
 
     def __init__(self, on_complete=None, *, include_model: bool = False,
                  include_permissions: bool = False, steps=None):
@@ -345,6 +345,7 @@ class WelcomePane:
         "mic": "welcome to wayfinder aura",
         "hotkey": "your hotkey",
         "dictate": "try it now",
+        "preferences": "after dictation",
     }
 
     # macOS permission rows: (id, title, why, icon).
@@ -605,6 +606,8 @@ class WelcomePane:
             self._render_hotkey(body)
         elif step == "dictate":
             self._render_dictate(body)
+        elif step == "preferences":
+            self._render_preferences(body)
         if self.flow.index == 0 and not self._only_permissions:
             self._render_desktop_approval_note(body)
 
@@ -1085,7 +1088,7 @@ class WelcomePane:
             heard.pack(anchor="w", pady=(SPACING["sm"], 0))
             self._wrap_labels.append(heard)
             self._login_item_choice(body)
-            self._continue_button(body, "done", gold=True)
+            self._continue_button(body, "continue")
         elif self._help_shown:
             self._render_dictate_help(body)
         else:
@@ -1097,6 +1100,39 @@ class WelcomePane:
                 pady=(SPACING["sm"], 0),
             )
             self._schedule_help()
+
+    def _render_preferences(self, body) -> None:
+        """Offer the existing Auto-Enter setting before finishing the tour."""
+        ctk = self._ctk
+        self._body_label(body, "Want Aura to press Enter after each dictation?")
+        self._auto_enter_choice_var = ctk.BooleanVar(
+            value=bool(self.app.config.get("press_enter_after_dictation", False))
+        )
+        ctk.CTkSwitch(
+            body, text="Press Enter", variable=self._auto_enter_choice_var,
+            command=self._on_auto_enter_choice,
+            font=(FONTS["body"][0], FONT_SIZES["body"]),
+            text_color=COLORS["text_secondary"],
+            fg_color=COLORS["bg_elevated"], progress_color=COLORS["accent"],
+            button_color=COLORS["text_bright"],
+            button_hover_color=COLORS["text_bright"],
+        ).pack(anchor="w", pady=(SPACING["md"], 0))
+        self._body_label(
+            body,
+            "Sends chat messages or adds a new line. "
+            "You can change this in Settings → System.",
+            muted=True, pady=(SPACING["sm"], 0),
+        )
+        self._continue_button(body, "done", gold=True)
+
+    def _on_auto_enter_choice(self) -> None:
+        enabled = bool(self._auto_enter_choice_var.get())
+        self.app.config["press_enter_after_dictation"] = enabled
+        save_config(self.app.config)
+        # Settings may already have been built before the tour opened.
+        settings_var = getattr(self.app, "_auto_enter_var", None)
+        if settings_var is not None:
+            settings_var.set(enabled)
 
     def _login_item_choice(self, body) -> None:
         """macOS: offer "open at login" where it matters - right after the first
@@ -1517,7 +1553,7 @@ class WelcomePane:
         if self.flow.current == "mic":
             self._cancel_mic_test()
             self.flow.pass_mic_test()
-        elif self.flow.current != "dictate":
+        elif self.flow.current not in ("dictate", "preferences"):
             self.flow.goto("dictate")
         self._render_step()
 

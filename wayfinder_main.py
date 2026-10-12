@@ -8715,9 +8715,8 @@ class WayfinderApp(ctk.CTk):
             corner_radius=RADIUS["lg"],
             **self._macos_glass_rim_kwargs(),
             width=188,
-            # Hugs the nav content + tier footer with modest breathing room — the old
-            # 380 left a large dead band between History and the footer.
-            height=320,
+            # Room for five nav rows, the tier badge, and the running build version.
+            height=360,
         )
         sidebar.grid(row=0, column=0, sticky="nw")  # Don't stretch vertically
         sidebar.grid_propagate(False)
@@ -8775,7 +8774,21 @@ class WayfinderApp(ctk.CTk):
             # allocated so the saved style workspace can return immediately.
             self.tab_buttons["style"].pack_forget()
 
-        # Footer pinned to the sidebar bottom: intentional Free pill or Ultra badge.
+        # The installed build stays visible even when a different update channel
+        # is selected: choosing Beta does not mean its update is installed yet.
+        from wayfinder import __version__ as current_version
+        from wayfinder.core.app_updates import channel_label
+
+        version_label = ctk.CTkLabel(
+            nav_container,
+            text=f"v{current_version} · {channel_label(current_version)}",
+            font=(self.font_mono[0], self.font_sizes["caption"]),
+            text_color=COLORS["text_muted"],
+            height=20,
+        )
+        version_label.pack(side="bottom", fill="x", pady=(4, 0))
+
+        # Footer pinned above the version: intentional Free pill or Ultra badge.
         is_ultra = getattr(self, "feature_gate", None) is not None and self.feature_gate.is_premium
         footer_pill = ctk.CTkFrame(
             nav_container,
