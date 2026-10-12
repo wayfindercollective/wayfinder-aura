@@ -460,6 +460,14 @@ if "--runtime-assets-self-test" in sys.argv:
             raise RuntimeError("bundled whisper-cli was not resolved")
         if not _llama_binary:
             raise RuntimeError("bundled llama.cpp CLI was not resolved")
+        if sys.platform == "darwin":
+            from pathlib import Path as _Path
+            _coreml_dir = _Path(_whisper_binary).parent / "whisper-coreml"
+            if _coreml_dir.is_dir():
+                from wayfinder.utils.macos_coreml_convert import load_bindings, template_path
+                load_bindings(template_path())
+                if not _Path(_whisper_binary).with_name("coreml-compile").is_file():
+                    raise RuntimeError("local Core ML compiler was not bundled")
         print(
             "RUNTIME_ASSETS_SELF_TEST_OK "
             f"whisper={_whisper_binary!r} llama={_llama_binary!r}",

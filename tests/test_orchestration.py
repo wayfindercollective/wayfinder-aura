@@ -1677,11 +1677,15 @@ class TestMacPreemptFinishTail:
         app.on_record_button()
         app.on_record_button()
         app.pump_events()  # transcription done → paste
-        app.pump_events()  # injection done → min-display tail scheduled
-        assert app._finish_injection_job is not None
-        assert app.app_state != AppState.IDLE
+        app.pump_events()  # Mac finishes immediately; Windows/Linux retain the tail.
+        if wayfinder_main.IS_MACOS:
+            assert app._finish_injection_job is None
+            assert app.app_state == AppState.IDLE
+        else:
+            assert app._finish_injection_job is not None
+            assert app.app_state != AppState.IDLE
 
-    def test_press_during_tail_starts_recording(self, app, monkeypatch):
+    def test_fast_completion_starts_next_recording(self, app, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
         self._through_injection(app, monkeypatch)
         app.on_hotkey()
