@@ -5,11 +5,14 @@ Covers the pure ``WelcomeFlow`` state machine and confirms the module imports
 headlessly (WelcomeFlow available without touching Tk / creating windows).
 """
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 
 
 class TestWelcomeFlow:
-    """State-machine transitions for the 3-step tour."""
+    """State-machine transitions for the welcome tour."""
 
     def test_starts_on_mic(self):
         from wayfinder.ui.welcome import WelcomeFlow
@@ -23,7 +26,7 @@ class TestWelcomeFlow:
         from wayfinder.ui.welcome import WelcomeFlow
 
         flow = WelcomeFlow(include_model=True)
-        assert flow.steps == ["mic", "model", "hotkey", "dictate"]
+        assert flow.steps == ["mic", "model", "hotkey", "dictate", "preferences"]
         flow.pass_mic_test()
         assert flow.advance() is True
         assert flow.current == "model"
@@ -45,6 +48,9 @@ class TestWelcomeFlow:
         flow.advance()
         assert flow.current == "dictate"
         assert flow.is_complete is False
+        flow.advance()
+        assert flow.current == "preferences"
+        assert flow.is_complete is False
         flow.advance()  # past last step -> complete
         assert flow.is_complete is True
         assert flow.current is None
@@ -53,7 +59,7 @@ class TestWelcomeFlow:
     def test_skip_from_any_step_completes(self):
         from wayfinder.ui.welcome import WelcomeFlow
 
-        for pre_advances in (0, 1, 2):
+        for pre_advances in (0, 1, 2, 3):
             seen = []
             flow = WelcomeFlow(on_complete=lambda seen=seen: seen.append(1))
             if pre_advances:
@@ -81,6 +87,7 @@ class TestWelcomeFlow:
         flow.pass_mic_test()
         flow.advance()
         flow.advance()
+        flow.advance()
         flow.advance()  # complete
         assert flow.is_complete is True
         flow.advance()  # should not raise or reopen
@@ -103,6 +110,59 @@ class TestWelcomeFlow:
         flow.goto("mic")
         assert flow.current is None
         assert flow.is_complete is True
+
+
+class TestWelcomeAutoEnter:
+    @pytest.mark.parametrize("configured, expected", [(None, False), (False, False), (True, True)])
+    def test_offer_uses_existing_setting_and_keeps_new_installs_opt_in(self, configured, expected):
+        from wayfinder.ui.welcome import WelcomePane
+
+        pane = WelcomePane.__new__(WelcomePane)
+        pane.app = SimpleNamespace(config={} if configured is None else {
+            "press_enter_after_dictation": configured,
+        })
+        pane._ctk = SimpleNamespace(BooleanVar=MagicMock(), CTkSwitch=MagicMock())
+        pane._body_label = MagicMock()
+        pane._continue_button = MagicMock()
+
+        pane._render_preferences(None)
+
+        pane._ctk.BooleanVar.assert_called_once_with(value=expected)
+        assert pane._ctk.CTkSwitch.call_args.kwargs["command"] == pane._on_auto_enter_choice
+        pane._continue_button.assert_called_once_with(None, "done", gold=True)
+
+    @pytest.mark.parametrize("settings_built", [False, True])
+    def test_toggle_saves_both_choices_and_syncs_existing_settings(self, monkeypatch, settings_built):
+        from wayfinder.ui import welcome
+
+        saved = []
+        monkeypatch.setattr(welcome, "save_config", lambda config: saved.append(dict(config)))
+        pane = welcome.WelcomePane.__new__(welcome.WelcomePane)
+        pane.app = SimpleNamespace(config={"press_enter_after_dictation": False})
+        if settings_built:
+            pane.app._auto_enter_var = MagicMock()
+
+        for enabled in (True, False):
+            pane._auto_enter_choice_var = SimpleNamespace(get=lambda: enabled)
+            pane._on_auto_enter_choice()
+            assert saved[-1]["press_enter_after_dictation"] is enabled
+            assert pane.app.config["press_enter_after_dictation"] is enabled
+            if settings_built:
+                pane.app._auto_enter_var.set.assert_called_with(enabled)
+
+    def test_another_tutorial_transcript_does_not_skip_back_past_the_choice(self):
+        from wayfinder.ui.welcome import WelcomeFlow, WelcomePane
+
+        pane = WelcomePane.__new__(WelcomePane)
+        pane.flow = WelcomeFlow()
+        pane.flow.goto("preferences")
+        pane._cancel_help = MagicMock()
+        pane._render_step = MagicMock()
+
+        pane.receive_transcript("another sentence")
+
+        assert pane.flow.current == "preferences"
+        pane._render_step.assert_called_once()
 
 
 class TestWelcomeModuleImport:
@@ -270,7 +330,7 @@ class TestWelcomePermissionsDetour:
         from wayfinder.ui.welcome import WelcomeFlow
 
         flow = WelcomeFlow(include_permissions=True)
-        assert flow.steps == ["permissions", "mic", "hotkey", "dictate"]
+        assert flow.steps == ["permissions", "mic", "hotkey", "dictate", "preferences"]
         assert flow.current == "permissions"
 
     def test_linux_default_has_no_permissions_step(self):
