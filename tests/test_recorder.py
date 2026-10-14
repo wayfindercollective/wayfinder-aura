@@ -417,10 +417,10 @@ class TestSilenceDetection:
         recorder._audio_callback(np.full(100, 0.3, dtype=np.float32), 100, None, None)
         assert recorder.get_peak_amplitude() == pytest.approx(0.3)
 
-    def test_saved_wav_peak_distinguishes_silence_from_speech(self, tmp_path):
+    def test_saved_wav_analysis_distinguishes_silence_from_speech(self, tmp_path):
         import wave
         import numpy as np
-        from wayfinder.core.recorder import get_wav_peak_amplitude
+        from wayfinder.core.recorder import analyze_wav_speech_activity
 
         silent = tmp_path / "silent.wav"
         voiced = tmp_path / "voiced.wav"
@@ -434,15 +434,57 @@ class TestSilenceDetection:
                 wav_file.setframerate(16000)
                 wav_file.writeframes(samples.tobytes())
 
-        assert get_wav_peak_amplitude(silent) == 0.0
-        assert get_wav_peak_amplitude(voiced) == pytest.approx(0.25)
+        silence = analyze_wav_speech_activity(silent)
+        assert silence.verdict == "silence" and silence.peak == 0.0
+        assert analyze_wav_speech_activity(voiced).peak == pytest.approx(0.25)
 
-    def test_saved_wav_peak_fails_open_for_invalid_input(self, tmp_path):
-        from wayfinder.core.recorder import get_wav_peak_amplitude
+    def test_saved_wav_analysis_fails_open_for_invalid_input(self, tmp_path):
+        from wayfinder.core.recorder import analyze_wav_speech_activity
 
         invalid = tmp_path / "not-a-wav.wav"
         invalid.write_text("not audio")
-        assert get_wav_peak_amplitude(invalid) is None
+        assert analyze_wav_speech_activity(invalid) is None
+
+    def test_speech_check_reports_verdict_and_levels(self):
+        """The verdict carries the levels behind it, so a rejected dictation
+        leaves numbers in activity.log instead of only "No speech detected"."""
+        import numpy as np
+        from wayfinder.core.recorder import analyze_speech_activity
+
+        rng = np.random.default_rng(3)
+        hiss = rng.normal(0, 0.01, 32000).astype(np.float32)
+        noise = analyze_speech_activity(hiss, 16000)
+        assert noise.verdict == "noise" and not noise.has_speech
+        assert noise.floor == pytest.approx(0.01, rel=0.2)
+        assert "dBFS" in noise.describe() and "×1." in noise.describe()
+
+        assert analyze_speech_activity(hiss * 0.01, 16000).verdict == "silence"
+        assert analyze_speech_activity(np.empty(0, np.float32), 16000).verdict == "silence"
+        # Under 0.5s only the peak is judged: fail open.
+        assert analyze_speech_activity(hiss[:4000], 16000).verdict == "speech"
+
+    @pytest.mark.parametrize("text, kept", [
+        ("", False), (".", False), ("So,", False), ("Okay.", False),
+        ("Okay, sounds good.", True), ("It's crazy that Nico", True),
+    ])
+    def test_noise_transcript_needs_two_words(self, text, kept):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is kept
+
+    def test_recorders_report_the_same_verdict_as_the_bool_check(self):
+        import numpy as np
+        from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder
+
+        rng = np.random.default_rng(4)
+        hiss = rng.normal(0, 0.01, 32000).astype(np.float32).reshape(-1, 1)
+        for cls in (AudioRecorder, ChunkedRecorder):
+            with patch("wayfinder.core.recorder.sd"):
+                recorder = cls()
+            assert recorder.speech_activity().verdict == "silence"  # nothing captured
+            recorder._audio_callback(hiss, hiss.shape[0], None, None)
+            assert recorder.speech_activity().verdict == "noise"
+            assert recorder.has_speech_activity() is False
 
     @staticmethod
     def _feed_wav(recorder, path, block=512):
