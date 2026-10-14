@@ -91,6 +91,19 @@ failed or abandoned attempt waits a day before the next one, then a week; after
 three, Metal stays selected for that combination. Changing models/settings
 supersedes old preparation. Hotkeys never convert, compile, benchmark, or wait
 for device preparation.
+
+Once Core ML has won, dictation still uses it only from a server that has
+already finished loading. Each launch (and each model/GPU/license change)
+starts Metal, then the same worker loads the Core ML server after a quiet spell
+and swaps it in while idle. macOS usually has the compiled encoder cached
+(0.8 s on the M1), but it can evict that cache without an OS update, for
+example under disk pressure. The load is then the same minutes-long compile,
+handled like the first one: attempt history, 600-second deadline, and stopped
+when a dictation starts. A finished load clears the attempt history. If the
+loaded Core ML server exits or has to restart (crash, inference recovery,
+thread-count change), dictation uses Metal at once, never a Core ML start, and
+Core ML returns at the next launch or model/GPU change. With
+`whisper_server_mode` off, the per-dictation CLI always uses Metal.
 Setting it to false and restarting is the advanced Metal-only escape hatch.
 Local weight population/package compilation took 6.6 seconds on a 24 GiB M4
 and ~9 seconds on a 16 GiB M1. First device specialization took another ~59

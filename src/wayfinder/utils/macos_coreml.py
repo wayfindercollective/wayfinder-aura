@@ -340,6 +340,15 @@ def _note_attempt(key: str, *, count: bool, failure: str | None = None) -> int:
     return attempts
 
 
+def _forget_attempts(key: str) -> None:
+    """A finished Core ML load means macOS cached the compile; earlier failures no
+    longer predict the next load (the selected encoder loads once per launch)."""
+    path = _attempts_path()
+    rows = _read_rows(path)
+    if rows.pop(key, None) is not None:
+        _write_rows(path, rows)
+
+
 def coreml_twin(cli_binary: str, model_path: str) -> str | None:
     candidate = prepared_twin(cli_binary, model_path)
     row = comparison(cli_binary, model_path) if candidate else None
@@ -352,11 +361,12 @@ def _public_probe() -> Path:
 
 
 def prepare_comparison(config: dict, backend, *, cancelled=lambda: False,
-                       on_device_attempt=lambda: None) -> bool:
+                       on_device_attempt=lambda: None, on_device_loaded=lambda: None) -> bool:
     if not _prepare_lock.acquire(blocking=False):
         return False
     try:
-        return _prepare_comparison(config, backend, cancelled=cancelled, on_device_attempt=on_device_attempt)
+        return _prepare_comparison(config, backend, cancelled=cancelled, on_device_attempt=on_device_attempt,
+                                   on_device_loaded=on_device_loaded)
     finally:
         _prepare_lock.release()
 
@@ -549,7 +559,16 @@ def _measure_probe(probe, clip: Path, cancelled) -> tuple[list, list]:
 
 
 def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancelled) -> bool:
-    """Publish + hand off an already-warm child, never restart one on a hotkey."""
+    """Publish the comparison; hand off the already-warm child if it won."""
+    return _hand_off(probe, cancelled, lambda: record_comparison(cli, source_model, metal, coreml, same_words))
+
+
+def _hand_off(probe, cancelled, decide=lambda: True) -> bool:
+    """Make an already-loaded child the dictation server, only while idle.
+
+    Never restarts one on a hotkey. ``decide`` runs under the same arbitration
+    and says whether to adopt the child.
+    """
     from wayfinder.core.transcriber import WhisperServerBackend
     cls = WhisperServerBackend
     old = None
@@ -559,7 +578,7 @@ def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancell
         try:
             if probe.proc.poll() is not None:
                 return False
-            preferred = record_comparison(cli, source_model, metal, coreml, same_words)
+            preferred = decide()
             if preferred:
                 old = cls._server_process
                 cls._server_process = probe.proc
@@ -580,15 +599,40 @@ def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancell
     return preferred
 
 
-def _prepare_comparison(config: dict, backend, *, cancelled, on_device_attempt=lambda: None) -> bool:
+def _load_selected(backend, twin: str, source_model: str, cancelled, on_device_attempt, on_device_loaded) -> bool:
+    """Load the already-selected Core ML server off the hotkey path, then hand it over.
+
+    get_backend() serves Core ML only from a server that has finished loading,
+    so Metal serves dictation until this hands one over while idle. Usually
+    the load takes under a second. With a cold ANE cache (after eviction under
+    disk pressure, say) it is a device compile of minutes; it then gets the
+    full Core ML deadline, the quiet gate and the attempt history, like the
+    first comparison, and no dictation waits for it.
+    """
+    print("[Whisper] Loading the selected Core ML encoder in the background; Metal serves dictation meanwhile")
+    started = time.monotonic()
+    with _probe_server(backend, str(Path(twin).with_name("whisper-server")), str(converted_model_path(source_model)),
+                       coreml=True, cancelled=cancelled, on_spawn=on_device_attempt) as probe:
+        seconds = time.monotonic() - started
+        on_device_loaded()
+        adopted = _hand_off(probe, cancelled)
+    print(f"[Whisper] Core ML encoder loaded in {seconds:.1f}s; "
+          f"{'now serving dictation' if adopted else 'it exited before the hand-over; keeping Metal'}")
+    return adopted
+
+
+def _prepare_comparison(config: dict, backend, *, cancelled, on_device_attempt=lambda: None,
+                        on_device_loaded=lambda: None) -> bool:
     """Startup worker only: never benchmark on a hotkey or use the user's audio.
 
     The caller has already selected a licensed GPU backend and waited for a
     quiet spell. Metal stays live while a separately supervised Core ML child
     is prepared. If the user starts dictating, every phase is abandoned and its
     child stopped at once, without interrupting their server.
-    ``on_device_attempt`` runs just before the Core ML probe starts, because
-    the system's ANE compile cannot be cancelled after that.
+    ``on_device_attempt`` runs just before a Core ML child starts, because the
+    system's ANE compile cannot be cancelled after that; ``on_device_loaded``
+    runs once that child reports the encoder loaded (the compile is cached).
+    When an earlier comparison already selected Core ML, this only loads it.
     """
     if sys.platform != "darwin" or not backend.use_gpu:
         return False
@@ -604,8 +648,12 @@ def _prepare_comparison(config: dict, backend, *, cancelled, on_device_attempt=l
     if not prepare_encoder(cli, source_model, cancelled=cancelled):
         return False
     twin = prepared_twin(cli, source_model)
-    if not twin or comparison(cli, source_model) is not None:
+    if not twin:
         return False
+    row = comparison(cli, source_model)
+    if row is not None:
+        return bool(row["preferred"] and row["same_words"]) and _load_selected(
+            backend, twin, source_model, cancelled, on_device_attempt, on_device_loaded)
     clip = _public_probe()
     if not clip.is_file():
         return False
@@ -616,6 +664,7 @@ def _prepare_comparison(config: dict, backend, *, cancelled, on_device_attempt=l
         baseline, baseline_words = _measure_probe(baseline_probe, clip, cancelled)
     with _probe_server(backend, str(Path(twin).with_name("whisper-server")), str(converted_model_path(source_model)),
                        coreml=True, cancelled=cancelled, on_spawn=on_device_attempt) as probe:
+        on_device_loaded()
         timings, outputs = _measure_probe(probe, clip, cancelled)
         same_words = bool(baseline_words[0] and all(words == baseline_words[0] for words in baseline_words + outputs))
         metal, coreml = statistics.median(baseline), statistics.median(timings)
@@ -675,8 +724,20 @@ def _preparation_pass() -> bool:
         _note_attempt(key, count=True)
         counted = True
 
+    def device_loaded():
+        nonlocal counted
+        counted = False  # a later yield wastes no compile, so it needs no backoff
+        try:
+            _forget_attempts(key)
+        except OSError:
+            pass
+
     try:
-        if comparison(cli, model) is not None:
+        row = comparison(cli, model)
+        # Selected earlier: load it again each launch (Metal serves meanwhile),
+        # unless it is already serving. Metal measured faster: nothing to do.
+        if row is not None and (not (row["preferred"] and row["same_words"])
+                                or getattr(get_backend(snapshot), "metal_fallback", None) is not None):
             return False
         if not _attempt_allowed(key):
             print("[Whisper] Local encoder preparation postponed: an earlier attempt on this Mac "
@@ -691,7 +752,8 @@ def _preparation_pass() -> bool:
             return False
         from wayfinder.utils import macos_activity
         with macos_activity.held("coreml-preparation", "Converting local speech model"):
-            prepare_comparison(snapshot, current, cancelled=abandoned, on_device_attempt=device_attempt)
+            prepare_comparison(snapshot, current, cancelled=abandoned, on_device_attempt=device_attempt,
+                               on_device_loaded=device_loaded)
         if superseded():
             _preparation_requested.set()
         return False

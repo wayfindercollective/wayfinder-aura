@@ -790,6 +790,7 @@ class WhisperServerBackend(TranscriptionBackend):
         temperature_fallback: float = 0.0,
         gpu_layers: int = 0,
         startup_timeout: float = 30.0,
+        metal_fallback: Optional["WhisperServerBackend"] = None,
     ):
         self.whisper_server_binary = _expand_path(whisper_server_binary)
         self.model_path = _expand_path(model_path)
@@ -797,6 +798,12 @@ class WhisperServerBackend(TranscriptionBackend):
         self.threads = threads
         self.timeout = timeout
         self.startup_timeout = startup_timeout
+        # macOS Core ML encoder only. That server is never started here:
+        # macos_coreml loads it in the background and hands it over once
+        # loaded, because with a cold ANE cache the load is a device compile
+        # of minutes (125-250 s on an M1). Every start, restart and CLI
+        # salvage for this backend goes to this Metal backend instead.
+        self.metal_fallback = metal_fallback
         self.use_gpu = use_gpu
         self.beam_size = beam_size
         self.best_of = best_of
@@ -1034,6 +1041,15 @@ class WhisperServerBackend(TranscriptionBackend):
         force: restart even if a server appears to be running — recovery uses this to
         replace a wedged-but-listening server that would otherwise look healthy.
         """
+        if self.metal_fallback is not None:
+            # Core ML serves only from the server macos_coreml already loaded.
+            # If that one is gone or must be replaced (recovery), dictation
+            # gets Metal now rather than waiting on a possible device compile.
+            if not force and self._server_reusable():
+                return
+            print("[Whisper Server] Core ML server not loaded; using Metal for this dictation")
+            return self.metal_fallback._start_server(deadline=deadline, force=force)
+
         if not self.is_available():
             WhisperServerBackend._server_disabled = True
             raise TranscriptionError(
@@ -1143,9 +1159,8 @@ class WhisperServerBackend(TranscriptionBackend):
                 # macOS/Windows poll every 0.1s: with a warm Metal cache (or the
                 # OS file cache on Windows) the server is up in ~0.2s, so the
                 # 0.5s first sleep was pure latency on every (re)start. Same ~30s
-                # ceiling either way. The explicitly opted-in Core ML encoder
-                # needs a longer first-load budget for Apple's device compilation;
-                # inference/recovery still obey the original request deadline.
+                # ceiling either way. The Core ML encoder never starts here (see
+                # metal_fallback), so no device compile can sit inside this wait.
                 poll = 0.1 if sys.platform in ("darwin", "win32") else 0.5
                 started = time.monotonic()
                 died = False
@@ -1296,6 +1311,10 @@ class WhisperServerBackend(TranscriptionBackend):
         degradation ladder is: server(GPU) -> server(CPU) -> cli(GPU) -> cli(CPU)
         — slower per dictation but always working.
         """
+        if self.metal_fallback is not None:
+            # The Core ML whisper-cli would load the encoder per call, which
+            # with a cold ANE cache starts the same minutes-long compile.
+            return self.metal_fallback._cli_fallback()
         if getattr(self, "_cli_backend", None) is None:
             self._cli_backend = WhisperCppBackend(
                 whisper_binary=self._resolve_cli_binary(),
@@ -2409,7 +2428,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
             from wayfinder.utils.windows_whisper import gpu_twin
 
             cli_binary = gpu_twin(cli_binary) or cli_binary
-        coreml_selected = False
+        coreml_server = None
         selected_model_path = config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin")
         if (sys.platform == "darwin" and use_gpu_effective
                 and config.get("whisper_coreml_encoder", True)):
@@ -2417,23 +2436,17 @@ def get_backend(config: dict) -> TranscriptionBackend:
 
             coreml_binary = coreml_twin(cli_binary, config.get("model_path", ""))
             if coreml_binary:
-                cli_binary = coreml_binary
-                selected_model_path = str(converted_model_path(config.get("model_path", "")))
-                coreml_selected = True
-                print("[Whisper] macOS encoder: Core ML (automatic)")
+                coreml_server = (_derive_whisper_server_binary(coreml_binary),
+                                 str(converted_model_path(config.get("model_path", ""))))
         _wc_beam, _wc_best_of = whisper_decoding(config)
         if config.get("whisper_server_mode", True):
-            server_binary = _derive_whisper_server_binary(cli_binary)
-            server_backend = WhisperServerBackend(
-                whisper_server_binary=server_binary,
-                model_path=selected_model_path,
+            server_settings = dict(
                 port=config.get("whisper_server_port", 8178),
                 threads=config.get("threads", 4),
                 # Short, dedicated timeout (see config: whisper_server_timeout) so a
                 # wedged inference worker is caught fast → restart + retry can salvage
                 # the dictation before the 120s PROCESSING watchdog abandons it.
                 timeout=config.get("whisper_server_timeout", 30),
-                startup_timeout=120.0 if coreml_selected else 30.0,
                 use_gpu=use_gpu_effective,
                 beam_size=_wc_beam,
                 best_of=_wc_best_of,
@@ -2444,6 +2457,27 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 prompt=_effective_prompt,
                 custom_vocabulary=_effective_custom_vocabulary,
             )
+            server_backend = WhisperServerBackend(
+                whisper_server_binary=_derive_whisper_server_binary(cli_binary),
+                model_path=selected_model_path,
+                **server_settings,
+            )
+            if coreml_server and server_backend.is_available():
+                # Core ML serves only from a server macos_coreml has already
+                # loaded and handed over while idle. A cold ANE cache (evicted
+                # under disk pressure, say) turns that load into a device
+                # compile of minutes, which no hotkey may wait for, so until
+                # the hand-over Metal serves dictation.
+                coreml_backend = WhisperServerBackend(
+                    whisper_server_binary=coreml_server[0],
+                    model_path=coreml_server[1],
+                    metal_fallback=server_backend,
+                    **server_settings,
+                )
+                if coreml_backend._server_reusable():
+                    print("[Whisper] macOS encoder: Core ML (automatic)")
+                    return coreml_backend
+                print("[Whisper] macOS encoder: Metal (selected Core ML encoder not loaded yet)")
             if server_backend.is_available():
                 return server_backend
             if sys.platform in ("darwin", "win32") and not Path(
@@ -2455,6 +2489,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
             else:
                 print("[Transcription] whisper-server binary not found — using whisper-cli "
                       "(per-dictation model load). Build whisper-server for instant mode.")
+        # Never the Core ML encoder: with a cold ANE cache, a per-dictation
+        # Core ML load would start the minutes-long device compile every call.
         return WhisperCppBackend(
             whisper_binary=cli_binary,
             model_path=selected_model_path,
