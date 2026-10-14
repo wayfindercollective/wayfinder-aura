@@ -112,12 +112,44 @@ Try these before filing an issue — they cover the most common problems.
 - The app stores your mic **by name**, so it survives PipeWire device
   renumbering. If you recently changed audio hardware, re-select it.
 
+### A recording typed nothing
+
+Open `activity.log` (paths above) and find the lines for that recording:
+
+- `⏱ Duration: 2.7s` is measured from the captured audio, so it is the real
+  length of the recording. The time in front of each line is when Aura wrote
+  it, which can lag by seconds on a busy computer, so don't time a recording
+  from those.
+- `🔇 Speech check: silence (…)` (1.2.1 and later): the mic delivered almost
+  nothing. Check the mute switch, the gain and the selected device.
+- `🔇 Speech check: noise (…)` (1.2.1 and later): the loudness barely varied,
+  as with a fan or a hum, or speech that is quiet under one. Aura still
+  transcribes it, without its usual prompt, and types it only if Whisper hears
+  two or more words. If your speech keeps landing here, move closer to the mic
+  or away from the noise.
+- `sent no sound at all`: the device delivered exact silence, as a muted or
+  switched-off headset does.
+- `⚠ No speech detected` with none of the above: Whisper heard no words in
+  the audio.
+
+The levels in brackets (peak, floor and their ratio, in dBFS) are what to
+include in a bug report.
+
 ### Hotkey does nothing
 
 - **macOS:** use **Fn+Space**. Enable the Applications copy of Aura under
   Privacy & Security → Accessibility and Input Monitoring. Input Monitoring
   may require clicking **+** and selecting
   `/Applications/Wayfinder Aura.app`; quit and reopen Aura afterward.
+  - The activity log names what is missing, for example
+    `macOS permissions: Accessibility on, Input Monitoring off, … hotkey tap deaf`.
+  - A build you made yourself (not a release download) is a new app to macOS:
+    switches that were on for the release no longer apply. Turn each one off
+    and on again, or remove it with **–** and add the app with **+**, then
+    choose **Quit & Reopen**.
+  - `⚠ macOS Secure Input is on (held by …)` means a password field (or
+    Terminal's Secure Keyboard Entry) is hiding keystrokes from every app.
+    Leave the field and the hotkey works again.
 - **Windows:** the default is **Right Alt** (Alt Gr): tap to start/stop, hold
   to talk. If another app already owns your shortcut, pick a different one in
   Settings. Hotkeys and typing do not
@@ -166,6 +198,11 @@ Try these before filing an issue — they cover the most common problems.
   unexpectedly slow.
 - GPU acceleration and every speech model beyond Base/Base.en are Ultra
   features; the free tier runs Base/Base.en on CPU.
+- **macOS:** Ultra transcribes on the GPU with Metal; the activity log shows
+  `🍎 GPU: Apple M1 (Metal)` (your chip's name) at startup. With Large v3
+  Turbo, about 2 seconds per dictation on an M1 is normal, however short the
+  dictation: Whisper always processes a 30-second window. On the CPU the same
+  model takes more than twice as long.
 
 ### UI is too small (e.g. 4K)
 
