@@ -78,17 +78,27 @@ worker compares Metal and Core ML using bundled public synthetic speech, never
 the microphone. It requires identical normalized words and at least a 10% /
 25 ms improvement, caches timings only for the current model/binaries/chip/OS,
 and hands off the already-warm winner only while idle. Synthetic tests run on
-separate, supervised children, never on the user's dictation server. They yield
-to recording and retry after it finishes. Metal remains usable throughout;
-device compilation can continue while recording. Changing models/settings
+separate, supervised children, never on the user's dictation server. Nothing
+starts until nobody has dictated for 5 minutes, and starting a dictation stops
+every preparation child at once (package compiler and probe servers); the next
+try waits for another quiet spell. Metal remains usable throughout.
+
+The first Core ML load hands the encoder to Apple's `ANECompilerService`, a
+system daemon that keeps compiling after the probe exits and then discards the
+orphaned result. That step is therefore counted in `coreml-attempts.json` (app
+cache directory) *before* it starts, keyed by model, binaries, chip and OS. A
+failed or abandoned attempt waits a day before the next one, then a week; after
+three, Metal stays selected for that combination. Changing models/settings
 supersedes old preparation. Hotkeys never convert, compile, benchmark, or wait
 for device preparation.
 Setting it to false and restarting is the advanced Metal-only escape hatch.
-Local weight population/package compilation took 6.6 seconds on a 24 GiB M4.
-First device specialization took another ~59 seconds, in the background;
-native child startup is bounded to 120 seconds. Inference/recovery deadlines
-are unchanged. Public-clip tests of locally converted Q5 weights measured
-~0.51–0.64 seconds versus
+Local weight population/package compilation took 6.6 seconds on a 24 GiB M4
+and ~9 seconds on a 16 GiB M1. First device specialization took another ~59
+seconds on the M4, ~125 seconds on an idle M1 and ~250 seconds on a busy one;
+after one completes, macOS caches the result and later loads take under a
+second. Core ML probe startup is bounded to 600 seconds (Metal probes: 120).
+Inference/recovery deadlines are unchanged. Public-clip tests of locally
+converted Q5 weights measured ~0.51–0.64 seconds versus
 ~0.97–1.19 on Metal Q5, with identical normalized words across five clips.
 This is experimental, not a claim of instant completion or broad accuracy
 validation. Selection remains conditional on that Mac's local accuracy/speed

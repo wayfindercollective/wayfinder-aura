@@ -20,19 +20,62 @@ from pathlib import Path
 
 TURBO_CHECKPOINT_SHA256 = "aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a"
 COREML_MANIFEST = "aura-coreml.json"
+# Loading the encoder hands it to Apple's ANECompilerService, a system daemon
+# that keeps compiling after our probe exits and then discards the orphaned
+# result. A cold compile takes ~125 s on an idle M1 and ~250 s under load; once
+# one load completes, later loads take under a second. So preparation waits for
+# a quiet spell, gives the device enough time to finish, and failed attempts
+# back off persistently instead of repeating the compile after every dictation.
+QUIET_BEFORE_PREPARATION = 300.0  # seconds without dictation before any work starts
+METAL_READY_TIMEOUT = 120.0
+COREML_READY_TIMEOUT = 600.0
+# Wait before attempt n+1 once n attempts have failed, for the same model,
+# binaries, chip and OS. After the last entry, Metal stays selected for good.
+RETRY_AFTER_SECONDS = (0.0, 24 * 3600.0, 7 * 24 * 3600.0)
+_READY_POLL_SECONDS = 0.5
 _prepare_lock = threading.Lock()
 _transition_lock = threading.RLock()
 _dictation_active = threading.Event()
+_activity_changed = threading.Event()  # wakes the worker's quiet-spell wait
+_idle_since = time.monotonic()  # None while dictating
+_dictations = 0  # dictations started so far; a pass yields if this moves
+_children = set()  # live preparation processes; a starting dictation stops them
 _worker_lock = threading.Lock()
 _preparation_requested = threading.Event()
 _worker = None
 _latest_config = None
+_SETTINGS_KEYS = ("model_path", "use_gpu", "whisper_coreml_encoder", "transcription_backend", "threads",
+                  "beam_size", "best_of", "language", "prompt", "custom_vocabulary")
 
 
 def set_dictation_active(active: bool) -> None:
-    """Main-thread seam: arbitration takes milliseconds, never model loading."""
+    """Main-thread seam: arbitration takes milliseconds, never model loading.
+
+    Starting a dictation signals every live preparation child (compiler, probe
+    servers) at once, so none keeps loading the CPU while the microphone runs.
+    """
+    global _idle_since, _dictations
     with _transition_lock:
-        (_dictation_active.set if active else _dictation_active.clear)()
+        if active:
+            if not _dictation_active.is_set():
+                _dictations += 1
+            _dictation_active.set()
+            _idle_since = None
+            for proc in list(_children):
+                _signal_stop(proc)
+        elif _dictation_active.is_set() or _idle_since is None:
+            _dictation_active.clear()
+            _idle_since = time.monotonic()
+    _activity_changed.set()
+
+
+def _signal_stop(proc) -> None:
+    """Non-blocking SIGTERM; the supervisor forwards it to the native child."""
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+    except OSError:
+        pass
 
 
 def encoder_path(model_path: str) -> Path:
@@ -103,6 +146,8 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
 
     Licensing is checked by the caller. This does not select an accelerator:
     the original Metal model stays active until a separate idle comparison.
+    Raises InterruptedError when superseded or a dictation starts, and
+    TimeoutError/RuntimeError when the compiler fails (a recorded attempt).
     """
     if sys.platform != "darwin" or not _binary_twin(cli_binary):
         return False
@@ -128,34 +173,28 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
     with tempfile.TemporaryDirectory(prefix=".conversion-", dir=converted.parent.parent) as staging:
         stage = Path(staging)
         package = stage / "encoder.mlpackage"
-        marker = populate_package(model, package, cancelled=cancelled)
+        marker = populate_package(model, package, cancelled=lambda: cancelled() or not _idle())
         asset = stage / encoder_path(str(converted)).name
         command, env = wrap_macos_child_command([str(compiler), str(package), str(asset)], bundle_binary_env())
-        proc = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            import time
-            deadline = time.monotonic() + 180
-            while proc.poll() is None:
-                if cancelled() or time.monotonic() >= deadline:
-                    return False
-                time.sleep(0.2)
-            if proc.returncode or cancelled():
-                return False
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
+        with _preparation_child(command, env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as proc:
+            try:
+                deadline = time.monotonic() + 180
+                while proc.poll() is None:
+                    _ensure_idle(cancelled)
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Core ML package compilation timed out")
+                    time.sleep(0.2)
+                _ensure_idle(cancelled)
+                if proc.returncode:
+                    raise RuntimeError(f"Core ML package compiler exited with {proc.returncode}")
+            finally:
+                _stop_probe(proc)
         (asset / COREML_MANIFEST).write_text(json.dumps(marker))
         publish = stage / "ready"
         publish.mkdir(mode=0o700)
         asset.rename(publish / asset.name)
         (publish / model.name).symlink_to(model)
-        if cancelled():
-            return False
+        _ensure_idle(cancelled)
         # Every source revision/precision has a separate namespace. Repair only
         # our own incomplete generated cache; never touch the GGML download.
         obsolete = stage / "incomplete-cache"
@@ -206,23 +245,17 @@ def comparison(cli_binary: str, model_path: str) -> dict | None:
     return None
 
 
-def record_comparison(cli_binary: str, model_path: str, metal_seconds: float,
-                      coreml_seconds: float, same_words: bool) -> bool:
-    """Cache no audio/text; require a meaningful win rather than measurement noise."""
-    preferred = bool(same_words and 0 < coreml_seconds <= metal_seconds * 0.9
-                     and metal_seconds - coreml_seconds >= 0.025)
-    key = _comparison_key(cli_binary, model_path)
-    path = _cache_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _read_rows(path: Path) -> dict:
     try:
         rows = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(rows, dict):
-            rows = {}
     except (OSError, ValueError):
-        rows = {}
-    rows[key] = {"preferred": preferred, "metal_seconds": metal_seconds,
-                 "coreml_seconds": coreml_seconds, "same_words": bool(same_words)}
-    fd, temp = tempfile.mkstemp(prefix=".coreml-selection-", dir=path.parent)
+        return {}
+    return rows if isinstance(rows, dict) else {}
+
+
+def _write_rows(path: Path, rows: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=f".{path.stem}-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(rows, handle)
@@ -230,7 +263,81 @@ def record_comparison(cli_binary: str, model_path: str, metal_seconds: float,
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
+
+
+def record_comparison(cli_binary: str, model_path: str, metal_seconds: float,
+                      coreml_seconds: float, same_words: bool) -> bool:
+    """Cache no audio/text; require a meaningful win rather than measurement noise."""
+    preferred = bool(same_words and 0 < coreml_seconds <= metal_seconds * 0.9
+                     and metal_seconds - coreml_seconds >= 0.025)
+    key = _comparison_key(cli_binary, model_path)
+    path = _cache_path()
+    rows = _read_rows(path)
+    rows[key] = {"preferred": preferred, "metal_seconds": metal_seconds,
+                 "coreml_seconds": coreml_seconds, "same_words": bool(same_words)}
+    _write_rows(path, rows)
     return preferred
+
+
+def _attempts_path() -> Path:
+    from wayfinder.utils.platform import get_cache_dir
+    return get_cache_dir() / "coreml-attempts.json"
+
+
+def _attempt_key(cli_binary: str, model_path: str) -> str:
+    """Failure history follows the source model, binaries, chip and OS.
+
+    Unlike the comparison key it ignores the converted weights, so a
+    reconversion does not reset the attempt count.
+    """
+    from wayfinder.utils.macos_coreml_convert import TEMPLATE_VERSION
+    twin = _binary_twin(cli_binary)
+    if not twin:
+        raise ValueError("No Core ML twin")
+    cli = Path(cli_binary)
+    stamps = []
+    for path in (cli, twin, twin.with_name("whisper-server"), cli.with_name("coreml-compile"),
+                 Path(os.path.expanduser(model_path))):
+        try:
+            stat = path.stat()
+            stamps.append((path.name, stat.st_size, stat.st_mtime_ns))
+        except FileNotFoundError:
+            stamps.append((path.name, None, None))
+    return hashlib.sha256(json.dumps([_hardware_identity(), TEMPLATE_VERSION, stamps],
+                                     sort_keys=True).encode()).hexdigest()
+
+
+def _attempt_row(rows: dict, key: str) -> tuple[dict, int, float]:
+    row = rows.get(key)
+    row = dict(row) if isinstance(row, dict) else {}
+    attempts, last = row.get("attempts"), row.get("last_attempt")
+    attempts = attempts if isinstance(attempts, int) and attempts > 0 else 0
+    last = float(last) if isinstance(last, (int, float)) else 0.0
+    return row, attempts, last
+
+
+def _attempt_allowed(key: str) -> bool:
+    """Below the cap, and past the backoff since the last counted attempt."""
+    _, attempts, last = _attempt_row(_read_rows(_attempts_path()), key)
+    if attempts >= len(RETRY_AFTER_SECONDS):
+        return False
+    elapsed = time.time() - last
+    return not 0 <= elapsed < RETRY_AFTER_SECONDS[attempts]  # a clock moved back never blocks
+
+
+def _note_attempt(key: str, *, count: bool, failure: str | None = None) -> int:
+    """Persist one attempt (counted BEFORE uncancellable device work) or its failure."""
+    path = _attempts_path()
+    rows = _read_rows(path)
+    row, attempts, _ = _attempt_row(rows, key)
+    if count:
+        attempts += 1
+        row.update(attempts=attempts, last_attempt=time.time())
+    if failure:
+        row["last_failure"] = failure
+    rows[key] = row
+    _write_rows(path, rows)
+    return attempts
 
 
 def coreml_twin(cli_binary: str, model_path: str) -> str | None:
@@ -244,11 +351,12 @@ def _public_probe() -> Path:
     return root / "assets/benchmarks/coreml_probe.wav"
 
 
-def prepare_comparison(config: dict, backend, *, cancelled=lambda: False) -> bool:
+def prepare_comparison(config: dict, backend, *, cancelled=lambda: False,
+                       on_device_attempt=lambda: None) -> bool:
     if not _prepare_lock.acquire(blocking=False):
         return False
     try:
-        return _prepare_comparison(config, backend, cancelled=cancelled)
+        return _prepare_comparison(config, backend, cancelled=cancelled, on_device_attempt=on_device_attempt)
     finally:
         _prepare_lock.release()
 
@@ -262,14 +370,53 @@ def _idle() -> bool:
         return False
 
 
-def _wait_for_idle(cancelled) -> None:
-    deadline = time.monotonic() + 600
-    while not _idle():
-        if cancelled() or time.monotonic() >= deadline:
-            raise InterruptedError("Encoder comparison deferred")
-        time.sleep(0.2)
+def _ensure_idle(cancelled) -> None:
+    """Yield at once: every phase checks this, so recording never waits on preparation."""
     if cancelled():
         raise InterruptedError("Encoder preparation superseded")
+    if not _idle():
+        raise InterruptedError("Encoder preparation yielded to dictation")
+
+
+def _quiet_seconds() -> float:
+    since = _idle_since
+    return 0.0 if since is None or not _idle() else time.monotonic() - since
+
+
+def _wait_for_quiet(cancelled, seconds: float | None = None) -> int:
+    """Block until nobody has dictated for ``seconds``; each dictation restarts the clock.
+
+    Dictation changes and superseding requests wake it; a slow re-check covers
+    the status breadcrumb. No work starts while a dictation is active or likely.
+    Returns the dictation count, so later work can tell if anyone dictated since.
+    """
+    seconds = QUIET_BEFORE_PREPARATION if seconds is None else seconds
+    while True:
+        _activity_changed.clear()
+        if cancelled():
+            raise InterruptedError("Encoder preparation superseded")
+        count = _dictations
+        remaining = seconds - _quiet_seconds()
+        if remaining <= 0:
+            return count
+        _activity_changed.wait(min(remaining, 30.0))
+
+
+@contextmanager
+def _preparation_child(command, env, **popen):
+    """Spawn a preparation child that a starting dictation stops at once."""
+    if _dictation_active.is_set():
+        raise InterruptedError("Encoder preparation yielded to dictation")
+    proc = subprocess.Popen(command, env=env, **popen)
+    with _transition_lock:
+        _children.add(proc)
+        if _dictation_active.is_set():  # recording began during the spawn
+            _signal_stop(proc)
+    try:
+        yield proc
+    finally:
+        with _transition_lock:
+            _children.discard(proc)
 
 
 def _stop_probe(proc) -> None:
@@ -282,9 +429,24 @@ def _stop_probe(proc) -> None:
         proc.wait(timeout=2)
 
 
+def _supervised_child_pid(supervisor_pid: int, binary: str) -> int | None:
+    """The native server our supervisor started (same user, exact binary)."""
+    rows = subprocess.check_output(["ps", "-axo", "uid=,pid=,ppid=,command="], text=True).splitlines()
+    for row in rows:
+        parts = row.split(None, 3)
+        if (len(parts) == 4 and parts[0] == str(os.getuid()) and parts[2] == str(supervisor_pid)
+                and parts[3].startswith(binary + " ")):
+            return int(parts[1])
+    return None
+
+
 @contextmanager
-def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
-    """Independent supervised probe; never queue synthetic audio on dictation's server."""
+def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled, on_spawn=lambda: None):
+    """Independent supervised probe; never queue synthetic audio on dictation's server.
+
+    A starting dictation stops the probe at once (see set_dictation_active)
+    and this raises InterruptedError; ``on_spawn`` runs just before the spawn.
+    """
     import copy
     import socket
     from types import SimpleNamespace
@@ -302,41 +464,43 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     candidate.model_path = model
     command = candidate._server_cmd_attempts(port)[0] + ["--host", "127.0.0.1"]
     command, env = wrap_macos_child_command(command, bundle_binary_env(whisper_metal_env(gpu=True)))
-    proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    tail = deque(maxlen=100)
-    reader = threading.Thread(target=backend._drain_server_output, args=(proc.stdout, tail), daemon=True)
-    reader.start()
-    probe = SimpleNamespace(proc=proc, port=port, tail=tail, reader=reader, adopted=False, backend=candidate)
-    try:
-        deadline = time.monotonic() + 120
-        while time.monotonic() < deadline:
-            if cancelled() or proc.poll() is not None:
-                raise InterruptedError("Encoder preparation superseded")
-            # Device compilation may continue while recording; only public
-            # inference is paused. Verify ownership before trusting loopback.
-            rows = subprocess.check_output(["ps", "-axo", "uid=,pid=,ppid=,command="], text=True).splitlines()
-            owned = False
-            for row in rows:
-                parts = row.split(None, 3)
-                if (len(parts) == 4 and parts[0] == str(os.getuid()) and parts[2] == str(proc.pid)
-                        and parts[3].startswith(binary + " ")):
-                    owned = pid_listens_on_tcp(int(parts[1]), port) is True
-            if owned:
-                try:
-                    with urlopen_loopback(f"http://127.0.0.1:{port}/health", timeout=1) as response:
-                        ready = response.status == 200
-                    if ready and (not coreml or any("Core ML model loaded" in line for line in list(tail))):
-                        break
-                except OSError:
-                    pass
-            time.sleep(0.2)
-        else:
-            raise TimeoutError("Encoder device preparation timed out")
-        yield probe
-    finally:
-        if not probe.adopted:
-            _stop_probe(proc)
-            reader.join(timeout=1)
+    _ensure_idle(cancelled)
+    on_spawn()
+    with _preparation_child(command, env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+        tail = deque(maxlen=100)
+        reader = threading.Thread(target=backend._drain_server_output, args=(proc.stdout, tail), daemon=True)
+        reader.start()
+        probe = SimpleNamespace(proc=proc, port=port, tail=tail, reader=reader, adopted=False, backend=candidate)
+        try:
+            # The device compile happens inside Core ML's model load, before
+            # the server listens; it needs minutes on older chips.
+            deadline = time.monotonic() + (COREML_READY_TIMEOUT if coreml else METAL_READY_TIMEOUT)
+            native = None
+            while True:
+                _ensure_idle(cancelled)
+                if proc.poll() is not None:
+                    _ensure_idle(cancelled)  # stopped by a dictation, not a crash
+                    raise RuntimeError("Encoder probe exited during device preparation")
+                if coreml and any("failed to load Core ML model" in line for line in list(tail)):
+                    raise RuntimeError("Core ML encoder failed to load")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Encoder device preparation timed out")
+                # Verify ownership before trusting loopback.
+                native = native or _supervised_child_pid(proc.pid, binary)
+                if native and pid_listens_on_tcp(native, port) is True:
+                    try:
+                        with urlopen_loopback(f"http://127.0.0.1:{port}/health", timeout=1) as response:
+                            ready = response.status == 200
+                        if ready and (not coreml or any("Core ML model loaded" in line for line in list(tail))):
+                            break
+                    except OSError:
+                        pass
+                time.sleep(_READY_POLL_SECONDS)
+            yield probe
+        finally:
+            if not probe.adopted:
+                _stop_probe(proc)
+                reader.join(timeout=1)
 
 
 def _measure_probe(probe, clip: Path, cancelled) -> tuple[list, list]:
@@ -353,7 +517,7 @@ def _measure_probe(probe, clip: Path, cancelled) -> tuple[list, list]:
     body += f"--{boundary}--\r\n".encode()
     timings, words = [], []
     for trial in range(3):
-        _wait_for_idle(cancelled)
+        _ensure_idle(cancelled)
         done = threading.Event()
         result = []
 
@@ -370,11 +534,12 @@ def _measure_probe(probe, clip: Path, cancelled) -> tuple[list, list]:
 
         start = time.perf_counter()
         threading.Thread(target=infer, daemon=True).start()
-        while not done.wait(0.025):
-            if not _idle() or cancelled():
-                # The context manager stops ONLY this probe, so the user's
-                # already-warm dictation server can handle the next stop.
-                raise InterruptedError("Public comparison yielded to dictation")
+        # wait() returns the moment inference finishes, so the tick does not
+        # quantize timings; it only bounds how late a superseding change is seen.
+        while not done.wait(0.1):
+            # The context manager stops ONLY this probe, so the user's
+            # already-warm dictation server can handle the next stop.
+            _ensure_idle(cancelled)
         if isinstance(result[0], Exception):
             raise result[0]
         if trial:
@@ -407,6 +572,7 @@ def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancell
                 cls._server_log_thread = probe.reader
                 cls._server_disabled = False
                 probe.adopted = True
+                _children.discard(probe.proc)  # now the dictation server: recording must not stop it
         finally:
             cls._server_lock.release()
     if old is not None and old is not probe.proc:
@@ -414,12 +580,15 @@ def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancell
     return preferred
 
 
-def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
+def _prepare_comparison(config: dict, backend, *, cancelled, on_device_attempt=lambda: None) -> bool:
     """Startup worker only: never benchmark on a hotkey or use the user's audio.
 
-    The caller has already selected a licensed GPU backend. Metal stays live
-    while a separately supervised Core ML child is prepared. If the user starts
-    dictating, comparison is abandoned without interrupting their server.
+    The caller has already selected a licensed GPU backend and waited for a
+    quiet spell. Metal stays live while a separately supervised Core ML child
+    is prepared. If the user starts dictating, every phase is abandoned and its
+    child stopped at once, without interrupting their server.
+    ``on_device_attempt`` runs just before the Core ML probe starts, because
+    the system's ANE compile cannot be cancelled after that.
     """
     if sys.platform != "darwin" or not backend.use_gpu:
         return False
@@ -431,7 +600,8 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
         return False
     superseded = cancelled
     cancelled = lambda: superseded() or not get_feature_gate().has_feature("gpu_acceleration")
-    if cancelled() or not prepare_encoder(cli, source_model, cancelled=cancelled):
+    _ensure_idle(cancelled)
+    if not prepare_encoder(cli, source_model, cancelled=cancelled):
         return False
     twin = prepared_twin(cli, source_model)
     if not twin or comparison(cli, source_model) is not None:
@@ -439,13 +609,13 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
     clip = _public_probe()
     if not clip.is_file():
         return False
-    _wait_for_idle(cancelled)
+    _ensure_idle(cancelled)
     print("[Whisper] Background encoder comparison started (public synthetic audio, no microphone)")
     with _probe_server(backend, str(Path(cli).with_name("whisper-server")), backend.model_path,
                        coreml=False, cancelled=cancelled) as baseline_probe:
         baseline, baseline_words = _measure_probe(baseline_probe, clip, cancelled)
     with _probe_server(backend, str(Path(twin).with_name("whisper-server")), str(converted_model_path(source_model)),
-                       coreml=True, cancelled=cancelled) as probe:
+                       coreml=True, cancelled=cancelled, on_spawn=on_device_attempt) as probe:
         timings, outputs = _measure_probe(probe, clip, cancelled)
         same_words = bool(baseline_words[0] and all(words == baseline_words[0] for words in baseline_words + outputs))
         metal, coreml = statistics.median(baseline), statistics.median(timings)
@@ -455,7 +625,7 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
 
 
 def schedule_preparation(config: dict, backend) -> None:
-    """Single daemon job, retried after dictation; model/settings changes supersede it."""
+    """Single parked daemon; model/settings changes supersede its pending work."""
     global _worker, _latest_config
     if sys.platform != "darwin" or not backend.use_gpu:
         return
@@ -464,53 +634,85 @@ def schedule_preparation(config: dict, backend) -> None:
     model = Path(os.path.expanduser(str(config.get("model_path", ""))))
     if not model.is_file() or not _binary_twin(cli):
         return
-    keys = ("model_path", "use_gpu", "whisper_coreml_encoder", "transcription_backend", "threads",
-            "beam_size", "best_of", "language", "prompt", "custom_vocabulary")
     with _worker_lock:
         _latest_config = config
         _preparation_requested.set()
+        _activity_changed.set()  # a quiet-spell wait re-checks for supersession
         if _worker is not None and _worker.is_alive():
             return
-
-        def run():
-            from wayfinder.core.transcriber import get_backend
-            while True:
-                # One parked daemon, no idle polling and no lost request at
-                # thread teardown. A newer model/settings request cancels old work.
-                _preparation_requested.wait()
-                _preparation_requested.clear()
-                attempts = 0
-                while attempts < 3:
-                    live = _latest_config
-                    snapshot = dict(live)
-                    cancelled = lambda: (_preparation_requested.is_set() or live is not _latest_config
-                                         or any(live.get(k) != snapshot.get(k) for k in keys))
-                    try:
-                        current = get_backend(snapshot)
-                        if not current.use_gpu or not snapshot.get("whisper_coreml_encoder", True):
-                            break
-                        from wayfinder.utils import macos_activity
-                        with macos_activity.held("coreml-preparation", "Converting local speech model"):
-                            prepare_comparison(snapshot, current, cancelled=cancelled)
-                        if cancelled():
-                            _preparation_requested.set()
-                        break
-                    except InterruptedError:
-                        if cancelled():
-                            _preparation_requested.set()
-                            break
-                        # Recording wins. Resume only when quiet; compilation
-                        # is cached and need not be repeated.
-                        try:
-                            _wait_for_idle(cancelled)
-                        except InterruptedError:
-                            if cancelled():
-                                _preparation_requested.set()
-                            break
-                    except Exception as exc:
-                        print(f"[Whisper] Local encoder preparation deferred ({type(exc).__name__}); keeping Metal")
-                        attempts += 1
-                        time.sleep(1)
-
-        _worker = threading.Thread(target=run, name="wayfinder-local-encoder", daemon=True)
+        _worker = threading.Thread(target=_preparation_worker, name="wayfinder-local-encoder", daemon=True)
         _worker.start()
+
+
+def _preparation_worker() -> None:
+    while True:
+        # One parked daemon, no idle polling and no lost request at thread
+        # teardown. A newer model/settings request cancels old work.
+        _preparation_requested.wait()
+        _preparation_requested.clear()
+        while _preparation_pass():
+            pass
+
+
+def _preparation_pass() -> bool:
+    """At most one attempt. True: it yielded before finishing, so try again
+    after the next quiet spell (the attempt history decides whether it may)."""
+    from wayfinder.core.transcriber import _resolve_whisper_cli_binary, get_backend
+    live = _latest_config
+    snapshot = dict(live)
+    superseded = lambda: (_preparation_requested.is_set() or live is not _latest_config
+                          or any(live.get(k) != snapshot.get(k) for k in _SETTINGS_KEYS))
+    cli = _resolve_whisper_cli_binary(snapshot.get("whisper_binary", ""))
+    model = str(snapshot.get("model_path", ""))
+    try:
+        key = _attempt_key(cli, model)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    counted = False
+
+    def device_attempt():
+        nonlocal counted
+        _note_attempt(key, count=True)
+        counted = True
+
+    try:
+        if comparison(cli, model) is not None:
+            return False
+        if not _attempt_allowed(key):
+            print("[Whisper] Local encoder preparation postponed: an earlier attempt on this Mac "
+                  "did not finish; keeping Metal")
+            return False
+        dictations = _wait_for_quiet(superseded)
+        # Any dictation from here on abandons the pass, even a tap too short
+        # for a poll to see: its stopped probe must not count as a crash.
+        abandoned = lambda: superseded() or _dictations != dictations
+        current = get_backend(snapshot)
+        if not current.use_gpu or not snapshot.get("whisper_coreml_encoder", True):
+            return False
+        from wayfinder.utils import macos_activity
+        with macos_activity.held("coreml-preparation", "Converting local speech model"):
+            prepare_comparison(snapshot, current, cancelled=abandoned, on_device_attempt=device_attempt)
+        if superseded():
+            _preparation_requested.set()
+        return False
+    except InterruptedError:
+        if superseded():
+            _preparation_requested.set()
+            return False
+        if counted:  # the device compile had started; the backoff applies
+            try:
+                _note_attempt(key, count=False, failure="yielded to dictation")
+            except OSError:
+                pass
+        return True  # recording won; nothing restarts until the next quiet spell
+    except Exception as exc:
+        try:
+            attempts = _note_attempt(key, count=not counted, failure=type(exc).__name__)
+        except OSError:
+            attempts = 0
+        if attempts < len(RETRY_AFTER_SECONDS):
+            later = f"next attempt no sooner than {RETRY_AFTER_SECONDS[attempts] / 3600:.0f} h from now"
+        else:
+            later = "no further attempts for this model on this Mac"
+        print(f"[Whisper] Local encoder preparation failed ({type(exc).__name__}); keeping Metal; {later}")
+        return False
