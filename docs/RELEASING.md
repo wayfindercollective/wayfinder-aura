@@ -56,6 +56,32 @@ otherwise it does nothing and tries again the next night
 
 To pause betas, disable the Beta workflow in Actions (re-enable to resume).
 
+## When nothing ships
+
+A green nightly Beta run does not mean a beta shipped. It only cuts the tag;
+the Release workflow builds it, and a failed build leaves the tag without a
+release. From 2026-10-09 to 2026-10-14 every Release run failed while the
+nightly runs stayed green ("main is unchanged since v1.2.1-beta.4"), so the
+website kept offering v1.2.0 and beta.2. Check the builds, not the cuts:
+
+```bash
+gh run list --workflow release.yml --limit 5
+gh api repos/wayfindercollective/wayfinder-aura/actions/runners \
+  --jq '.runners[] | "\(.name)\t\(.status)"'
+```
+
+The website follows the releases by itself (`/aura/download/mac` redirects to
+the newest stable DMG, `?channel=beta` to the newest beta), so there is
+nothing to update there; a stale download link means the release is missing.
+
+The Mac Studio carries most of the pipeline: the Mac CI queue, the poller that
+admits Windows jobs, the Mac release watcher and, while the repository
+variable `SLACK_POSTER` is `local`, the Slack posts that announce failed
+builds. When it is down or wedged, CI, releases and the failure alerts stop
+together. The GitHub-side poster is no fallback yet: on 2026-10-14 the Linux
+runner had no `jq`, which `.github/scripts/slack-notify.sh` needs, so its
+posts failed with `invalid_payload`.
+
 ## Versions
 
 Semantic versioning. `main`'s `pyproject.toml` names the **next stable
