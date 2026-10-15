@@ -201,11 +201,12 @@ def appkit(monkeypatch):
     return fake
 
 
-def _open_intake_now(transport):
-    """A fresh labels fetch at the real current time (the hook reads the clock)."""
+def _open_intake_now(transport, *, force=False):
+    """A fresh labels fetch at the real current time (the hook reads the clock).
+    ``force``: a renewal within the day (the daily refresh limit set aside)."""
     now = time.time()
     transport.answer((200, labels_doc(generated_ms=int(now * 1000)), {"Date": http_date(now)}))
-    assert game_labels.refresh(now=now)
+    assert game_labels.refresh(now=now, force=force)
 
 
 @pytest.fixture
@@ -708,5 +709,170 @@ def test_a_card_left_open_past_expiry_cannot_send(transport, monkeypatch):
             assert game_reports._load()["reports"] == []
         assert card.PAUSED_TEXT in [w.cget("text") for w in _walk(widget.frame)
                                     if type(w).__name__ == "CTkLabel"]
+    finally:
+        root.destroy()
+
+
+# --- Sol r2 #1: an unknown foreground blocks the question, on every adapter ----------------
+
+def _fake_xlib_that_cannot_connect(monkeypatch):
+    """Xlib whose Display() fails, as with no X server or a refused connection."""
+    xlib, display, x = ModuleType("Xlib"), ModuleType("Xlib.display"), ModuleType("Xlib.X")
+
+    def no_display(*a, **k):
+        raise ConnectionRefusedError("Can't connect to display")
+
+    display.Display = no_display
+    xlib.display, xlib.X = display, x
+    for name, module in (("Xlib", xlib), ("Xlib.display", display), ("Xlib.X", x)):
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def _use_backend(monkeypatch, backend):
+    import wayfinder_main
+    monkeypatch.setitem(sys.modules, "AppKit", FakeAppKit())   # no NSWorkspace in it
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", backend == "macos")
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", backend == "windows")
+    monkeypatch.setattr(wayfinder_main, "_IS_LINUX", backend == "linux")
+
+
+@pytest.mark.parametrize("case", [
+    "macos_no_workspace",       # the real Mac adapter: AppKit can't say -> Nones
+    "linux_no_x_connection",    # the real Linux adapter: Display() refused -> Nones
+    "windows_no_foreground",    # the real Windows adapter: no foreground info -> Nones
+    "windows_exe_unreadable",   # a protected process: title only, no exe
+    "adapter_raises",           # any adapter raising
+])
+def test_an_unknown_foreground_blocks_the_question(transport, monkeypatch, case):
+    from wayfinder.core import linux_game_chat, windows_game_chat
+    backend = case.split("_")[0] if case != "adapter_raises" else "macos"
+    _use_backend(monkeypatch, backend)
+    if case == "linux_no_x_connection":
+        _fake_xlib_that_cannot_connect(monkeypatch)
+        monkeypatch.setattr(linux_game_chat, "sys", SimpleNamespace(platform="linux"))
+        assert linux_game_chat.frontmost_app() == (None, None, None)
+    elif case == "windows_no_foreground":
+        monkeypatch.setattr(windows_game_chat, "sys", SimpleNamespace(platform="darwin"))
+        assert windows_game_chat.frontmost_app() == (None, None, None)
+    elif case == "windows_exe_unreadable":
+        monkeypatch.setattr(windows_game_chat, "_foreground",
+                            lambda: (4321, None, "Protected Game"))
+    elif case == "macos_no_workspace":
+        assert gc.frontmost_app() == (None, None, None)
+    else:
+        def boom():
+            raise RuntimeError("adapter failed")
+        monkeypatch.setattr(gc, "frontmost_app", boom)
+    _open_intake_now(transport)
+    for _ in range(3):
+        game_reports.note_game_use("World of Warcraft")
+    app = _app_class()()
+    in_front = app._game_report_frontmost_name()
+    assert in_front == wayfinder_main_marker()
+    app._on_main_window_visible()
+    app._on_game_labels_refreshed()
+    app.run_jobs()
+    assert app.cards == []
+    with game_reports._lock:
+        assert game_reports._load()["games"]["world-of-warcraft"]["asked"] is False
+
+
+def wayfinder_main_marker():
+    import wayfinder_main
+    return wayfinder_main._UNLISTED_GAME_IN_FRONT
+
+
+def test_a_known_ordinary_app_in_front_still_allows_the_question(appkit, eligible):
+    app = _app_class()()                      # Terminal in front (the eligible fixture)
+    assert app._game_report_frontmost_name() is None
+    app._on_main_window_visible()
+    assert [g.key for g in app.cards] == ["world-of-warcraft"]
+
+
+# --- Sol r2 #2: an old expiry callback never retires renewed permission ------------------
+
+@pytest.mark.ui
+@pytest.mark.parametrize("renew", ["between_deadline_and_callback", "before_deadline"])
+def test_a_renewal_keeps_the_open_card_and_its_draft(transport, monkeypatch, renew):
+    import customtkinter as ctk
+
+    from wayfinder.ui import game_report_card as card
+    from wayfinder.ui import icons
+    from wayfinder.ui.theme import FONT_SIZES
+    monkeypatch.setattr(icons, "_CACHE", {})
+    _open_intake_now(transport)
+    root = ctk.CTk()
+    try:
+        app = SimpleNamespace(font_sizes=dict(FONT_SIZES), font_body=("DejaVu Sans",),
+                              after=root.after)
+        _expire_in(1.0)
+        widget = card.GameReportCard(root, app, "world-of-warcraft", "World of Warcraft",
+                                     prompt=False, post=lambda fn: fn(), on_close=lambda: None)
+        widget.pack()
+        widget.choose("works")
+        widget.note_entry.insert(0, "half-written note")
+        old_deadline = time.time() + game_labels.permission_left(time.time())
+        if renew == "before_deadline":
+            _pump(root, 0.3)
+        else:
+            while game_labels.permission_left(time.time()) > 0:
+                root.update()
+                time.sleep(0.005)
+        _open_intake_now(transport, force=True)           # the daily refresh renews it
+        _pump(root, max(0.0, old_deadline - time.time()) + 0.5)  # the old callback fired
+        assert widget.winfo_exists() and not widget._finished
+        assert widget.note_text() == "half-written note"
+    finally:
+        root.destroy()
+
+
+@pytest.mark.ui
+@pytest.mark.parametrize("renew", ["between_deadline_and_callback", "before_deadline"])
+def test_a_renewal_keeps_the_games_tab_row_card(transport, monkeypatch, renew):
+    import customtkinter as ctk
+    import wayfinder_main
+
+    from wayfinder.ui import icons
+    monkeypatch.setattr(icons, "_CACHE", {})
+    _open_intake_now(transport)
+    _expire_in(4.0)
+    root = ctk.CTk()
+    try:
+        container = ctk.CTkFrame(root)
+        container.pack(fill="both", expand=True)
+        app = SimpleNamespace(
+            tab_content_container=container, tab_frames={}, font_body=("DejaVu Sans",),
+            font_header=("DejaVu Sans",), font_sizes=dict.fromkeys(
+                ("display", "title", "heading", "body", "small", "caption"), 12),
+            after=root.after, after_cancel=root.after_cancel,
+            event_queue=SimpleNamespace(put=lambda item: None),
+            _create_game_chat_rows=lambda parent: None, _post_ui=lambda fn: fn())
+        wayfinder_main.WayfinderApp._create_games_tab(app)
+        app.tab_frames["games"].pack(fill="both", expand=True)
+        root.geometry("620x900")
+        search = next(w for w in _walk(app.tab_frames["games"]) if type(w).__name__ == "CTkEntry")
+        search.insert(0, "warcraft")
+        _pump(root, 0.3)
+        label = next(w for w in _walk(app.tab_frames["games"])
+                     if type(w).__name__ == "CTkLabel" and w.cget("text") == "World of Warcraft")
+        label._label.event_generate("<Button-1>")
+        root.update()
+        works = next(w for w in _walk(app.tab_frames["games"])
+                     if type(w).__name__ == "CTkButton" and w.cget("text") == "Works")
+        works.invoke()
+        root.update()
+        entries = [w for w in _walk(app.tab_frames["games"]) if type(w).__name__ == "CTkEntry"]
+        assert len(entries) == 2                          # search + the card's note
+        entries[1].insert(0, "draft")
+        old_deadline = time.time() + game_labels.permission_left(time.time())
+        if renew == "before_deadline":
+            _pump(root, 0.3)
+        else:
+            while game_labels.permission_left(time.time()) > 0:
+                root.update()
+                time.sleep(0.005)
+        _open_intake_now(transport, force=True)
+        _pump(root, max(0.0, old_deadline - time.time()) + 0.5)
+        assert entries[1].winfo_exists() and entries[1].get() == "draft"
     finally:
         root.destroy()

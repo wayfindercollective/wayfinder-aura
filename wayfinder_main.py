@@ -13812,6 +13812,20 @@ class WayfinderApp(ctk.CTk):
             card.pack(fill="x", pady=(SPACING["xs"], SPACING["xs"]))
             open_card.update(key=key, card=card)
 
+        def schedule_expiry(seconds):
+            expiry["job"] = self.after(int(seconds * 1000) + 100, on_expiry)
+
+        def on_expiry():
+            # Ask again rather than trust the old deadline: a refresh may have
+            # renewed permission, and then the hint and any draft stay.
+            expiry["job"] = None
+            left = game_reports.report_window(None)
+            if left > 0 and (open_card["card"] is None
+                             or game_reports.report_window(open_card["key"]) > 0):
+                schedule_expiry(left)
+            else:
+                render()
+
         def render(*_):
             close_row_card()
             for child in results.winfo_children():
@@ -13829,8 +13843,7 @@ class WayfinderApp(ctk.CTk):
             if allowed:
                 hint.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["xs"]), after=legend)
                 # The hint, row clicks and any open card go when permission lapses.
-                left_ms = int(game_labels.permission_left(now) * 1000) + 100
-                expiry["job"] = self.after(left_ms, render)
+                schedule_expiry(game_labels.permission_left(now))
             else:
                 hint.pack_forget()
             rows = []
@@ -16110,14 +16123,20 @@ class WayfinderApp(ctk.CTk):
     def _game_report_frontmost_name(self):
         """What is in front, for the question's guard: a supported game's list
         name, a fixed marker for any other app Aura recognises as a game (the
-        same detection dictation uses), or None. Never an unlisted game's name
-        or a window title, and nothing here is stored. Fails closed."""
+        same detection dictation uses) or can't identify, or None for a known
+        ordinary app. Never an unlisted game's name or a window title, and
+        nothing here is stored. Fails closed on unknowns and errors."""
         try:
             game_chat = _game_chat_module()
             pid, bundle_id, app_name = game_chat.frontmost_app()
             profile = game_chat.match_profile(bundle_id, app_name)
             if profile is not None:
                 return profile.name
+            # The adapters report "unknown" with Nones (no X connection, no
+            # foreground info, a process whose program can't be read). Unknown
+            # could be a game: block, as for an exception.
+            if pid is None or not bundle_id:
+                return _UNLISTED_GAME_IN_FRONT
             category, path = game_chat.app_signals(pid)
             if game_chat.unlisted_game_reason(bundle_id, app_name, category, path) is not None:
                 return _UNLISTED_GAME_IN_FRONT

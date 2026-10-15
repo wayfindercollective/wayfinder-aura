@@ -53,7 +53,8 @@ def test_result_messages():
     assert card.result_text("sent") == (
         "Thanks. It helps other players pick games. You can see or withdraw it in Games.")
     assert card.result_text("gone") == card.result_text("sent")
-    assert card.result_text("saved") == "Saved. Aura sends it when you're online."
+    # Covers offline and Wayfinder pausing reports (503) alike.
+    assert card.result_text("saved") == "Saved. Aura sends it as soon as Wayfinder can take it."
     assert card.result_text("limit").startswith("You've sent 5 reports today.")
     assert card.DONT_ASK_TEXT == "Aura won't ask. You can still report a game from the Games tab."
     assert card.CLOSE_AFTER_MS == 4000

@@ -732,3 +732,27 @@ def test_withdrawal_needs_no_permission(gr, transport):
     permit(T0, accepting=False)
     assert gr.withdraw("world-of-warcraft", now=T0 + 3 * DAY) == "withdrawing"
     assert gr.send_withdrawals(now=T0 + 3 * DAY) == 1
+
+
+# --- Sol r2 #2: what an expiry callback decides, in every refresh/expiry order -------------
+
+def test_report_window_follows_the_current_permission(gr):
+    deadline = T0 - 60 + game_labels.PERMISSION_S
+    assert gr.report_window("world-of-warcraft", T0) == pytest.approx(deadline - T0)
+    # No refresh: past the deadline the callback retires the controls.
+    assert gr.report_window("world-of-warcraft", deadline + 0.05) == 0
+    # A refresh after the deadline, before the callback: wait for the new deadline.
+    permit(deadline + 0.02)
+    assert gr.report_window("world-of-warcraft", deadline + 0.05) > game_labels.PERMISSION_S - 120
+    # A refresh that closes intake, or drops the game: retire now.
+    permit(deadline + 1, accepting=False)
+    assert gr.report_window("world-of-warcraft", deadline + 2) == 0
+    permit(deadline + 3, reportable=("albion-online",))
+    assert gr.report_window("world-of-warcraft", deadline + 4) == 0
+    assert gr.report_window(None, deadline + 4) > 0      # the hint: any game still open
+
+
+def test_report_window_before_the_deadline_sees_an_early_renewal(gr):
+    permit(T0 + 3600)                                     # refreshed an hour later
+    assert gr.report_window("world-of-warcraft", T0 + 3600) == pytest.approx(
+        game_labels.PERMISSION_S - 60)

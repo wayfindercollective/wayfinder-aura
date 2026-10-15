@@ -468,6 +468,23 @@ def may_report(key: str, now: float | None = None) -> bool:
         return False
 
 
+def report_window(key: str | None, now: float | None = None) -> float:
+    """Seconds left to offer new reports (for ``key``, or any game with
+    ``None``), from the permission as it is now; 0 means retire the controls.
+    Expiry callbacks ask this instead of trusting the deadline they were
+    scheduled for, so a refresh that renewed permission meanwhile keeps the
+    player's draft and just moves the next check."""
+    try:
+        from . import game_labels
+
+        now = time.time() if now is None else now
+        if key is not None and not may_report(key, now):
+            return 0.0
+        return game_labels.permission_left(now)
+    except Exception:
+        return 0.0
+
+
 def submit(game_name: str, answer: str, note: str | None = "", *,
            now: float | None = None,
            on_sent: Callable[[], None] | None = None) -> str:

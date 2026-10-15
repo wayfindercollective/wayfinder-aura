@@ -54,7 +54,7 @@ LINKS_TEXT = "Links can't be sent"
 PAUSED_TEXT = "Reports are paused right now. You can still see or withdraw yours in Games."
 _RESULTS = {
     "sent": "Thanks. It helps other players pick games. You can see or withdraw it in Games.",
-    "saved": "Saved. Aura sends it when you're online.",
+    "saved": "Saved. Aura sends it as soon as Wayfinder can take it.",
     "failed": "Aura couldn't send this report.",
     "limit": "You've sent 5 reports today. Aura can send more tomorrow.",
     "error": "Aura couldn't save this report.",
@@ -210,12 +210,8 @@ class GameReportCard:
                           text_color=COLORS["text_muted"], anchor="w",
                           font=(family, sizes["caption"]),
                           command=self.dont_ask).pack(anchor="w")
-        # One one-shot callback retires the controls when report permission lapses.
-        left_ms = int(game_labels.permission_left(time.time()) * 1000) + 100
-        try:
-            app.after(left_ms, self._permission_lapsed)
-        except Exception:
-            pass
+        # One one-shot callback at a time, for when report permission lapses.
+        self._schedule_expiry(game_labels.permission_left(time.time()))
 
     # The card is used like a widget by its host.
     def pack(self, **kwargs) -> None:
@@ -294,8 +290,21 @@ class GameReportCard:
                                    game_reports.NOTE_MAX else COLORS["text_muted"])
         self.send_button.configure(state="normal" if send_allowed(text) else "disabled")
 
+    def _schedule_expiry(self, seconds: float) -> None:
+        try:
+            self.app.after(int(seconds * 1000) + 100, self._permission_lapsed)
+        except Exception:
+            pass
+
     def _permission_lapsed(self) -> None:
-        if self.winfo_exists() and not self._finished:
+        """The deadline this was scheduled for has passed. Ask again: a refresh
+        may have renewed permission since, and then the draft stays."""
+        if not self.winfo_exists() or self._finished:
+            return
+        left = game_reports.report_window(self.key)
+        if left > 0:
+            self._schedule_expiry(left)
+        else:
             self._finish(PAUSED_TEXT)
 
     def send(self) -> None:
