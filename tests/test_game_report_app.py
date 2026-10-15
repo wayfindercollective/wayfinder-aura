@@ -474,3 +474,30 @@ def _walk(widget):
     yield widget
     for child in widget.winfo_children():
         yield from _walk(child)
+
+
+def test_showing_the_card_counts_as_asked_so_it_never_returns(monkeypatch):
+    """PRIVACY.md: Aura "never asks twice about the same game", even if the
+    player quits with the card still showing."""
+    import wayfinder_main
+    shown = []
+
+    class FakeCard:
+        def __init__(self, *a, **k):
+            shown.append(a[2])  # (parent, app, key, name)
+
+        def pack(self, **k):
+            pass
+
+    import wayfinder.ui.game_report_card as card_module
+    monkeypatch.setattr(card_module, "GameReportCard", FakeCard)
+    for _ in range(3):
+        game_reports.note_game_use("World of Warcraft")
+    app = SimpleNamespace(_dictate_banner_anchor=SimpleNamespace(master=object()),
+                          _post_ui=lambda fn: None, _close_game_report_card=lambda: None,
+                          _game_reports_dont_ask=lambda: None)
+    wayfinder_main.WayfinderApp._show_game_report_card(
+        app, game_reports.PromptGame("world-of-warcraft", "World of Warcraft"))
+    assert shown == ["world-of-warcraft"]
+    with game_reports._lock:
+        assert game_reports._load()["games"]["world-of-warcraft"]["asked"] is True

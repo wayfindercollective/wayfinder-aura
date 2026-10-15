@@ -16133,6 +16133,7 @@ class WayfinderApp(ctk.CTk):
         anchor = getattr(self, "_dictate_banner_anchor", None)
         if anchor is None:
             return
+        from wayfinder.core import game_reports
         from wayfinder.ui.game_report_card import GameReportCard
 
         card = GameReportCard(anchor.master, self, game.key, game.name, prompt=True,
@@ -16140,6 +16141,8 @@ class WayfinderApp(ctk.CTk):
                               on_dont_ask=self._game_reports_dont_ask)
         card.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
         self._game_report_card = card
+        # Shown once is asked: never again for this game, even if Aura quits now.
+        game_reports.mark_asked(game.key)
 
     def _close_game_report_card(self) -> None:
         card = getattr(self, "_game_report_card", None)
