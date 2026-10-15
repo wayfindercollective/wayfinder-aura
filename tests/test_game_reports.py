@@ -96,3 +96,663 @@ def test_profile_game_keys_are_pinned():
     profiles = {p.name for p in linux_game_chat.PROFILES}
     assert profiles == set(PINNED_PROFILE_KEYS)
     assert {name: game_key(name) for name in profiles} == PINNED_PROFILE_KEYS
+
+
+# =============================================================================
+# Part B: reports, the local state file, sending and withdrawal
+# (design sections 4.1, 5, 6 and 11). requests is faked at the transport;
+# the state file is real, in a temp dir.
+# =============================================================================
+
+import ast  # noqa: E402
+import json  # noqa: E402
+import re  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from tests.game_report_fixtures import Transport, http_date, labels_doc  # noqa: E402
+from wayfinder.core import game_labels  # noqa: E402
+from wayfinder.core import game_reports as game_reports_module  # noqa: E402
+
+T0 = 1_760_000_000.0
+DAY = 86400
+REPO = Path(__file__).resolve().parent.parent
+PAYLOAD_KEYS = {"reportId", "reporterId", "seq", "gameKey", "gameName", "answer", "note",
+                "appVersion", "os", "osVersion"}
+
+
+@pytest.fixture
+def gr(tmp_path, monkeypatch):
+    gr = game_reports_module
+    (tmp_path / "config").mkdir()
+    (tmp_path / "cache").mkdir()
+    monkeypatch.setattr(gr, "get_config_dir", lambda: tmp_path / "config")
+    monkeypatch.setattr(game_labels, "get_cache_dir", lambda: tmp_path / "cache")
+    monkeypatch.setattr(gr, "_is_packaged", lambda: True)       # a released build may send
+    monkeypatch.setattr(game_labels, "_is_packaged", lambda: True)
+    monkeypatch.setattr(gr, "_send_soon", lambda *a, **k: None)  # tests drive the sender
+    monkeypatch.setattr(gr, "_withdraw_soon", lambda *a, **k: None)
+    monkeypatch.setattr(gr, "coarse_os", lambda: ("macos", "15"))
+    monkeypatch.setattr(gr, "_app_version", lambda: "1.2.1")
+    monkeypatch.setattr(gr, "_logged_corrupt", False)
+    permit(T0)  # Wayfinder accepts reports: a fresh labels fetch just before T0
+    return gr
+
+
+def permit(now, *, accepting=True, reportable=("world-of-warcraft", "albion-online")):
+    """Store a real labels cache as a fresh fetch at ``now`` would."""
+    doc = labels_doc(accepting=accepting, generated_ms=int(now * 1000), reportable=reportable)
+    with game_labels._lock:
+        cache = game_labels._load_cache()
+        cache.update({"doc": doc, "fetchedAt": now - 60, "date": now - 60, "fresh": True})
+        game_labels._save_cache(cache)
+
+
+@pytest.fixture
+def transport(monkeypatch):
+    return Transport(monkeypatch)
+
+
+def _state(gr) -> dict:
+    return json.loads(gr.state_path().read_text(encoding="utf-8"))
+
+
+def _open_intake(transport, now=T0, reportable=("world-of-warcraft", "albion-online")):
+    transport.answer((200, labels_doc(generated_ms=int(now * 1000), reportable=reportable),
+                      {"Date": http_date(now)}))
+    assert game_labels.refresh(now=now) is True
+
+
+# --- 1. payload and imports --------------------------------------------------------------
+
+def test_a_report_sends_exactly_the_listed_fields(gr, transport):
+    assert gr.submit("World of Warcraft", "works", "Chat opened in a raid.", now=T0) == "queued"
+    assert gr.send_pending(now=T0) == 1
+    (post,) = transport.posts("/api/aura/game-report")
+    assert post.url == gr.GAME_REPORT_URL and post.timeout == 10
+    body = post.body
+    assert set(body) == PAYLOAD_KEYS
+    assert body["gameKey"] == "world-of-warcraft" and body["gameName"] == "World of Warcraft"
+    assert body["answer"] == "works" and body["note"] == "Chat opened in a raid."
+    assert body["appVersion"] == "1.2.1" and (body["os"], body["osVersion"]) == ("macos", "15")
+    assert re.fullmatch(r"[0-9a-f]{32}", body["reportId"])
+    assert re.fullmatch(r"[0-9a-f]{32}", body["reporterId"]) and body["seq"] == 1
+
+
+def test_a_blank_note_is_left_out(gr, transport):
+    gr.submit("World of Warcraft", "some_issues", "   \n ", now=T0)
+    gr.send_pending(now=T0)
+    assert set(transport.posts()[0].body) == PAYLOAD_KEYS - {"note"}
+
+
+def test_a_report_never_carries_licence_machine_crash_or_plan_data(gr, transport, tmp_path,
+                                                                   monkeypatch):
+    from wayfinder.core import crash_reports
+    monkeypatch.setitem(crash_reports._state, "dir", tmp_path / "crash")
+    install = crash_reports.install_id()
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    text = json.dumps(transport.posts()[0].body)
+    assert install not in text
+    for word in ("licen", "machine", "plan", "installId", "ultra", "email"):
+        assert word not in text.lower()
+
+
+LICENCE_MODULES = {"wayfinder.license", "wayfinder.models_cdn"}
+
+
+@pytest.mark.parametrize("path", ["src/wayfinder/core/game_reports.py",
+                                  "src/wayfinder/core/game_labels.py",
+                                  "src/wayfinder/ui/game_report_card.py"])
+def test_game_report_code_never_touches_licensing(path):
+    source = (REPO / path).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:  # relative: resolve against wayfinder.core / wayfinder.ui
+                package = "wayfinder." + path.split("/")[2]
+                parent = package.rsplit(".", node.level - 1)[0] if node.level > 1 else package
+                base = f"{parent}.{base}" if base else parent
+            names = [base] + [f"{base}.{a.name}" for a in node.names]
+        else:
+            continue
+        for name in names:
+            assert not any(name == m or name.startswith(m + ".") for m in LICENCE_MODULES), (
+                f"{path} imports {name}")
+    assert "license.json" not in source and "machine_id" not in source
+
+
+# --- 2. reporter ID and counter ----------------------------------------------------------
+
+def test_the_reporter_id_is_made_at_the_first_send_and_kept(gr, tmp_path, monkeypatch):
+    gr.note_game_use("World of Warcraft")
+    assert "reporterId" not in _state(gr)
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    first = _state(gr)["reporterId"]
+    assert re.fullmatch(r"[0-9a-f]{32}", first)
+    gr.submit("Albion Online", "works", "", now=T0)
+    assert _state(gr)["reporterId"] == first
+    from wayfinder.core import crash_reports
+    monkeypatch.setitem(crash_reports._state, "dir", tmp_path / "crash")
+    assert first != crash_reports.install_id()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_the_state_file_is_owner_only(gr):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    assert gr.state_path().name == "game-reports.json"
+    assert gr.state_path().parent.name == "config"
+    assert (gr.state_path().stat().st_mode & 0o777) == 0o600
+
+
+def test_a_corrupt_state_file_is_set_aside_and_never_crashes(gr, capsys):
+    gr.state_path().write_text("{broken", encoding="utf-8")
+    gr.note_game_use("World of Warcraft")             # no exception
+    bad = gr.state_path().with_name("game-reports.json.bad")
+    assert bad.read_text(encoding="utf-8") == "{broken"
+    assert _state(gr)["games"]["world-of-warcraft"]["uses"] == 1
+    gr.state_path().write_text("[1, 2]", encoding="utf-8")
+    assert gr.your_reports() == []
+    assert capsys.readouterr().out.count("game-reports.json") == 1   # logged once
+
+
+def test_the_counter_never_decreases_even_across_withdraw_all(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    gr.submit("Albion Online", "works", "", now=T0)
+    assert _state(gr)["seq"] == 2
+    assert gr.withdraw_all(now=T0) == "withdrawing"
+    assert gr.send_withdrawals(now=T0) == 1
+    assert _state(gr)["seq"] == 2 and "reporterId" not in _state(gr)
+    gr.submit("World of Warcraft", "doesnt_work", "", now=T0)
+    assert _state(gr)["seq"] == 3
+
+
+# --- 3. coarse OS ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("kwargs,expected", [
+    ({"system": "darwin", "mac_version": "15.4.1"}, ("macos", "15")),
+    ({"system": "darwin", "mac_version": "26.0"}, ("macos", "26")),
+    ({"system": "win32", "windows_build": 19045}, ("windows", "10")),
+    ({"system": "win32", "windows_build": 22000}, ("windows", "11")),
+    ({"system": "win32", "windows_build": 22631}, ("windows", "11")),
+    ({"system": "linux", "os_release": {"ID": "steamos", "VERSION_ID": "3.6.19"}}, ("linux", "steamos 3")),
+    ({"system": "linux", "os_release": {"ID": "bazzite", "VERSION_ID": "42"}}, ("linux", "bazzite 42")),
+    ({"system": "linux", "os_release": {"ID": "ubuntu", "VERSION_ID": "24.04"}}, ("linux", "ubuntu 24")),
+    ({"system": "linux", "os_release": {"ID": "arch", "BUILD_ID": "rolling"}}, ("linux", "arch")),
+    ({"system": "linux", "os_release": {"ID": "Fedora", "VERSION_ID": "41"}}, ("linux", "fedora 41")),
+    ({"system": "linux", "os_release": {}}, ("linux", "linux")),
+    ({"system": "linux", "os_release": {"ID": "evil/../id;rm", "VERSION_ID": "x"}}, ("linux", "evil..idrm")),
+])
+def test_coarse_os(kwargs, expected):
+    os_name, version = game_reports_module.coarse_os(**kwargs)
+    assert (os_name, version) == expected
+    assert re.fullmatch(r"[a-z0-9][a-z0-9 ._-]{0,23}", version)
+
+
+def test_coarse_os_reads_the_hosts_os_release_inside_the_flatpak(tmp_path, monkeypatch):
+    host = tmp_path / "os-release"
+    host.write_text('NAME="SteamOS"\nID=steamos\nVERSION_ID=3.7.8\n', encoding="utf-8")
+    monkeypatch.setattr(game_reports_module, "_HOST_OS_RELEASE", host)
+    assert game_reports_module._read_os_release() == {"NAME": "SteamOS", "ID": "steamos",
+                                                     "VERSION_ID": "3.7.8"}
+
+
+# --- 6. eligibility ----------------------------------------------------------------------
+
+def _use(gr, name, times):
+    for _ in range(times):
+        gr.note_game_use(name)
+
+
+def test_a_game_is_offered_after_three_uses(gr, transport):
+    _open_intake(transport)
+    _use(gr, "World of Warcraft", 2)
+    assert gr.eligible_prompt(None, False, T0 + 1) is None
+    gr.note_game_use("World of Warcraft")
+    assert gr.eligible_prompt(None, False, T0 + 1) == gr.PromptGame("world-of-warcraft",
+                                                                    "World of Warcraft")
+
+
+@pytest.mark.parametrize("case", ["asked", "switch_off", "not_reportable", "expired",
+                                  "frontmost", "busy", "closed"])
+def test_eligibility_says_no(gr, transport, case):
+    _open_intake(transport, reportable=("albion-online",) if case == "not_reportable"
+                 else ("world-of-warcraft",))
+    if case == "closed":
+        transport.answer((200, labels_doc(accepting=False, generated_ms=int((T0 + DAY + 5) * 1000)),
+                          {"Date": http_date(T0 + DAY + 5)}))
+        game_labels.refresh(now=T0 + DAY + 5)
+    _use(gr, "World of Warcraft", 3)
+    if case == "asked":
+        gr.mark_asked("world-of-warcraft")
+    now = {"expired": T0 + DAY + 1, "closed": T0 + DAY + 6}.get(case, T0 + 1)
+    front = "World of Warcraft" if case == "frontmost" else None
+    assert gr.eligible_prompt(front, case == "busy", now,
+                              enabled=case != "switch_off") is None
+
+
+def test_the_most_recently_played_game_is_asked_first(gr, transport):
+    _open_intake(transport)
+    _use(gr, "Albion Online", 3)
+    _use(gr, "World of Warcraft", 3)
+    assert gr.eligible_prompt(None, False, T0 + 1).key == "world-of-warcraft"
+    gr.note_game_use("Albion Online")
+    assert gr.eligible_prompt(None, False, T0 + 1).key == "albion-online"
+    gr.mark_asked("albion-online")
+    assert gr.eligible_prompt(None, False, T0 + 1).key == "world-of-warcraft"
+
+
+def test_a_labels_refresh_is_wanted_only_when_permission_is_the_missing_piece(gr, transport):
+    game_labels.cache_path().unlink()                            # never fetched
+    _use(gr, "World of Warcraft", 3)
+    assert gr.wants_labels_refresh(T0, enabled=True) is True     # never fetched
+    assert gr.wants_labels_refresh(T0, enabled=False) is False
+    _open_intake(transport)
+    assert gr.wants_labels_refresh(T0 + 1, enabled=True) is False  # fresh
+    assert gr.wants_labels_refresh(T0 + DAY + 1, enabled=True) is True
+    gr.mark_asked("world-of-warcraft")
+    assert gr.wants_labels_refresh(T0 + DAY + 1, enabled=True) is False
+
+
+def test_counting_never_stores_a_time(gr):
+    gr.note_game_use("World of Warcraft")
+    entry = _state(gr)["games"]["world-of-warcraft"]
+    assert set(entry) <= {"name", "uses", "asked", "attempted", "order"}
+    assert not any(isinstance(v, float) for v in entry.values())
+
+
+# --- 8. states, sending and withdrawal (section 6.1 and 11) -------------------------------
+
+def _report(gr):
+    (only,) = _state(gr)["reports"]
+    return only
+
+
+def test_a_never_attempted_report_is_withdrawn_locally_without_network(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    assert gr.withdraw("world-of-warcraft", now=T0) == "deleted"
+    assert transport.sent == [] and _state(gr)["reports"] == []
+    assert _state(gr)["withdrawals"] == []
+
+
+def test_sending_is_marked_on_disk_before_the_request_starts(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    seen = []
+    transport.on_send = lambda sent: seen.append(_report(gr)["state"])
+    transport.answer(ConnectionError("dropped"))
+    gr.send_pending(now=T0)
+    assert seen == ["sending"]
+    assert _report(gr)["state"] == "not_confirmed"
+
+
+def _crash_mid_request(gr, transport):
+    def crash(_sent):
+        raise SystemExit("power cut")
+    transport.on_send = crash
+    with pytest.raises(SystemExit):
+        gr.send_pending(now=T0)
+    transport.on_send = None
+    assert _report(gr)["state"] == "sending"
+
+
+@pytest.mark.parametrize("how", ["sending", "not_confirmed", "sent", "failed_after_attempt"])
+def test_withdrawal_goes_to_the_server_once_any_request_started(gr, transport, how):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    if how == "sending":
+        _crash_mid_request(gr, transport)
+    elif how == "not_confirmed":
+        transport.answer((503, {"ok": False, "error": "not accepting reports"}))
+        gr.send_pending(now=T0)
+        assert _report(gr)["state"] == "not_confirmed"
+    elif how == "sent":
+        gr.send_pending(now=T0)
+        assert _report(gr)["state"] == "sent"
+    else:
+        gr.send_pending(now=T0)                                     # an earlier one reached it
+        gr.submit("World of Warcraft", "doesnt_work", "", now=T0)
+        transport.answer((400, {"ok": False, "error": "unknown Aura version"}))
+        gr.send_pending(now=T0)
+        assert [r["state"] for r in _state(gr)["reports"]] == ["sent", "failed"]
+    reporter = _state(gr)["reporterId"]
+    counter = _state(gr)["seq"]
+    before = len(transport.posts("/withdraw"))
+    assert gr.withdraw("world-of-warcraft", now=T0) == "withdrawing"
+    assert _state(gr)["reports"] == []
+    assert gr.send_withdrawals(now=T0) == 1
+    (post,) = transport.posts("/withdraw")[before:]
+    assert post.url == gr.GAME_WITHDRAW_URL
+    assert post.body == {"reporterId": reporter, "gameKey": "world-of-warcraft",
+                         "throughSeq": counter}
+    assert _state(gr)["withdrawals"] == []
+
+
+def test_couldnt_send_without_an_earlier_attempt_is_only_deleted_locally(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    transport.answer((400, {"ok": False, "error": "unknown game"}))
+    gr.send_pending(now=T0)
+    assert _report(gr)["state"] == "failed"
+    # 400 means the server wrote nothing, and nothing else was ever attempted.
+    sent = len(transport.sent)
+    assert gr.withdraw("world-of-warcraft", now=T0) == "deleted"
+    assert len(transport.sent) == sent and _state(gr)["withdrawals"] == []
+
+
+def test_the_withdrawal_boundary_is_fixed_at_the_press(gr, transport, monkeypatch):
+    monkeypatch.setattr(gr, "DAILY_SENDS", 100)
+    for _ in range(8):
+        gr.submit("Albion Online", "works", "", now=T0)
+    gr.submit("World of Warcraft", "works", "", now=T0)           # seq 9
+    gr.send_pending(now=T0)
+    assert _state(gr)["seq"] == 9
+    transport.answer(ConnectionError("offline"))
+    assert gr.withdraw("world-of-warcraft", now=T0) == "withdrawing"
+    assert gr.send_withdrawals(now=T0) == 0                        # offline: stays
+    assert _state(gr)["withdrawals"][0]["throughSeq"] == 9
+    gr.submit("World of Warcraft", "some_issues", "after", now=T0)  # seq 10
+    sent_before = len(transport.posts("/api/aura/game-report"))
+    assert gr.send_pending(now=T0) == 1
+    new = transport.posts("/api/aura/game-report")[sent_before:]
+    assert [p.body["seq"] for p in new if "/withdraw" not in p.url] == [10]
+    assert gr.send_withdrawals(now=T0) == 1
+    retry = transport.posts("/withdraw")[-1]
+    assert retry.body["throughSeq"] == 9                           # never the current 10
+    kept = [r for r in _state(gr)["reports"] if r["gameKey"] == "world-of-warcraft"]
+    assert [(r["seq"], r["state"]) for r in kept] == [(10, "sent")]
+
+
+def test_withdrawing_stops_the_queue_retrying_that_game(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    transport.answer(ConnectionError("offline"))
+    gr.send_pending(now=T0)
+    transport.answer(ConnectionError("offline"))
+    gr.withdraw("world-of-warcraft", now=T0)
+    gr.send_withdrawals(now=T0)
+    reports_before = len([p for p in transport.posts() if "/withdraw" not in p.url])
+    gr.send_pending(now=T0)
+    assert len([p for p in transport.posts() if "/withdraw" not in p.url]) == reports_before
+
+
+def test_offline_withdraw_all_stays_withdrawing_and_resets_only_on_200(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    reporter = _state(gr)["reporterId"]
+    transport.answer(ConnectionError("offline"))
+    assert gr.withdraw_all(now=T0) == "withdrawing"
+    assert gr.send_withdrawals(now=T0) == 0
+    assert _state(gr)["reporterId"] == reporter
+    assert [w["throughSeq"] for w in _state(gr)["withdrawals"]] == [1]
+    assert [r.status for r in gr.your_reports()] == ["withdrawing"]
+    transport.answer((500, {"ok": False}))
+    assert gr.send_withdrawals(now=T0) == 0
+    assert _state(gr)["reporterId"] == reporter
+    assert gr.send_withdrawals(now=T0) == 1
+    body = transport.posts("/withdraw")[-1].body
+    assert body == {"reporterId": reporter, "throughSeq": 1}       # no gameKey: everything
+    assert "reporterId" not in _state(gr) and _state(gr)["withdrawals"] == []
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    assert _state(gr)["reporterId"] != reporter
+
+
+def test_a_report_answered_withdrawn_is_dropped_silently(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    transport.answer((200, {"ok": True, "withdrawn": True}))
+    assert gr.send_pending(now=T0) == 0
+    assert _state(gr)["reports"] == [] and gr.your_reports() == []
+
+
+@pytest.mark.parametrize("status,state", [
+    (200, "sent"), (400, "failed"), (413, "failed"), (415, "failed"),
+    (429, "not_confirmed"), (404, "not_confirmed"), (503, "not_confirmed"), (500, "not_confirmed"),
+])
+def test_status_codes(gr, transport, status, state):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    transport.answer((status, {"ok": status == 200}))
+    gr.send_pending(now=T0)
+    assert _report(gr)["state"] == state
+
+
+def test_a_retry_keeps_the_same_report_id_and_counter(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    transport.answer(TimeoutError("slow"))
+    gr.send_pending(now=T0)
+    gr.send_pending(now=T0 + 60)
+    first, second = transport.posts()
+    assert first.body == second.body
+    assert _report(gr)["state"] == "sent"
+
+
+def test_a_newer_answer_replaces_one_still_queued(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.submit("World of Warcraft", "doesnt_work", "", now=T0)
+    (entry,) = _state(gr)["reports"]
+    assert entry["answer"] == "doesnt_work" and entry["seq"] == 2
+
+
+def test_at_most_five_sends_a_day(gr, transport):
+    for _ in range(5):
+        assert gr.submit("World of Warcraft", "works", "", now=T0) == "queued"
+    assert gr.submit("Albion Online", "works", "", now=T0) == "limit"
+    permit(T0 + DAY)
+    assert gr.submit("Albion Online", "works", "", now=T0 + DAY) == "queued"
+
+
+def test_reports_expire_after_14_days(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)              # never attempted
+    gr.submit("Albion Online", "works", "", now=T0)
+    transport.answer(ConnectionError("offline"))
+    gr.send_pending(now=T0)                                          # WoW attempted
+    assert gr.send_pending(now=T0 + 15 * DAY) == 0
+    states = {r["gameKey"]: r["state"] for r in _state(gr)["reports"]}
+    assert states == {"world-of-warcraft": "not_confirmed"}          # kept, no longer retried
+    assert len(transport.posts()) == 1
+
+
+def test_a_source_checkout_sends_only_with_an_override(gr, transport, monkeypatch):
+    monkeypatch.setattr(gr, "_is_packaged", lambda: False)
+    monkeypatch.delenv("WAYFINDER_AURA_GAME_REPORT_URL", raising=False)
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    assert gr.send_pending(now=T0) == 0 and transport.sent == []
+    assert _report(gr)["state"] == "queued"
+    monkeypatch.setenv("WAYFINDER_AURA_GAME_REPORT_URL", "https://dev.example/api/aura/game-report")
+    monkeypatch.setattr(gr, "GAME_REPORT_URL", "https://dev.example/api/aura/game-report")
+    assert gr.send_pending(now=T0) == 1
+    assert transport.posts()[0].url == "https://dev.example/api/aura/game-report"
+
+
+def test_the_default_urls_and_overrides(monkeypatch):
+    import importlib
+    for name in ("WAYFINDER_AURA_GAME_REPORT_URL", "WAYFINDER_AURA_GAME_WITHDRAW_URL"):
+        monkeypatch.delenv(name, raising=False)
+    module = importlib.reload(game_reports_module)
+    assert module.GAME_REPORT_URL == "https://fine-shrimp-886.convex.site/api/aura/game-report"
+    assert module.GAME_WITHDRAW_URL == (
+        "https://fine-shrimp-886.convex.site/api/aura/game-report/withdraw")
+    monkeypatch.setenv("WAYFINDER_AURA_GAME_REPORT_URL", "https://a.test/r")
+    monkeypatch.setenv("WAYFINDER_AURA_GAME_WITHDRAW_URL", "https://a.test/w")
+    module = importlib.reload(game_reports_module)
+    assert (module.GAME_REPORT_URL, module.GAME_WITHDRAW_URL) == ("https://a.test/r", "https://a.test/w")
+    monkeypatch.delenv("WAYFINDER_AURA_GAME_REPORT_URL")
+    monkeypatch.delenv("WAYFINDER_AURA_GAME_WITHDRAW_URL")
+    importlib.reload(game_reports_module)
+
+
+def test_network_errors_never_raise(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    transport.answer(OSError("boom"))
+    assert gr.send_pending(now=T0) == 0
+    gr.withdraw("world-of-warcraft", now=T0)
+    transport.answer(ValueError("weird"))
+    assert gr.send_withdrawals(now=T0) == 0
+
+
+# --- 9. always available ----------------------------------------------------------------
+
+def test_your_reports_and_withdraw_work_with_intake_closed_and_labels_failing(gr, transport):
+    gr.submit("World of Warcraft", "works", "Fine.", now=T0)
+    gr.send_pending(now=T0)
+    # A day later: permission has lapsed, the labels fetch fails, intake is shut.
+    later = T0 + DAY + 1
+    transport.answer(ConnectionError("labels down"))
+    assert game_labels.refresh(now=later) is False
+    assert game_labels.intake_open(later) is False
+    permit(later, accepting=False)
+    (row,) = gr.your_reports()
+    assert (row.game_key, row.game_name, row.answer, row.note, row.app_version, row.status) == (
+        "world-of-warcraft", "World of Warcraft", "works", "Fine.", "1.2.1", "sent")
+    assert row.created_at == T0
+    assert gr.withdraw("world-of-warcraft", now=later) == "withdrawing"
+    assert gr.send_withdrawals(now=later) == 1
+    assert gr.your_reports() == []
+
+
+def test_your_answers_feed_you_said(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.submit("Albion Online", "doesnt_work", "", now=T0)
+    assert gr.latest_answers() == {"world-of-warcraft": "works", "albion-online": "doesnt_work"}
+
+
+# --- 11. notes ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,clean,problem", [
+    ("  Chat opened fine.  ", "Chat opened fine.", None),
+    ("", None, None),
+    ("   \t", None, None),
+    ("line one\nline\ttwo\x00\x07", "line one line two", None),
+    ("‮evil‬ text", "evil text", None),
+    ("see https://example.com", None, "links"),
+    ("go to www.example.com", None, "links"),
+    ("ftp://x", None, "links"),
+    ("x" * 300, "x" * 280, None),
+])
+def test_notes(raw, clean, problem):
+    assert game_reports_module.clean_note(raw) == (clean, problem)
+
+
+def test_a_note_with_a_link_is_refused_at_submit(gr, transport):
+    assert gr.submit("World of Warcraft", "works", "https://evil.example", now=T0) == "link"
+    assert not gr.state_path().exists() or _state(gr)["reports"] == []
+
+
+def test_submit_refuses_unknown_answers_and_games(gr):
+    assert gr.submit("World of Warcraft", "great", "", now=T0) == "invalid"
+    assert gr.submit("!!!", "works", "", now=T0) == "invalid"
+
+
+def test_redirects_are_never_followed(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    transport.answer((307, b"", {"Location": "https://elsewhere.example/r"}))
+    gr.send_pending(now=T0)
+    assert len(transport.posts()) == 1 and _report(gr)["state"] == "not_confirmed"
+    gr.withdraw("world-of-warcraft", now=T0)
+    transport.answer((308, b"", {"Location": "https://elsewhere.example/w"}))
+    assert gr.send_withdrawals(now=T0) == 0
+    assert len(transport.posts("/withdraw")) == 1
+    assert all("elsewhere" not in s.url for s in transport.sent)
+
+
+def test_tests_never_touch_the_real_game_report_files():
+    """conftest points both files at a temp dir for every test."""
+    from wayfinder.utils.platform import get_cache_dir, get_config_dir
+    assert game_reports_module.state_path().parent != get_config_dir()
+    assert game_labels.cache_path().parent != get_cache_dir()
+
+
+
+# --- Sol r1 #1: a withdrawal boundary never changes once made --------------------------
+
+def test_a_second_withdrawal_during_the_first_is_never_lost(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)                                        # report 1 sent
+    assert gr.withdraw("world-of-warcraft", now=T0) == "withdrawing"  # boundary 1
+    pressed = []
+
+    def while_the_first_is_in_flight(sent):
+        if "/withdraw" in sent.url and not pressed:
+            pressed.append(sent.body["throughSeq"])
+            gr.submit("World of Warcraft", "doesnt_work", "", now=T0)  # report 2
+            gr.send_pending(now=T0)
+            assert gr.withdraw("world-of-warcraft", now=T0) == "withdrawing"  # boundary 2
+
+    transport.on_send = while_the_first_is_in_flight
+    gr.send_withdrawals(now=T0)
+    transport.on_send = None
+    gr.send_withdrawals(now=T0)
+    assert pressed == [1]
+    assert [p.body["throughSeq"] for p in transport.posts("/withdraw")] == [1, 2]
+    assert _state(gr)["withdrawals"] == []
+
+
+def test_each_press_keeps_its_own_boundary_until_that_one_is_acknowledged(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    transport.answer(ConnectionError("offline"))
+    gr.withdraw("world-of-warcraft", now=T0)                       # through 1
+    gr.send_withdrawals(now=T0)
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    gr.withdraw("world-of-warcraft", now=T0)                       # through 2
+    gr.withdraw("world-of-warcraft", now=T0)                       # same boundary: no copy
+    assert [w["throughSeq"] for w in _state(gr)["withdrawals"]] == [1, 2]
+    assert [r.status for r in gr.your_reports()] == ["withdrawing"]  # one row per game
+    transport.answer((200, {"ok": True}), ConnectionError("offline"))
+    gr.send_withdrawals(now=T0)
+    assert [w["throughSeq"] for w in _state(gr)["withdrawals"]] == [2]
+    gr.send_withdrawals(now=T0)
+    assert [p.body["throughSeq"] for p in transport.posts("/withdraw")] == [1, 1, 2, 2]
+    assert _state(gr)["withdrawals"] == []
+
+
+# --- Sol r1 #2: Send needs fresh permission and a reportable game ------------------------
+
+def test_send_is_refused_once_permission_has_lapsed(gr, transport):
+    assert gr.may_report("world-of-warcraft", T0) is True
+    assert gr.submit("World of Warcraft", "works", "", now=T0 + DAY + 1) == "closed"
+    assert gr.may_report("world-of-warcraft", T0 + DAY + 1) is False
+    assert not gr.state_path().exists() or _state(gr)["reports"] == []
+
+
+def test_send_is_refused_for_a_game_wayfinder_does_not_take(gr, transport):
+    permit(T0, reportable=("albion-online",))
+    assert gr.may_report("world-of-warcraft", T0) is False
+    assert gr.submit("World of Warcraft", "works", "", now=T0) == "closed"
+    assert gr.submit("Albion Online", "works", "", now=T0) == "queued"
+
+
+def test_send_is_refused_when_intake_closed(gr, transport):
+    permit(T0, accepting=False)
+    assert gr.submit("World of Warcraft", "works", "", now=T0) == "closed"
+
+
+def test_withdrawal_needs_no_permission(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    permit(T0, accepting=False)
+    assert gr.withdraw("world-of-warcraft", now=T0 + 3 * DAY) == "withdrawing"
+    assert gr.send_withdrawals(now=T0 + 3 * DAY) == 1
+
+
+# --- Sol r2 #2: what an expiry callback decides, in every refresh/expiry order -------------
+
+def test_report_window_follows_the_current_permission(gr):
+    deadline = T0 - 60 + game_labels.PERMISSION_S
+    assert gr.report_window("world-of-warcraft", T0) == pytest.approx(deadline - T0)
+    # No refresh: past the deadline the callback retires the controls.
+    assert gr.report_window("world-of-warcraft", deadline + 0.05) == 0
+    # A refresh after the deadline, before the callback: wait for the new deadline.
+    permit(deadline + 0.02)
+    assert gr.report_window("world-of-warcraft", deadline + 0.05) > game_labels.PERMISSION_S - 120
+    # A refresh that closes intake, or drops the game: retire now.
+    permit(deadline + 1, accepting=False)
+    assert gr.report_window("world-of-warcraft", deadline + 2) == 0
+    permit(deadline + 3, reportable=("albion-online",))
+    assert gr.report_window("world-of-warcraft", deadline + 4) == 0
+    assert gr.report_window(None, deadline + 4) > 0      # the hint: any game still open
+
+
+def test_report_window_before_the_deadline_sees_an_early_renewal(gr):
+    permit(T0 + 3600)                                     # refreshed an hour later
+    assert gr.report_window("world-of-warcraft", T0 + 3600) == pytest.approx(
+        game_labels.PERMISSION_S - 60)

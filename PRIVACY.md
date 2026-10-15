@@ -118,6 +118,59 @@ The same bug is sent at most once a day, and no more than 20 reports a day.
 Reports wait on your computer when you're offline and are deleted after 14
 days, or right away when you turn reports off.
 
+## Game reports (only when you press Send)
+
+Aura can ask how it worked in a game, so players can see which games it
+works with. Nothing is sent unless you press **Send** on a report.
+
+- **When Aura asks.** After you have dictated into a supported game a few
+  times, Aura may ask once, inside its own window when you next have it open:
+  "How did Aura work in World of Warcraft?" It never asks over a game, never
+  takes focus and never asks twice about the same game. You can report a game
+  from the Games tab, and turn the question off there (**Ask how games
+  went**) or with **Don't ask again**.
+- **What a report holds.** The game's name as Aura's list spells it, the
+  Aura version, your operating system and its major version (for example
+  macOS 15, Windows 11, or a Linux distribution such as SteamOS 3), your
+  answer (Works, Some issues or Doesn't work) and the short note if you typed
+  one. It also holds a random report ID made on your computer for game
+  reports only, and a counter, so several reports from one computer count
+  once, the newest answer wins and you can withdraw them. That ID is not your
+  crash-report ID, licence key or machine ID, and Wayfinder stores only a
+  one-way fingerprint of it.
+- **What it never holds.** Audio, dictated text, window titles, other apps
+  or games, your settings, licence key, plan or API keys, or your email
+  address. The note is yours to write: please leave out names and contact
+  details. Links are not accepted.
+- **Where it goes.** Wayfinder's own backend, which runs on Convex. Reports
+  are counted per game, operating system and Aura version line (for example
+  1.3) to set the labels in the Games tab, so a label such as "Works with
+  (community)" means three or more anonymous report IDs, not verified people.
+  Notes are read only by the Wayfinder team on a signed-in review page. They
+  are never shown publicly or posted anywhere else. A weekly summary with
+  counts and label changes, never notes or report IDs, goes to the team's
+  Slack.
+- **Your internet address.** Like any web request, the server sees your IP
+  address. It is used only to limit spam, is kept for about two hours in
+  rate-limit counters and is never stored with a report.
+- **Seeing and withdrawing.** Games > Your reports lists every report this
+  computer sent, and works even when reporting is paused. **Withdraw**
+  deletes that game's reports from Wayfinder's servers. **Withdraw all**
+  deletes them all and makes a new report ID. So that a delayed copy can't
+  bring a withdrawn report back, the server keeps a short record (the ID's
+  fingerprint and the counter, no answer or note) for 30 days. If you delete
+  Aura's settings folder, Aura can no longer show which reports were yours,
+  so withdraw them first.
+- **How long it is kept.** Notes are erased after 90 days. Reports are
+  deleted after 2 years, or as soon as you withdraw them.
+- **Offline.** A report waits on your computer until Aura can send it, for
+  up to 14 days.
+- **On your computer.** To ask only once, Aura counts dictations into
+  supported games and remembers which games it asked about. It keeps that,
+  your report ID, the counter and a copy of what you sent in
+  `game-reports.json` beside `config.json`, readable only by your user
+  account (`0600`).
+
 ## Local diagnostic log
 
 For troubleshooting, the app keeps a local activity log at
@@ -145,18 +198,20 @@ advanced option (`desktop_paste_on_focus_drift`); both restore the clipboard on
 a best-effort basis. Clipboard managers (Klipper, CopyQ, and similar) may record
 what Aura puts there.
 
-## Window detection (Linux)
+## Game detection
 
-Gamer mode (on by default) reads the active X11 window's class, title, and
-`STEAM_GAME` property at each dictation to tell whether a game is in front.
-This stays on your machine: nothing is sent, and the only trace is an
-activity-log line naming the game when one is recognized.
+Gamer mode (on by default) checks which app is in front each time you dictate:
+on the Mac its bundle ID and name, on Windows its program file name and window
+title, on Linux the X11 window's class, title and `STEAM_GAME` property. This
+stays on your computer. The only traces are an activity-log line naming the
+game and, for supported games, the count described under Game reports.
 
 ## No analytics, no telemetry
 
 Wayfinder Aura contains no analytics or usage telemetry. It does not track how
-you use the app. The network activity is exactly the following; none of it
-carries your audio or transcripts unless you enable a cloud backend (item 6):
+you use the app. Game reports are not telemetry: Aura sends one only when you
+press Send. The network activity is exactly the following; none of it carries
+your audio or transcripts unless you enable a cloud backend (item 6):
 
 1. **Model catalog, at every launch.** Aura fetches the list of downloadable
    models from the Wayfinder Models CDN and keeps a copy for 6 hours. The
@@ -187,6 +242,11 @@ carries your audio or transcripts unless you enable a cloud backend (item 6):
    described above.
 8. **Crash reports** (on for Beta, off for Stable; Settings → System → Send
    crash reports), as described above. They never carry audio or text.
+9. **Game reports, only when you press Send on one**, as described above.
+   Withdrawing sends your report ID so the server can delete them.
+10. **Community game labels, at most once a day,** when you open the Games
+    tab or Aura is about to ask about a game. The request carries nothing
+    about you.
 
 ## Questions
 

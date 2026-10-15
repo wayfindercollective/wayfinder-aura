@@ -388,6 +388,22 @@ def _isolated_windows_local_appdata(monkeypatch: pytest.MonkeyPatch, tmp_path_fa
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path_factory.mktemp("localappdata")))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_game_reports(monkeypatch: pytest.MonkeyPatch, tmp_path_factory):
+    """Game reports keep game-reports.json beside config.json and the labels
+    cache in the cache dir. Every test that drives a Gamer-mode dictation
+    through _inject_into_game_chat() counts a game use, so point both at a
+    temp dir: no test may write the developer's real files."""
+    from wayfinder.core import game_labels, game_reports
+
+    base = tmp_path_factory.getbasetemp() / "game-reports-isolation"
+    (base / "config").mkdir(parents=True, exist_ok=True)
+    (base / "cache").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(game_reports, "get_config_dir", lambda: base / "config")
+    monkeypatch.setattr(game_labels, "get_cache_dir", lambda: base / "cache")
+    monkeypatch.setattr(game_reports, "_change_listener", None)
+
+
 @pytest.fixture
 def appimage_env(monkeypatch: pytest.MonkeyPatch, temp_dir: Path):
     """Set up environment variables to simulate running from an AppImage."""

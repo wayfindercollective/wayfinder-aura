@@ -736,10 +736,12 @@ def test_unhide_restores_the_native_hero(monkeypatch):
         "_refresh_tray_menu": lambda self: events.append("menu"),
         "_sync_macos_hero_visibility": lambda self: events.append("sync"),
         "_start_idle_breath": lambda self: events.append("breath"),
+        "_schedule_main_window_visible": lambda self: events.append("visible"),
     })()
     wayfinder_main.WayfinderApp._on_macos_app_visibility_changed(app)
-    # NSApplication reports not hidden, so this is the unhide path.
-    assert events == ["menu", "geometry", "sync", "breath"]
+    # NSApplication reports not hidden, so this is the unhide path. Unhide is
+    # also how the window comes back on the Mac, so the game-report hook runs.
+    assert events == ["menu", "geometry", "sync", "breath", "visible"]
 
 
 def test_ctk_dpi_poll_is_idle_on_macos():

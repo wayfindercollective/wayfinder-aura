@@ -9,6 +9,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Tell us how Aura worked in a game.** After a few dictations into a
+  supported game, Aura asks once, in its own window and never over the game,
+  and the Games tab shows community labels from anonymous player reports.
+  Nothing is sent unless you press Send, and Games > Your reports lets you
+  withdraw what you sent.
 - **Windows: Aura offers a restart when it stops answering the hotkey.** If
   Aura stops handling key presses (seen once after the laptop woke from sleep),
   it logs when it happened and why, and a press now brings up a Restart
