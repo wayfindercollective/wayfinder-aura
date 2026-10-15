@@ -1671,6 +1671,10 @@ SETTING_TOOLTIPS = {
         "On: Aura presses Enter to send each message.\n"
         "Off: the text is left in the chat box for you to check and send."
     ),
+    "game_report_prompts": (
+        "After you've used Aura in a game a few times, Aura asks once how it went, "
+        "in its own window, never over the game. Nothing is sent unless you press Send."
+    ),
     "overlay_type": (
         "Always On: the pill stays on screen and never takes focus.\n"
         "Disappearing: it shows only while you dictate.\n"
@@ -6596,6 +6600,7 @@ class WayfinderApp(ctk.CTk):
         # Check for a newer app release (non-blocking, once per day)
         self.after(2600, self._check_app_update_background)
         self.after(8000, self._start_crash_report_pass)
+        self._install_game_report_hooks()
 
         # Start display wake-up listener for overlay recovery
         if self._use_pyqt_overlay and not IS_MACOS:
@@ -8503,6 +8508,7 @@ class WayfinderApp(ctk.CTk):
             self._sync_macos_hero_visibility()
         if self.app_state == AppState.IDLE:
             self._start_idle_breath()
+        self._schedule_main_window_visible()
 
     def _on_hero_canvas_map(self, event=None) -> None:
         """Restore the native hero after deminiaturize or returning to Dictate."""
@@ -9079,6 +9085,8 @@ class WayfinderApp(ctk.CTk):
             # no Python timer behind; one pass re-seeds whichever renderer the
             # hero needs now (the Tk one only under an overlay).
             self._start_idle_breath()
+        if tab_id == "games":
+            self._refresh_game_labels()  # community labels, at most once a day
 
     def show_setup_pane(self, on_done=None) -> None:
         """Show the first-run dependency setup as an inline pane over the tab
@@ -13723,9 +13731,19 @@ class WayfinderApp(ctk.CTk):
         ctk.CTkFrame(mode, fg_color="transparent", height=SPACING["tile_pad_y"]).pack()
 
         # --- Games list ----------------------------------------------------------
+        # Labels come from the community labels document when there is one
+        # (game reports, docs/plans/game-reports-design-2026-10-15.md 3.4/4.3).
+        from wayfinder import __version__ as app_version
+        from wayfinder.core import game_labels, game_reports
+        from wayfinder.ui.game_report_card import (
+            GAMES_HINT, GameReportCard, YourReportsPanel, you_said)
+
+        os_family = "macos" if IS_MACOS else "windows" if IS_WINDOWS else "linux"
+        app_line = game_labels.app_line(app_version)
         games = tile("GAMES")
         tones = {
             game_chat.VERIFIED: COLORS["accent_green"],
+            game_chat.COMMUNITY: COLORS["accent_green"],
             game_chat.PLAYABLE: COLORS["accent"],
             game_chat.UNTESTED: COLORS["text_secondary"],
             game_chat.NOT_RECOMMENDED: COLORS["accent_red"],
@@ -13735,11 +13753,14 @@ class WayfinderApp(ctk.CTk):
         for status, label in game_chat.STATUS_LABELS.items():
             row = ctk.CTkFrame(legend, fg_color="transparent")
             row.pack(fill="x", pady=1)
-            ctk.CTkLabel(row, text=label, width=120, anchor="w",
+            ctk.CTkLabel(row, text=label, width=160, anchor="w",
                          font=(fam, fs["small"], "bold"), text_color=tones[status]).pack(side="left")
             ctk.CTkLabel(row, text=game_chat.STATUS_MEANINGS[status], anchor="w", justify="left",
                          font=(fam, fs["small"]), text_color=COLORS["text_muted"],
-                         wraplength=340).pack(side="left", fill="x", expand=True)
+                         wraplength=300).pack(side="left", fill="x", expand=True)
+        # Only while Wayfinder accepts reports (packed by render()).
+        hint = ctk.CTkLabel(games, text=GAMES_HINT, anchor="w", justify="left", wraplength=460,
+                            font=(fam, fs["small"]), text_color=COLORS["text_secondary"])
 
         search_var = ctk.StringVar()
         ctk.CTkEntry(
@@ -13748,7 +13769,7 @@ class WayfinderApp(ctk.CTk):
             fg_color=COLORS["bg_input"], border_color=COLORS["border_subtle"],
             text_color=COLORS["text_primary"],
         ).pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["sm"], SPACING["xs"]))
-        filter_labels = ["All"] + list(game_chat.STATUS_LABELS.values())
+        filter_labels = ["All"] + list(game_chat.FILTER_LABELS.values())
         filter_var = ctk.StringVar(value="All")
         ctk.CTkSegmentedButton(
             games, values=filter_labels, variable=filter_var,
@@ -13758,23 +13779,53 @@ class WayfinderApp(ctk.CTk):
                                    text_color=COLORS["text_muted"])
         count_label.pack(fill="x", padx=SPACING["tile_pad"])
         results = ctk.CTkFrame(games, fg_color="transparent")
-        results.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
+        results.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["sm"]))
         max_rows = 40  # a hundred-plus rows would make every keystroke lag
-        status_for_label = {v: k for k, v in game_chat.STATUS_LABELS.items()}
+        status_for_label = {v: k for k, v in game_chat.FILTER_LABELS.items()}
+        open_card = {"key": None, "card": None}
+
+        def close_row_card():
+            card = open_card["card"]
+            open_card.update(key=None, card=None)
+            if card is not None:
+                card.destroy()
+
+        def toggle_row_card(row, entry, key):
+            # A click on a reportable row opens the card under it; a second closes it.
+            was_open = open_card["key"] == key
+            close_row_card()
+            if was_open:
+                return
+            card = GameReportCard(row, self, key, entry.name, prompt=False, post=self._post_ui,
+                                  on_close=lambda: (close_row_card(), render()))
+            card.pack(fill="x", pady=(SPACING["xs"], SPACING["xs"]))
+            open_card.update(key=key, card=card)
 
         def render(*_):
+            close_row_card()
             for child in results.winfo_children():
                 child.destroy()
-            entries = game_chat.search_games(search_var.get())
+            now = time.time()
+            doc = game_labels.labels_doc(now)
+            allowed = game_labels.reportable() if game_labels.intake_open(now) else frozenset()
+            answers = game_reports.latest_answers()
+            if allowed:
+                hint.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["xs"]), after=legend)
+            else:
+                hint.pack_forget()
+            rows = []
+            for entry in game_chat.search_games(search_var.get()):
+                status, caption = game_labels.display_status(entry, os_family, app_line, doc=doc)
+                rows.append((entry, status, caption))
             wanted = status_for_label.get(filter_var.get())
             if wanted:
-                entries = [e for e in entries if e.status == wanted]
-            shown = entries[:max_rows]
+                rows = [r for r in rows if r[1] == wanted]
+            shown = rows[:max_rows]
             count_label.configure(
-                text=(f"Showing {len(shown)} of {len(entries)} games. Search to narrow it down."
-                      if len(entries) > len(shown) else
-                      f"{len(entries)} game{'s' if len(entries) != 1 else ''}"))
-            if not entries:
+                text=(f"Showing {len(shown)} of {len(rows)} games. Search to narrow it down."
+                      if len(rows) > len(shown) else
+                      f"{len(rows)} game{'s' if len(rows) != 1 else ''}"))
+            if not rows:
                 ctk.CTkLabel(
                     results, font=(fam, fs["small"]), anchor="w", justify="left",
                     text_color=COLORS["text_muted"], wraplength=460,
@@ -13783,18 +13834,46 @@ class WayfinderApp(ctk.CTk):
                          "just hasn't been tested there, so check the game's rules on chat tools.",
                 ).pack(fill="x", pady=SPACING["xs"])
                 return
-            for entry in shown:
+            for entry, status, caption in shown:
+                key = game_reports.game_key(entry.name)
                 row = ctk.CTkFrame(results, fg_color="transparent")
                 row.pack(fill="x", pady=(SPACING["xs"], 0))
                 head = ctk.CTkFrame(row, fg_color="transparent")
                 head.pack(fill="x")
-                ctk.CTkLabel(head, text=entry.name, anchor="w", font=(fam, fs["body"], "bold"),
-                             text_color=COLORS["text_primary"]).pack(side="left")
-                ctk.CTkLabel(head, text=game_chat.STATUS_LABELS[entry.status], anchor="e",
-                             font=(fam, fs["small"], "bold"),
-                             text_color=tones[entry.status]).pack(side="right")
-                ctk.CTkLabel(row, text=entry.note, anchor="w", justify="left", wraplength=460,
-                             font=(fam, fs["small"]), text_color=COLORS["text_muted"]).pack(fill="x")
+                parts = [head,
+                         ctk.CTkLabel(head, text=entry.name, anchor="w",
+                                      font=(fam, fs["body"], "bold"),
+                                      text_color=COLORS["text_primary"]),
+                         ctk.CTkLabel(head, text=game_chat.STATUS_LABELS[status], anchor="e",
+                                      font=(fam, fs["small"], "bold"), text_color=tones[status])]
+                parts[1].pack(side="left")
+                parts[2].pack(side="right")
+                lines = [(caption, COLORS["text_muted"], "caption"),
+                         (entry.note, COLORS["text_muted"], "small")]
+                if key in answers:
+                    lines.append((you_said(answers[key]), COLORS["text_secondary"], "caption"))
+                for text, color, size in lines:
+                    if text:
+                        label = ctk.CTkLabel(row, text=text, anchor="w", justify="left",
+                                             wraplength=460, font=(fam, fs[size]), text_color=color)
+                        label.pack(fill="x")
+                        parts.append(label)
+                if key in allowed:
+                    for widget in [row] + parts:
+                        widget.bind("<Button-1>",
+                                    lambda _e, r=row, e=entry, k=key: toggle_row_card(r, e, k),
+                                    add="+")
+
+        def render_unless_answering():
+            # Background refreshes never close a card the player is filling in.
+            if open_card["card"] is None or not open_card["card"].winfo_exists():
+                render()
+
+        self._games_tab_render = render_unless_answering
+        # Your reports: always here, whatever the labels fetch or intake says.
+        self._your_reports_panel = YourReportsPanel(games, self, on_change=render_unless_answering)
+        self._your_reports_panel.pack(fill="x", padx=SPACING["tile_pad"],
+                                      pady=(0, SPACING["tile_pad_y"]))
 
         pending = {"job": None}
 
@@ -15944,6 +16023,177 @@ class WayfinderApp(ctk.CTk):
                              name="crash-report-startup").start()
         except Exception:
             pass
+        try:
+            # Game reports keep their own queue, whatever the crash switch says:
+            # waiting withdrawals first, then reports (design 11).
+            from wayfinder.core import game_reports
+
+            threading.Thread(target=game_reports.retry_pending, daemon=True,
+                             name="game-report-startup").start()
+        except Exception:
+            pass
+
+    # --- Game reports (docs/plans/game-reports-design-2026-10-15.md) --------------------
+    # Thin hooks: the decisions live in wayfinder.core.game_reports / game_labels
+    # and the widgets in wayfinder.ui.game_report_card.
+
+    def _install_game_report_hooks(self) -> None:
+        """Every way the window becomes visible reaches _on_main_window_visible():
+        the cold launch (not a minimized one), _show_window(), native restore
+        (root <Map>/<FocusIn>) and a finished labels fetch."""
+        self._launched_minimized = bool(
+            (IS_MACOS and "--minimized" in sys.argv) or self.config.get("start_minimized", False))
+        self._game_report_visible_job = None
+        self.after(3000, self._game_report_cold_launch)
+        self.bind("<Map>", self._schedule_main_window_visible, add="+")
+        self.bind("<FocusIn>", self._schedule_main_window_visible, add="+")
+        try:
+            from wayfinder.core import game_reports
+
+            game_reports.set_change_listener(lambda: self.event_queue.put(
+                (EventType.UI_CALLBACK, self._on_game_reports_changed)))
+        except Exception:
+            pass
+
+    def _game_report_cold_launch(self) -> None:
+        if not getattr(self, "_launched_minimized", False):
+            self._on_main_window_visible()
+
+    def _schedule_main_window_visible(self, event=None) -> None:
+        """Root events only; a burst runs the hook once (one pending after(250))."""
+        if event is not None and getattr(event, "widget", None) is not self:
+            return
+        if getattr(self, "_game_report_visible_job", None) is not None:
+            return
+        try:
+            self._game_report_visible_job = self.after(250, self._on_main_window_visible)
+        except Exception:
+            self._game_report_visible_job = None
+
+    def _main_window_shown(self) -> bool:
+        """Aura's window is on screen: mapped, not minimized, withdrawn or hidden."""
+        try:
+            if IS_MACOS:
+                from AppKit import NSApplication
+
+                if NSApplication.sharedApplication().isHidden():
+                    return False
+            if self.state() in ("iconic", "withdrawn"):
+                return False
+            return bool(self.winfo_viewable())
+        except Exception:
+            return False
+
+    def _game_report_frontmost_name(self):
+        """The supported game in front, if any (never a window title)."""
+        try:
+            game_chat = _game_chat_module()
+            _pid, bundle_id, app_name = game_chat.frontmost_app()
+            profile = game_chat.match_profile(bundle_id, app_name)
+            return profile.name if profile is not None else None
+        except Exception:
+            return None
+
+    def _on_main_window_visible(self) -> None:
+        """Ask how a game went, once the player can see Aura's window (design 4.1).
+
+        Rechecks everything now: shown, idle, no card already, the question
+        allowed, and no game in front. Never focuses, raises or deiconifies:
+        it only packs a frame into a window that is already on screen."""
+        self._game_report_visible_job = None
+        try:
+            if getattr(self, "_game_report_card", None) is not None:
+                return
+            # Steam Deck Game Mode: the window isn't really visible; wait for Desktop Mode.
+            if getattr(self, "_game_mode_session", False) or not self._main_window_shown():
+                return
+            if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+                return
+            from wayfinder.core import game_reports
+
+            enabled = bool(self.config.get("game_report_prompts", True))
+            now = time.time()
+            if game_reports.wants_labels_refresh(now, enabled=enabled):
+                self._refresh_game_labels()
+                return
+            if game_reports.eligible_prompt(None, False, now, enabled=enabled) is None:
+                return
+            game = game_reports.eligible_prompt(self._game_report_frontmost_name(), False, now,
+                                                enabled=enabled)
+            if game is not None:
+                self._show_game_report_card(game)
+        except Exception:
+            pass
+
+    def _post_ui(self, fn) -> None:
+        self.event_queue.put((EventType.UI_CALLBACK, fn))
+
+    def _show_game_report_card(self, game) -> None:
+        """The question card on the Dictate tab, under any update banner."""
+        anchor = getattr(self, "_dictate_banner_anchor", None)
+        if anchor is None:
+            return
+        from wayfinder.ui.game_report_card import GameReportCard
+
+        card = GameReportCard(anchor.master, self, game.key, game.name, prompt=True,
+                              post=self._post_ui, on_close=self._close_game_report_card,
+                              on_dont_ask=self._game_reports_dont_ask)
+        card.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
+        self._game_report_card = card
+
+    def _close_game_report_card(self) -> None:
+        card = getattr(self, "_game_report_card", None)
+        self._game_report_card = None
+        if card is not None:
+            card.destroy()
+        self._on_game_reports_changed()
+
+    def _game_reports_dont_ask(self) -> None:
+        self.config["game_report_prompts"] = False
+        save_config(self.config)
+        var = getattr(self, "game_report_prompts_var", None)
+        if var is not None:
+            var.set(False)
+        self.log("🎮 Aura won't ask how games went")
+
+    def _refresh_game_labels(self) -> None:
+        """Fetch community labels in the background (at most once a day). The
+        callback goes through the Tk event queue."""
+        try:
+            from wayfinder.core import game_labels, game_reports
+
+            def done(ok: bool) -> None:
+                if ok:
+                    game_reports.retry_pending()
+                self.event_queue.put((EventType.UI_CALLBACK, self._on_game_labels_refreshed))
+
+            game_labels.refresh_in_background(on_done=done)
+        except Exception:
+            pass
+
+    def _on_game_labels_refreshed(self) -> None:
+        render = getattr(self, "_games_tab_render", None)
+        if render is not None:
+            try:
+                render()
+            except Exception:
+                pass
+        self._schedule_main_window_visible()
+
+    def _on_game_reports_changed(self) -> None:
+        """Sending or withdrawal changed Your reports: refresh what shows it."""
+        panel = getattr(self, "_your_reports_panel", None)
+        if panel is not None:
+            try:
+                panel.refresh()
+            except Exception:
+                pass
+        render = getattr(self, "_games_tab_render", None)
+        if render is not None:
+            try:
+                render()
+            except Exception:
+                pass
 
     def report_callback_exception(self, exc, val, tb):
         """An error in a Tk callback: print it as Tk does, and report it."""
@@ -16095,7 +16345,10 @@ class WayfinderApp(ctk.CTk):
             # for a status line.
             self._set_app_update_button_visible(True)
             if not banner.winfo_manager():
-                anchor = getattr(self, "_dictate_banner_anchor", None)
+                # Above a showing game-report card: the card sits under the banner.
+                card = getattr(self, "_game_report_card", None)
+                anchor = (card.frame if card is not None
+                          else getattr(self, "_dictate_banner_anchor", None))
                 if anchor is not None:
                     banner.pack(fill="x", pady=(0, SPACING["md"]), before=anchor)
                 else:
@@ -19329,6 +19582,15 @@ class WayfinderApp(ctk.CTk):
                              "Game messages send automatically",
                              "Game messages are left in chat for you to send"),
             tooltip=SETTING_TOOLTIPS["game_chat_send"],
+        )
+        self.game_report_prompts_var = ctk.BooleanVar(
+            value=bool(self.config.get("game_report_prompts", True)))
+        self.create_toggle_row(
+            parent, "Ask how games went", self.game_report_prompts_var,
+            lambda: _toggled("game_report_prompts", self.game_report_prompts_var,
+                             "Aura will ask once how a game went",
+                             "Aura won't ask how games went"),
+            tooltip=SETTING_TOOLTIPS["game_report_prompts"],
         )
 
     def _create_login_item_row(self, parent) -> None:
@@ -22592,6 +22854,7 @@ class WayfinderApp(ctk.CTk):
             self.after(200, lambda: self.attributes("-topmost", False))
         except Exception:
             pass
+        self._schedule_main_window_visible()
 
     def _macos_show_settings(self) -> None:
         """App menu → Settings… (⌘,): bring the window forward on Settings."""
@@ -25662,6 +25925,13 @@ class WayfinderApp(ctk.CTk):
                 )
         except game_chat.GameChatAborted as exc:
             raise InjectionError(f"Game chat stopped: {exc}. Your text is in History.") from exc
+        try:
+            # Game reports: count it, so Aura can ask once after a few (design 4.1).
+            from wayfinder.core import game_reports
+
+            game_reports.note_game_use(profile.name)
+        except Exception:
+            pass
         if result.waiting:
             self.log(f"🎮 Sent the first message ({profile.name} chat holds {profile.max_chars} "
                      "characters). The next part is in chat: press Enter to send it."

@@ -26,6 +26,8 @@ from typing import Optional
 
 from .macos_game_chat import (  # noqa: F401 - re-exported: same interface as the Mac module
     BETWEEN_MESSAGES_S,
+    COMMUNITY,
+    FILTER_LABELS,
     KEY_HOLD_S,
     MMO_VOCABULARY,
     NOT_RECOMMENDED,

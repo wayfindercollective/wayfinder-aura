@@ -116,19 +116,35 @@ PASTE_SETTLE_S = 0.2
 BETWEEN_MESSAGES_S = 0.45
 
 
-# Games tab verdicts, modelled on Steam Deck Verified.
-VERIFIED, PLAYABLE, UNTESTED, NOT_RECOMMENDED = "verified", "playable", "untested", "not_recommended"
+# Games tab verdicts, modelled on Steam Deck Verified. Verified and Works with
+# (community) share a rank: Verified means Wayfinder tested it; community means
+# anonymous player reports did (game reports, docs/plans/game-reports-design-
+# 2026-10-15.md, section 3.1). Code only ever sets Verified, Playable, Untested
+# and Not recommended; the community label comes from the labels document.
+VERIFIED, COMMUNITY, PLAYABLE, UNTESTED, NOT_RECOMMENDED = (
+    "verified", "community", "playable", "untested", "not_recommended")
 STATUS_LABELS = {
     VERIFIED: "Verified",
+    COMMUNITY: "Works with (community)",
     PLAYABLE: "Playable",
     UNTESTED: "Untested",
     NOT_RECOMMENDED: "Not recommended",
 }
 STATUS_MEANINGS = {
-    VERIFIED: "Tested in the game. Aura opens chat, pastes and sends.",
-    PLAYABLE: "Works, with a step from you (like opening chat first).",
-    UNTESTED: "Set up from the game's documentation; not tried in the game yet.",
+    VERIFIED: "We tested Aura in this game ourselves.",
+    COMMUNITY: "3 or more anonymous reporters say it works on this version, and none "
+               "report a problem.",
+    PLAYABLE: "Works, maybe with a step from you, or with small issues.",
+    UNTESTED: "Not tried yet, or not enough reports.",
     NOT_RECOMMENDED: "Aura still works, but the game's rules or chat make it a bad idea.",
+}
+# The Games tab's filter buttons use short names.
+FILTER_LABELS = {
+    VERIFIED: "Verified",
+    COMMUNITY: "Community",
+    PLAYABLE: "Playable",
+    UNTESTED: "Untested",
+    NOT_RECOMMENDED: "Not recommended",
 }
 
 

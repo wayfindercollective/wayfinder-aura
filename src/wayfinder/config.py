@@ -444,6 +444,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # its chat box, paste and send (src/wayfinder/core/macos_game_chat.py).
     "gamer_mode": True,
     "game_chat_send": True,
+    # Game reports: after a few dictations into a supported game, ask once (in
+    # Aura's own window) how it went. Nothing is sent unless the player presses
+    # Send (core/game_reports.py). Games > Gamer mode > "Ask how games went".
+    "game_report_prompts": True,
     # Chat slang that primes Whisper for the game in front; Gamer mode fills it
     # in for one dictation (core/macos_game_chat.py), empty otherwise.
     "gamer_vocabulary": [],
