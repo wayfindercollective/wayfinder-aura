@@ -3169,6 +3169,7 @@ def transcribe_with_config(
     config: dict, 
     context: str = "",
     skip_post_processing: bool = False,
+    unprompted: bool = False,
 ) -> str:
     """
     Transcribe using settings from config dictionary.
@@ -3180,6 +3181,10 @@ def transcribe_with_config(
         context: Optional context from previous transcription (helps continuity)
         skip_post_processing: If True, skip LLM post-processing (useful for chunked mode
             where post-processing should happen on the final combined text)
+        unprompted: Send Whisper no prompt, vocabulary or context. For audio the
+            speech check calls steady noise: primed with the dictation prompt,
+            large-v3-turbo turned 9 of 36 fan/hum/hiss recordings into invented
+            sentences; unprompted, 90 of 90 came back as "." or one word.
 
     Returns:
         Transcribed text string
@@ -3201,6 +3206,10 @@ def transcribe_with_config(
     config["prompt"] = original_prompt
     
     backend = get_backend(config)
+    if unprompted:
+        backend.prompt = ""
+        backend.custom_vocabulary = []
+        context = ""
     text = backend.transcribe(audio_path, context=context)
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep

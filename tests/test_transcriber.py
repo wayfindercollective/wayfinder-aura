@@ -2453,3 +2453,48 @@ class TestSoundAnnotations:
     def test_dictated_brackets_survive(self, text):
         from wayfinder.core.transcriber import clean_whisper_artifacts
         assert clean_whisper_artifacts(text) == text
+
+
+class TestUnpromptedTranscription:
+    """Noise-verdict audio is heard with no prompt: primed with the dictation
+    prompt, large-v3-turbo turned fan/hum/hiss into invented sentences (2026-10-13)."""
+
+    @pytest.fixture
+    def prompts(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        import wayfinder.license as lic
+        from wayfinder.core import transcriber as T
+
+        gate = SimpleNamespace(is_premium=True, has_feature=lambda f: True)
+        monkeypatch.setattr(lic, "get_feature_gate", lambda *a, **k: gate)
+        heard = []
+
+        def transcribe(backend, audio_path, context="", deadline=None):
+            heard.append(backend._build_prompt(context))
+            return "hello there"
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
+        model = tmp_path / "ggml-base.en.bin"
+        model.write_bytes(b"\0")
+        self.config = {"transcription_backend": "whisper_cpp", "model_path": str(model),
+                       "whisper_server_mode": False, "post_processing_enabled": False,
+                       "output_tone": "professional", "custom_vocabulary": ["Wayfinder"]}
+        self.audio = str(tmp_path / "a.wav")
+        return heard
+
+    def test_dictation_is_primed_with_prompt_vocabulary_and_context(self, prompts):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        transcribe_with_config(self.audio, self.config)
+        transcribe_with_config(self.audio, self.config, context="earlier words")
+        assert "Use proper punctuation" in prompts[0] and "Wayfinder" in prompts[0]
+        assert prompts[1].startswith("earlier words")
+
+    def test_unprompted_sends_no_prompt_vocabulary_or_context(self, prompts):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        text = transcribe_with_config(self.audio, self.config, context="earlier words",
+                                      unprompted=True)
+        assert prompts == [""]
+        assert text == "Hello there."

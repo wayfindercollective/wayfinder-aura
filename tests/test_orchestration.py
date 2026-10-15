@@ -181,6 +181,7 @@ class FakeApp:
     _finalize_chunked_transcription = WApp._finalize_chunked_transcription
     _deduplicate_overlap_text = WApp._deduplicate_overlap_text
     _find_text_overlap = WApp._find_text_overlap
+    _speech_check = WApp._speech_check
     _silence_error_message = WApp._silence_error_message
     _maybe_show_gpu_nudge = WApp._maybe_show_gpu_nudge
     _has_visual_pyqt_overlay = WApp._has_visual_pyqt_overlay
@@ -1249,6 +1250,16 @@ def _quiet_noise_wav(tmp_path):
     return path
 
 
+def _steady_noise_wav(tmp_path):
+    """Audible hiss whose loudness barely varies: the speech check's "noise"."""
+    import numpy as np
+
+    path = tmp_path / "fan.wav"
+    rng = np.random.default_rng(9)
+    _write_wav(path, np.clip(rng.normal(0, 300, 48000), -32768, 32767).astype(np.int16))
+    return path
+
+
 class TestSilentMicMessage:
     """Field report 2026-10-01: a muted USB headset recorded pure zeros and the
     banner said "try again, a bit closer to the mic", so the owner blamed paste.
@@ -1327,8 +1338,51 @@ class TestSilentMicMessage:
         assert self.transcribed == []
         assert any(m.startswith("⚠ No speech detected from “Wireless Stereo Headset”")
                    for m in app.logs)
+        assert any(m.startswith("🔇 Speech check: silence (peak ") for m in app.logs)
         assert not any("sent no sound" in m for m in app.logs)
         assert self.banners == ["No speech detected — try again, a bit closer to the mic."]
+
+    def _outcome(self, app):
+        """(texts the recording produced, errors it raised) from the event queue."""
+        events = wayfinder_main.EventType
+        texts, errors = [], []
+        while not app.event_queue.empty():
+            event_type, data = app.event_queue.get_nowait()
+            payload, _gen = app._split_gen(data)
+            if event_type in (events.TRANSCRIPTION_DONE, events.CHUNKED_TRANSCRIPTION_DONE):
+                texts.append(payload)
+            elif event_type == events.TRANSCRIPTION_ERROR:
+                errors.append(payload)
+        return [t for t in texts if t], errors
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
+    def test_steady_noise_is_heard_unprompted_and_its_stray_word_dropped(
+        self, app, tmp_path, monkeypatch, chunked
+    ):
+        """Field report 2026-10-13: six real MacBook Air dictations got the noise
+        verdict and were deleted unheard. Noise now reaches Whisper without a
+        prompt (primed, it invents sentences), and its lone "So," is no speech."""
+        calls = []
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
+                            lambda path, cfg, **k: calls.append(k) or "So,")
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked), chunked)
+
+        assert [k.get("unprompted") for k in calls] == [True]
+        assert any(m.startswith("🔇 Speech check: noise (peak ") for m in app.logs)
+        texts, errors = self._outcome(app)
+        assert texts == []
+        assert errors == (["No speech detected"] if chunked else [])
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
+    def test_speech_the_check_calls_noise_is_kept(self, app, tmp_path, monkeypatch, chunked):
+        spoken = "I need a technical manager who can run this"
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
+                            lambda path, cfg, **k: spoken)
+        app.config["post_processing_enabled"] = False
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked), chunked)
+
+        assert self._outcome(app) == ([spoken], [])
+        assert self.banners == []
 
     def test_all_zero_recording_without_a_device_name(self, app, tmp_path):
         app.config["audio_device_name"] = None

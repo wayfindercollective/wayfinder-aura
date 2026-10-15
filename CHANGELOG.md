@@ -21,6 +21,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Dictations no longer vanish as "No speech detected" when the mic picks up
+  steady background noise.** A recording whose loudness barely varied was
+  thrown away before transcription, even when it held real speech (six
+  dictations in one afternoon on a MacBook Air). Such recordings are now
+  transcribed without the dictation prompt, which kept Whisper from inventing
+  sentences out of fan, hum or hiss noise in testing; the result is used only
+  if Whisper hears at least two words. Only near-silent recordings are still
+  rejected, and the activity log records the levels behind every rejection.
 - **The desktop asks one question at a time on first run, and the tour says
   what is coming.** The Flatpak's shortcut request is answered first; the
   question whether Aura may type in every app waits for it (up to a minute).
