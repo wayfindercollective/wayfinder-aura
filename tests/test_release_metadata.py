@@ -1569,3 +1569,23 @@ def test_appimage_container_installs_what_appimagetool_needs():
     packages = release[start:release.index("\n\n", start)].replace("\\\n", " ").split()
     for needed in ("libfuse2", "wget", "file"):
         assert needed in packages, needed
+
+
+def test_privacy_notice_covers_game_reports_and_community_labels():
+    """Game reports ship with their PRIVACY.md text (design docs/plans/
+    game-reports-design-2026-10-15.md, section 7)."""
+    text = (REPO / "PRIVACY.md").read_text(encoding="utf-8")
+    crash = text.index("## Crash reports")
+    reports = text.index("## Game reports (only when you press Send)")
+    assert crash < reports < text.index("## Local diagnostic log")
+    assert "## Game detection" in text and "## Window detection (Linux)" not in text
+    flat = " ".join(text.split())  # wording, whatever the line wrapping
+    assert "Game reports are not telemetry: Aura sends one only when you press Send." in flat
+    assert "9. **Game reports, only when you press Send on one**" in flat
+    assert "10. **Community game labels, at most once a day,**" in flat
+    for promise in ("readable only by your user account (`0600`)",
+                    "Notes are erased after 90 days",
+                    "for 30 days",
+                    "for up to 14 days",
+                    "That ID is not your crash-report ID, licence key or machine ID"):
+        assert promise in flat, promise
