@@ -1,6 +1,11 @@
 """Core ML is explicit, asset-validated, and behind the existing GPU gate."""
+import contextlib
+import io
 import json
 import os
+import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -214,3 +219,301 @@ def test_export_loads_normalization_before_half_conversion():
     assert "TURBO_CHECKPOINT_SHA256" in exporter
     assert "dtype=np.float32" in exporter
     assert "compute_precision=ct.precision.FLOAT16" in exporter
+
+
+# --- Preparation backoff and the never-during-recording guarantee ---------------
+
+
+@pytest.fixture
+def activity(monkeypatch, tmp_path):
+    """Dictation flag only (no status breadcrumb), private history and child registry."""
+    monkeypatch.setattr(macos_coreml, "_idle", lambda: not macos_coreml._dictation_active.is_set())
+    monkeypatch.setattr(macos_coreml, "_attempts_path", lambda: tmp_path / "coreml-attempts.json")
+    monkeypatch.setattr(macos_coreml, "_children", set())
+    macos_coreml.set_dictation_active(False)
+    yield tmp_path / "coreml-attempts.json"
+    macos_coreml.set_dictation_active(False)
+
+
+def fake_clock(monkeypatch, start=1_000_000.0):
+    now = [start]
+    monkeypatch.setattr(macos_coreml, "time", SimpleNamespace(
+        time=lambda: now[0], monotonic=time.monotonic, sleep=time.sleep, perf_counter=time.perf_counter))
+    return now
+
+
+def test_failures_back_off_persistently_then_stop(activity, monkeypatch):
+    now = fake_clock(monkeypatch)
+    hour, day = 3600.0, 24 * 3600.0
+    assert macos_coreml._attempt_allowed("key")
+    macos_coreml._note_attempt("key", count=True)
+    macos_coreml._note_attempt("key", count=False, failure="TimeoutError")
+    row = json.loads(activity.read_text())["key"]
+    assert row["attempts"] == 1 and row["last_failure"] == "TimeoutError"
+    for later in (0.0, hour, day - 1):  # e.g. right after the next dictation or a relaunch
+        now[0] = 1_000_000.0 + later
+        assert not macos_coreml._attempt_allowed("key")
+    now[0] = 1_000_000.0 + day
+    assert macos_coreml._attempt_allowed("key")
+    macos_coreml._note_attempt("key", count=True)
+    now[0] += 7 * day - 1
+    assert not macos_coreml._attempt_allowed("key")
+    now[0] += 1
+    assert macos_coreml._note_attempt("key", count=True) == len(macos_coreml.RETRY_AFTER_SECONDS)
+    now[0] += 10 * 365 * day
+    assert not macos_coreml._attempt_allowed("key")  # capped for good on this model/Mac
+
+
+def test_attempt_history_follows_model_binaries_chip_and_os(tmp_path, monkeypatch):
+    cli, twin, model, asset = prepared(tmp_path, monkeypatch)
+    identity = {"hardware": "MacBookAir10,1", "os": "26.6.2", "arch": "arm64"}
+    monkeypatch.setattr(macos_coreml, "_hardware_identity", lambda: dict(identity))
+    key = lambda: macos_coreml._attempt_key(str(cli), str(model))
+    original = key()
+    (asset / "weights/weight.bin").write_bytes(b"reconverted weights")
+    assert key() == original  # reconversion does not reset the count
+    identity["os"] = "26.7"
+    assert key() != original
+    identity.update(os="26.6.2", hardware="Mac15,3")
+    assert key() != original
+    identity["hardware"] = "MacBookAir10,1"
+    assert key() == original
+    twin.with_name("whisper-server").write_bytes(b"updated app build")
+    assert key() != original
+    updated_binaries = key()
+    model.write_bytes(b"different model revision")
+    assert key() not in (original, updated_binaries)
+
+
+def run_pass(monkeypatch, fake_prepare, order=None):
+    """One worker pass with the real attempt history and fakes for the heavy parts."""
+    from wayfinder.core import transcriber
+    from wayfinder.utils import macos_activity
+    order = [] if order is None else order
+    monkeypatch.setattr(transcriber, "_resolve_whisper_cli_binary", lambda configured: "/bin/whisper-cli")
+    monkeypatch.setattr(transcriber, "get_backend", lambda config: SimpleNamespace(use_gpu=True))
+    monkeypatch.setattr(macos_coreml, "_attempt_key", lambda cli, model: "key")
+    monkeypatch.setattr(macos_coreml, "comparison", lambda cli, model: None)
+
+    def quiet(cancelled, seconds=None):
+        order.append("quiet")
+        return macos_coreml._dictations
+
+    @contextlib.contextmanager
+    def held(key, reason):
+        order.append("hold")
+        yield True
+
+    monkeypatch.setattr(macos_coreml, "_wait_for_quiet", quiet)
+    monkeypatch.setattr(macos_activity, "held", held)
+    monkeypatch.setattr(macos_coreml, "prepare_comparison", fake_prepare)
+    monkeypatch.setattr(macos_coreml, "_latest_config", {"model_path": "/models/ggml-large-v3-turbo-q5_0.bin"})
+    macos_coreml._preparation_requested.clear()
+    return macos_coreml._preparation_pass()
+
+
+def test_device_timeout_is_recorded_and_not_retried_after_dictation(activity, monkeypatch, capsys):
+    calls, order = [], []
+
+    def times_out(config, backend, *, cancelled, on_device_attempt):
+        order.append("work")
+        calls.append(config)
+        on_device_attempt()
+        raise TimeoutError("Encoder device preparation timed out")
+
+    assert run_pass(monkeypatch, times_out, order) is False
+    assert order == ["quiet", "hold", "work"]  # nothing starts, nor is held awake, before a quiet spell
+    row = json.loads(activity.read_text())["key"]
+    assert row["attempts"] == 1 and row["last_failure"] == "TimeoutError"
+    assert "next attempt no sooner than 24 h" in capsys.readouterr().out
+    macos_coreml.set_dictation_active(True)
+    macos_coreml.set_dictation_active(False)
+    assert run_pass(monkeypatch, times_out) is False  # the next dictation, or a relaunch
+    assert len(calls) == 1
+    assert "postponed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("device_started", [True, False])
+def test_yield_counts_only_once_the_device_compile_started(activity, monkeypatch, device_started):
+    calls = []
+
+    def yields(config, backend, *, cancelled, on_device_attempt):
+        calls.append(config)
+        if device_started:
+            on_device_attempt()
+        raise InterruptedError("Encoder preparation yielded to dictation")
+
+    assert run_pass(monkeypatch, yields) is True  # retry only after another quiet spell
+    rows = json.loads(activity.read_text()) if activity.exists() else {}
+    if device_started:
+        assert rows["key"] == {"attempts": 1, "last_attempt": rows["key"]["last_attempt"],
+                               "last_failure": "yielded to dictation"}
+    else:
+        assert rows == {}  # conversion/baseline are cancellable, so no attempt is spent
+    run_pass(monkeypatch, yields)
+    assert len(calls) == (1 if device_started else 2)
+
+
+def test_conversion_failure_counts_as_an_attempt(activity, monkeypatch):
+    def compiler_fails(config, backend, *, cancelled, on_device_attempt):
+        raise RuntimeError("Core ML package compiler exited with 1")
+
+    assert run_pass(monkeypatch, compiler_fails) is False
+    assert json.loads(activity.read_text())["key"]["attempts"] == 1
+
+
+def test_wait_for_quiet_needs_an_unbroken_quiet_spell(activity):
+    quiet = 0.4
+    macos_coreml.set_dictation_active(True)
+    returned = []
+    waiter = threading.Thread(target=lambda: returned.append(
+        (macos_coreml._wait_for_quiet(lambda: False, quiet), time.monotonic())), daemon=True)
+    waiter.start()
+    time.sleep(quiet * 1.5)
+    assert waiter.is_alive()  # never while recording
+    macos_coreml.set_dictation_active(False)
+    time.sleep(quiet / 2)
+    macos_coreml.set_dictation_active(True)  # a short tap restarts the clock
+    tap_ended = time.monotonic()
+    macos_coreml.set_dictation_active(False)
+    waiter.join(timeout=10)
+    assert returned and returned[0][1] - tap_ended >= quiet
+    assert returned[0][0] == macos_coreml._dictations
+
+
+def fake_backend():
+    return SimpleNamespace(
+        whisper_server_binary="/native/bin/whisper-server", model_path="model.bin", threads=4,
+        _server_cmd_attempts=lambda port: [["/native/bin/whisper-server", "--port", str(port)]],
+        _drain_server_output=lambda stream, tail: None)
+
+
+class FakeProbe:
+    """Stands in for the supervised probe: stays 'loading' until signalled."""
+
+    def __init__(self, *args, **kwargs):
+        self.pid, self.stdout, self.returncode = 4242, io.BytesIO(), None
+        self.terminated = threading.Event()
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -15
+        self.terminated.set()
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def test_no_probe_or_compile_starts_while_dictating(activity, monkeypatch):
+    spawned, counted = [], []
+    monkeypatch.setattr(macos_coreml.subprocess, "Popen", lambda *a, **k: spawned.append(a) or FakeProbe())
+    macos_coreml.set_dictation_active(True)
+    with pytest.raises(InterruptedError):
+        with macos_coreml._probe_server(fake_backend(), "/native/bin/whisper-server", "model.bin", coreml=True,
+                                        cancelled=lambda: False, on_spawn=lambda: counted.append(1)):
+            pass
+    with pytest.raises(InterruptedError):
+        with macos_coreml._preparation_child(["coreml-compile"], {}):
+            pass
+    assert spawned == [] and counted == []
+
+
+def test_device_attempt_is_counted_before_the_probe_spawns(activity, monkeypatch):
+    order = []
+
+    def spawn(*args, **kwargs):
+        order.append("spawn")
+        raise OSError("stop here")
+
+    monkeypatch.setattr(macos_coreml.subprocess, "Popen", spawn)
+    with pytest.raises(OSError):
+        with macos_coreml._probe_server(fake_backend(), "/native/bin/whisper-server", "model.bin", coreml=True,
+                                        cancelled=lambda: False, on_spawn=lambda: order.append("counted")):
+            pass
+    assert order == ["counted", "spawn"]  # a quit or crash mid-compile still counts
+
+
+@pytest.mark.parametrize("tap", [False, True])
+def test_dictation_stops_a_loading_probe_and_yields(activity, monkeypatch, tap):
+    probes = []
+    monkeypatch.setattr(macos_coreml.subprocess, "Popen", lambda *a, **k: probes.append(FakeProbe()) or probes[-1])
+    monkeypatch.setattr(macos_coreml, "_supervised_child_pid", lambda pid, binary: None)  # still loading
+    monkeypatch.setattr(macos_coreml, "_READY_POLL_SECONDS", 0.05)
+    dictations = macos_coreml._dictations
+    outcome = []
+
+    def prepare():
+        try:
+            with macos_coreml._probe_server(fake_backend(), "/native/bin/whisper-server", "model.bin", coreml=True,
+                                            cancelled=lambda: macos_coreml._dictations != dictations):
+                outcome.append("ready")
+        except Exception as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=prepare, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 5
+    while not macos_coreml._children and time.monotonic() < deadline:  # spawned and registered
+        time.sleep(0.01)
+    macos_coreml.set_dictation_active(True)
+    assert probes[0].terminated.is_set()  # signalled synchronously, not at the next poll
+    if tap:  # over before the worker polls again: still a yield, never a "crash"
+        macos_coreml.set_dictation_active(False)
+    worker.join(timeout=5)
+    assert len(outcome) == 1 and isinstance(outcome[0], InterruptedError)
+    assert macos_coreml._children == set()
+
+
+def test_probe_stopped_by_a_tap_between_checks_is_a_yield_not_a_crash(activity, monkeypatch):
+    class TappedProbe(FakeProbe):
+        tapped = False
+
+        def poll(self):  # the user taps the hotkey exactly while the loop checks the child
+            if not self.tapped:
+                self.tapped = True
+                macos_coreml.set_dictation_active(True)
+                macos_coreml.set_dictation_active(False)
+            return self.returncode
+
+    monkeypatch.setattr(macos_coreml.subprocess, "Popen", lambda *a, **k: TappedProbe())
+    dictations = macos_coreml._dictations
+    with pytest.raises(InterruptedError):
+        with macos_coreml._probe_server(fake_backend(), "/native/bin/whisper-server", "model.bin", coreml=True,
+                                        cancelled=lambda: macos_coreml._dictations != dictations):
+            pass
+
+
+def test_starting_dictation_terminates_a_real_preparation_child(activity):
+    command = [sys.executable, "-c", "import time; time.sleep(60)"]
+    with macos_coreml._preparation_child(command, dict(os.environ)) as proc:
+        assert proc.poll() is None
+        started = time.monotonic()
+        macos_coreml.set_dictation_active(True)
+        proc.wait(timeout=5)
+        assert time.monotonic() - started < 5
+    assert proc.returncode != 0
+
+
+@pytest.mark.parametrize("preferred", [True, False])
+def test_only_an_adopted_probe_survives_the_next_dictation(activity, monkeypatch, preferred):
+    from unittest.mock import Mock
+    from wayfinder.core.transcriber import WhisperServerBackend
+    cls = WhisperServerBackend
+    for name in ("_server_process", "_server_port", "_server_model_path", "_server_binary", "_server_use_gpu",
+                 "_server_threads", "_server_log_tail", "_server_log_thread", "_server_disabled"):
+        monkeypatch.setattr(cls, name, getattr(cls, name))
+    monkeypatch.setattr(cls, "_server_lock", threading.Lock())
+    monkeypatch.setattr(macos_coreml, "record_comparison", lambda *args: preferred)
+    monkeypatch.setattr(macos_coreml, "_stop_probe", Mock())
+    proc = FakeProbe()
+    macos_coreml._children.add(proc)
+    probe = SimpleNamespace(proc=proc, port=9000, tail=[], reader=Mock(), adopted=False,
+                            backend=SimpleNamespace(model_path="converted.bin", whisper_server_binary="coreml-server",
+                                                    threads=4))
+    macos_coreml._activate_probe(probe, "cli", "model", 1.0, .5, True, lambda: False)
+    macos_coreml.set_dictation_active(True)
+    assert proc.terminated.is_set() is (not preferred)  # the live dictation server is never stopped
