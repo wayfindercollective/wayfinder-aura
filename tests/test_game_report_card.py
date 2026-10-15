@@ -91,7 +91,9 @@ def test_the_card_builds_and_walks_through_an_answer(monkeypatch):
     import customtkinter as ctk
 
     from wayfinder.core import game_reports
+    from wayfinder.ui import icons
 
+    monkeypatch.setattr(icons, "_CACHE", {})  # icons belong to one Tk root
     sent = []
     monkeypatch.setattr(game_reports, "submit",
                         lambda name, answer, note, **k: sent.append((name, answer, note)) or "queued")

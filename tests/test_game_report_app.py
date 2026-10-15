@@ -389,3 +389,88 @@ def test_the_card_packs_under_the_update_banner():
     assert "before=" in source and "_dictate_banner_anchor" in source
     banner = inspect.getsource(wayfinder_main.WayfinderApp._show_app_update_banner)
     assert "_game_report_card" in banner
+
+
+@pytest.mark.ui
+def test_the_games_tab_builds_with_community_labels_and_your_reports(transport, monkeypatch):
+    """The real _create_games_tab() in a Tk window (needs a display)."""
+    import customtkinter as ctk
+    import wayfinder_main
+
+    from wayfinder.ui import icons
+    from wayfinder.ui.ui_inspect import describe, flatten
+    monkeypatch.setattr(icons, "_CACHE", {})  # icons belong to one Tk root
+    os_family = ("macos" if wayfinder_main.IS_MACOS else
+                 "windows" if wayfinder_main.IS_WINDOWS else "linux")
+    now = time.time()
+    doc = labels_doc(generated_ms=int(now * 1000), games=[{
+        "key": "world-of-warcraft", "os": os_family, "complete": True,
+        "lines": [{"line": "1.2", "level": "works", "verified": False, "sourceLine": "1.2",
+                   "carried": False, "works": 3, "someIssues": 0, "doesntWork": 0}]}])
+    transport.answer((200, doc, {"Date": http_date(now)}))
+    assert game_labels.refresh(now=now)
+    monkeypatch.setattr(wayfinder_main, "__version__", "1.2.0", raising=False)
+    game_reports.submit("World of Warcraft", "works", "Fine.")
+
+    root = ctk.CTk()
+    try:
+        W = wayfinder_main.WayfinderApp
+        container = ctk.CTkFrame(root)
+        container.pack(fill="both", expand=True)
+        app = SimpleNamespace(
+            tab_content_container=container, tab_frames={}, font_body=("DejaVu Sans",),
+            font_header=("DejaVu Sans",), font_sizes=dict.fromkeys(("display", "title", "heading", "body", "small", "caption"), 12),
+            after=root.after, after_cancel=root.after_cancel,
+            event_queue=SimpleNamespace(put=lambda item: None),
+            _create_game_chat_rows=lambda parent: None)
+        app._post_ui = lambda fn: fn()
+        W._create_games_tab(app)
+        app.tab_frames["games"].pack(fill="both", expand=True)
+        root.geometry("620x900")
+        root.update()
+        search = next(w for w in _walk(app.tab_frames["games"]) if type(w).__name__ == "CTkEntry")
+        search.insert(0, "warcraft")      # 85 games, 40 shown: search like a player
+        root.update()
+        time.sleep(0.3)                   # let the search's one-shot render (180 ms) run
+        root.update()
+        nodes = flatten(describe(root, root))
+        texts = [n["text"] for n in nodes if n.get("text")]
+        for expected in ("Works with (community)", "Community",
+                         "Played one of these? Click it to tell us how Aura worked.",
+                         "3 anonymous reporters say it works on Aura 1.2.",
+                         "You said: Works", "Your reports: 1. See or withdraw."):
+            assert expected in texts, expected
+        # Clicking the World of Warcraft row opens the card under it.
+        label = next(w for w in _walk(app.tab_frames["games"])
+                     if type(w).__name__ == "CTkLabel" and w.cget("text") == "World of Warcraft")
+        label._label.event_generate("<Button-1>")
+        root.update()
+        texts = [n["text"] for n in flatten(describe(root, root)) if n.get("text")]
+        assert "How did Aura work in World of Warcraft?" in texts
+        assert "Don't ask again" not in texts             # only when Aura asks
+        label._label.event_generate("<Button-1>")   # a second click closes it
+        root.update()
+        # Intake closed: no new-report UI at all, but Your reports stays.
+        closed = dict(doc, accepting=False, generatedAt=int(time.time() * 1000))
+        transport.answer((200, closed, {"Date": http_date(time.time())}))
+        assert game_labels.refresh(force=True)
+        app._games_tab_render()
+        root.update()
+        label = next(w for w in _walk(app.tab_frames["games"])
+                     if type(w).__name__ == "CTkLabel" and w.cget("text") == "World of Warcraft")
+        label._label.event_generate("<Button-1>")
+        root.update()
+        texts = [n["text"] for n in flatten(describe(root, root))
+                 if n.get("text") and n.get("mapped", True)]
+        assert "Played one of these? Click it to tell us how Aura worked." not in texts
+        assert "How did Aura work in World of Warcraft?" not in texts
+        assert "Your reports: 1. See or withdraw." in texts
+        assert "3 anonymous reporters say it works on Aura 1.2." in texts  # labels still show
+    finally:
+        root.destroy()
+
+
+def _walk(widget):
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk(child)
