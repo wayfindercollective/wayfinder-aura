@@ -147,6 +147,8 @@ def _app_class():
             self.queued, self.jobs, self.binds, self.cards, self.fetches = [], [], [], [], []
             self._viewable, self._state = viewable, state
             self._game_report_card = None
+            self.active_tab = "dictate"
+            self._welcome_active = self._setup_active = False
 
         # Tk
         def after(self, ms, fn):
@@ -495,9 +497,216 @@ def test_showing_the_card_counts_as_asked_so_it_never_returns(monkeypatch):
         game_reports.note_game_use("World of Warcraft")
     app = SimpleNamespace(_dictate_banner_anchor=SimpleNamespace(master=object()),
                           _post_ui=lambda fn: None, _close_game_report_card=lambda: None,
-                          _game_reports_dont_ask=lambda: None)
+                          _game_reports_dont_ask=lambda: None, active_tab="dictate",
+                          _main_window_shown=lambda: True)
     wayfinder_main.WayfinderApp._show_game_report_card(
         app, game_reports.PromptGame("world-of-warcraft", "World of Warcraft"))
     assert shown == ["world-of-warcraft"]
     with game_reports._lock:
         assert game_reports._load()["games"]["world-of-warcraft"]["asked"] is True
+
+
+
+# --- Sol r1 #3: any recognised game in front blocks the question --------------------------
+
+@pytest.mark.parametrize("backend,front,signals", [
+    ("macos", (5, "com.mojang.minecraftlauncher", "Minecraft"),
+     ("public.app-category.games", "/Applications/Minecraft.app")),
+    ("linux", (77, "steam_app_570", "Dota 2"), (None, None)),
+    ("windows", (9, "dota2.exe", "Dota 2"),
+     (None, "C:\\Program Files (x86)\\Steam\\steamapps\\common\\dota 2\\dota2.exe")),
+])
+def test_an_unlisted_game_in_front_blocks_the_question(transport, monkeypatch, backend, front,
+                                                       signals):
+    import wayfinder_main
+
+    from wayfinder.core import linux_game_chat, windows_game_chat
+    monkeypatch.setitem(sys.modules, "AppKit", FakeAppKit())
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", backend == "macos")
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", backend == "windows")
+    monkeypatch.setattr(wayfinder_main, "_IS_LINUX", backend == "linux")
+    module = {"macos": gc, "linux": linux_game_chat, "windows": windows_game_chat}[backend]
+    monkeypatch.setattr(module, "frontmost_app", lambda: front)
+    monkeypatch.setattr(module, "app_signals", lambda pid: signals)
+    _open_intake_now(transport)
+    for _ in range(3):
+        game_reports.note_game_use("World of Warcraft")
+    app = _app_class()()
+    in_front = app._game_report_frontmost_name()
+    assert in_front and front[1] not in in_front and front[2] not in in_front  # no name kept
+    app._on_main_window_visible()
+    app._on_game_labels_refreshed()          # the delayed-callback path too
+    app.run_jobs()
+    assert app.cards == []
+    with game_reports._lock:
+        saved = game_reports.state_path().read_text()
+    assert front[2] not in saved and front[1] not in saved
+
+
+# --- Sol r1 #4: ask only on a Dictate tab the player can see ------------------------------
+
+@pytest.mark.parametrize("blocker", ["games", "settings", "welcome", "setup"])
+def test_the_question_waits_for_the_dictate_tab(appkit, eligible, blocker):
+    app = _app_class()()
+    if blocker in ("games", "settings"):
+        app.active_tab = blocker
+    else:
+        setattr(app, f"_{blocker}_active", True)
+    app._on_main_window_visible()
+    assert app.cards == []
+    with game_reports._lock:
+        assert game_reports._load()["games"]["world-of-warcraft"]["asked"] is False
+    # The player opens Dictate: entering it schedules the check.
+    app.active_tab = "dictate"
+    app._welcome_active = app._setup_active = False
+    app._schedule_main_window_visible()
+    app.run_jobs()
+    assert [g.key for g in app.cards] == ["world-of-warcraft"]
+
+
+def test_entering_dictate_schedules_the_check():
+    import wayfinder_main
+    source = inspect.getsource(wayfinder_main.WayfinderApp._switch_tab)
+    assert 'tab_id == "dictate"' in source and "_schedule_main_window_visible" in source
+
+
+def test_the_card_is_marked_asked_only_once_presented_on_dictate(monkeypatch):
+    import wayfinder_main
+
+    import wayfinder.ui.game_report_card as card_module
+    shown = []
+
+    class FakeCard:
+        def __init__(self, *a, **k):
+            shown.append(a[2])
+
+        def pack(self, **k):
+            pass
+
+    monkeypatch.setattr(card_module, "GameReportCard", FakeCard)
+    for _ in range(3):
+        game_reports.note_game_use("World of Warcraft")
+    game = game_reports.PromptGame("world-of-warcraft", "World of Warcraft")
+    app = SimpleNamespace(_dictate_banner_anchor=SimpleNamespace(master=object()),
+                          _post_ui=lambda fn: None, _close_game_report_card=lambda: None,
+                          _game_reports_dont_ask=lambda: None, active_tab="games",
+                          _main_window_shown=lambda: True)
+
+    def asked():
+        with game_reports._lock:
+            return game_reports._load()["games"]["world-of-warcraft"]["asked"]
+
+    wayfinder_main.WayfinderApp._show_game_report_card(app, game)
+    assert shown == [] and asked() is False                     # Dictate not selected
+    app.active_tab, app._main_window_shown = "dictate", lambda: False
+    wayfinder_main.WayfinderApp._show_game_report_card(app, game)
+    assert shown == [] and asked() is False                     # window not on screen
+    app._main_window_shown = lambda: True
+    wayfinder_main.WayfinderApp._show_game_report_card(app, game)
+    assert shown == ["world-of-warcraft"] and asked() is True
+
+
+# --- Sol r1 #2: report controls expire with permission -----------------------------------
+
+def test_permission_left_counts_down_to_the_one_shot_expiry(transport):
+    now = time.time()
+    _open_intake_now(transport)
+    left = game_labels.permission_left(now + 60)
+    assert game_labels.PERMISSION_S - 120 < left <= game_labels.PERMISSION_S - 59
+    assert game_labels.permission_left(now + game_labels.PERMISSION_S + 1) == 0
+    assert game_labels.permission_left(now - 3600) == 0          # clock moved back
+
+
+def _expire_in(seconds):
+    """Make the stored permission lapse ``seconds`` from now."""
+    with game_labels._lock:
+        cache = game_labels._load_cache()
+        cache["fetchedAt"] = time.time() - game_labels.PERMISSION_S + seconds
+        game_labels._save_cache(cache)
+
+
+def _pump(root, seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        root.update()
+        time.sleep(0.02)
+
+
+@pytest.mark.ui
+def test_the_games_tab_hint_rows_and_card_expire_with_permission(transport, monkeypatch):
+    import customtkinter as ctk
+    import wayfinder_main
+
+    from wayfinder.ui import icons
+    from wayfinder.ui.ui_inspect import describe, flatten
+    monkeypatch.setattr(icons, "_CACHE", {})
+    _open_intake_now(transport)
+    _expire_in(4.0)
+    root = ctk.CTk()
+    try:
+        container = ctk.CTkFrame(root)
+        container.pack(fill="both", expand=True)
+        app = SimpleNamespace(
+            tab_content_container=container, tab_frames={}, font_body=("DejaVu Sans",),
+            font_header=("DejaVu Sans",), font_sizes=dict.fromkeys(
+                ("display", "title", "heading", "body", "small", "caption"), 12),
+            after=root.after, after_cancel=root.after_cancel,
+            event_queue=SimpleNamespace(put=lambda item: None),
+            _create_game_chat_rows=lambda parent: None, _post_ui=lambda fn: fn())
+        wayfinder_main.WayfinderApp._create_games_tab(app)
+        app.tab_frames["games"].pack(fill="both", expand=True)
+        root.geometry("620x900")
+        search = next(w for w in _walk(app.tab_frames["games"]) if type(w).__name__ == "CTkEntry")
+        search.insert(0, "warcraft")
+        _pump(root, 0.3)
+
+        def texts():
+            return [n["text"] for n in flatten(describe(root, root))
+                    if n.get("text") and n.get("mapped", True)]
+
+        def click():
+            label = next(w for w in _walk(app.tab_frames["games"])
+                         if type(w).__name__ == "CTkLabel" and w.cget("text") == "World of Warcraft")
+            label._label.event_generate("<Button-1>")
+            root.update()
+
+        hint = "Played one of these? Click it to tell us how Aura worked."
+        assert hint in texts()
+        click()
+        assert "How did Aura work in World of Warcraft?" in texts()
+        _pump(root, max(0.0, game_labels.permission_left(time.time())) + 0.5)  # it lapses
+        assert hint not in texts()
+        assert "How did Aura work in World of Warcraft?" not in texts()
+        click()                                                  # an old binding can't revive it
+        assert "How did Aura work in World of Warcraft?" not in texts()
+        assert "Your reports: none yet." in texts()              # withdrawal access stays
+    finally:
+        root.destroy()
+
+
+@pytest.mark.ui
+def test_a_card_left_open_past_expiry_cannot_send(transport, monkeypatch):
+    import customtkinter as ctk
+
+    from wayfinder.ui import game_report_card as card
+    from wayfinder.ui import icons
+    from wayfinder.ui.theme import FONT_SIZES
+    monkeypatch.setattr(icons, "_CACHE", {})
+    _open_intake_now(transport)
+    root = ctk.CTk()
+    try:
+        app = SimpleNamespace(font_sizes=dict(FONT_SIZES), font_body=("DejaVu Sans",),
+                              after=root.after)
+        widget = card.GameReportCard(root, app, "world-of-warcraft", "World of Warcraft",
+                                     prompt=False, post=lambda fn: fn(), on_close=lambda: None)
+        widget.pack()
+        widget.choose("works")
+        _expire_in(-1)                                           # lapsed while open
+        widget.send()
+        root.update()
+        with game_reports._lock:
+            assert game_reports._load()["reports"] == []
+        assert card.PAUSED_TEXT in [w.cget("text") for w in _walk(widget.frame)
+                                    if type(w).__name__ == "CTkLabel"]
+    finally:
+        root.destroy()

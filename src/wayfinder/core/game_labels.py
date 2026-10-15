@@ -78,8 +78,21 @@ def _is_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_COUNT
 
 
+DEMOTION_KINDS = ("issues", "broken")
+
+
+def _valid_demotion(value: Any) -> bool:
+    """``demotedBy``: null, or ``{line, kind}`` naming the line whose problem
+    reports dropped the label (kind ``issues`` or ``broken``). Optional, so a
+    document from before the field still reads."""
+    return value is None or (
+        isinstance(value, dict) and isinstance(value.get("line"), str)
+        and _LINE.match(value["line"]) is not None and value.get("kind") in DEMOTION_KINDS)
+
+
 def _valid_line(state: Any) -> bool:
     return (isinstance(state, dict)
+            and _valid_demotion(state.get("demotedBy"))
             and isinstance(state.get("line"), str) and _LINE.match(state["line"]) is not None
             and state.get("level") in LEVELS
             and _is_bool(state.get("verified"))
@@ -170,6 +183,16 @@ def intake_open(now: float) -> bool:
     age = _age(now, cache.get("fetchedAt"))
     return (doc is not None and cache.get("fresh") is True and doc.get("accepting") is True
             and age is not None and age < PERMISSION_S)
+
+
+def permission_left(now: float) -> float:
+    """Seconds until intake permission lapses; 0 when there is none. The UI
+    uses it for one one-shot callback that retires the report controls."""
+    if not intake_open(now):
+        return 0.0
+    with _lock:
+        fetched = _load_cache().get("fetchedAt")
+    return max(0.0, float(fetched) + PERMISSION_S - now)
 
 
 def reportable() -> frozenset[str]:
@@ -302,6 +325,11 @@ def _caption(status: str, state: dict, lines: list[dict]) -> str:
         if state["carried"]:
             return f"Works with (community), confirmed on Aura {source}."
         return f"{_reporters(state['works'])} it works on Aura {state['line']}."
+    # The server names the line whose problems dropped the label, so the
+    # caption survives that line leaving the published six.
+    demoted = state.get("demotedBy")
+    if demoted:
+        return f"Problems reported on Aura {demoted['line']}."
     origin = next((s for s in lines if s["line"] == source), None)
     if origin is not None and origin["someIssues"] + origin["doesntWork"] > 0:
         return f"Problems reported on Aura {source}."

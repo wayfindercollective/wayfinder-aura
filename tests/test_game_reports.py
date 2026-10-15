@@ -135,7 +135,17 @@ def gr(tmp_path, monkeypatch):
     monkeypatch.setattr(gr, "coarse_os", lambda: ("macos", "15"))
     monkeypatch.setattr(gr, "_app_version", lambda: "1.2.1")
     monkeypatch.setattr(gr, "_logged_corrupt", False)
+    permit(T0)  # Wayfinder accepts reports: a fresh labels fetch just before T0
     return gr
+
+
+def permit(now, *, accepting=True, reportable=("world-of-warcraft", "albion-online")):
+    """Store a real labels cache as a fresh fetch at ``now`` would."""
+    doc = labels_doc(accepting=accepting, generated_ms=int(now * 1000), reportable=reportable)
+    with game_labels._lock:
+        cache = game_labels._load_cache()
+        cache.update({"doc": doc, "fetchedAt": now - 60, "date": now - 60, "fresh": True})
+        game_labels._save_cache(cache)
 
 
 @pytest.fixture
@@ -336,6 +346,7 @@ def test_the_most_recently_played_game_is_asked_first(gr, transport):
 
 
 def test_a_labels_refresh_is_wanted_only_when_permission_is_the_missing_piece(gr, transport):
+    game_labels.cache_path().unlink()                            # never fetched
     _use(gr, "World of Warcraft", 3)
     assert gr.wants_labels_refresh(T0, enabled=True) is True     # never fetched
     assert gr.wants_labels_refresh(T0, enabled=False) is False
@@ -524,6 +535,7 @@ def test_at_most_five_sends_a_day(gr, transport):
     for _ in range(5):
         assert gr.submit("World of Warcraft", "works", "", now=T0) == "queued"
     assert gr.submit("Albion Online", "works", "", now=T0) == "limit"
+    permit(T0 + DAY)
     assert gr.submit("Albion Online", "works", "", now=T0 + DAY) == "queued"
 
 
@@ -579,17 +591,20 @@ def test_network_errors_never_raise(gr, transport):
 # --- 9. always available ----------------------------------------------------------------
 
 def test_your_reports_and_withdraw_work_with_intake_closed_and_labels_failing(gr, transport):
-    transport.answer(ConnectionError("labels down"))
-    assert game_labels.refresh(now=T0) is False
-    assert game_labels.intake_open(T0) is False
     gr.submit("World of Warcraft", "works", "Fine.", now=T0)
     gr.send_pending(now=T0)
+    # A day later: permission has lapsed, the labels fetch fails, intake is shut.
+    later = T0 + DAY + 1
+    transport.answer(ConnectionError("labels down"))
+    assert game_labels.refresh(now=later) is False
+    assert game_labels.intake_open(later) is False
+    permit(later, accepting=False)
     (row,) = gr.your_reports()
     assert (row.game_key, row.game_name, row.answer, row.note, row.app_version, row.status) == (
         "world-of-warcraft", "World of Warcraft", "works", "Fine.", "1.2.1", "sent")
     assert row.created_at == T0
-    assert gr.withdraw("world-of-warcraft", now=T0) == "withdrawing"
-    assert gr.send_withdrawals(now=T0) == 1
+    assert gr.withdraw("world-of-warcraft", now=later) == "withdrawing"
+    assert gr.send_withdrawals(now=later) == 1
     assert gr.your_reports() == []
 
 
@@ -643,3 +658,77 @@ def test_tests_never_touch_the_real_game_report_files():
     from wayfinder.utils.platform import get_cache_dir, get_config_dir
     assert game_reports_module.state_path().parent != get_config_dir()
     assert game_labels.cache_path().parent != get_cache_dir()
+
+
+
+# --- Sol r1 #1: a withdrawal boundary never changes once made --------------------------
+
+def test_a_second_withdrawal_during_the_first_is_never_lost(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)                                        # report 1 sent
+    assert gr.withdraw("world-of-warcraft", now=T0) == "withdrawing"  # boundary 1
+    pressed = []
+
+    def while_the_first_is_in_flight(sent):
+        if "/withdraw" in sent.url and not pressed:
+            pressed.append(sent.body["throughSeq"])
+            gr.submit("World of Warcraft", "doesnt_work", "", now=T0)  # report 2
+            gr.send_pending(now=T0)
+            assert gr.withdraw("world-of-warcraft", now=T0) == "withdrawing"  # boundary 2
+
+    transport.on_send = while_the_first_is_in_flight
+    gr.send_withdrawals(now=T0)
+    transport.on_send = None
+    gr.send_withdrawals(now=T0)
+    assert pressed == [1]
+    assert [p.body["throughSeq"] for p in transport.posts("/withdraw")] == [1, 2]
+    assert _state(gr)["withdrawals"] == []
+
+
+def test_each_press_keeps_its_own_boundary_until_that_one_is_acknowledged(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    transport.answer(ConnectionError("offline"))
+    gr.withdraw("world-of-warcraft", now=T0)                       # through 1
+    gr.send_withdrawals(now=T0)
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    gr.withdraw("world-of-warcraft", now=T0)                       # through 2
+    gr.withdraw("world-of-warcraft", now=T0)                       # same boundary: no copy
+    assert [w["throughSeq"] for w in _state(gr)["withdrawals"]] == [1, 2]
+    assert [r.status for r in gr.your_reports()] == ["withdrawing"]  # one row per game
+    transport.answer((200, {"ok": True}), ConnectionError("offline"))
+    gr.send_withdrawals(now=T0)
+    assert [w["throughSeq"] for w in _state(gr)["withdrawals"]] == [2]
+    gr.send_withdrawals(now=T0)
+    assert [p.body["throughSeq"] for p in transport.posts("/withdraw")] == [1, 1, 2, 2]
+    assert _state(gr)["withdrawals"] == []
+
+
+# --- Sol r1 #2: Send needs fresh permission and a reportable game ------------------------
+
+def test_send_is_refused_once_permission_has_lapsed(gr, transport):
+    assert gr.may_report("world-of-warcraft", T0) is True
+    assert gr.submit("World of Warcraft", "works", "", now=T0 + DAY + 1) == "closed"
+    assert gr.may_report("world-of-warcraft", T0 + DAY + 1) is False
+    assert not gr.state_path().exists() or _state(gr)["reports"] == []
+
+
+def test_send_is_refused_for_a_game_wayfinder_does_not_take(gr, transport):
+    permit(T0, reportable=("albion-online",))
+    assert gr.may_report("world-of-warcraft", T0) is False
+    assert gr.submit("World of Warcraft", "works", "", now=T0) == "closed"
+    assert gr.submit("Albion Online", "works", "", now=T0) == "queued"
+
+
+def test_send_is_refused_when_intake_closed(gr, transport):
+    permit(T0, accepting=False)
+    assert gr.submit("World of Warcraft", "works", "", now=T0) == "closed"
+
+
+def test_withdrawal_needs_no_permission(gr, transport):
+    gr.submit("World of Warcraft", "works", "", now=T0)
+    gr.send_pending(now=T0)
+    permit(T0, accepting=False)
+    assert gr.withdraw("world-of-warcraft", now=T0 + 3 * DAY) == "withdrawing"
+    assert gr.send_withdrawals(now=T0 + 3 * DAY) == 1

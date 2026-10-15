@@ -266,3 +266,50 @@ def test_a_redirect_is_never_followed(labels, transport):
     transport.answer((307, b"", {"Location": "https://elsewhere.example/labels"}))
     assert labels.refresh(now=T) is False
     assert len(transport.gets()) == 1
+
+
+
+# --- Sol r1 #5: a demotion keeps its caption after its line leaves the six -----------------
+
+@pytest.mark.parametrize("kind", ["issues", "broken"])
+def test_a_demotion_caption_survives_its_line_leaving_the_published_six(kind):
+    level = "playable" if kind == "issues" else "untested"
+    lines_ = [line(f"1.{n}", level, source="1.4", carried=True, demoted=("1.4", kind))
+              for n in range(5, 11)]
+    doc = _doc(*lines_)
+    assert "1.4" not in {s["line"] for s in doc["games"][0]["lines"]}   # really gone
+    assert gl.display_status(WOW, "macos", "1.10", doc=doc) == (
+        gc.PLAYABLE if kind == "issues" else gc.UNTESTED, "Problems reported on Aura 1.4.")
+
+
+def test_a_demotion_on_the_line_itself_names_that_line():
+    state = line("1.4", "playable", some=1, works=2, demoted=("1.4", "issues"))
+    assert gl.display_status(WOW, "macos", "1.4", doc=_doc(state)) == (
+        gc.PLAYABLE, "Problems reported on Aura 1.4.")
+
+
+def test_no_demotion_and_no_problems_means_no_caption():
+    lines_ = [line(f"1.{n}", "playable", source="1.4", carried=True) for n in range(5, 11)]
+    assert gl.display_status(WOW, "macos", "1.10", doc=_doc(*lines_)) == (gc.PLAYABLE, "")
+
+
+@pytest.mark.parametrize("demoted_by,valid", [
+    (None, True),
+    ({"line": "1.4", "kind": "issues"}, True),
+    ({"line": "1.4", "kind": "broken"}, True),
+    ({"line": "1.4", "kind": "meh"}, False),
+    ({"line": "1.4.0", "kind": "issues"}, False),
+    ({"kind": "issues"}, False),
+    ("1.4", False),
+    (True, False),
+])
+def test_demoted_by_has_exactly_the_agreed_shape(demoted_by, valid):
+    doc = _doc(line("1.5", "playable", source="1.4", carried=True))
+    doc["games"][0]["lines"][0]["demotedBy"] = demoted_by
+    assert (gl.validate_labels(doc) is not None) is valid
+
+
+def test_a_document_without_demoted_by_still_reads():
+    doc = _doc(line("1.2", "works", verified=True))
+    doc["games"][0]["lines"][0].pop("demotedBy")
+    assert gl.validate_labels(doc) is not None

@@ -115,6 +115,11 @@ def _game_chat_module():
     return macos_game_chat
 
 
+# Game reports: what the question's foreground guard reports for a recognised
+# game that isn't on Aura's list. Deliberately not its name or window title.
+_UNLISTED_GAME_IN_FRONT = "an unlisted game"
+
+
 def _device_noun() -> str:
     """How user-facing copy names this computer."""
     return "PC" if IS_WINDOWS else "Mac" if IS_MACOS else "computer"
@@ -9087,6 +9092,8 @@ class WayfinderApp(ctk.CTk):
             self._start_idle_breath()
         if tab_id == "games":
             self._refresh_game_labels()  # community labels, at most once a day
+        elif tab_id == "dictate":
+            self._schedule_main_window_visible()  # a waiting game question can show now
 
     def show_setup_pane(self, on_done=None) -> None:
         """Show the first-run dependency setup as an inline pane over the tab
@@ -13783,6 +13790,7 @@ class WayfinderApp(ctk.CTk):
         max_rows = 40  # a hundred-plus rows would make every keystroke lag
         status_for_label = {v: k for k, v in game_chat.FILTER_LABELS.items()}
         open_card = {"key": None, "card": None}
+        expiry = {"job": None}  # one one-shot render when report permission lapses
 
         def close_row_card():
             card = open_card["card"]
@@ -13796,6 +13804,9 @@ class WayfinderApp(ctk.CTk):
             close_row_card()
             if was_open:
                 return
+            if not game_reports.may_report(key):
+                render()  # permission lapsed since this row was drawn: retire it
+                return
             card = GameReportCard(row, self, key, entry.name, prompt=False, post=self._post_ui,
                                   on_close=lambda: (close_row_card(), render()))
             card.pack(fill="x", pady=(SPACING["xs"], SPACING["xs"]))
@@ -13805,12 +13816,21 @@ class WayfinderApp(ctk.CTk):
             close_row_card()
             for child in results.winfo_children():
                 child.destroy()
+            if expiry["job"] is not None:
+                try:
+                    self.after_cancel(expiry["job"])
+                except Exception:
+                    pass
+                expiry["job"] = None
             now = time.time()
             doc = game_labels.labels_doc(now)
             allowed = game_labels.reportable() if game_labels.intake_open(now) else frozenset()
             answers = game_reports.latest_answers()
             if allowed:
                 hint.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["xs"]), after=legend)
+                # The hint, row clicks and any open card go when permission lapses.
+                left_ms = int(game_labels.permission_left(now) * 1000) + 100
+                expiry["job"] = self.after(left_ms, render)
             else:
                 hint.pack_forget()
             rows = []
@@ -13865,8 +13885,11 @@ class WayfinderApp(ctk.CTk):
                                     add="+")
 
         def render_unless_answering():
-            # Background refreshes never close a card the player is filling in.
-            if open_card["card"] is None or not open_card["card"].winfo_exists():
+            # Background refreshes never close a card the player is filling in,
+            # unless it may no longer send.
+            card = open_card["card"]
+            if (card is None or not card.winfo_exists()
+                    or not game_reports.may_report(open_card["key"])):
                 render()
 
         self._games_tab_render = render_unless_answering
@@ -16085,14 +16108,25 @@ class WayfinderApp(ctk.CTk):
             return False
 
     def _game_report_frontmost_name(self):
-        """The supported game in front, if any (never a window title)."""
+        """What is in front, for the question's guard: a supported game's list
+        name, a fixed marker for any other app Aura recognises as a game (the
+        same detection dictation uses), or None. Never an unlisted game's name
+        or a window title, and nothing here is stored. Fails closed."""
         try:
             game_chat = _game_chat_module()
-            _pid, bundle_id, app_name = game_chat.frontmost_app()
+            pid, bundle_id, app_name = game_chat.frontmost_app()
             profile = game_chat.match_profile(bundle_id, app_name)
-            return profile.name if profile is not None else None
-        except Exception:
+            if profile is not None:
+                return profile.name
+            category, path = game_chat.app_signals(pid)
+            if game_chat.unlisted_game_reason(bundle_id, app_name, category, path) is not None:
+                return _UNLISTED_GAME_IN_FRONT
+            is_steam = getattr(game_chat, "is_steam_game", None)
+            if callable(is_steam) and is_steam(pid, bundle_id):
+                return _UNLISTED_GAME_IN_FRONT
             return None
+        except Exception:
+            return _UNLISTED_GAME_IN_FRONT
 
     def _on_main_window_visible(self) -> None:
         """Ask how a game went, once the player can see Aura's window (design 4.1).
@@ -16104,8 +16138,7 @@ class WayfinderApp(ctk.CTk):
         try:
             if getattr(self, "_game_report_card", None) is not None:
                 return
-            # Steam Deck Game Mode: the window isn't really visible; wait for Desktop Mode.
-            if getattr(self, "_game_mode_session", False) or not self._main_window_shown():
+            if not WayfinderApp._game_report_dictate_in_view(self):
                 return
             if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
                 return
@@ -16125,13 +16158,23 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _game_report_dictate_in_view(self) -> bool:
+        """The Dictate tab is selected and on screen, with no first-run pane
+        over it. Steam Deck Game Mode: the window isn't really visible."""
+        return (getattr(self, "active_tab", None) == "dictate"
+                and not getattr(self, "_welcome_active", False)
+                and not getattr(self, "_setup_active", False)
+                and not getattr(self, "_game_mode_session", False)
+                and self._main_window_shown())
+
     def _post_ui(self, fn) -> None:
         self.event_queue.put((EventType.UI_CALLBACK, fn))
 
     def _show_game_report_card(self, game) -> None:
-        """The question card on the Dictate tab, under any update banner."""
+        """The question card on the Dictate tab, under any update banner. Only
+        when the player can see that tab: then, and only then, it counts as asked."""
         anchor = getattr(self, "_dictate_banner_anchor", None)
-        if anchor is None:
+        if anchor is None or not WayfinderApp._game_report_dictate_in_view(self):
             return
         from wayfinder.core import game_reports
         from wayfinder.ui.game_report_card import GameReportCard

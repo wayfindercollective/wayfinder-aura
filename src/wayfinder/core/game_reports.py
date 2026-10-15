@@ -456,17 +456,32 @@ def _today(now: float) -> str:
     return date.fromtimestamp(now).isoformat()
 
 
+def may_report(key: str, now: float | None = None) -> bool:
+    """A new report for this game may be sent now: intake permission is fresh
+    and the game is reportable. Checked again at every Send."""
+    try:
+        from . import game_labels
+
+        now = time.time() if now is None else now
+        return game_labels.intake_open(now) and key in game_labels.reportable()
+    except Exception:
+        return False
+
+
 def submit(game_name: str, answer: str, note: str | None = "", *,
            now: float | None = None,
            on_sent: Callable[[], None] | None = None) -> str:
     """Queue a report (the player pressed Send). Returns ``"queued"``,
-    ``"limit"`` (5 Sends today), ``"link"`` (the note has a link),
-    ``"invalid"`` or ``"error"``. Sending happens on a background thread;
-    ``on_sent`` runs there afterwards."""
+    ``"closed"`` (permission lapsed, intake closed or the game not
+    reportable), ``"limit"`` (5 Sends today), ``"link"`` (the note has a
+    link), ``"invalid"`` or ``"error"``. Sending happens on a background
+    thread; ``on_sent`` runs there afterwards."""
     now = time.time() if now is None else now
     key = game_key(game_name)
     if answer not in ANSWERS or not is_valid_game_key(key):
         return "invalid"
+    if not may_report(key, now):
+        return "closed"
     cleaned, problem = clean_note(note)
     if problem:
         return "link"
@@ -684,11 +699,11 @@ def withdraw(key: str | None = None, now: float | None = None) -> str:
                 result = "deleted"
             else:
                 for rid in sorted(ids):
-                    existing = next((w for w in data["withdrawals"]
-                                     if w["reporterId"] == rid and w.get("gameKey") == key), None)
-                    if existing is not None:
-                        existing["throughSeq"] = max(existing["throughSeq"], through)
-                        continue
+                    # A boundary never changes once made: a later press adds its
+                    # own, so acknowledging an earlier one can't drop it.
+                    if any(w["reporterId"] == rid and w.get("gameKey") == key
+                           and w["throughSeq"] == through for w in data["withdrawals"]):
+                        continue  # this exact boundary is already waiting
                     data["withdrawals"].append({
                         "id": secrets.token_hex(8), "reporterId": rid, "gameKey": key,
                         "gameName": name, "throughSeq": through, "createdAt": now})
@@ -719,11 +734,8 @@ def _settle(data: dict, rid: str, key: str | None, through: int) -> None:
                     for r in data["reports"])
         if not newer and rid in game["attempted"]:
             game["attempted"].remove(rid)
-    if key is None:
-        data["withdrawals"] = [w for w in data["withdrawals"]
-                               if not (w["reporterId"] == rid and w["throughSeq"] <= through)]
-        if data.get("reporterId") == rid:
-            data.pop("reporterId")  # Withdraw all: a new ID is made at the next Send
+    if key is None and data.get("reporterId") == rid:
+        data.pop("reporterId")  # Withdraw all: a new ID is made at the next Send
 
 
 def send_withdrawals(now: float | None = None) -> int:
@@ -767,6 +779,7 @@ def send_withdrawals(now: float | None = None) -> int:
                     break
                 continue
             with _lock:
+                # Clear exactly the boundary that was sent; any other stays queued.
                 data = _load()
                 data["withdrawals"] = [w for w in data["withdrawals"] if w.get("id") != pending["id"]]
                 _settle(data, pending["reporterId"], pending.get("gameKey"), pending["throughSeq"])
@@ -819,9 +832,12 @@ def your_reports() -> list[ReportView]:
             data = _load()
     except Exception:
         return []
-    rows = [ReportView(w.get("gameKey"), w.get("gameName") or "All your reports", None, None,
-                       None, w.get("createdAt"), WITHDRAWING)
-            for w in data["withdrawals"]]
+    rows, seen = [], set()
+    for w in data["withdrawals"]:  # one Withdrawing row per game, however many presses
+        if w.get("gameKey") not in seen:
+            seen.add(w.get("gameKey"))
+            rows.append(ReportView(w.get("gameKey"), w.get("gameName") or "All your reports",
+                                   None, None, None, w.get("createdAt"), WITHDRAWING))
     for r in sorted(data["reports"], key=lambda r: r["seq"], reverse=True):
         status = NOT_CONFIRMED if r["state"] == SENDING else r["state"]
         rows.append(ReportView(r["gameKey"], r["gameName"], r["answer"], r.get("note"),

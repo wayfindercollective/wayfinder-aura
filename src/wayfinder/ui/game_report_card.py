@@ -20,10 +20,11 @@ the Tk thread.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from datetime import date
 
-from wayfinder.core import game_reports
+from wayfinder.core import game_labels, game_reports
 from wayfinder.ui.theme import COLORS, RADIUS, SPACING
 
 CLOSE_AFTER_MS = 4000
@@ -50,12 +51,14 @@ STATUS_TEXT = {
 GAMES_HINT = "Played one of these? Click it to tell us how Aura worked."
 DONT_ASK_TEXT = "Aura won't ask. You can still report a game from the Games tab."
 LINKS_TEXT = "Links can't be sent"
+PAUSED_TEXT = "Reports are paused right now. You can still see or withdraw yours in Games."
 _RESULTS = {
     "sent": "Thanks. It helps other players pick games. You can see or withdraw it in Games.",
     "saved": "Saved. Aura sends it when you're online.",
     "failed": "Aura couldn't send this report.",
     "limit": "You've sent 5 reports today. Aura can send more tomorrow.",
     "error": "Aura couldn't save this report.",
+    "closed": PAUSED_TEXT,
 }
 _LINUX_NAMES = {
     "steamos": "SteamOS", "bazzite": "Bazzite", "ubuntu": "Ubuntu", "fedora": "Fedora",
@@ -170,6 +173,7 @@ class GameReportCard:
         self.answer: str | None = None
         self.note_entry = None
         self._closed = False
+        self._finished = False
         family, sizes = _fonts(app)
         self._family, self._sizes = family, sizes
 
@@ -206,6 +210,12 @@ class GameReportCard:
                           text_color=COLORS["text_muted"], anchor="w",
                           font=(family, sizes["caption"]),
                           command=self.dont_ask).pack(anchor="w")
+        # One one-shot callback retires the controls when report permission lapses.
+        left_ms = int(game_labels.permission_left(time.time()) * 1000) + 100
+        try:
+            app.after(left_ms, self._permission_lapsed)
+        except Exception:
+            pass
 
     # The card is used like a widget by its host.
     def pack(self, **kwargs) -> None:
@@ -284,9 +294,16 @@ class GameReportCard:
                                    game_reports.NOTE_MAX else COLORS["text_muted"])
         self.send_button.configure(state="normal" if send_allowed(text) else "disabled")
 
+    def _permission_lapsed(self) -> None:
+        if self.winfo_exists() and not self._finished:
+            self._finish(PAUSED_TEXT)
+
     def send(self) -> None:
         text = self.note_text()
         if self.answer is None or not send_allowed(text):
+            return
+        if not game_reports.may_report(self.key):
+            self._finish(PAUSED_TEXT)  # permission lapsed or intake closed meanwhile
             return
         result = game_reports.submit(self.name, self.answer, text,
                                      on_sent=lambda: self.post(self._after_send))
@@ -309,6 +326,7 @@ class GameReportCard:
 
     def _finish(self, text: str) -> None:
         """Show the last line, then close once, a few seconds later."""
+        self._finished = True
         self._show_message(text)
         try:
             self.app.after(CLOSE_AFTER_MS, self._closed_by_timer)

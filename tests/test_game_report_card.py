@@ -94,6 +94,14 @@ def test_the_card_builds_and_walks_through_an_answer(monkeypatch):
     from wayfinder.ui import icons
 
     monkeypatch.setattr(icons, "_CACHE", {})  # icons belong to one Tk root
+    import time
+
+    from wayfinder.core import game_labels
+    now = time.time()                          # Wayfinder is taking reports
+    with game_labels._lock:
+        game_labels._save_cache({"fetchedAt": now, "date": now, "fresh": True, "doc": {
+            "v": 1, "accepting": True, "generatedAt": int(now * 1000), "capped": False,
+            "reportable": ["world-of-warcraft"], "games": []}})
     sent = []
     monkeypatch.setattr(game_reports, "submit",
                         lambda name, answer, note, **k: sent.append((name, answer, note)) or "queued")

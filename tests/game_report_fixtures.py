@@ -83,9 +83,13 @@ def labels_doc(*, accepting=True, generated_ms=0, reportable=("world-of-warcraft
             "reportable": list(reportable), "games": list(games)}
 
 
-def line(line_, level, *, verified=False, source=None, carried=False, works=0, some=0, doesnt=0):
+def line(line_, level, *, verified=False, source=None, carried=False, works=0, some=0, doesnt=0,
+         demoted=None):
+    """One published line state. ``demoted`` is ``(line, kind)`` for the
+    server's ``demotedBy`` provenance, kind ``"issues"`` or ``"broken"``."""
     return {"line": line_, "level": level, "verified": verified,
             "sourceLine": source or line_, "carried": carried,
+            "demotedBy": {"line": demoted[0], "kind": demoted[1]} if demoted else None,
             "works": works, "someIssues": some, "doesntWork": doesnt}
 
 
