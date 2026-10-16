@@ -23,8 +23,14 @@ import traceback
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
-CHECK_EVERY_S = 2.0
-STALL_AFTER_S = 10.0     # poll runs every 100-250 ms; 10 s quiet is not a hiccup
+CHECK_EVERY_S = 1.0
+# The poll runs every 100-250 ms. 5 s quiet is a pill that visibly fails to
+# open (16 Oct: one hotkey press held the main thread for 10 s).
+STALL_AFTER_S = 5.0
+# While the poll is quiet, the main thread is sampled every tick so the stall
+# report shows where it was stuck from the start, not only where it is now.
+SAMPLE_AFTER_S = 1.0
+_MAX_SAMPLES = 6
 # A press waiting this long into a stall gets the restart offer. Above the
 # 19-34 s start-up stalls seen on a memory-starved laptop (settings preload),
 # which recover by themselves.
@@ -73,6 +79,8 @@ class PollWatchdog:
         self._awake_since = clock()
         self._stalled_at: Optional[float] = None   # heartbeat value when the stall began
         self._offered = False
+        self._samples: list[tuple[float, str]] = []   # (seconds quiet, stack) this quiet spell
+        self._sampled_beat: Optional[float] = None
         self._stop = threading.Event()
 
     @property
@@ -89,13 +97,20 @@ class PollWatchdog:
             return
         quiet = now - beat
         if self._stalled_at is None:
+            if beat != self._sampled_beat:
+                self._sampled_beat, self._samples = beat, []
+            if quiet >= SAMPLE_AFTER_S and len(self._samples) < _MAX_SAMPLES:
+                stack = _safe(self._stack)
+                if not self._samples or self._samples[-1][1] != stack:
+                    self._samples.append((quiet, stack))
             if quiet >= STALL_AFTER_S and now - self._awake_since >= STALL_AFTER_S:
                 self._stalled_at = beat
                 self._offered = False
                 since = datetime.now() - timedelta(seconds=quiet)
                 self._log(f"⚠ Aura stopped checking for the hotkey at {since:%H:%M:%S} "
                           f"({quiet:.0f}s ago) — presses are not being handled")
-                self._log(f"   main thread: {_safe(self._stack)}")
+                for at, stack in self._samples:
+                    self._log(f"   main thread at {at:.0f}s: {stack}")
                 self._spawn(lambda: self._log(f"   Tk check: {_safe(self._probe)}"),
                             "poll-watchdog-probe")
             return
@@ -107,6 +122,11 @@ class PollWatchdog:
             except Exception:
                 pass
             return
+        if len(self._samples) < _MAX_SAMPLES:
+            stack = _safe(self._stack)
+            if not self._samples or self._samples[-1][1] != stack:
+                self._samples.append((quiet, stack))
+                self._log(f"   main thread at {quiet:.0f}s: {stack}")
         if not self._offered and quiet >= PROMPT_AFTER_S and _safe_bool(self._pending_hotkey):
             self._offered = True
             self._log("⚠ Hotkey pressed while Aura was stuck — offering a restart")
