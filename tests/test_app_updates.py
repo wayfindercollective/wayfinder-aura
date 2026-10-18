@@ -643,6 +643,24 @@ class TestBannerWiring:
     def test_startup_schedules_the_check(self, src):
         assert "self.after(2600, self._check_app_update_background)" in src
 
+    def test_periodic_poll_is_scheduled_while_running(self):
+        import wayfinder_main as wm
+
+        scheduled = []
+        app = types.SimpleNamespace(
+            config={"check_for_app_updates": True},
+            stop_event=threading.Event(),
+            _app_update_timer_id="old-job",
+            _check_app_update_background=lambda: None,
+            after_cancel=lambda job: scheduled.append(("cancel", job)),
+            after=lambda ms, fn: scheduled.append(("after", ms, fn)) or "new-job",
+            _APP_UPDATE_POLL_MS=wm.WayfinderApp._APP_UPDATE_POLL_MS,
+        )
+        wm.WayfinderApp._schedule_next_app_update_check(app)
+        assert ("cancel", "old-job") in scheduled
+        assert ("after", wm.WayfinderApp._APP_UPDATE_POLL_MS, app._check_app_update_background) in scheduled
+        assert app._app_update_timer_id == "new-job"
+
     def test_check_respects_the_config_toggle(self, src):
         body = src.split("def _check_app_update_background", 1)[1]
         body = body.split("def _show_app_update_banner", 1)[0]
@@ -669,9 +687,15 @@ class TestBannerWiring:
             assert 'self.config.get("update_channel")' in body
             assert "channel=channel" in body
 
-    def test_updates_row_is_in_the_system_settings_tile(self, src):
+    def test_updates_row_is_in_the_advanced_system_group(self, src):
+        # Update channel + crash reports are Advanced (Stable is the default), so
+        # the row is built into the collapsed Advanced tile's "system" group; it
+        # falls back to the System tile when that section was never built.
         body = src.split("# === BENTO TILE 3: System", 1)[1].split('yield "system"', 1)[0]
-        assert "self._create_update_channel_row(system_content)" in body
+        assert (
+            'self._create_update_channel_row(advanced_slot(self, "system", system_content))'
+            in body
+        )
 
     def test_check_for_updates_menu_item_is_mac_only(self, src):
         body = src.split("update_items = (", 1)[1].split("menu = pystray.Menu(", 1)[0]
@@ -681,7 +705,7 @@ class TestBannerWiring:
 
 
 class TestUpdateChannelSetting:
-    """Settings > System > Updates, exercised on the unbound handler."""
+    """Settings > Advanced > System > Updates, exercised on the unbound handler."""
 
     @staticmethod
     def _app(wm, config):

@@ -19,8 +19,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   drawing, plus display on, off and dimmed, sleep and wake, so a pill that
   goes missing can be explained.
 
+### Changed
+
+- **Settings shows only what most people need.** Microphone, audio ducking,
+  speech model, GPU, language, cleanup, hotkey and the overlay switch stay up
+  front. Backend, Chunk Processing, hotkey devices, UI scale, update channel,
+  overlay tuning and the benchmark moved into a collapsed **Advanced** section,
+  and each part of it opens on its own. Nothing was removed and every setting
+  keeps its value.
+- **The Mic Test moved to the Dictate tab,** next to the dictation it checks.
+  It stops by itself when you leave the tab or start dictating.
+
 ### Fixed
 
+- **macOS permissions and Ultra setup flow.** Activating Ultra now shows live
+  download progress for the recommended Large v3 Turbo Q5 speech model, skips
+  the permissions checklist when hotkeys are already live, auto-closes the
+  post-activation permissions card once missing permissions are granted, and
+  re-runs the one-time Ultra setup if a license is removed and re-activated.
+- **Periodic update checks while running.** Long-running Aura sessions now
+  re-check for app updates every 6 hours in the background instead of only at
+  startup.
 - **The desktop asks one question at a time on first run, and the tour says
   what is coming.** The Flatpak's shortcut request is answered first; the
   question whether Aura may type in every app waits for it (up to a minute).

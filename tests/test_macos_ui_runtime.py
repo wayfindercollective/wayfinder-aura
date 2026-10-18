@@ -785,7 +785,7 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
     linux = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
     assert linux == ("Couldn't type the text — click into a text box and try again. On "
-                     "Wayland, check Settings → System → Type into every app.")
+                     "Wayland, check Settings → Advanced → System → Type into every app.")
     # Messages written for the user pass through instead of the generic line.
     held = ("Injection: A Shift, Ctrl, Alt, or Super key is still held. "
             "Release it, then dictate again; the transcript was not typed.")

@@ -9,7 +9,7 @@ the Flatpak has no automatic update channel until it is on Flathub.
 Stable installs follow stable releases. Prerelease installs follow both newer
 prereleases and stable releases, so beta testers are not stranded by GitHub's
 ``/releases/latest`` endpoint (which deliberately excludes prereleases). The
-user can pick the channel instead (Settings > System > Updates, config
+user can pick the channel instead (Settings > Advanced > System > Updates, config
 ``update_channel``): "beta" makes a stable install follow betas too, "stable"
 moves a beta install back to the next stable release. Unset follows the build.
 

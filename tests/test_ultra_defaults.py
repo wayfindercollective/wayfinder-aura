@@ -481,5 +481,49 @@ def test_raw_controls_follow_chunk_processing_and_precede_llm_cleanup():
     local = source[source.index("def _build_local_mode_settings"):]
     local = local[: local.index("def _build_remote_mode_settings")]
     assert (local.index('"Chunk Processing"')
-            < local.index("self._build_raw_transcription_controls(parent)")
+            < local.index("self._build_raw_transcription_controls")
             < local.index('"Post-Processing (LLM Cleanup)"'))
+
+
+def test_license_removal_resets_ultra_defaults_applied(monkeypatch):
+    saved = []
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: saved.append(dict(cfg)))
+    gate = _gate(premium=False)
+    app = SimpleNamespace(
+        config=_free_config(**{ULTRA_DEFAULTS_KEY: True}),
+        feature_gate=gate,
+        log=lambda _msg: None,
+        _rebuild_header=lambda: None,
+        _refresh_entitlement_ui=lambda: None,
+        _render_license_tile=lambda: None,
+        _write_status_breadcrumb=lambda: None,
+    )
+    with patch("wayfinder.license.get_feature_gate", return_value=gate):
+        wayfinder_main.WayfinderApp._finish_license_removal(
+            app, SimpleNamespace(released=True, status="ok")
+        )
+
+    assert app.config[ULTRA_DEFAULTS_KEY] is False
+    assert saved and saved[-1][ULTRA_DEFAULTS_KEY] is False
+
+
+def test_ultra_model_progress_updates_button_and_banner():
+    btn_updates = []
+    banner_updates = []
+    app = SimpleNamespace(
+        _destroyed=False,
+        _ultra_model_downloading=True,
+        model_btn=SimpleNamespace(
+            winfo_exists=lambda: True,
+            configure=lambda **kw: btn_updates.append(kw),
+        ),
+        _ultra_banner_label=SimpleNamespace(
+            winfo_exists=lambda: True,
+            configure=lambda **kw: banner_updates.append(kw),
+        ),
+    )
+    wayfinder_main.WayfinderApp._update_ultra_model_progress(app, 42)
+    assert any("42%" in kw.get("text", "") for kw in btn_updates)
+    assert any("42%" in kw.get("text", "") for kw in banner_updates)
+
+

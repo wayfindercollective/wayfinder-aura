@@ -10,7 +10,7 @@ follow from that with one deliberate step for customers.
 | **Stable** (default) | customers | a beta that held up, promoted by hand | every 2–3 weeks, when there is something worth shipping |
 | **Beta** | testers, friends, anyone who opts in | `main` as of last night | at most once a day, only when `main` changed |
 
-Users pick in **Settings → System → Updates** (config `update_channel`). An
+Users pick in **Settings → Advanced → System → Updates** (config `update_channel`). An
 install that never picked follows its own build: a beta build stays on Beta.
 Moving from Beta back to Stable keeps the installed beta until the next stable
 release outranks it. The website's download page offers Stable, with a Beta

@@ -372,7 +372,7 @@ def _xdotool(*args: str, timeout: float = 10) -> None:
     except FileNotFoundError:
         raise InjectionError(
             "xdotool not found: install xdotool, or let Aura type through the desktop "
-            "(Settings → System → Type into every app)") from None
+            "(Settings → Advanced → System → Type into every app)") from None
     except subprocess.TimeoutExpired:
         raise InjectionError(f"xdotool {args[0]} timed out after {timeout:.0f}s") from None
     if result.returncode != 0:

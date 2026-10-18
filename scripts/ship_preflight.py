@@ -231,7 +231,7 @@ def summarize(report: dict[str, Any]) -> list[tuple[str, str, str]]:
         if approval == "approved":
             rows.append(("OK", "Aura portal approval", "approved (restore token saved)"))
         elif approval == "declined":
-            rows.append(("WARN", "Aura portal approval", "declined: Settings > System > 'Type into every app' asks again"))
+            rows.append(("WARN", "Aura portal approval", "declined: Settings > Advanced > System > 'Type into every app' asks again"))
         else:
             rows.append(("INFO", "Aura portal approval", "not asked yet: Aura asks once at launch"))
     fallback_only = session_type == "wayland" and portal_ok
