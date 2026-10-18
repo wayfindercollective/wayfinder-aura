@@ -113,8 +113,8 @@ the verified checkmark.
   all registered). The user approves the binding once when prompted, or sets
   it in System Settings → Shortcuts. Typing into native Wayland windows goes
   through a separate keyboard-only `org.freedesktop.portal.RemoteDesktop`
-  portal session, approved once and remembered (Settings → System → "Type into
-  every app"). KDE native Wayland and XWayland injection have automated
+  portal session, approved once and remembered (Settings → Advanced → System → "Type
+  into every app"). KDE native Wayland and XWayland injection have automated
   acceptance evidence; GNOME 45+ is expected to work but is not yet verified,
   and the remaining real-desktop/game checks are tracked in
   `docs/LINUX-SHIPPING-PLAN.md`. On a desktop whose portal offers no keyboard

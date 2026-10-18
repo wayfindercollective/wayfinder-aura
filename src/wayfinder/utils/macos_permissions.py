@@ -305,9 +305,11 @@ def ask_for_permission(permission: str) -> bool:
         if request_accessibility_permission(prompt=False) is not True:
             request_accessibility_permission(prompt=True)
             return open_macos_privacy_settings("accessibility")
-        if request_input_monitoring_permission(prompt=False) is not True:
+        trusted = request_input_monitoring_permission(prompt=False)
+        if trusted is not True:
             _reset_stale_entry_once("input_monitoring")
-        if request_input_monitoring_registration() is None:
+        registered = request_input_monitoring_registration()
+        if registered is None or (trusted is not True and not registered):
             request_input_monitoring_permission(prompt=True)
     else:
         return False

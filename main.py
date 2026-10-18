@@ -884,7 +884,7 @@ def main():
         sys.exit(0)
 
     # Crash reports for this (GUI) process: Beta sends by default, Stable only
-    # when turned on (Settings > System). Installed early to catch startup crashes.
+    # when turned on (Settings > Advanced > System). Installed early to catch startup crashes.
     try:
         from wayfinder import __version__ as _aura_version
         from wayfinder.core import crash_reports

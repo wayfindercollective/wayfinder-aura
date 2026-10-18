@@ -92,8 +92,8 @@ involved. There is no switch for it in Settings; to turn it off, set
 When Aura crashes or hits an error it didn't expect, it can send a crash
 report to Wayfinder so the bug gets fixed. **Beta** builds and installs set to
 Beta updates send them unless you turn them off; **Stable** sends nothing
-unless you turn them on. The switch is **Settings → System → Send crash
-reports** (`crash_reports: "on"` / `"off"`).
+unless you turn them on. The switch is **Settings → Advanced → System → Send
+crash reports** (`crash_reports: "on"` / `"off"`).
 
 A report holds the kind of error (for example `KeyError`) and where in Aura's
 own code it happened: file names, function names and line numbers, with your
@@ -185,8 +185,8 @@ carries your audio or transcripts unless you enable a cloud backend (item 6):
 6. **Cloud transcription/cleanup backends** (off by default; your own keys).
 7. **License activation** (only if you activate an Ultra license), as
    described above.
-8. **Crash reports** (on for Beta, off for Stable; Settings → System → Send
-   crash reports), as described above. They never carry audio or text.
+8. **Crash reports** (on for Beta, off for Stable; Settings → Advanced → System →
+   Send crash reports), as described above. They never carry audio or text.
 
 ## Questions
 

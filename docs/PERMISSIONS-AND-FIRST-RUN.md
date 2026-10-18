@@ -52,7 +52,7 @@ Bazzite/Silverblue, zypper on openSUSE), builds whisper.cpp, then the tour.
 
 | What happened | What Aura shows | How to recover |
 |---|---|---|
-| Typing dialog declined (Esc counts) | Dictate-tab banner; the "Type into every app" switch turns off; typing reaches X11 apps only | Settings → System → Type into every app: turn it on, the desktop asks again |
+| Typing dialog declined (Esc counts) | Dictate-tab banner; the "Type into every app" switch turns off; typing reaches X11 apps only | Settings → Advanced → System → Type into every app: turn it on, the desktop asks again |
 | Typing session failed to start, or a restarting portal dropped it | tried again after 5, 30 and 120 s; then the Dictate-tab banner | Turn the switch off and on |
 | Typing session ended by the desktop (or revoked by the user) | Dictate-tab banner | Turn the switch off and on |
 | Portal stops taking keys mid-session | log line, then the normal tools (ydotool/wtype/xdotool) type | Turn the switch off and on |

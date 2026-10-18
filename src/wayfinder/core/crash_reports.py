@@ -22,7 +22,7 @@ Capture:
 Reports are queued as small JSON files and sent in the background to the
 Wayfinder backend (WAYFINDER_AURA_CRASH_URL overrides). The same bug is sent
 once a day per version, at most 20 reports a day; unsent reports are kept
-for 14 days. Turning reports off deletes the queue. Settings > System >
+for 14 days. Turning reports off deletes the queue. Settings > Advanced > System >
 "Send crash reports" (config ``crash_reports``: "" follows the channel,
 "on", "off").
 """

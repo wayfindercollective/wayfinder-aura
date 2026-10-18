@@ -169,7 +169,7 @@ Try these before filing an issue — they cover the most common problems.
 
 ### UI is too small (e.g. 4K)
 
-- Press **Ctrl + Plus**, or open **Settings → UI Scale**.
+- Press **Ctrl + Plus**, or open **Settings → Advanced → System → UI Scale**.
 
 ### Text typed into the wrong place (or nowhere) on Wayland
 
@@ -182,7 +182,7 @@ Try these before filing an issue — they cover the most common problems.
 - **Approve the portal prompt.** The first time, the desktop asks whether Aura
   may type in every app (the activity log says so, then shows
   “✓ Text injection: desktop portal”). If you declined, Aura says so on the Dictate tab and
-  turns **Settings → System → Type into every app** off: turn it back on to be
+  turns **Settings → Advanced → System → Type into every app** off: turn it back on to be
   asked again. KDE shows a
   “Remote Control” icon in the tray while Aura runs; that is the portal's own
   indicator. Without the approval the Flatpak types with xdotool, which

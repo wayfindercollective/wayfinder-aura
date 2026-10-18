@@ -308,6 +308,30 @@ def test_input_monitoring_allow_registers_without_resetting_a_working_grant(monk
                      ("settings", "input_monitoring")]
 
 
+def test_input_monitoring_allow_requests_quartz_prompt_when_iohid_returns_false(monkeypatch):
+    calls = []
+    monkeypatch.setattr(macos_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_permissions, "request_accessibility_permission",
+                        lambda *, prompt: True)
+    monkeypatch.setattr(macos_permissions, "request_input_monitoring_permission",
+                        lambda *, prompt: calls.append(("input", prompt)) or False)
+    monkeypatch.setattr(macos_permissions, "request_input_monitoring_registration",
+                        lambda: calls.append("register") or False)
+    monkeypatch.setattr(macos_permissions, "_reset_own_entry",
+                        lambda name: calls.append(("reset", name)))
+    monkeypatch.setattr(macos_permissions, "open_macos_privacy_settings",
+                        lambda name: calls.append(("settings", name)) or True)
+
+    assert macos_permissions.ask_for_permission("input_monitoring") is True
+    assert calls == [
+        ("input", False),
+        ("reset", "input_monitoring"),
+        "register",
+        ("input", True),
+        ("settings", "input_monitoring"),
+    ]
+
+
 def _patch_build(monkeypatch, build):
     monkeypatch.setattr(macos_permissions, "_build_identity", lambda: build)
 

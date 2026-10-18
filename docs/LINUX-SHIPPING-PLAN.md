@@ -46,7 +46,7 @@ behaves the same everywhere.
    portal session that died without a Closed signal (a portal backend restart)
    is marked failed, logged, and handed to the normal tool selection instead of
    silently typing nothing (2026-10-04).
-   Settings → System → "Type into every app" turns it off (or asks again after
+   Settings → Advanced → System → "Type into every app" turns it off (or asks again after
    a decline).
    KDE shows a "Remote Control Started" notice when the session starts and a
    "Remote Control" tray icon while Aura runs: the portal's own indicator.
