@@ -127,6 +127,22 @@
   </supports>
 
   <releases>
+    <release version="1.2.1-beta.5" date="2026-10-18" type="development">
+      <description>
+        <p>Beta built from main on 2026-10-18. Changes since the last stable release:</p>
+        <ul>
+          <li>Windows: Aura offers a restart when it stops answering the hotkey.</li>
+          <li>Windows: diagnostics for the dictation pill and for sleep.</li>
+          <li>Settings shows only what most people need.</li>
+          <li>The Mic Test moved to the Dictate tab,</li>
+          <li>macOS permissions and Ultra setup flow.</li>
+          <li>Periodic update checks while running.</li>
+          <li>The desktop asks one question at a time on first run, and the tour says what is coming.</li>
+          <li>Typing into every app recovers by itself.</li>
+          <li>The AppImage tells the desktop who is asking.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-10-05">
       <description>
         <p>Linux: dictation for gamers on every desktop.</p>
