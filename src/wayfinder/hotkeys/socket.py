@@ -128,6 +128,9 @@ def socket_listener(
                 elif data_str == "cancel":
                     log("✕ Cancel recording received via socket")
                     event_queue.put((EventType.CANCEL_RECORDING, None))
+                elif data_str == "update":
+                    log("⟳ Check for updates received via socket")
+                    event_queue.put((EventType.CHECK_UPDATES, None))
                 elif data_str == "quit":
                     # Tray "Quit" — clean full shutdown.
                     log("👋 Quit received via socket")

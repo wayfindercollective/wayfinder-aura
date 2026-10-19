@@ -16265,6 +16265,12 @@ class WayfinderApp(ctk.CTk):
             self._update_channel_var, self._on_update_channel_changed,
             tooltip=SETTING_TOOLTIPS["update_channel"], width=160,
         )
+        self.create_setting_row(
+            parent,
+            f"Installed Version (v{current_version})",
+            "Check for Updates",
+            self._check_app_update_now,
+        )
         from wayfinder.core.crash_reports import reports_enabled
 
         self._crash_reports_var = ctk.BooleanVar(

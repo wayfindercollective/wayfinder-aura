@@ -3185,10 +3185,8 @@ def run_overlay():
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Open Settings").triggered.connect(lambda: _tray_send("show"))
                 _tray_menu.addAction("Hide to tray").triggered.connect(lambda: _tray_send("hide"))
-                if sys.platform == "win32":
-                    # Mirrors the Mac menu-bar "Check for Updates…" item.
-                    _tray_menu.addAction("Check for Updates…").triggered.connect(
-                        lambda: _tray_send("update"))
+                _tray_menu.addAction("Check for Updates…").triggered.connect(
+                    lambda: _tray_send("update"))
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Quit").triggered.connect(lambda: _tray_send("quit"))
                 tray_icon.setContextMenu(_tray_menu)
