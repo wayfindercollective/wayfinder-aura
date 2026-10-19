@@ -229,6 +229,9 @@ elif [[ "${SKIP_FLATPAK}" -eq 1 ]]; then
 fi
 
 flatpak info --user "${APP_ID}" >/dev/null
+# Ensure standalone GitHub-release Flatpak installs can self-update in place
+# via flatpak-spawn --host (src/wayfinder/core/app_installer.py).
+flatpak override --user --talk-name=org.freedesktop.Flatpak "${APP_ID}" >/dev/null 2>&1 || true
 # `flatpak info` exposes no version flag (verified on 1.16), so read the
 # human-readable Version: field. This gate runs before any host file is
 # installed — anything that breaks here aborts the whole install, so pin

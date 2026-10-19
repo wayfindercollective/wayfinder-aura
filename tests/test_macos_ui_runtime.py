@@ -16,8 +16,8 @@ import wayfinder_main
 def test_disappearing_uses_separate_qt_process_only_on_macos():
     assert wayfinder_main.visual_overlay_mode("darwin", "disappearing") == "transient"
     assert wayfinder_main.visual_overlay_mode("darwin", "always_on") == "persistent"
-    assert wayfinder_main.visual_overlay_mode("linux", "disappearing") is None
-    assert wayfinder_main.visual_overlay_mode("win32", "disappearing") is None
+    assert wayfinder_main.visual_overlay_mode("linux", "disappearing") == "transient"
+    assert wayfinder_main.visual_overlay_mode("win32", "disappearing") == "transient"
 
 
 @pytest.mark.parametrize("tray_required", [False, True])
