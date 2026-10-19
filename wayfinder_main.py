@@ -3752,10 +3752,10 @@ def resolve_status_indicator_target(
 
 
 def visual_overlay_mode(platform: str, overlay_type: str) -> str | None:
-    """Use a separate Qt process when a hidden Mac app needs a visible pill."""
+    """Use the PyQt6 glassmorphic overlay for both persistent and disappearing modes."""
     if overlay_type == "always_on":
         return "persistent"
-    if platform == "darwin" and overlay_type == "disappearing":
+    if overlay_type == "disappearing":
         return "transient"
     return None
 
@@ -9963,7 +9963,7 @@ class WayfinderApp(ctk.CTk):
         self.overlay_type_var = ctk.StringVar(value=overlay_type)
         overlay_type_labels = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)",
         }
         self.overlay_type_dropdown = self.create_dropdown_row(
             overlay_adv, "Indicator Style",
@@ -13084,16 +13084,27 @@ class WayfinderApp(ctk.CTk):
         except ImportError:
             return False
         try:
+            initial_style = (
+                "raw"
+                if self.config.get("raw_transcription", False)
+                else self.config.get("output_tone", "minimal")
+            )
+            cancel_hint = (
+                (self._cancel_hotkey_display() or "")
+                if hasattr(self, "_cancel_hotkey_display")
+                else ""
+            )
             self.overlay_controller = OverlayController(
                 audio_level_callback=None if tray_only else self._audio_level_for_overlay,
                 mode=("persistent" if tray_only else
                       visual_overlay_mode(sys.platform, self.config.get("overlay_type", "always_on"))
                       or "persistent"),
-                initial_style=self.config.get("output_tone", "minimal"),
+                initial_style=initial_style,
                 config=self.config,
                 log_callback=self.log,
                 want_tray=want_tray or tray_only,
                 tray_only=tray_only,
+                cancel_hint=cancel_hint,
             )
             if not self.overlay_controller._start_process():
                 self.overlay_controller = None
@@ -16254,6 +16265,12 @@ class WayfinderApp(ctk.CTk):
             self._update_channel_var, self._on_update_channel_changed,
             tooltip=SETTING_TOOLTIPS["update_channel"], width=160,
         )
+        self.create_setting_row(
+            parent,
+            f"Installed Version (v{current_version})",
+            "Check for Updates",
+            self._check_app_update_now,
+        )
         from wayfinder.core.crash_reports import reports_enabled
 
         self._crash_reports_var = ctk.BooleanVar(
@@ -17806,32 +17823,38 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
     
     def on_overlay_type_changed(self, value: str):
-        """Handle overlay type change - requires restart for clean switch."""
+        """Handle overlay type change — hot-swaps the PyQt6 overlay live."""
         old_value = self.config.get("overlay_type", "always_on")
         self.config["overlay_type"] = value
         save_config(self.config)
         
         type_names = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)",
         }
         self.log(f"⚙ Status indicator: {type_names.get(value, value)}")
         
         if value == old_value:
             return  # No change
         
-        # Kill tracked overlay (pidfile / controller) — never pattern pkill.
-        try:
-            if getattr(self, "overlay_controller", None):
-                self.overlay_controller.stop()
-            from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
-            kill_stale_overlay_from_pidfile()
-        except Exception:
-            pass
-        
-        self.log("  ℹ️ Restart the app to apply the change")
+        want_tray = self._stop_overlay_process() or should_host_qt_tray(
+            sys.platform, IS_FLATPAK, self.config.get("enable_tray_icon", True)
+        )
+        if getattr(self, "floating_indicator", None) is not None:
+            try:
+                self.floating_indicator.destroy()
+            except Exception:
+                pass
+            self.floating_indicator = None
 
-        # Show inline restart banner
+        if self.config.get("overlay_enabled", True):
+            if self._start_live_overlay_controller(tray_only=False, want_tray=want_tray):
+                return
+        elif want_tray:
+            if self._start_live_overlay_controller(tray_only=True, want_tray=True):
+                return
+
+        self.log("  ℹ️ Restart the app to apply the change")
         try:
             self._show_restart_banner()
         except Exception as e:

@@ -1790,6 +1790,8 @@ class GlassmorphicOverlay(QWidget):
         focus on the next show.
         """
         self.setWindowOpacity(opacity)
+        if opacity <= 0.01 or self._backend == "kwin":
+            self.update()
     
     def _calculate_target_width(self, text: str, style: Optional[str] = None) -> int:
         """Calculate required width for text and wave (with ``style``'s badge,
@@ -2038,6 +2040,13 @@ class GlassmorphicOverlay(QWidget):
             if mode in ("persistent", "transient"):
                 # Keep the surface mapped; a future show() would steal focus.
                 self.setGeometry(-9999, -9999, self.width(), self.height())
+                self.move(-9999, -9999)
+                try:
+                    if self.windowHandle():
+                        from PyQt6.QtCore import QPoint
+                        self.windowHandle().setPosition(QPoint(-9999, -9999))
+                except Exception:
+                    pass
             else:
                 # Standard mode: actually hide
                 self.hide()
@@ -2091,6 +2100,13 @@ class GlassmorphicOverlay(QWidget):
                 )
         else:
             self.setGeometry(x, y, final_width, final_height)
+            self.move(x, y)
+            try:
+                if self.windowHandle():
+                    from PyQt6.QtCore import QPoint
+                    self.windowHandle().setPosition(QPoint(x, y))
+            except Exception:
+                pass
         
         # Start transparent BEFORE mapping so the first mapped frame is invisible, then
         # fade up. Force the window to 0 directly (the value-setter guard skips the emit
@@ -2316,6 +2332,8 @@ class GlassmorphicOverlay(QWidget):
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
             painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            if self._state == OverlayState.HIDDEN and self._opacity.value <= 0.01:
+                return
 
             # Calculate centered rect for the squircle
             # Margin provides room for subtle glow
@@ -2769,9 +2787,7 @@ def run_overlay():
         # Map once while transparent and offscreen. On each dictation the
         # existing window only moves and fades; no new show/raise steals the
         # insertion target's focus.
-        content_width = max(
-            overlay._calculate_target_width(lbl) for lbl in STATE_LABELS.values()
-        )
+        content_width = overlay._static_content_width()
         final_width = content_width + (overlay.glow_margin * 2)
         overlay._static_width = final_width
         overlay.setFixedSize(final_width, overlay.widget_height)
@@ -2886,13 +2902,14 @@ def run_overlay():
             if level_commands:
                 handle_command(overlay, level_commands[-1])
 
-            # Watchdog: if stuck in active state with no commands, auto-return to READY
+            # Watchdog: if stuck in active state with no commands, auto-return to idle
             if not _stdin_eof[0] and overlay._state in (OverlayState.LISTENING, OverlayState.PROCESSING):
                 elapsed = _time_mod.time() - _last_command_time[0]
                 if elapsed > _COMMAND_TIMEOUT:
-                    _debug_log(f"WATCHDOG: no commands for {elapsed:.0f}s, returning to READY")
-                    overlay.set_state(OverlayState.READY)
-                    _update_tray(OverlayState.READY)
+                    idle_state = OverlayState.HIDDEN if mode == "transient" else OverlayState.READY
+                    _debug_log(f"WATCHDOG: no commands for {elapsed:.0f}s, returning to {idle_state.name}")
+                    overlay.set_state(idle_state)
+                    _update_tray(idle_state)
 
         except Exception as e:
             _debug_log(f"process_commands error: {e}")
@@ -2972,7 +2989,7 @@ def run_overlay():
                                                      screen.geometry().width(), screen.geometry().height()],
                 # Starting up (faded in after the boot hold) or about to be
                 # shown (parked off-screen for 50 ms): not a fault yet.
-                "settling": bool(getattr(overlay, "_boot_hold_reveal", False)) or geo.x() <= -5000,
+                "settling": bool(getattr(overlay, "_boot_hold_reveal", False)) or geo.x() <= -5000 or overlay._state == OverlayState.HIDDEN,
             }
             _diag_state["paints"] = paints
             return diag
@@ -3168,10 +3185,8 @@ def run_overlay():
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Open Settings").triggered.connect(lambda: _tray_send("show"))
                 _tray_menu.addAction("Hide to tray").triggered.connect(lambda: _tray_send("hide"))
-                if sys.platform == "win32":
-                    # Mirrors the Mac menu-bar "Check for Updates…" item.
-                    _tray_menu.addAction("Check for Updates…").triggered.connect(
-                        lambda: _tray_send("update"))
+                _tray_menu.addAction("Check for Updates…").triggered.connect(
+                    lambda: _tray_send("update"))
                 _tray_menu.addSeparator()
                 _tray_menu.addAction("Quit").triggered.connect(lambda: _tray_send("quit"))
                 tray_icon.setContextMenu(_tray_menu)

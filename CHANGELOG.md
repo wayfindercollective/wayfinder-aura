@@ -21,6 +21,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The Disappearing indicator now uses the glassmorphic pill on every platform.**
+  Choosing **Disappearing** in Settings shows the same glassmorphic pill (`Raw`,
+  live waveform, `Shift+Esc` cancel hint, and `Processing…`) during dictation
+  and hides it completely when idle, with live switching in Settings.
 - **Settings shows only what most people need.** Microphone, audio ducking,
   speech model, GPU, language, cleanup, hotkey and the overlay switch stay up
   front. Backend, Chunk Processing, hotkey devices, UI scale, update channel,
@@ -32,6 +36,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Linux Flatpak updates install in place and Settings includes a Check for Updates button.**
+  Standalone GitHub Release Flatpak installs now download, verify, and install
+  updates directly inside Aura (**Install Update**) instead of handing the
+  bundle to external software centers, and **Check for Updates** is available
+  in **Settings → Advanced → System** as well as the Linux tray menu.
 - **macOS permissions and Ultra setup flow.** Activating Ultra now shows live
   download progress for the recommended Large v3 Turbo Q5 speech model, skips
   the permissions checklist when hotkeys are already live, auto-closes the

@@ -102,9 +102,47 @@ class TestInstallMode:
         image.write_bytes(b"x")
         monkeypatch.setattr(app_installer.sys, "platform", "linux")
         monkeypatch.setattr(app_installer, "appimage_path", lambda: image)
+        monkeypatch.setattr(app_installer, "flatpak_bundle_info", lambda: None)
         assert app_installer.install_mode() == "appimage"
         monkeypatch.setattr(app_installer, "appimage_path", lambda: None)
         assert app_installer.install_mode() is None
+
+    def test_standalone_flatpak_with_host_access_self_updates_flathub_does_not(
+        self, monkeypatch, tmp_path
+    ):
+        import wayfinder.utils.platform as plat
+
+        info_file = tmp_path / ".flatpak-info"
+        info_file.write_text(
+            "[Application]\nname=io.wayfindercollective.WayfinderAura\n"
+            "[Instance]\ninstance-id=12345\n"
+            "app-path=/home/u/.local/share/flatpak/app/io.wayfindercollective.WayfinderAura/x86_64/master/abc/files\n"
+            "app-commit=abc123\n"
+            "[Session Bus Policy]\norg.freedesktop.Notifications=talk\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(app_installer.sys, "platform", "linux")
+        monkeypatch.setattr(app_installer, "appimage_path", lambda: None)
+        monkeypatch.setattr(plat, "is_flatpak", lambda: True)
+        monkeypatch.setattr(app_installer.shutil, "which", lambda cmd: "/usr/bin/flatpak-spawn")
+        monkeypatch.setattr(app_installer, "FLATPAK_INFO_PATH", info_file)
+
+        # Flathub/strict sandbox without org.freedesktop.Flatpak=talk: None
+        assert app_installer.flatpak_bundle_info() is None
+        assert app_installer.install_mode() is None
+
+        # Standalone GitHub bundle with org.freedesktop.Flatpak=talk: "flatpak"
+        info_file.write_text(
+            info_file.read_text(encoding="utf-8") + "org.freedesktop.Flatpak=talk\n",
+            encoding="utf-8",
+        )
+        info = app_installer.flatpak_bundle_info()
+        assert info == app_installer.FlatpakBundleInfo(
+            app_id="io.wayfindercollective.WayfinderAura",
+            instance_id="12345",
+            app_commit="abc123",
+        )
+        assert app_installer.install_mode() == "flatpak"
 
     def test_prepare_update_without_a_mode_is_a_quiet_fallback(self, monkeypatch):
         monkeypatch.setattr(app_installer, "install_mode", lambda: None)
@@ -342,6 +380,56 @@ class TestSwapHelpers:
         assert (tmp_path / "ran").read_text().split() == ["old"]
         assert 'echo old' in target.read_text()
         assert (tmp_path / "failed").exists() and not (tmp_path / ".previous").exists()
+
+    def _flatpak(self, tmp_path, confirm=True, token=None, wait=3):
+        staged = tmp_path / ".io.wayfindercollective.WayfinderAura.flatpak.update"
+        staged.write_bytes(b"flatpak\x00bundle")
+        tok = token or "${2##*=}"
+        run_body = (
+            f'echo "run $*" >> "{tmp_path}/fp_log"\n'
+            + (
+                f'if [ "${{2%%=*}}" = "--env" ]; then '
+                f'echo "{tok} 2" > "{tmp_path}/launched"; sleep 3; fi\n'
+                if confirm
+                else 'if [ "${2%%=*}" = "--env" ]; then sleep 30; fi\n'
+            )
+        )
+        fake_fp = self._script(
+            tmp_path / "fake-flatpak.sh",
+            f'cmd="$1"; shift\n'
+            f'case "$cmd" in\n'
+            f'  ps) exit 0 ;;\n'
+            f'  install) echo "install $*" >> "{tmp_path}/fp_log"; exit 0 ;;\n'
+            f'  run) {run_body} ;;\n'
+            f'  kill) echo "kill $*" >> "{tmp_path}/fp_log"; exit 0 ;;\n'
+            f'  update) echo "update $*" >> "{tmp_path}/fp_log"; exit 0 ;;\n'
+            f'esac\n',
+        )
+        args = [
+            "/bin/sh", "-c", app_installer._flatpak_helper_script(), "t",
+            "99999", "io.wayfindercollective.WayfinderAura", str(staged),
+            str(tmp_path / "failed"), str(tmp_path / "launched"), str(wait),
+            self.TOKEN, "oldcommit123", str(fake_fp),
+        ]
+        return staged, args
+
+    def test_flatpak_swap_installs_bundle_and_confirms(self, tmp_path):
+        staged, args = self._flatpak(tmp_path, confirm=True)
+        subprocess.run(args, check=True, timeout=30)
+        assert not staged.exists()
+        assert not (tmp_path / "failed").exists()
+        log = (tmp_path / "fp_log").read_text().splitlines()
+        assert any("install --user --noninteractive --or-update -y --bundle" in line for line in log)
+        assert any(f"run --user --env=AURA_UPDATE_TOKEN={self.TOKEN}" in line for line in log)
+
+    def test_flatpak_unconfirmed_launch_rolls_back_commit(self, tmp_path):
+        staged, args = self._flatpak(tmp_path, confirm=False, wait=2)
+        subprocess.run(args, check=True, timeout=30)
+        assert not staged.exists()
+        assert (tmp_path / "failed").exists()
+        log = (tmp_path / "fp_log").read_text().splitlines()
+        assert any("update --user --noninteractive -y --commit=oldcommit123" in line for line in log)
+        assert log[-1] == "run --user io.wayfindercollective.WayfinderAura"
 
 
 class TestLeftovers:
