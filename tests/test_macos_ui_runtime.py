@@ -488,8 +488,8 @@ def test_tab_switch_raises_persistent_opaque_pages_instead_of_unmapping_them():
     # without glass); pages inside keep the opaque _tab_surface_kwargs().
     assert '**self._content_pane_kwargs()' in setup_source
     assert wayfinder_main._tab_surface_kwargs("darwin") == {
-        "fg_color": wayfinder_main.COLORS["bg_base"],
-        "bg_color": wayfinder_main.COLORS["bg_base"],
+        "fg_color": wayfinder_main.COLORS["bg_card"],
+        "bg_color": wayfinder_main.COLORS["bg_card"],
         "corner_radius": 0,
     }
     assert wayfinder_main._tab_surface_kwargs("linux") == {

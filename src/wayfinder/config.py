@@ -338,6 +338,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_server_port": 8178,
     
     # UI settings
+    # A presentation preference only: both views edit the same settings above.
+    "advanced_mode": False,
     "start_minimized": False,
     "enable_tray_icon": True,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names

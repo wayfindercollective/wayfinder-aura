@@ -22,7 +22,6 @@ import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from enum import Enum, auto
 from pathlib import Path
 
 import tkinter as tk
@@ -184,6 +183,7 @@ from wayfinder.config import (
     normalize_duck_percent,
     save_config,
 )
+from wayfinder.state import AppState
 from wayfinder.utils.platform import (
     get_portal_app_id,
     get_user_llm_models_dir,
@@ -205,6 +205,9 @@ from wayfinder.ui.window_geometry import (
 )
 from wayfinder.ui.tooltip_geometry import anchor_in_area, tooltip_position, tooltip_wraplength
 from wayfinder.ui.advanced_section import ADVANCED_GROUPS, advanced_slot, groups_to_show
+from wayfinder.ui.basic_mode import basic_mode_enabled, indicator_updates
+from wayfinder.ui.surfaces import panel_style
+from wayfinder.ui.scrollbars import apply_scrollbar_theme, sync_scrollbar_visibility
 from wayfinder.ui.macos_window import (
     TRANSPARENT as MACOS_TRANSPARENT,
     apply_glass_palette as apply_macos_glass_palette,
@@ -484,15 +487,6 @@ def get_gpu_info() -> GPUInfo:
     return _cached_gpu_info
 
 
-# === State Machine ===
-
-class AppState(Enum):
-    IDLE = auto()
-    RECORDING = auto()
-    PROCESSING = auto()
-    PASTING = auto()
-
-
 # === Premium Design System (2025) ===
 # Pre-blended colors for depth simulation (Tkinter doesn't support alpha)
 # Base: #0D1117 (Deep Ink) - all blends calculated against this
@@ -507,6 +501,10 @@ COLORS = {
     "bg_hover_strong": "#1B2D48",   # Hover = 25% accent glow — obvious selection (dropdown rows)
     "bg_elevated": "#2D333B",       # Pressed/elevated elements
     "bg_input": "#13171D",          # Input fields - slightly recessed
+
+    # Scroll controls stay visible against both standard and glass panels.
+    "scrollbar_thumb": "#647084",
+    "scrollbar_thumb_hover": "#8795AA",
     
     # Accent - brand blue (matches tray / app icon arrow)
     "accent": "#4682DC",            # Primary accent — same family as assets/icon.png
@@ -574,8 +572,8 @@ def _tab_surface_kwargs(platform_name: str | None = None) -> dict:
     active_platform = platform_name or sys.platform
     if active_platform == "darwin":
         return {
-            "fg_color": COLORS["bg_base"],
-            "bg_color": COLORS["bg_base"],
+            "fg_color": COLORS["bg_card"],
+            "bg_color": COLORS["bg_card"],
             "corner_radius": 0,
         }
     return {"fg_color": "transparent"}
@@ -583,9 +581,11 @@ def _tab_surface_kwargs(platform_name: str | None = None) -> dict:
 # Corner radius design tokens for consistent rounded corners.
 # Mirrored in src/wayfinder/ui/theme.py (RADIUS) — keep both in sync.
 RADIUS = {
+    "none": 0,  # Flat pages within a shared panel have no separate edge.
     "xs": 6,    # Chips, progress bars, tight inline elements
     "sm": 8,    # Small elements (toggles, chips, badges)
     "md": 12,   # Buttons, inputs, dropdowns
+    "pane": 18, # Secondary panes: 12px cards + the existing 6px page inset.
     "lg": 24,   # Bento tiles - 24px for squircle feel
     "xl": 28,   # Hero sections, modals
 }
@@ -1536,7 +1536,9 @@ def _patch_ctk_scrollbar_quiet_draw() -> None:
         saved = canvas.update_idletasks
         canvas.update_idletasks = lambda: None  # type: ignore[method-assign]
         try:
-            return _orig_draw(self, no_color_updates=no_color_updates)
+            result = _orig_draw(self, no_color_updates=no_color_updates)
+            sync_scrollbar_visibility(self)
+            return result
         finally:
             canvas.update_idletasks = saved  # type: ignore[method-assign]
 
@@ -1568,7 +1570,9 @@ def _patch_ctk_button_aqua_release() -> None:
     """
     if sys.platform != "darwin" or getattr(ctk.CTkButton, "_wf_aqua_release", False):
         return
-    original = ctk.CTkButton._on_release
+    original = getattr(ctk.CTkButton, "_on_release", None)
+    if original is None:
+        return  # CTk 5.2 uses _clicked; this is only the 6.x release regression.
 
     def _aqua_on_release(self, event=None):  # noqa: ANN001
         if event is not None:
@@ -1675,7 +1679,7 @@ SETTING_TOOLTIPS = {
     "overlay_type": (
         "Always On: the pill stays on screen and never takes focus.\n"
         "Disappearing: it shows only while you dictate.\n"
-        "Applies after a restart."
+        "Applies immediately."
     ),
     "overlay_enabled": (
         "Show the floating status pill (Listening, Processing, Ready). "
@@ -6728,6 +6732,9 @@ class WayfinderApp(ctk.CTk):
         native = getattr(self, "_macos_hero_layer", None)
         if native is not None:
             self.after(100, native.update_geometry)
+        native_mic = getattr(self, "_macos_mic_button", None)
+        if native_mic is not None:
+            self.after(100, native_mic.update_geometry)
 
     # Consistent base dimensions for the window
     BASE_WINDOW_WIDTH = 480
@@ -7016,15 +7023,17 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 _WHEEL_SCROLL_ACTIVE = False
 
-        def _scroll_under_pointer(event, notches: float):
+        def _scroll_under_pointer(event, notches: float, *, skip_text=False):
             try:
                 widget = self.winfo_containing(event.x_root, event.y_root)
             except Exception:
                 return None
-            # Text/entry widgets scroll themselves via Tk class bindings
-            # (correct on Tk 9), so let the event through.
+            # Text widgets normally scroll themselves. Their pre-class wheel
+            # hook can hand input back here when they cannot move any further.
             if isinstance(widget, tk.Text):
-                return None
+                if not skip_text:
+                    return None
+                widget = getattr(widget, "master", None)
             while widget is not None:
                 if isinstance(widget, ctk.CTkScrollableFrame):
                     try:
@@ -7094,25 +7103,29 @@ class WayfinderApp(ctk.CTk):
             return None
 
         # Windows and Tk 9/X11 use ±120 wheel deltas; macOS trackpads emit
-        # small high-resolution deltas. Normalize without crushing Aqua input.
-        if IS_MACOS:
-            _last_wheel = [0.0]
+        # small high-resolution deltas. Text handoffs use this same path once.
+        _last_wheel = [0.0]
 
-            def _aqua_wheel(e):
+        def _dispatch_wheel(event, *, skip_text=False):
+            num = getattr(event, "num", None)
+            if num in (4, 5):
+                notches = -1 if num == 4 else 1
+            elif IS_MACOS:
                 now = time.monotonic()
                 gap, _last_wheel[0] = now - _last_wheel[0], now
-                return _scroll_under_pointer(e, _aqua_wheel_notches(e.delta, gap))
+                notches = _aqua_wheel_notches(event.delta, gap)
+            else:
+                notches = _wheel_event_notches(event.delta)
+            return _scroll_under_pointer(event, notches, skip_text=skip_text)
 
-            self.bind_all("<MouseWheel>", _aqua_wheel, add="+")
-        else:
-            self.bind_all(
-                "<MouseWheel>",
-                lambda e: _scroll_under_pointer(e, _wheel_event_notches(e.delta)),
-                add="+",
-            )
+        self.bind_all("<MouseWheel>", _dispatch_wheel, add="+")
         # Legacy X11 (pre-Tk9): one Button-4/5 press per notch.
-        self.bind_all("<Button-4>", lambda e: _scroll_under_pointer(e, -1), add="+")
-        self.bind_all("<Button-5>", lambda e: _scroll_under_pointer(e, 1), add="+")
+        self.bind_all("<Button-4>", _dispatch_wheel, add="+")
+        self.bind_all("<Button-5>", _dispatch_wheel, add="+")
+
+        from wayfinder.ui.text_scroll import install_text_scroll_chaining
+
+        install_text_scroll_chaining(self, lambda e: _dispatch_wheel(e, skip_text=True))
 
     # --- In-window dropdown panel -------------------------------------------
     # InlineOptionMenu routes its open list here instead of a native tk.Menu
@@ -7332,8 +7345,8 @@ class WayfinderApp(ctk.CTk):
             rows_parent = ctk.CTkScrollableFrame(
                 panel,
                 fg_color="transparent",
-                scrollbar_button_color=COLORS["bg_hover"],
-                scrollbar_button_hover_color=COLORS["accent_dim"],
+                scrollbar_button_color=COLORS["scrollbar_thumb"],
+                scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
                 corner_radius=RADIUS["sm"],
             )
         else:
@@ -7649,6 +7662,9 @@ class WayfinderApp(ctk.CTk):
                 pass
     
     def setup_ui(self) -> None:
+        # main.py selects CTk's base theme before this method. Apply product
+        # defaults now, including text boxes and pickers without overrides.
+        apply_scrollbar_theme(ctk.ThemeManager.theme)
         # === Typography ===
         # DejaVu Sans IS the product typeface, by decision (2026-07-30): the
         # look the product was designed/approved against always rendered as
@@ -7710,17 +7726,14 @@ class WayfinderApp(ctk.CTk):
         # === Header ===
         self._create_header(content)
         
-        # === Hero Section (Always visible) ===
-        self._create_hero_section(content)
-        
-        # === Main Body: Sidebar + Content ===
-        body_container = ctk.CTkFrame(content, fg_color="transparent")
-        body_container.pack(fill="both", expand=True)
-        
-        # Configure grid for sidebar layout
-        body_container.grid_columnconfigure(0, weight=0, minsize=180)  # Sidebar fixed width
-        body_container.grid_columnconfigure(1, weight=1)  # Content expands
-        body_container.grid_rowconfigure(0, weight=1)
+        # A single surface in the default view; the original sidebar workspace
+        # remains available without recreating the hero or its native renderer.
+        from wayfinder.ui.workspace import Workspace
+
+        self._workspace = Workspace(self, content)
+        self._create_hero_section(self._workspace.frame)
+        self.hero_frame.pack_configure(before=self._workspace.nav)
+        body_container = self._workspace.body
         
         # === Sidebar Navigation ===
         self._create_sidebar(body_container)
@@ -7734,6 +7747,7 @@ class WayfinderApp(ctk.CTk):
             **self._content_pane_kwargs(),
         )
         self.tab_content_container.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        self._tab_pane = self.tab_content_container
         if MAC_LOOK:
             # Pages live in an inset host so the pane's rounded corners and rim
             # stay visible (the Mac insets its placed pages the same way).
@@ -7748,6 +7762,8 @@ class WayfinderApp(ctk.CTk):
             # is within a pixel of the straight edge.
             self.tab_content_container.pack(
                 fill="both", expand=True, padx=CONTENT_PANE_INSET, pady=RADIUS["lg"] // 2)
+
+        self._workspace.attach(self._sidebar, self._tab_pane)
         
         # Create tab frames
         self.tab_frames = {}
@@ -8110,7 +8126,18 @@ class WayfinderApp(ctk.CTk):
         
         # Right side controls container
         right_controls = ctk.CTkFrame(header, fg_color="transparent")
+        self._header_right_controls = right_controls
         right_controls.pack(side="right")
+        self._header_upgrade_button = None
+        if not is_ultra:
+            self._header_upgrade_button = ctk.CTkButton(
+                right_controls, text="Upgrade to Ultra", width=132, height=30,
+                font=(self.font_body[0], self.font_sizes["small"], "bold"),
+                fg_color=COLORS["bg_input"], hover_color=COLORS["bg_elevated"],
+                text_color=COLORS["accent_yellow"], corner_radius=RADIUS["md"],
+                command=lambda: self._show_premium_prompt("large_models"),
+            )
+            self._header_upgrade_button.pack(side="right")
         
         # Aqua already provides Close and Minimize in the native traffic-light
         # frame. Duplicating them inside the header looked non-native and gave
@@ -8145,6 +8172,7 @@ class WayfinderApp(ctk.CTk):
         
         # === Quick Scale Controls (always visible for accessibility) ===
         scale_frame = ctk.CTkFrame(right_controls, fg_color="transparent")
+        self._header_scale_controls = scale_frame
         scale_frame.pack(side="right", padx=(0, 12))
         
         # Rescue button (emergency reset) - icon only
@@ -8221,7 +8249,8 @@ class WayfinderApp(ctk.CTk):
             # above the hero frame, so pack before it to preserve column order.
             self._create_header(parent)
             try:
-                hero = getattr(self, "hero_frame", None)
+                workspace = getattr(self, "_workspace", None)
+                hero = workspace.frame if workspace is not None else getattr(self, "hero_frame", None)
                 if hero is not None and hero.winfo_exists():
                     self._header_frame.pack_configure(before=hero)
             except Exception:
@@ -8256,19 +8285,22 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
 
+        workspace = getattr(self, "_workspace", None)
+        if workspace is not None:
+            workspace._mode = None
+            workspace.refresh()
+        WayfinderApp._refresh_basic_settings(self)
+
     def _create_hero_section(self, parent) -> None:
         """Create the hero section with visualizer and mic button."""
         # Hero card with layered depth effect
         self.hero_frame = ctk.CTkFrame(
-            parent,
-            fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"],
-            border_width=1,
-            border_color=COLORS["border_rim"],  # pre-blended 10% blue rim (resting depth)
+            parent, **panel_style("workspace", COLORS),
         )
         self.hero_frame.pack(fill="x", pady=(0, 12))
         
         hero_inner = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
+        self._hero_inner = hero_inner
         hero_inner.pack(fill="x", padx=20, pady=16)
         
         # === Waveform Visualizer Canvas - elegant silk ribbon ===
@@ -8316,6 +8348,7 @@ class WayfinderApp(ctk.CTk):
         
         # === Mic Button Container (centered) ===
         mic_container = ctk.CTkFrame(hero_inner, fg_color="transparent")
+        self._hero_mic_container = mic_container
         mic_container.pack()
         
         # Glowing mic button canvas
@@ -8325,13 +8358,14 @@ class WayfinderApp(ctk.CTk):
             height=_mic_canvas_px(self.ui_scale),
             bg=COLORS["bg_card"],
             highlightthickness=0,
-            cursor="hand2",
+            cursor="pointinghand" if IS_MACOS else "hand2",
         )
         self.mic_button_canvas.pack()
         self.mic_button_canvas.bind("<Button-1>", lambda e: self.on_record_button())
         # Hover glow — one redraw per Enter/Leave (no timers). Bound on the canvas only.
         self.mic_button_canvas.bind("<Enter>", lambda e: self._on_mic_hover(True))
         self.mic_button_canvas.bind("<Leave>", lambda e: self._on_mic_hover(False))
+        self.mic_button_canvas.bind("<Map>", self._on_mic_canvas_map, add="+")
         
         # STABILITY FIX: Pre-created mic button item tracking
         self._mic_items_created = False
@@ -8351,22 +8385,33 @@ class WayfinderApp(ctk.CTk):
         )
         self.status_label.pack(pady=(SPACING["md"], 0))
 
-        # Hotkey as primary CTA (mono token, mirrors welcome step 2).
-        self.hotkey_label = ctk.CTkLabel(
-            hero_inner,
-            text=self.get_hotkey_display(),
-            font=(self.font_mono[0], self.font_sizes["title"], "bold"),
-            text_color=COLORS["accent"],
+        # A quiet keycap, rather than a second oversized blue headline.
+        self._hero_hotkey_chip = ctk.CTkFrame(
+            hero_inner, fg_color=COLORS["bg_input"], corner_radius=RADIUS["sm"],
+            border_width=1, border_color=COLORS["border_subtle"],
         )
-        self.hotkey_label.pack(pady=(SPACING["sm"], 0))
+        self._hero_hotkey_chip.pack(pady=(SPACING["sm"], 0))
+        self.hotkey_label = ctk.CTkLabel(
+            self._hero_hotkey_chip,
+            text=self.get_hotkey_display(),
+            font=(self.font_mono[0], self.font_sizes["small"]),
+            text_color=COLORS["text_secondary"],
+        )
+        self.hotkey_label.pack(padx=SPACING["md"], pady=SPACING["xs"])
         self._hero_hotkey_hint = ctk.CTkLabel(
             hero_inner,
             text=self._hero_hotkey_hint_text(),
             font=(self.font_body[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
         )
-        self._hero_hotkey_hint.pack(pady=(SPACING["xs"], 0))
+        # Retain the hint model for existing state/accessibility callers, but
+        # don't put instructional copy under an otherwise self-evident button.
     
+    def _on_mic_canvas_map(self, event=None) -> None:
+        # Once mapped, Aqua can attach a backing-resolution image layer.
+        # One event-driven redraw; no additional idle/animation timer.
+        self.after_idle(lambda: self._draw_mic_button(STATE_COLORS[self.app_state]))
+
     def _on_mic_hover(self, entering: bool) -> None:
         """Redraw the mic button once on Enter/Leave with a brighter glow while hovered.
         Re-reads the live app state (race guard) so a state change mid-hover can't paint
@@ -8425,6 +8470,26 @@ class WayfinderApp(ctk.CTk):
         cache[key] = photo
         return photo
 
+    def _present_macos_mic_button(self, color, *, active=False, pulse=None, hover=False) -> bool:
+        if not IS_MACOS:
+            return False
+        from wayfinder.ui.macos_mic_button import MacOSMicButton
+
+        native = getattr(self, "_macos_mic_button", None)
+        if native is None:
+            native = MacOSMicButton.try_create(self, self.mic_button_canvas)
+            self._macos_mic_button = native
+        if native is None:
+            return False
+        occluded = WayfinderApp._macos_hero_is_occluded(self)
+        rendered = native.render(
+            color, card=COLORS["bg_card"], ink=COLORS["bg_base"], light=COLORS["text_primary"],
+            active=active, pulse=pulse, hover=hover, hidden=occluded,
+        )
+        if not rendered:
+            native.set_hidden(True)  # Never leave stale native pixels over the fallback.
+        return rendered and not occluded
+
     def _draw_mic_button(self, color: str, pressed: bool = False, hover: bool = False) -> None:
         """Draw the mic button — supersampled PIL render, single image blit."""
         canvas = self.mic_button_canvas
@@ -8446,6 +8511,8 @@ class WayfinderApp(ctk.CTk):
         is_active = self.app_state in [AppState.RECORDING, AppState.PROCESSING, AppState.PASTING]
 
         try:
+            if self._present_macos_mic_button(color, active=is_active, hover=hover):
+                return
             phys = self._mic_button_phys()
             photo = self._render_mic_button_photo(color, pressed=pressed, is_active=is_active,
                                                   hover=hover)
@@ -8545,6 +8612,12 @@ class WayfinderApp(ctk.CTk):
 
     def _sync_macos_hero_visibility(self) -> None:
         """Hide the native layer under Tk overlays and animate its Tk fallback."""
+        native_mic = getattr(self, "_macos_mic_button", None)
+        if native_mic is not None:
+            occluded = WayfinderApp._macos_hero_is_occluded(self)
+            native_mic.set_hidden(occluded)
+            if occluded:
+                self._draw_mic_button(STATE_COLORS[self.app_state])
         native_layer = getattr(self, "_macos_hero_layer", None)
         if native_layer is not None:
             occluded = WayfinderApp._macos_hero_is_occluded(self)
@@ -8711,15 +8784,13 @@ class WayfinderApp(ctk.CTk):
     def _create_sidebar(self, parent) -> None:
         """Create the vertical sidebar navigation."""
         sidebar = ctk.CTkFrame(
-            parent,
-            fg_color=COLORS["bg_surface"],
-            corner_radius=RADIUS["lg"],
-            **self._macos_glass_rim_kwargs(),
+            parent, **panel_style("pane", COLORS),
             width=188,
             # Room for five nav rows, the tier badge, and the running build version.
             height=360,
         )
         sidebar.grid(row=0, column=0, sticky="nw")  # Don't stretch vertically
+        self._sidebar = sidebar
         sidebar.grid_propagate(False)
         sidebar.pack_propagate(False)
         
@@ -8814,6 +8885,21 @@ class WayfinderApp(ctk.CTk):
     
     def _ensure_tab_created(self, tab_id: str) -> None:
         """Build a tab once, immediately before its first display."""
+        if tab_id == "settings" and getattr(self, "_workspace", None) is not None:
+            if basic_mode_enabled(self.config):
+                self._create_basic_settings_tab()
+                return
+            loader = getattr(self, "_settings_loader", None)
+            if loader is not None and not getattr(self, "_settings_build_complete", False):
+                self._select_settings_frame(loader.frame)
+                return
+            advanced = getattr(self, "_advanced_settings_frame", None)
+            if advanced is not None:
+                self._select_settings_frame(advanced)
+            elif self.tab_frames.get("settings") is getattr(self, "_basic_settings_frame", None):
+                basic = self.tab_frames.pop("settings", None)
+                if basic is not None and basic.winfo_manager() == "pack":
+                    basic.pack_forget()
         settings_staged = (
             tab_id == "settings" and hasattr(self, "_settings_build_complete")
         )
@@ -8877,7 +8963,10 @@ class WayfinderApp(ctk.CTk):
         A hidden/tray-only window intentionally does no Settings work; opening
         the window schedules it again from ``_show_window``.
         """
+        if getattr(self, "_workspace", None) is not None and basic_mode_enabled(self.config):
+            return  # Basic settings are cheap; never build the hidden advanced UI.
         if getattr(self, "_settings_build_complete", False):
+            WayfinderApp._complete_settings_loader(self)
             return
         if getattr(self, "_settings_preload_job", None) is not None:
             return
@@ -8891,7 +8980,10 @@ class WayfinderApp(ctk.CTk):
     def _preload_settings_slice(self) -> None:
         """Advance hidden Settings construction by one bounded UI-thread slice."""
         self._settings_preload_job = None
+        if getattr(self, "_workspace", None) is not None and basic_mode_enabled(self.config):
+            return
         if getattr(self, "_settings_build_complete", False):
+            WayfinderApp._complete_settings_loader(self)
             return
 
         # Tk widgets must be created on the Tk thread. Do no hidden work while
@@ -8905,9 +8997,8 @@ class WayfinderApp(ctk.CTk):
         # First-run setup/welcome owns the foreground and should receive the
         # entire idle budget. Settings remains available through normal lazy
         # creation afterward; no retry loop is needed for a one-time flow.
-        if getattr(self, "_setup_active", False) or getattr(
-            self, "_welcome_active", False
-        ):
+        if (getattr(self, "_settings_loader", None) is None
+                and (getattr(self, "_setup_active", False) or getattr(self, "_welcome_active", False))):
             return
         if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
             self._schedule_settings_preload(delay_ms=500)
@@ -8922,41 +9013,93 @@ class WayfinderApp(ctk.CTk):
             next(iterator)
         except StopIteration:
             self._settings_build_iterator = None
+            WayfinderApp._complete_settings_loader(self)
             return
         except Exception as exc:
             # A preload failure must not strand a partial tab. Remove it so the
             # existing click-time builder remains a clean fallback.
             self._settings_build_iterator = None
             self._settings_build_complete = False
+            loader = getattr(self, "_settings_loader", None)
             partial = self.tab_frames.pop("settings", None)
-            if partial is not None:
+            if partial is not None and (loader is None or partial is not loader.frame):
                 try:
                     partial.destroy()
                 except Exception:
                     pass
+            self._advanced_settings_frame = None
+            if loader is not None:
+                self.tab_frames["settings"] = loader.frame
+                loader.failed()
             try:
                 self.log(f"⚠ Settings preload skipped: {exc}")
             except Exception:
                 pass
             return
 
+        loader = getattr(self, "_settings_loader", None)
+        if loader is not None:
+            # The real page is built offscreen. Keep the foreground placeholder
+            # selected until every tile is ready, even when another tab opens.
+            self._select_settings_frame(loader.frame)
         # Let the 15 Hz overlay/header animation and input queue run between
         # tiles. This is a finite one-shot chain, not an idle polling loop.
         self._schedule_settings_preload(delay_ms=_settings_preload_interval_ms())
 
     def _finish_settings_build(self) -> None:
         """Drain any staged build now (first-run or an unusually early click)."""
-        if getattr(self, "_settings_build_complete", False):
+        if getattr(self, "_workspace", None) is not None and basic_mode_enabled(self.config):
+            self._create_basic_settings_tab()
             return
-        iterator = getattr(self, "_settings_build_iterator", None)
-        if iterator is None:
-            iterator = self._create_settings_tab_steps()
-            self._settings_build_iterator = iterator
-        try:
-            for _slice_complete in iterator:
-                pass
-        finally:
-            self._settings_build_iterator = None
+        if not getattr(self, "_settings_build_complete", False):
+            iterator = getattr(self, "_settings_build_iterator", None)
+            if iterator is None:
+                iterator = self._create_settings_tab_steps()
+                self._settings_build_iterator = iterator
+            try:
+                for _slice_complete in iterator:
+                    pass
+            finally:
+                self._settings_build_iterator = None
+        WayfinderApp._expose_advanced_settings(self)
+        WayfinderApp._complete_settings_loader(self)
+
+    def _expose_advanced_settings(self) -> None:
+        if getattr(self, "_workspace", None) is not None and not basic_mode_enabled(self.config):
+            # The workspace switch already opted into advanced settings. Don't
+            # require a second Show button just to see its section headings.
+            if not getattr(self, "_advanced_open", False):
+                self.toggle_advanced_settings()
+            self._advanced_toggle_btn.pack_forget()
+
+    def _show_advanced_settings_loader(self) -> None:
+        from wayfinder.ui.settings_loading import SettingsLoadingView
+
+        loader = getattr(self, "_settings_loader", None)
+        if loader is None:
+            loader = self._settings_loader = SettingsLoadingView(
+                self, self.tab_content_container, surface=_tab_surface_kwargs(),
+                retry=self._show_advanced_settings_loader,
+            )
+        loader.busy()
+        self._select_settings_frame(loader.frame)
+        self._switch_tab("settings")
+        # Paint the loader before the first batch. The normal finite preload
+        # chain then yields between tiles and pauses for any active dictation.
+        self._schedule_settings_preload(delay_ms=100)
+
+    def _complete_settings_loader(self) -> None:
+        loader = getattr(self, "_settings_loader", None)
+        if loader is None or not getattr(self, "_settings_build_complete", False):
+            return
+        self._settings_loader = None
+        self._select_settings_frame(self._advanced_settings_frame)
+        WayfinderApp._expose_advanced_settings(self)
+        if self.active_tab == "settings" and not basic_mode_enabled(self.config):
+            self._switch_tab("settings")
+        loader.frame.destroy()
+        for callback in loader.callbacks:
+            self.after_idle(callback)
 
     def _inspect_ui(self, tab_id: str) -> None:
         """Dump a tab's live widget tree (headless QA; see wayfinder.ui.ui_inspect).
@@ -8965,6 +9108,7 @@ class WayfinderApp(ctk.CTk):
         choosing a style stays gated - then returns to the previous tab.
         """
         previous = getattr(self, "active_tab", "dictate")
+        previous_advanced = bool(self.config.get("advanced_mode", False))
         try:
             self._switch_tab(tab_id, inspection=True)
         except Exception as exc:
@@ -8988,6 +9132,7 @@ class WayfinderApp(ctk.CTk):
             except Exception as exc:
                 self.log(f"⚠ Inspect {tab_id} failed: {exc}")
             finally:
+                self.config["advanced_mode"] = previous_advanced
                 if previous != tab_id:
                     try:
                         self._switch_tab(previous)
@@ -9023,6 +9168,15 @@ class WayfinderApp(ctk.CTk):
                 self._show_premium_prompt(required_feature)
                 return
 
+        # Socket/menu shortcuts can still open an advanced destination. Reveal
+        # its navigation only after the normal feature gate. Inspection stays
+        # temporary and restores the presentation preference afterward.
+        if (getattr(self, "_workspace", None) is not None
+                and basic_mode_enabled(self.config) and tab_id not in self._workspace.available_tabs()):
+            self.config["advanced_mode"] = True
+            if not inspection:
+                save_config(self.config)
+
         # Style availability depends on cleanup settings made elsewhere (model,
         # on/off, style): rebuild the Style tab when that picture changed.
         if tab_id == "style" and "style" in getattr(self, "tab_frames", {}):
@@ -9056,6 +9210,7 @@ class WayfinderApp(ctk.CTk):
         # Set this before the one-time builder runs so tab-specific setup observes the intended
         # destination, and so the selected sidebar button + loading surface paint immediately.
         self.active_tab = tab_id
+        WayfinderApp._refresh_workspace_layout(self)
         WayfinderApp._sync_macos_hero_visibility(self)
         self._ensure_tab_created(tab_id)
         
@@ -9063,6 +9218,8 @@ class WayfinderApp(ctk.CTk):
             # Keep every built page mapped in one stack and only raise the selected
             # page. Unmapping/remapping Canvas-heavy CTkScrollableFrames makes Aqua
             # expose their native white backing for one compositor frame.
+            workspace = getattr(self, "_workspace", None)
+            basic_pages = workspace is not None and basic_mode_enabled(self.config)
             for frame in self.tab_frames.values():
                 manager = frame.winfo_manager()
                 if manager != "place":
@@ -9070,8 +9227,19 @@ class WayfinderApp(ctk.CTk):
                         frame.pack_forget()
                     elif manager == "grid":
                         frame.grid_forget()
+                if basic_pages:
+                    # One shared surface: no rounded inner pane to inset from.
+                    place_in_macos_content_pane(frame, inset=0)
+                elif manager != "place" or workspace is not None:
                     place_in_macos_content_pane(frame)
             self.tab_frames[tab_id].lift()
+            # Basic and advanced Settings share one tab ID. Once its replacement
+            # is mapped, retire the cached alternate: a full-width basic page
+            # left mapped underneath covered the rounded advanced pane's edges.
+            for cached in (getattr(self, "_basic_settings_frame", None), getattr(self, "_advanced_settings_frame", None)):
+                if (cached is not None and cached not in self.tab_frames.values()
+                        and cached.winfo_manager() == "place"):
+                    cached.place_forget()
         else:
             # Hide all tabs, show selected
             for tid, frame in self.tab_frames.items():
@@ -9141,23 +9309,21 @@ class WayfinderApp(ctk.CTk):
             **_tab_surface_kwargs(),
         )
         self.tab_frames["dictate"] = frame
+        self._dictate_frame = frame
         
         # Scrollable content
         scroll = SmoothScrollableFrame(
             frame,
             **_tab_surface_kwargs(),
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
+            scrollbar_button_color=COLORS["scrollbar_thumb"],
+            scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
         )
         scroll.pack(fill="both", expand=True)
+        self._dictate_scroll = scroll
 
         # Last transcription card
         trans_card = ctk.CTkFrame(
-            scroll,
-            fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"],
-            border_width=1,
-            border_color=COLORS["border_subtle"],
+            scroll, **panel_style("section", COLORS),
         )
         trans_card.pack(fill="x", pady=(0, 12))
 
@@ -9166,6 +9332,7 @@ class WayfinderApp(ctk.CTk):
         # Built now, hidden until _show_error_banner()/_maybe_show_setup_cue() pack
         # them (see CLAUDE.md rule 2: inline CTkFrame panels, never popups).
         self._dictate_banner_anchor = trans_card
+        self._dictate_transcription_card = trans_card
 
         # (A) Dismissible runtime-error banner.
         self.dictate_error_banner = ctk.CTkFrame(
@@ -9365,12 +9532,13 @@ class WayfinderApp(ctk.CTk):
         header = ctk.CTkFrame(trans_card, fg_color="transparent")
         header.pack(fill="x", padx=16, pady=(12, 8))
         
-        ctk.CTkLabel(
+        self._transcription_heading = ctk.CTkLabel(
             header,
-            text="LAST TRANSCRIPTION",
+            text="Last dictation",
             font=(self.font_header[0], self.font_sizes["caption"]),
             text_color=COLORS["text_secondary"],
-        ).pack(side="left")
+        )
+        self._transcription_heading.pack(side="left")
         
         # Copy button
         self.copy_btn = ctk.CTkButton(
@@ -9386,11 +9554,19 @@ class WayfinderApp(ctk.CTk):
             command=self._copy_last_transcription,
         )
         self.copy_btn.pack(side="right")
+        self._dictate_mic_test_toggle = ctk.CTkButton(
+            header, text="Test mic", width=76, height=24,
+            font=(self.font_body[0], self.font_sizes["small"]),
+            fg_color="transparent", hover_color=COLORS["bg_hover"],
+            text_color=COLORS["text_secondary"], corner_radius=RADIUS["sm"],
+            command=self._toggle_basic_mic_test,
+        )
+        self._dictate_mic_test_toggle.pack(side="right", padx=(0, SPACING["sm"]))
         
         # Transcription text
         self.transcription_label = ctk.CTkLabel(
             trans_card,
-            text="No transcription yet. Press the mic button or use your hotkey to start recording.",
+            text="Nothing dictated yet.",
             font=(self.font_body[0], self.font_sizes["body"]),
             text_color=COLORS["text_secondary"],
             wraplength=380,
@@ -9425,19 +9601,16 @@ class WayfinderApp(ctk.CTk):
             anchor="w",
         )
         self._dictate_setup_label.pack(side="left")
+        self._dictate_setup_row = setup_row
 
         # Mic test lives here, where people check their mic before dictating (it
         # used to sit in Settings, away from the thing it checks).
         mic_card = ctk.CTkFrame(
-            scroll,
-            fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"],
-            border_width=1,
-            border_color=COLORS["border_subtle"],
+            scroll, **panel_style("section", COLORS),
         )
         mic_card.pack(fill="x", pady=(0, SPACING["md"]))
+        self._dictate_mic_card = mic_card
         self._build_audio_calibration_section(mic_card)
-        ctk.CTkFrame(mic_card, fg_color="transparent", height=SPACING["sm"]).pack()
 
         # Quick tips — only for pre-welcome / first session; hidden after welcome
         # completes or the first successful dictation (see _hide_dictate_tips).
@@ -9548,15 +9721,25 @@ class WayfinderApp(ctk.CTk):
             self.clipboard_clear()
             self.clipboard_append(self.last_transcription)
             self.log("📋 Transcription copied to clipboard")
+
+    def _toggle_basic_mic_test(self) -> None:
+        self._dictate_mic_test_open = not getattr(self, "_dictate_mic_test_open", False)
+        if self._dictate_mic_test_open:
+            self._dictate_mic_card.pack(
+                fill="x", pady=(0, SPACING["md"]), after=self._dictate_transcription_card,
+            )
+        else:
+            self._dictate_mic_card.pack_forget()
+            if getattr(self, "_mic_test_recording", False):
+                self._stop_mic_test()
+        self._dictate_mic_test_toggle.configure(
+            text="Hide test" if self._dictate_mic_test_open else "Test mic",
+        )
     
     def _create_bento_tile(self, parent, title: str, icon: str = "") -> ctk.CTkFrame:
         """Create a Bento-style tile with header and thin border."""
         tile = ctk.CTkFrame(
-            parent,
-            fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"],
-            border_width=1,
-            border_color=COLORS["border_light"],  # 5% white "catches light"
+            parent, **panel_style("section", COLORS),
         )
         
         # Tile header
@@ -9566,7 +9749,7 @@ class WayfinderApp(ctk.CTk):
         header_text = f"{icon}  {title}" if icon else title
         ctk.CTkLabel(
             header,
-            text=header_text.upper(),
+            text=header_text,
             font=(self.font_mono[0], self.font_sizes["caption"], "bold"),
             text_color=COLORS["text_muted"],
         ).pack(side="left")
@@ -9581,6 +9764,147 @@ class WayfinderApp(ctk.CTk):
         """Create Settings immediately, draining any staged preload in progress."""
         self._finish_settings_build()
 
+    def _select_settings_frame(self, frame) -> None:
+        old = self.tab_frames.get("settings")
+        if old is not None and old is not frame and old.winfo_manager() == "pack":
+            old.pack_forget()
+        self.tab_frames["settings"] = frame
+
+    def _create_basic_settings_tab(self) -> None:
+        view = getattr(self, "_basic_settings_view", None)
+        if view is None:
+            from wayfinder.ui.basic_settings import BasicSettingsController, BasicSettingsView
+
+            options = _tab_surface_kwargs()
+            # This is a flat page, not another rounded panel inside the workspace.
+            options.update(fg_color=COLORS["bg_card"], bg_color=COLORS["bg_card"], corner_radius=RADIUS["none"])
+            frame = ctk.CTkFrame(self.tab_content_container, **options)
+            # Give the responsive form its real viewport before its option
+            # menus request an idle layout. Build behind the current page.
+            if IS_MACOS:
+                place_in_macos_content_pane(frame, inset=0)
+            else:
+                frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+            frame.lower()
+            scroll = SmoothScrollableFrame(
+                frame, **options,
+                scrollbar_button_color=COLORS["scrollbar_thumb"],
+                scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
+            )
+            scroll.pack(fill="both", expand=True)
+            controller = BasicSettingsController(self, ModelDownloader, WHISPER_CPP_MODELS)
+            view = self._basic_settings_view = BasicSettingsView(
+                self, scroll, controller, option_menu=InlineOptionMenu, tooltip=ToolTip,
+            )
+            self._basic_settings_frame = frame
+        else:
+            view.refresh_microphones()
+        self._select_settings_frame(self._basic_settings_frame)
+        view.refresh()
+
+    def _set_advanced_mode(self, enabled: bool) -> None:
+        """Change only presentation; keep both settings views and all values."""
+        hide_all_tooltips()
+        self.config["advanced_mode"] = bool(enabled)
+        save_config(self.config)
+        if getattr(self, "_hotkey_capture_target", None) is not None:
+            self._cancel_hotkey_detect(self._hotkey_capture_target)
+        if enabled and getattr(self, "_workspace", None) is not None and not getattr(self, "_settings_build_complete", False):
+            self._show_advanced_settings_loader()
+            return
+        loader = None
+        if not enabled:
+            loader = getattr(self, "_settings_loader", None)
+            self._settings_loader = None
+            job = getattr(self, "_settings_preload_job", None)
+            if job is not None:
+                self.after_cancel(job)
+                self._settings_preload_job = None
+        self._switch_tab("settings")
+        if loader is not None:
+            loader.frame.destroy()
+
+    def _refresh_basic_settings(self) -> None:
+        view = getattr(self, "_basic_settings_view", None)
+        if view is not None:
+            view.controller.apply_pending()
+
+    def _refresh_workspace_navigation(self) -> None:
+        workspace = getattr(self, "_workspace", None)
+        if workspace is None:
+            return
+        workspace.refresh()
+        if (basic_mode_enabled(self.config) and getattr(self, "active_tab", None) == "style"
+                and "style" not in workspace.available_tabs()):
+            self._switch_tab("settings")
+
+    def set_indicator_mode(self, choice: str) -> None:
+        """Apply the same overlay settings once, including Off, without a restart."""
+        updates = indicator_updates(choice)
+        if all(self.config.get(key) == value for key, value in updates.items()):
+            return
+        self.config.update(updates)
+        variable = getattr(self, "overlay_enabled_var", None)
+        if variable is None:
+            self.overlay_enabled_var = ctk.BooleanVar(master=self, value=updates["overlay_enabled"])
+        else:
+            variable.set(updates["overlay_enabled"])
+        style_var = getattr(self, "overlay_type_var", None)
+        if style_var is not None and "overlay_type" in updates:
+            style_var.set(updates["overlay_type"])
+        self._on_overlay_enabled_toggled()
+        WayfinderApp._hide_restart_banner(self)
+
+    def _refresh_workspace_layout(self) -> None:
+        workspace = getattr(self, "_workspace", None)
+        if workspace is None:
+            return
+        workspace.refresh()
+        basic = basic_mode_enabled(self.config)
+        if basic == getattr(self, "_workspace_hero_layout", None):
+            return
+        self._workspace_hero_layout = basic
+        self._hero_inner.pack_configure(pady=SPACING["lg"])
+        self._hero_mic_container.pack_forget()
+        self.status_label.pack_forget()
+        self._hero_hotkey_chip.pack_forget()
+        self._hero_hotkey_hint.pack_forget()
+        self._hero_mic_container.pack()
+        self.status_label.configure(font=(
+            self.font_header[0],
+            self.font_sizes["title" if basic else "heading"],
+            "bold",
+        ))
+        self.status_label.pack(pady=(SPACING["md"], 0))
+        self._hero_hotkey_chip.pack(pady=(SPACING["sm"], 0))
+        for name in ("_dictate_frame", "_dictate_scroll", "_style_frame", "_style_scroll"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.configure(**(
+                    {"fg_color": COLORS["bg_card"], "bg_color": COLORS["bg_card"], "corner_radius": RADIUS["none"]}
+                    if basic else _tab_surface_kwargs()
+                ))
+        for name in ("_dictate_transcription_card", "_dictate_mic_card"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.configure(border_width=0 if basic else 1)
+        if basic:
+            self._dictate_mic_test_toggle.pack(side="right", padx=(0, SPACING["sm"]))
+            if not getattr(self, "_dictate_mic_test_open", False):
+                self._dictate_mic_card.pack_forget()
+            self._dictate_tips_card.pack_forget()
+        else:
+            self._dictate_mic_test_toggle.pack_forget()
+            self._dictate_mic_card.pack(
+                fill="x", pady=(0, SPACING["md"]), after=self._dictate_transcription_card,
+            )
+        setup_row = getattr(self, "_dictate_setup_row", None)
+        if setup_row is not None:
+            if basic:
+                setup_row.pack_forget()
+            else:
+                setup_row.pack(fill="x", padx=SPACING["lg"], pady=(0, SPACING["md"]))
+
     def _create_settings_tab_steps(self):
         """Yield after each hidden Settings tile to keep the UI responsive."""
         frame = ctk.CTkFrame(
@@ -9588,15 +9912,21 @@ class WayfinderApp(ctk.CTk):
             **_tab_surface_kwargs(),
         )
         self.tab_frames["settings"] = frame
+        self._advanced_settings_frame = frame
         
         # Scrollable content
         scroll = SmoothScrollableFrame(
             frame,
             **_tab_surface_kwargs(),
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
+            scrollbar_button_color=COLORS["scrollbar_thumb"],
+            scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
         )
         scroll.pack(fill="both", expand=True)
+
+        workspace = getattr(self, "_workspace", None)
+        if workspace is not None:
+            self._advanced_mode_switch = workspace.create_mode_switch(scroll)
+            self._advanced_mode_switch.pack(anchor="w", padx=SPACING["md"], pady=(SPACING["sm"], SPACING["lg"]))
 
         # Collapsed "Advanced" tile: created now so the rows below can be built
         # into its groups, packed after the benchmark step (see _create_advanced_tile).
@@ -9604,9 +9934,7 @@ class WayfinderApp(ctk.CTk):
 
         # === BENTO TILE 1: Audio ===
         audio_tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
+            scroll, **panel_style("section", COLORS),
         )
         audio_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
@@ -9669,9 +9997,7 @@ class WayfinderApp(ctk.CTk):
         
         # === BENTO TILE 2: Processing Mode ===
         mode_tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
+            scroll, **panel_style("section", COLORS),
         )
         mode_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
@@ -9707,9 +10033,7 @@ class WayfinderApp(ctk.CTk):
 
         # === BENTO TILE: Vocabulary (Ultra) — names/jargon + corrections ===
         vocab_tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
+            scroll, **panel_style("section", COLORS),
         )
         vocab_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         self._vocabulary_tile = vocab_tile
@@ -9719,9 +10043,7 @@ class WayfinderApp(ctk.CTk):
         
         # === BENTO TILE 3: System (expanded with Hotkey and Typing Speed) ===
         system_tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
+            scroll, **panel_style("section", COLORS),
         )
         system_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
@@ -9928,9 +10250,7 @@ class WayfinderApp(ctk.CTk):
 
         # === BENTO TILE: Status Overlay ===
         overlay_tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
+            scroll, **panel_style("section", COLORS),
         )
         overlay_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
@@ -10185,7 +10505,7 @@ class WayfinderApp(ctk.CTk):
             advanced_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
 
         # === BENTO TILE: License ===
-        license_tile = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["md"])
+        license_tile = ctk.CTkFrame(scroll, **panel_style("section", COLORS))
         license_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         self._license_tile = license_tile
         self._render_license_tile()
@@ -12003,26 +12323,29 @@ class WayfinderApp(ctk.CTk):
 
     def _create_style_tab(self) -> None:
         """Create the Style tab with 5 preset options and Strong mode toggle."""
+        surface = _tab_surface_kwargs()
+        if getattr(self, "_workspace", None) is not None and basic_mode_enabled(self.config):
+            surface.update(fg_color=COLORS["bg_card"], bg_color=COLORS["bg_card"])
         frame = ctk.CTkFrame(
             self.tab_content_container,
-            **_tab_surface_kwargs(),
+            **surface,
         )
         self.tab_frames["style"] = frame
+        self._style_frame = frame
         
         # Scrollable content
         scroll = SmoothScrollableFrame(
             frame,
-            **_tab_surface_kwargs(),
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
+            **surface,
+            scrollbar_button_color=COLORS["scrollbar_thumb"],
+            scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
         )
         scroll.pack(fill="both", expand=True)
+        self._style_scroll = scroll
         
         # === SECTION: Output Style ===
         tone_tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
+            scroll, **panel_style("section", COLORS),
         )
         tone_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
@@ -12257,9 +12580,7 @@ class WayfinderApp(ctk.CTk):
 
         # === SECTION: Style Toggle Hotkey ===
         hotkey_tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
+            scroll, **panel_style("section", COLORS),
         )
         hotkey_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
@@ -12282,6 +12603,11 @@ class WayfinderApp(ctk.CTk):
         ).pack(anchor="w", padx=16, pady=(0, 4))
         
         # Style hotkey key dropdown (inline)
+        # The simple workspace reaches Style without ever building advanced
+        # Settings. Use the same platform key catalog in either entry path.
+        if not hasattr(self, "_hotkey_code_to_name"):
+            self._hotkey_key_codes = hotkey_key_options()
+            self._hotkey_code_to_name = {value: key for key, value in self._hotkey_key_codes.items()}
         current_style_key_code = self.config.get("style_toggle_key", 68)
         current_style_key_name = self._hotkey_code_to_name.get(current_style_key_code)
         if current_style_key_name is None:
@@ -12868,7 +13194,10 @@ class WayfinderApp(ctk.CTk):
         # Re-show if it's the active tab
         if self.active_tab == "style":
             if IS_MACOS:
-                place_in_macos_content_pane(self.tab_frames["style"])
+                if getattr(self, "_workspace", None) is not None and basic_mode_enabled(self.config):
+                    place_in_macos_content_pane(self.tab_frames["style"], inset=0)
+                else:
+                    place_in_macos_content_pane(self.tab_frames["style"])
                 self.tab_frames["style"].lift()
             else:
                 self.tab_frames["style"].pack(fill="both", expand=True)
@@ -13718,16 +14047,16 @@ class WayfinderApp(ctk.CTk):
         self.tab_frames["games"] = frame
         scroll = SmoothScrollableFrame(
             frame, **_tab_surface_kwargs(),
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
+            scrollbar_button_color=COLORS["scrollbar_thumb"],
+            scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
         )
         scroll.pack(fill="both", expand=True)
         fam, fs = self.font_body[0], self.font_sizes
+        self._games_scroll = scroll
 
         def tile(title: str):
             card = ctk.CTkFrame(
-                scroll, fg_color=COLORS["bg_card"], corner_radius=RADIUS["lg"],
-                border_width=1, border_color=COLORS["border_rim"],
+                scroll, **panel_style("section", COLORS),
             )
             card.pack(fill="x", pady=(0, SPACING["md"]))
             ctk.CTkLabel(
@@ -13758,8 +14087,9 @@ class WayfinderApp(ctk.CTk):
             "Dark Age of Camelot has no paste: press Enter to open chat first, then dictate. "
             "Aura types it into the chat box.",
         ) if _linux_tab else ()):
-            note(mode, "•  " + line, color=COLORS["text_secondary"])
-        ctk.CTkFrame(mode, fg_color="transparent", height=SPACING["tile_pad_y"]).pack()
+            last_note = note(mode, "•  " + line, color=COLORS["text_secondary"])
+        # Preserve the bottom space without a Tk widget painting over the rim.
+        last_note.pack_configure(pady=(0, SPACING["tile_pad_y"] + 2))
 
         # --- Games list ----------------------------------------------------------
         games = tile("GAMES")
@@ -13887,11 +14217,7 @@ class WayfinderApp(ctk.CTk):
         
         # Log card
         log_card = ctk.CTkFrame(
-            frame,
-            fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"],
-            border_width=1,
-            border_color=COLORS["border_subtle"],
+            frame, **panel_style("section", COLORS),
         )
         log_card.pack(fill="both", expand=True)
         
@@ -13902,8 +14228,8 @@ class WayfinderApp(ctk.CTk):
             text_color=COLORS["text_secondary"],
             wrap="word",
             activate_scrollbars=True,
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
+            scrollbar_button_color=COLORS["scrollbar_thumb"],
+            scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
         )
         self.log_textbox.pack(fill="both", expand=True, padx=12, pady=12)
         pending_logs = list(getattr(self, "_pending_ui_logs", ()))
@@ -13946,19 +14272,15 @@ class WayfinderApp(ctk.CTk):
         """The tab content container: a rounded opaque pane on macOS glass."""
         if IS_MACOS and macos_glass_enabled():
             return {
-                "fg_color": COLORS["bg_base"],
+                **panel_style("pane", COLORS),
                 "bg_color": MACOS_TRANSPARENT,
-                "corner_radius": RADIUS["lg"],
-                **self._macos_glass_rim_kwargs(),
             }
         if MAC_LOOK:
             return {
-                "fg_color": COLORS["bg_base"],
+                **panel_style("pane", COLORS),
                 "bg_color": WINDOWS_GLASS_SURFACE,
-                "corner_radius": RADIUS["lg"],
-                **self._macos_glass_rim_kwargs(),
             }
-        return _tab_surface_kwargs()
+        return panel_style("pane", COLORS)
 
     def _macos_glass_chip_kwargs(self) -> dict:
         """Opaque chip for images that sit directly on the macOS glass.
@@ -14054,9 +14376,7 @@ class WayfinderApp(ctk.CTk):
         defaults are the recommended setup and nothing here is needed to dictate.
         """
         tile = ctk.CTkFrame(
-            scroll, fg_color=COLORS["bg_card"],
-            corner_radius=RADIUS["lg"], border_width=1,
-            border_color=COLORS["border_rim"],
+            scroll, **panel_style("section", COLORS),
         )
         header = ctk.CTkFrame(tile, fg_color="transparent")
         header.pack(fill="x", padx=SPACING["tile_pad"], pady=(SPACING["tile_pad_y"], 8))
@@ -14253,6 +14573,10 @@ class WayfinderApp(ctk.CTk):
     def on_language_changed(self, value: str):
         """Handle language change from dropdown."""
         self.config["language"] = value
+        # Basic model/language choices also update the cached advanced menu.
+        variable = getattr(self, "language_var", None)
+        if variable is not None:
+            variable.set(value)
         save_config(self.config)
         lang_name = "English" if value == "en" else "Auto-detect" if value == "auto" else value.upper()
         self.log(f"⚙ Language: {lang_name}")
@@ -14498,6 +14822,7 @@ class WayfinderApp(ctk.CTk):
         sync_residency = getattr(self, "_sync_cleanup_residency", None)
         if sync_residency is not None:
             sync_residency()
+        WayfinderApp._refresh_workspace_navigation(self)
 
     def _on_repetition_cleanup_changed(self) -> None:
         """Keep the existing loop filter optional without affecting other cleanup."""
@@ -14703,6 +15028,7 @@ class WayfinderApp(ctk.CTk):
         def _error(message: str) -> None:
             def _handle_error():
                 self._ultra_model_downloading = False
+                WayfinderApp._refresh_basic_settings(self)
                 if hasattr(self, "model_btn"):
                     try:
                         self.model_btn.configure(text=self.get_model_display())
@@ -14729,6 +15055,7 @@ class WayfinderApp(ctk.CTk):
         """Update Settings model button and Ultra activation banner during model setup."""
         if not getattr(self, "_ultra_model_downloading", False):
             return
+        WayfinderApp._refresh_basic_settings(self)
         if hasattr(self, "model_btn"):
             try:
                 self.model_btn.configure(text=f"Downloading Large v3 Turbo Q5 ({pct}%)")
@@ -14758,6 +15085,7 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
         if not wants_recommended_speech_model(self.config, self.feature_gate):
+            WayfinderApp._refresh_basic_settings(self)
             if hasattr(self, "model_btn"):
                 try:
                     self.model_btn.configure(text=self.get_model_display())
@@ -17806,36 +18134,14 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
     
     def on_overlay_type_changed(self, value: str):
-        """Handle overlay type change - requires restart for clean switch."""
-        old_value = self.config.get("overlay_type", "always_on")
-        self.config["overlay_type"] = value
-        save_config(self.config)
-        
-        type_names = {
-            "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
-        }
-        self.log(f"⚙ Status indicator: {type_names.get(value, value)}")
-        
-        if value == old_value:
-            return  # No change
-        
-        # Kill tracked overlay (pidfile / controller) — never pattern pkill.
-        try:
-            if getattr(self, "overlay_controller", None):
-                self.overlay_controller.stop()
-            from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
-            kill_stale_overlay_from_pidfile()
-        except Exception:
-            pass
-        
-        self.log("  ℹ️ Restart the app to apply the change")
-
-        # Show inline restart banner
-        try:
-            self._show_restart_banner()
-        except Exception as e:
-            self.log(f"  ⚠ Banner error: {e}")
+        """Advanced style and the basic three-way control share one live apply."""
+        if value not in ("always_on", "disappearing"):
+            return
+        if not self.config.get("overlay_enabled", True):
+            self.config["overlay_type"] = value
+            save_config(self.config)
+            return  # Tune a disabled indicator without turning it on.
+        self.set_indicator_mode("Disappearing" if value == "disappearing" else "Always on")
 
     def _show_restart_banner(self):
         """Show the inline 'restart needed' banner under the status-indicator row.
@@ -18324,6 +18630,10 @@ class WayfinderApp(ctk.CTk):
 
     def show_first_run_model_setup(self) -> None:
         """Put a clean packaged install directly into the model downloader."""
+        if getattr(self, "_workspace", None) is not None and basic_mode_enabled(self.config):
+            self._pending_welcome_after_model = False
+            self.show_welcome_pane()
+            return
         try:
             self._switch_tab("settings")
             self._finish_settings_build()
@@ -18377,6 +18687,14 @@ class WayfinderApp(ctk.CTk):
         """Jump from the setup cue into the whisper-model download settings."""
         try:
             self._switch_tab("settings")
+            if getattr(self, "_workspace", None) is not None and basic_mode_enabled(self.config):
+                from wayfinder.ui.basic_mode import language_choice, premium_model_selected
+
+                self._basic_settings_view.controller.choose_model(
+                    language_choice(self.config),
+                    self.feature_gate.has_feature("large_models") and premium_model_selected(self.config),
+                )
+                return
             self.open_model_settings()
             # The panel opens mid-page; without this the user lands on the
             # Audio section at the top and the button seems to do nothing.
@@ -19151,8 +19469,8 @@ class WayfinderApp(ctk.CTk):
 
         inner = SmoothScrollableFrame(
             card, fg_color="transparent",
-            scrollbar_button_color=COLORS["bg_hover"],
-            scrollbar_button_hover_color=COLORS["accent_dim"],
+            scrollbar_button_color=COLORS["scrollbar_thumb"],
+            scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
         )
         inner.pack(fill="both", expand=True, padx=SPACING["lg"], pady=(0, SPACING["lg"]))
         content_pad = SPACING["lg"]
@@ -19837,6 +20155,7 @@ class WayfinderApp(ctk.CTk):
 
     def _refresh_entitlement_ui(self) -> None:
         """Refresh controls whose lock state can change after live activation."""
+        WayfinderApp._refresh_workspace_navigation(self)
         try:
             self._render_vocabulary_tile()
         except Exception:
@@ -20273,6 +20592,12 @@ class WayfinderApp(ctk.CTk):
             btn.configure(text=text, state="normal")
         except Exception:
             pass  # settings panel may have been rebuilt/destroyed
+        if target == "record":
+            try:
+                WayfinderApp._refresh_record_hotkey_surfaces(self)
+                WayfinderApp._refresh_basic_settings(self)
+            except Exception:
+                pass  # The binding is durable even if its UI no longer exists.
 
     def _pure_hotkey_label(self, code: int) -> str:
         """Human label for a keycode without touching any widgets."""
@@ -20642,8 +20967,12 @@ class WayfinderApp(ctk.CTk):
         # Repopulate the dropdown from the fresh device table.
         try:
             options, current = self._get_microphone_dropdown_options()
-            self.mic_dropdown.configure(values=options)
-            self.mic_var.set(current)
+            dropdown = getattr(self, "mic_dropdown", None)
+            variable = getattr(self, "mic_var", None)
+            if dropdown is not None:
+                dropdown.configure(values=options)
+            if variable is not None:
+                variable.set(current)
         except Exception as e:
             self.log(f"⚠ Could not refresh the mic list: {e}")
         n = max(0, len(getattr(self, "_mic_device_map", {}) or {}))
@@ -20785,7 +21114,7 @@ class WayfinderApp(ctk.CTk):
         # Outer shell matches other form rows (padx 16); header uses form measure
         # so Play/Record don't pin to the far right edge on fullscreen.
         self._mic_test_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self._mic_test_frame.pack(fill="x", padx=SPACING["lg"], pady=(8, 0))
+        self._mic_test_frame.pack(fill="x", padx=SPACING["lg"], pady=(8, SPACING["sm"]))
 
         _header_shell, header_row = self._begin_form_row(self._mic_test_frame, padx=0, pady=0)
 
@@ -21428,6 +21757,8 @@ class WayfinderApp(ctk.CTk):
             if callable(warm):
                 warm()
 
+        WayfinderApp._refresh_basic_settings(self)
+
     def _activate_downloaded_model(
         self, role: str, path: str, model_info: dict | None = None,
     ) -> str:
@@ -21523,6 +21854,12 @@ class WayfinderApp(ctk.CTk):
         tiles (click to select, double-click to apply). No radio clutter; selection
         is an accent border + soft fill that matches the rest of the design system.
         """
+        if getattr(self, "_workspace", None) is not None and basic_mode_enabled(self.config):
+            self._set_advanced_mode(True)
+        loader = getattr(self, "_settings_loader", None)
+        if loader is not None:
+            loader.when_ready(self.open_model_settings)
+            return
         container = self.mode_settings_container
 
         def build_panel(content, close_panel):
@@ -23063,6 +23400,10 @@ class WayfinderApp(ctk.CTk):
             except Exception:
                 pass
             self._macos_hero_layer = None
+        native_mic = getattr(self, "_macos_mic_button", None)
+        if native_mic is not None:
+            native_mic.close()
+            self._macos_mic_button = None
         
         # Give a moment for cleanup to complete
         time.sleep(0.2)
@@ -23230,6 +23571,13 @@ class WayfinderApp(ctk.CTk):
                 self.after(0, self._flush_pending_model_activations)
             except Exception:
                 pass
+
+        # The basic view may have a download ready, or need to disable model
+        # and microphone controls while this dictation owns the pipeline.
+        try:
+            WayfinderApp._refresh_basic_settings(self)
+        except Exception as exc:
+            self.log(f"⚠ Basic settings refresh: {exc}")
 
         # Duck off the Tk thread via a single FIFO worker (order preserved; no race
         # where a slow duck finishes after restore and leaves audio attenuated).
@@ -23711,14 +24059,16 @@ class WayfinderApp(ctk.CTk):
         Pulse is quantized to 0.05 steps so the whole animation resolves to ~13
         cached PIL frames per colour; after the first cycle every tick is a dict
         hit + a single canvas call (cheaper than the old 5x coords/itemconfig)."""
-        if not self._mic_items_created:
-            self._init_mic_pulse_items(color)
-            return
         try:
             # Validate pulse to avoid NaN/Inf crashes
             if not isinstance(pulse, (int, float)) or pulse != pulse or abs(pulse) > 100:
                 pulse = 1.0
             q = round(pulse * 20) / 20.0
+            if self._present_macos_mic_button(color, active=True, pulse=q):
+                return
+            if not self._mic_items_created:
+                self._init_mic_pulse_items(color)
+                return
             photo = self._render_mic_button_photo(color, pulse=q)
             self.mic_button_canvas.itemconfig(self._mic_pulse_image_id, image=photo)
             self._mic_pulse_photo = photo

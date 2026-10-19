@@ -40,7 +40,7 @@ _SOLID_BG = (13 / 255, 17 / 255, 23 / 255, 1.0)
 # Deeper ink panes on the glass, each with a lifted blue-grey rim so its edge
 # reads against any backdrop (light pages behind the window, or a dark desktop).
 GLASS_PALETTE = {
-    "bg_base": "#0B0F15",       # content pane + underlays (deepest)
+    "bg_base": "#0B0F15",       # underlays (deepest)
     "bg_surface": "#121720",    # sidebar pane
     "bg_card": "#151B25",       # hero + cards (Metal hero bg follows)
     "border_rim": "#26303F",    # glass edge on every pane

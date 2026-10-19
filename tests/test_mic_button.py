@@ -47,6 +47,13 @@ def test_hover_colours_the_rim():
     assert r_hover[2] - r_hover[0] > r_rest[2] - r_rest[0] + 30  # blue, not neutral
 
 
+def test_ready_chip_has_one_rim_not_a_second_highlight_arc():
+    img = render_mic_button(160, BLUE, card=CARD, ink=INK, light=LIGHT)
+    # Away from the glyph, the inside of the disc is the same above/below it.
+    # The old upper highlight painted a conspicuous extra crescent here.
+    assert _dist(_px(img, 80, 37), _px(img, 80, 123)) < 6
+
+
 def test_mic_canvas_follows_zoom_on_linux_only():
     assert wm._mic_canvas_px(2.0, "linux") == 160
     assert wm._mic_canvas_px(1.0, "linux") == 80
