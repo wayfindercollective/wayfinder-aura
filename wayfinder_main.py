@@ -3756,10 +3756,10 @@ def resolve_status_indicator_target(
 
 
 def visual_overlay_mode(platform: str, overlay_type: str) -> str | None:
-    """Use a separate Qt process when a hidden Mac app needs a visible pill."""
+    """Use the PyQt6 glassmorphic overlay for both persistent and disappearing modes."""
     if overlay_type == "always_on":
         return "persistent"
-    if platform == "darwin" and overlay_type == "disappearing":
+    if overlay_type == "disappearing":
         return "transient"
     return None
 
@@ -10283,7 +10283,7 @@ class WayfinderApp(ctk.CTk):
         self.overlay_type_var = ctk.StringVar(value=overlay_type)
         overlay_type_labels = {
             "always_on": "Always On (PyQt6)",
-            "disappearing": "Disappearing (PyQt6)" if IS_MACOS else "Disappearing (CTk)",
+            "disappearing": "Disappearing (PyQt6)",
         }
         self.overlay_type_dropdown = self.create_dropdown_row(
             overlay_adv, "Indicator Style",
@@ -13413,16 +13413,27 @@ class WayfinderApp(ctk.CTk):
         except ImportError:
             return False
         try:
+            initial_style = (
+                "raw"
+                if self.config.get("raw_transcription", False)
+                else self.config.get("output_tone", "minimal")
+            )
+            cancel_hint = (
+                (self._cancel_hotkey_display() or "")
+                if hasattr(self, "_cancel_hotkey_display")
+                else ""
+            )
             self.overlay_controller = OverlayController(
                 audio_level_callback=None if tray_only else self._audio_level_for_overlay,
                 mode=("persistent" if tray_only else
                       visual_overlay_mode(sys.platform, self.config.get("overlay_type", "always_on"))
                       or "persistent"),
-                initial_style=self.config.get("output_tone", "minimal"),
+                initial_style=initial_style,
                 config=self.config,
                 log_callback=self.log,
                 want_tray=want_tray or tray_only,
                 tray_only=tray_only,
+                cancel_hint=cancel_hint,
             )
             if not self.overlay_controller._start_process():
                 self.overlay_controller = None
@@ -16581,6 +16592,12 @@ class WayfinderApp(ctk.CTk):
             parent, "Updates", list(self._UPDATE_CHANNEL_CHOICES),
             self._update_channel_var, self._on_update_channel_changed,
             tooltip=SETTING_TOOLTIPS["update_channel"], width=160,
+        )
+        self.create_setting_row(
+            parent,
+            f"Installed Version (v{current_version})",
+            "Check for Updates",
+            self._check_app_update_now,
         )
         from wayfinder.core.crash_reports import reports_enabled
 

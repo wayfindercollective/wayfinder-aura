@@ -90,6 +90,43 @@ def appimage_path() -> Path | None:
     return Path(path) if path and os.path.isfile(path) else None
 
 
+@dataclass(frozen=True)
+class FlatpakBundleInfo:
+    app_id: str
+    instance_id: str
+    app_commit: str = ""
+
+
+FLATPAK_INFO_PATH = Path("/.flatpak-info")
+
+
+def flatpak_bundle_info() -> FlatpakBundleInfo | None:
+    """Running user-installed standalone Flatpak that can talk to host Flatpak."""
+    from ..utils.platform import is_flatpak
+
+    if not sys.platform.startswith("linux") or not is_flatpak():
+        return None
+    if shutil.which("flatpak-spawn") is None:
+        return None
+    try:
+        import configparser
+
+        cp = configparser.ConfigParser(interpolation=None)
+        if not cp.read(FLATPAK_INFO_PATH, encoding="utf-8"):
+            return None
+        if cp.get("Session Bus Policy", "org.freedesktop.Flatpak", fallback="") != "talk":
+            return None
+        app_id = cp.get("Application", "name", fallback="").strip()
+        instance_id = cp.get("Instance", "instance-id", fallback="").strip()
+        app_path = cp.get("Instance", "app-path", fallback="").strip()
+        app_commit = cp.get("Instance", "app-commit", fallback="").strip()
+        if not app_id or not instance_id or "/.local/share/flatpak/" not in app_path:
+            return None
+        return FlatpakBundleInfo(app_id=app_id, instance_id=instance_id, app_commit=app_commit)
+    except Exception:
+        return None
+
+
 _in_place_failed = False  # the last swap failed: hand over downloads this launch
 
 
@@ -147,7 +184,7 @@ def confirm_launch() -> None:
 
 
 def install_mode() -> str | None:
-    """"mac", "windows" or "appimage" when an in-place install is possible."""
+    """"mac", "windows", "appimage" or "flatpak" when an in-place install is possible."""
     if _in_place_failed:
         return None
     if sys.platform == "darwin":
@@ -160,6 +197,8 @@ def install_mode() -> str | None:
     target = appimage_path()
     if target is not None and os.access(target.parent, os.W_OK):
         return "appimage"
+    if flatpak_bundle_info() is not None:
+        return "flatpak"
     return None
 
 
@@ -401,6 +440,64 @@ def _prepare_appimage(url: str, progress: Progress) -> Outcome:
     return Outcome(ready=True, message="Update ready: restarting Aura.", finish=finish)
 
 
+# --- Linux Flatpak (standalone bundle) ---------------------------------------------
+
+def _flatpak_helper_script() -> str:
+    # $1 instance-id, $2 app-id, $3 staged .flatpak bundle, $4 failure marker,
+    # $5 launch marker, $6 seconds to wait (for Aura to exit, then for
+    # confirmation), $7 token, $8 previous OSTree commit, $9 optional flatpak
+    # binary (default: flatpak).
+    return (
+        'fp="${9:-flatpak}"; '
+        'i=0; while "$fp" ps --columns=instance 2>/dev/null | grep -Fqx "$1"; do '
+        'if [ "$i" -ge "$(($6 * 5))" ]; then rm -f "$3"; : > "$4"; exit 1; fi; '
+        'sleep 0.2; i=$((i+1)); done; '
+        'rm -f "$5"; '
+        'if "$fp" install --user --noninteractive --or-update -y --bundle "$3" >/dev/null 2>&1; then '
+        'rm -f "$3"; '
+        f'"$fp" run --user --env="{TOKEN_ENV}=$7" "$2" >/dev/null 2>&1 & child=$!; i=0; ok=; '
+        'while [ "$i" -lt "$6" ] && kill -0 "$child" 2>/dev/null; do '
+        'if [ -e "$5" ] && read -r tok _ < "$5" && [ "$tok" = "$7" ]; then ok=1; break; fi; '
+        'sleep 1; i=$((i+1)); done; '
+        'rm -f "$5"; '
+        'if [ -n "$ok" ]; then exit 0; fi; '
+        '"$fp" kill "$2" >/dev/null 2>&1; kill "$child" 2>/dev/null; sleep 1; '
+        '[ -n "$8" ] && "$fp" update --user --noninteractive -y --commit="$8" "$2" >/dev/null 2>&1; '
+        'else rm -f "$3"; fi; '
+        ': > "$4"; exec "$fp" run --user "$2"'
+    )
+
+
+def _prepare_flatpak(url: str, progress: Progress) -> Outcome:
+    from ..utils.platform import get_cache_dir
+
+    info = flatpak_bundle_info()
+    if info is None:
+        return Outcome(message="")
+    downloaded = download(url, _updates_dir(), progress)
+    staged = get_cache_dir() / f".{info.app_id}.flatpak.update"
+    shutil.move(str(downloaded), staged)
+    with open(staged, "rb") as fh:
+        head = fh.read(8)
+    if head != b"flatpak\x00":
+        staged.unlink()
+        return Outcome(message="The download is not a Flatpak bundle.")
+
+    def finish() -> None:
+        subprocess.Popen(
+            ["flatpak-spawn", "--host", "/bin/sh", "-c",
+             'setsid /bin/sh -c "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" </dev/null >/dev/null 2>&1 &',
+             "wayfinder-update-host", _flatpak_helper_script(), "wayfinder-update",
+             info.instance_id, info.app_id, str(staged), str(_failure_marker()),
+             str(_launch_marker()), str(CONFIRM_SECONDS), secrets.token_hex(16),
+             info.app_commit],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+
+    return Outcome(ready=True, message="Update ready: restarting Aura.", finish=finish)
+
+
 # --- leftovers -------------------------------------------------------------------------
 
 def cleanup_stale_staging() -> bool:
@@ -426,6 +523,10 @@ def cleanup_stale_staging() -> bool:
     image = appimage_path() if sys.platform.startswith("linux") else None
     if image is not None:
         paths += [image.parent / f".{image.name}.update", image.parent / f".{image.name}.previous"]
+    if sys.platform.startswith("linux"):
+        from ..utils.platform import get_cache_dir
+
+        paths.append(get_cache_dir() / ".io.wayfindercollective.WayfinderAura.flatpak.update")
     now = time.time()
     for path in paths:
         try:
@@ -460,6 +561,8 @@ def prepare_update(download_url: str, progress: Progress = None) -> Outcome:
             return _prepare_mac(download_url, progress)
         if mode == "windows":
             return _prepare_windows(download_url, progress)
+        if mode == "flatpak":
+            return _prepare_flatpak(download_url, progress)
         return _prepare_appimage(download_url, progress)
     except Exception as exc:  # network, disk, tools: the user still gets the download
         return Outcome(message=f"Couldn't install the update ({exc}).")
