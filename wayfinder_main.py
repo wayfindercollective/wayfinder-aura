@@ -9242,11 +9242,23 @@ class WayfinderApp(ctk.CTk):
                     cached.place_forget()
         else:
             # Hide all tabs, show selected
+            for cached in (getattr(self, "_basic_settings_frame", None), getattr(self, "_advanced_settings_frame", None)):
+                if cached is not None and cached not in self.tab_frames.values():
+                    if cached.winfo_manager() == "place":
+                        cached.place_forget()
+                    elif cached.winfo_manager() == "pack":
+                        cached.pack_forget()
             for tid, frame in self.tab_frames.items():
                 if tid == tab_id:
+                    if frame.winfo_manager() == "place":
+                        frame.place_forget()
                     frame.pack(fill="both", expand=True)
+                    frame.lift()
                 else:
-                    frame.pack_forget()
+                    if frame.winfo_manager() == "place":
+                        frame.place_forget()
+                    else:
+                        frame.pack_forget()
         WayfinderApp._sync_macos_hero_visibility(self)
         
         self._write_status_breadcrumb()

@@ -340,6 +340,7 @@ def test_real_workspace_can_switch_views_without_resetting_config(monkeypatch, l
         assert app._hero_hotkey_chip.winfo_manager() == "pack"
         assert _hero_layout(app) == initial_hero
         _assert_native_hero_is_aligned(app)
+        assert app._basic_settings_view.frame.winfo_ismapped()
         assert app._basic_settings_view.raw_var.get() is True
         basic_scroll = app._basic_settings_view.frame.master
         # CTk 5.2's scrollbar cget does not expose its button colors correctly;

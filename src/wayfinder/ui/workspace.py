@@ -111,7 +111,7 @@ class Workspace:
                 self.body.pack_configure(pady=0)
                 self.footer.pack(
                     side="bottom", fill="x", padx=SPACING["lg"],
-                    pady=(SPACING["sm"], SPACING["lg"]),
+                    pady=(SPACING["sm"], SPACING["lg"]), before=self.body,
                 )
             else:
                 self.frame.configure(fg_color="transparent", border_width=0)
