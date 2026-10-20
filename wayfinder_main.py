@@ -5630,16 +5630,9 @@ class WayfinderApp(ctk.CTk):
                     self.config.get("paste_diagnostics_watch", False)))
             except Exception:
                 pass
-            # Kept recordings outlive their window only until the next start;
-            # with the setting off (0) this removes any copies left behind.
-            try:
-                from wayfinder.core.recording_diagnostics import prune_recent
-                from wayfinder.utils.platform import get_cache_dir
-
-                prune_recent(get_cache_dir(), float(
-                    self.config.get("keep_recent_recordings_minutes", 0) or 0))
-            except Exception:
-                pass
+            # Kept recordings: delete expired copies now and every minute (all
+            # of them when the setting is off).
+            self._prune_kept_recordings()
         if IS_WINDOWS and not IS_MACOS:
             # Same sleep/wake/display handling as the Mac, from Windows'
             # WM_POWERBROADCAST / WM_DISPLAYCHANGE (utils/windows_lifecycle.py);
@@ -25167,6 +25160,8 @@ class WayfinderApp(ctk.CTk):
                 self.event_queue.put((EventType.CHUNK_TRANSCRIBED, (chunk_index, text, False)))
         except Exception as e:
             self.log(f"⚠ Chunk {chunk_index + 1} error: {e}")
+            if IS_WINDOWS and not IS_MACOS:
+                WayfinderApp._chunk_diagnostics(self, chunk_path, chunk_index, "", gen)
             # Mark chunk as failed so this session's finalizer doesn't wait forever. Writes go to
             # the per-session store, so this can't poison a newer session's chunk count.
             with self.chunk_transcription_lock:
@@ -25175,18 +25170,36 @@ class WayfinderApp(ctk.CTk):
                 store[chunk_index] = "[error]"
     
     def _chunk_diagnostics(self, chunk_path, chunk_index, text, gen=None) -> None:
-        """Windows: log this chunk's levels against its word count, and keep a
-        short-lived local copy when keep_recent_recordings_minutes is set
+        """Windows: log this chunk's mic level against its word count, and keep
+        a short-lived local copy when keep_recent_recordings_minutes is set
         (20 Oct: 47 s of speech came back as 93 characters, and nothing showed
         whether the mic or the transcriber lost it). Never raises."""
         try:
             from wayfinder.core import recording_diagnostics as rd
             from wayfinder.utils.platform import get_cache_dir
 
-            self.log(rd.chunk_report(chunk_index + 1, text, rd.wav_levels(chunk_path)))
-            minutes = float(self.config.get("keep_recent_recordings_minutes", 0) or 0)
-            rd.keep_recording(chunk_path, get_cache_dir(), minutes,
+            recorder = getattr(self, "chunked_recorder", None)
+            raw = getattr(recorder, "raw_levels", {}).get(str(chunk_path))
+            self.log(rd.chunk_report(chunk_index + 1, text, rd.wav_levels(chunk_path, raw)))
+            rd.keep_recording(chunk_path, get_cache_dir(),
+                              self.config.get("keep_recent_recordings_minutes", 0),
                               session=int(gen or 0), chunk=chunk_index + 1)
+        except Exception:
+            pass
+
+    def _prune_kept_recordings(self) -> None:
+        """Windows: delete kept recordings past their minutes (all of them when
+        the setting is off), now and every minute, so the last dictation of the
+        day doesn't outlive its window."""
+        try:
+            from wayfinder.core.recording_diagnostics import prune_recent
+            from wayfinder.utils.platform import get_cache_dir
+
+            prune_recent(get_cache_dir(), self.config.get("keep_recent_recordings_minutes", 0))
+        except Exception:
+            pass
+        try:
+            self.after(60_000, self._prune_kept_recordings)
         except Exception:
             pass
 
@@ -25568,6 +25581,7 @@ class WayfinderApp(ctk.CTk):
     def transcribe_and_inject(self, audio_path, gen=None, noise=False):
         """Transcribe one recording; *noise* is the speech check's "noise" verdict."""
         import time as time_module
+        text = ""
         try:
             self.log("🔄 Transcribing...")
             trans_start = time_module.perf_counter()
@@ -25591,6 +25605,10 @@ class WayfinderApp(ctk.CTk):
         except Exception as e:
             self.event_queue.put((EventType.TRANSCRIPTION_ERROR, (str(e), gen)))
         finally:
+            if IS_WINDOWS and not IS_MACOS:
+                # One-shot recordings (chunking off, Free, cloud backends) get
+                # the same level line and kept copy as chunks.
+                WayfinderApp._chunk_diagnostics(self, audio_path, 0, text or "", gen)
             # Delete THIS session's audio file specifically — not self.recorder.cleanup(), which
             # wipes the recorder's *current* temp files and could delete a newer session's audio
             # (the recorder instance is reused across sessions).

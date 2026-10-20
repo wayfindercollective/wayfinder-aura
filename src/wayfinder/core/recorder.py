@@ -1884,6 +1884,9 @@ class ChunkedRecorder:
         # this after stop() and surfaces it to the activity log so a mid-dictation
         # hole is traceable instead of silently vanishing.
         self.dropped_chunk_count: int = 0
+        # chunk WAV path -> (peak, rms) of the audio as the mic delivered it,
+        # before preprocessing's gain (Windows chunk diagnostics read it).
+        self.raw_levels: dict[str, tuple[float, float]] = {}
 
         # Calculate samples (will be updated based on actual recording rate)
         self._chunk_samples = int(chunk_duration * sample_rate)
@@ -2010,6 +2013,10 @@ class ChunkedRecorder:
                     self.target_sample_rate
                 )
             
+            raw = np.nan_to_num(np.asarray(audio_data, dtype=np.float32))
+            raw_level = ((float(np.max(np.abs(raw))), float(np.sqrt(np.mean(raw ** 2))))
+                         if raw.size else (0.0, 0.0))
+
             # Apply preprocessing based on level (using target sample rate)
             if self.preprocessing and self.preprocessing != "off":
                 audio_data = preprocess_audio(audio_data, self.target_sample_rate, level=self.preprocessing)
@@ -2031,6 +2038,7 @@ class ChunkedRecorder:
             # subprocess can't read the chunk. Harmless on POSIX.
             temp_file.close()
             self._temp_files.append(temp_path)
+            self.raw_levels[temp_path] = raw_level
             
             # Write WAV at target sample rate (16kHz for Whisper)
             with wave.open(temp_path, "wb") as wav_file:
