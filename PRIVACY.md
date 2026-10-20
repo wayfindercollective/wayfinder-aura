@@ -25,8 +25,13 @@ When you dictate, the recorded audio is written to a temporary WAV file
 it. As soon as transcription finishes, that temporary file is deleted
 (`Recorder.cleanup()` / `ChunkedRecorder.cleanup()` unlink it).
 
-There is **no "save audio" option**. Wayfinder Aura does not keep a library of
-your recordings.
+Wayfinder Aura does not keep a library of your recordings, and nothing in the
+app saves audio by default. On Windows there is one diagnostic setting, off
+unless you turn it on in the config file (`keep_recent_recordings_minutes`):
+it keeps each recording on your computer for that many minutes (at most a
+day), in `%LOCALAPPDATA%\wayfinder-aura\cache\recent-recordings`, so a bad
+transcription can be checked, then deletes it. The copies are never uploaded,
+and setting it back to 0 deletes them all the next time the app starts.
 
 ## Cloud backends are opt-in and off by default
 
