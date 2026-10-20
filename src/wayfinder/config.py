@@ -292,6 +292,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Ctrl+V and when. Polls every 0.5 ms for 1.5 s per paste, so it is for
     # chasing a "pasted my old clipboard" report, not for everyday use.
     "paste_diagnostics_watch": False,
+    # Windows dictation diagnostics: keep a copy of each recorded chunk in the
+    # cache dir's recent-recordings folder for this many minutes, so a bad
+    # transcription can be re-run. 0 (default) keeps nothing; audio never
+    # leaves the machine (core/recording_diagnostics.py).
+    "keep_recent_recordings_minutes": 0,
 
     # Auto press Enter after dictation (opt-in): dictate → text lands → Enter
     # fires, so chat inputs submit hands-free. Off by default — implicitly

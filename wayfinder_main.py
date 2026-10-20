@@ -5630,6 +5630,16 @@ class WayfinderApp(ctk.CTk):
                     self.config.get("paste_diagnostics_watch", False)))
             except Exception:
                 pass
+            # Kept recordings outlive their window only until the next start;
+            # with the setting off (0) this removes any copies left behind.
+            try:
+                from wayfinder.core.recording_diagnostics import prune_recent
+                from wayfinder.utils.platform import get_cache_dir
+
+                prune_recent(get_cache_dir(), float(
+                    self.config.get("keep_recent_recordings_minutes", 0) or 0))
+            except Exception:
+                pass
         if IS_WINDOWS and not IS_MACOS:
             # Same sleep/wake/display handling as the Mac, from Windows'
             # WM_POWERBROADCAST / WM_DISPLAYCHANGE (utils/windows_lifecycle.py);
@@ -24988,6 +24998,8 @@ class WayfinderApp(ctk.CTk):
                         store.append("")
                     store[chunk_index] = "[empty]"
                 self.log(f"🔇 Chunk {chunk_index + 1} skipped (no speech-level audio)")
+                if IS_WINDOWS and not IS_MACOS:
+                    WayfinderApp._chunk_diagnostics(self, chunk_path, chunk_index, "", gen)
                 self.event_queue.put(
                     (EventType.CHUNK_TRANSCRIBED, (chunk_index, "", False))
                 )
@@ -25138,6 +25150,8 @@ class WayfinderApp(ctk.CTk):
                         self.log(f"↻ Chunk {chunk_index + 1} re-heard without context "
                                  f"({len(text.split())} → {len(fuller.split())} words)")
                     text = fuller
+            if IS_WINDOWS and not IS_MACOS:
+                WayfinderApp._chunk_diagnostics(self, chunk_path, chunk_index, text, gen)
             # Write into this session's private store — never touches a newer session's list.
             with self.chunk_transcription_lock:
                 while len(store) <= chunk_index:
@@ -25160,6 +25174,22 @@ class WayfinderApp(ctk.CTk):
                     store.append("")
                 store[chunk_index] = "[error]"
     
+    def _chunk_diagnostics(self, chunk_path, chunk_index, text, gen=None) -> None:
+        """Windows: log this chunk's levels against its word count, and keep a
+        short-lived local copy when keep_recent_recordings_minutes is set
+        (20 Oct: 47 s of speech came back as 93 characters, and nothing showed
+        whether the mic or the transcriber lost it). Never raises."""
+        try:
+            from wayfinder.core import recording_diagnostics as rd
+            from wayfinder.utils.platform import get_cache_dir
+
+            self.log(rd.chunk_report(chunk_index + 1, text, rd.wav_levels(chunk_path)))
+            minutes = float(self.config.get("keep_recent_recordings_minutes", 0) or 0)
+            rd.keep_recording(chunk_path, get_cache_dir(), minutes,
+                              session=int(gen or 0), chunk=chunk_index + 1)
+        except Exception:
+            pass
+
     def _update_recording_duration(self):
         """Update the status label with recording duration."""
         if self.app_state != AppState.RECORDING or self._recording_start_time is None:
