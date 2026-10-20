@@ -36,6 +36,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Windows: the dictation pill no longer disappears behind other windows.**
+  Windows sometimes ranked the always-on-top pill below the app you were in,
+  hiding it. The pill now puts itself back on top within a second, without
+  taking focus, and the activity log notes each time it happened.
+- **Windows: hotkey freezes are logged with their cause.** A press that
+  keeps Aura busy for 5 seconds or more is recorded with what Aura was doing
+  from the start, not only at the end.
 - **Linux Flatpak updates install in place and Settings includes a Check for Updates button.**
   Standalone GitHub Release Flatpak installs now download, verify, and install
   updates directly inside Aura (**Install Update**) instead of handing the
