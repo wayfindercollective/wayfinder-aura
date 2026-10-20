@@ -849,3 +849,24 @@ def test_static_window_fits_every_style_badge():
             assert widest <= envelope, style
     finally:
         ov.deleteLater()
+
+
+def test_style_switch_while_ready_updates_pill_width():
+    """Switching from a 3-letter badge ('Pro') to 6-letter 'Normal' while visible
+    in READY must widen _current_width immediately instead of clipping the wave
+    until the next recording."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay_mod = pytest.importorskip("wayfinder.ui.overlay")
+    ov = overlay_mod.GlassmorphicOverlay()
+    try:
+        ov.set_style_indicator("professional", animate=False)
+        ov.set_state(overlay_mod.OverlayState.READY, animate=False)
+        pro_width = ov._current_width
+        ov.set_style_indicator("minimal", animate=False)
+        assert ov._current_width > pro_width
+        assert ov._current_width == ov._calculate_target_width("", "minimal")
+    finally:
+        ov.deleteLater()

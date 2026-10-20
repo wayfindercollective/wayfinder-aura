@@ -13426,7 +13426,7 @@ class WayfinderApp(ctk.CTk):
             return False
         try:
             initial_style = (
-                "raw"
+                "minimal"
                 if self.config.get("raw_transcription", False)
                 else self.config.get("output_tone", "minimal")
             )
