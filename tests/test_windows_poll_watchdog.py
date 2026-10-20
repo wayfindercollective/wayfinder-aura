@@ -93,7 +93,8 @@ def test_restart_offered_once_only_when_a_press_is_waiting():
     waiting[0] = True
     run_for(dog, clock, 20)
     assert offers == [1]
-    assert "offering a restart" in lines[-1]
+    assert "offering a restart" in lines[-2]
+    assert lines[-1].startswith("   main thread at ")   # where it is stuck at the offer
     assert spawned.count("poll-watchdog-restart") == 1
 
 

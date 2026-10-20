@@ -3242,25 +3242,15 @@ def run_overlay():
         # VS Code, Explorer and Slack while it was still flagged topmost, so it
         # vanished behind them (ui/windows_topmost.py). Check on every
         # foreground change and once a second; restores are reported to the
-        # main process at most every 30 s, with a count.
+        # main process (batched by the keeper, at most every 30 s).
         try:
-            from wayfinder.ui.windows_topmost import TopmostKeeper, foreground_exe
-
-            _restored = {"count": 0, "max_above": 0, "reported": 0.0}
+            from wayfinder.ui.windows_topmost import TopmostKeeper
 
             def _pill_hwnd():
                 return int(overlay.winId()) if overlay.isVisible() else None
 
-            def _report_restore(above: int) -> None:
-                _restored["count"] += 1
-                _restored["max_above"] = max(_restored["max_above"], above)
-                now = time.monotonic()
-                if now - _restored["reported"] < 30.0:
-                    return
-                print(json.dumps({"event": "topmost", "restores": _restored["count"],
-                                  "above": _restored["max_above"],
-                                  "front": foreground_exe()}), flush=True)
-                _restored.update(count=0, max_above=0, reported=now)
+            def _report_restore(info: dict) -> None:
+                print(json.dumps({"event": "topmost", **info}), flush=True)
 
             _topmost_keeper = TopmostKeeper(
                 _pill_hwnd, _report_restore,

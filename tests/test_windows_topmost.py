@@ -12,11 +12,12 @@ PILL = 100
 
 
 class FakeUser32:
-    """A z-order (top first) of (hwnd, visible, topmost)."""
+    """A z-order (top first) of (hwnd, visible, topmost[, cloaked])."""
 
-    def __init__(self, stack):
-        self.stack = list(stack)
+    def __init__(self, stack, sticky=False):
+        self.stack = [tuple(w) + (False,) * (4 - len(w)) for w in stack]
         self.restored = []
+        self.sticky = sticky  # True: restoring doesn't move the pill (it gets pushed back)
 
     def _index(self, h):
         return [w[0] for w in self.stack].index(h)
@@ -36,8 +37,9 @@ class FakeUser32:
 
     def SetWindowPos(self, h, after, *_rest):
         self.restored.append((h, after))
-        entry = self.stack.pop(self._index(h))
-        self.stack.insert(0, entry)
+        if not self.sticky:
+            entry = self.stack.pop(self._index(h))
+            self.stack.insert(0, entry)
         return 1
 
 
@@ -47,10 +49,24 @@ def wt(monkeypatch):
     return windows_topmost
 
 
-def use(monkeypatch, wt, stack):
-    fake = FakeUser32(stack)
+def use(monkeypatch, wt, stack, sticky=False):
+    fake = FakeUser32(stack, sticky)
     monkeypatch.setattr(wt, "_user32", fake)
+    monkeypatch.setattr(wt, "_cloaked", lambda h: fake.stack[fake._index(h)][3])
     return fake
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def keeper_for(wt, reports, clock=None, front="Code.exe"):
+    return wt.TopmostKeeper(lambda: PILL, reports.append, clock=clock or Clock(),
+                            front=lambda: front)
 
 
 def test_healthy_pill_has_nothing_above_it(monkeypatch, wt):
@@ -72,20 +88,74 @@ def test_missing_pill_reads_as_not_demoted(monkeypatch, wt):
     assert wt.normal_windows_above(PILL) == 0
 
 
-def test_keeper_restores_without_activating_and_reports(monkeypatch, wt):
+def test_cloaked_windows_do_not_count(monkeypatch, wt):
+    use(monkeypatch, wt, [(2, True, False, True),   # other virtual desktop
+                          (PILL, True, True)])
+    assert wt.normal_windows_above(PILL) == 0
+
+
+def test_keeper_restores_without_activating_and_reports_at_once(monkeypatch, wt):
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
     reports = []
-    keeper = wt.TopmostKeeper(lambda: PILL, reports.append)
+    keeper = keeper_for(wt, reports)
     assert keeper.check() == 1
     assert fake.restored == [(PILL, wt._HWND_TOPMOST)]
-    assert reports == [1]
+    assert reports == [{"restores": 1, "above": 1, "fronts": ["Code.exe"], "held": True}]
     assert keeper.check() == 0          # back on top: nothing more to do
-    assert reports == [1]
+    assert len(reports) == 1
+
+
+def test_later_restores_are_batched_and_flushed_in_a_quiet_spell(monkeypatch, wt):
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
+    clock, reports = Clock(), []
+    fronts = iter(["Code.exe", "Slack.exe", "explorer.exe"])
+    keeper = wt.TopmostKeeper(lambda: PILL, reports.append, clock=clock,
+                              front=lambda: next(fronts))
+    keeper.check()                      # reported at once
+    for step in (12, 12):               # two more demotions inside 30 s
+        clock.t += step
+        fake.stack.insert(0, fake.stack.pop(fake._index(2)))
+        keeper.check()
+    assert len(reports) == 1
+    clock.t += 10                       # no demotion, but 30 s since the report
+    keeper.check()
+    assert reports[1] == {"restores": 2, "above": 1, "fronts": ["Slack.exe", "explorer.exe"],
+                          "held": True}
+
+
+def test_restore_that_does_not_hold_backs_off_for_a_minute(monkeypatch, wt):
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)], sticky=True)
+    clock, reports = Clock(), []
+    keeper = keeper_for(wt, reports, clock)
+    keeper.check()
+    assert reports[-1]["held"] is False
+    for _ in range(59):
+        clock.t += 1
+        keeper.check()
+    assert len(fake.restored) == 1      # no fight every second
+    clock.t += 2
+    keeper.check()
+    assert len(fake.restored) == 2      # tries again after the pause
+
+
+def test_repeated_demotions_back_off(monkeypatch, wt):
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
+    clock, reports = Clock(), []
+    keeper = keeper_for(wt, reports, clock)
+    for _ in range(wt.BURST + 1):
+        fake.stack.insert(0, fake.stack.pop(fake._index(2)))
+        keeper.check()
+        clock.t += 1
+    assert reports[-1]["held"] is False
+    fake.stack.insert(0, fake.stack.pop(fake._index(2)))
+    restores = len(fake.restored)
+    keeper.check()
+    assert len(fake.restored) == restores   # paused
 
 
 def test_keeper_leaves_a_hidden_pill_alone(monkeypatch, wt):
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
-    keeper = wt.TopmostKeeper(lambda: None, lambda n: None)
+    keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
     assert keeper.check() == 0
     assert fake.restored == []
 
@@ -93,17 +163,16 @@ def test_keeper_leaves_a_hidden_pill_alone(monkeypatch, wt):
 def test_keeper_never_raises(monkeypatch, wt):
     def boom():
         raise RuntimeError("winId gone")
-    keeper = wt.TopmostKeeper(boom, lambda n: None)
+    keeper = wt.TopmostKeeper(boom, lambda info: None)
     assert keeper.check() == 0
 
 
 def test_restore_flags_never_activate_move_or_resize(wt):
-    flags = wt._SWP_NOSIZE | wt._SWP_NOMOVE | wt._SWP_NOACTIVATE
-    assert flags == 0x13
+    assert wt._RESTORE_FLAGS == 0x213   # NOSIZE | NOMOVE | NOACTIVATE | NOOWNERZORDER
 
 
 def test_real_foreground_hook_installs_and_uninstalls(wt):
-    keeper = wt.TopmostKeeper(lambda: None, lambda n: None)
+    keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
     assert keeper.install_foreground_hook()
     keeper.uninstall()
     assert keeper._hook is None
