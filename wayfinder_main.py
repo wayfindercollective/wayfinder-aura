@@ -3817,9 +3817,17 @@ def _portal_desktop() -> bool:
 
 def _cloud_cleanup_models(provider: str) -> list[str]:
     """Current cloud cleanup models for the Settings model menus."""
-    from wayfinder.core.cloud_keys import ANTHROPIC_CLEANUP_MODELS, OPENAI_CLEANUP_MODELS
+    from wayfinder.core.cloud_keys import (
+        ANTHROPIC_CLEANUP_MODELS,
+        GROQ_CLEANUP_MODELS,
+        OPENAI_CLEANUP_MODELS,
+    )
 
-    return list(ANTHROPIC_CLEANUP_MODELS if provider == "anthropic" else OPENAI_CLEANUP_MODELS)
+    if provider == "anthropic":
+        return list(ANTHROPIC_CLEANUP_MODELS)
+    if provider == "groq":
+        return list(GROQ_CLEANUP_MODELS)
+    return list(OPENAI_CLEANUP_MODELS)
 
 
 # macOS: bare right-hand modifiers and Fn/Globe usable as a tap/hold record
@@ -11579,12 +11587,11 @@ class WayfinderApp(ctk.CTk):
             # Local mode: only allow llama_cpp backend
             if current_backend != "llama_cpp":
                 self.config["post_processing_backend"] = "llama_cpp"
-                save_config(self.config)
         # Remote mode uses cloud backends
         elif mode == "remote":
-            if current_backend not in ["openai", "anthropic"]:
-                self.config["post_processing_backend"] = "openai"
-                save_config(self.config)
+            if current_backend not in ["groq", "openai", "anthropic"]:
+                is_groq_asr = self.config.get("transcription_backend", "groq_whisper") == "groq_whisper"
+                self.config["post_processing_backend"] = "groq" if is_groq_asr else "openai"
                 # This writes the backend key directly instead of going through
                 # on_postproc_backend_changed(), so it skipped that handler's
                 # release: switching Processing Mode to Remote left the local
@@ -11822,7 +11829,6 @@ class WayfinderApp(ctk.CTk):
             if postproc_backend != "llama_cpp":
                 postproc_backend = "llama_cpp"
                 self.config["post_processing_backend"] = postproc_backend
-                save_config(self.config)
             
             # Inline model management section (no popups)
             self._build_inline_model_section(postproc_parent, postproc_backend)
@@ -12018,22 +12024,24 @@ class WayfinderApp(ctk.CTk):
         if postproc_enabled:
             postproc_backend = self.config.get("post_processing_backend", "openai")
             # Ensure we're using a cloud backend for remote mode
-            if postproc_backend not in ["openai", "anthropic"]:
-                postproc_backend = "openai"
+            if postproc_backend not in ["groq", "openai", "anthropic"]:
+                is_groq_asr = self.config.get("transcription_backend", "groq_whisper") == "groq_whisper"
+                postproc_backend = "groq" if is_groq_asr else "openai"
                 self.config["post_processing_backend"] = postproc_backend
-                save_config(self.config)
             self.postproc_backend_var = ctk.StringVar(value=postproc_backend)
             
-            # Provider dropdown (OpenAI vs Anthropic)
+            # Provider dropdown (Groq, OpenAI, Anthropic)
             self.postproc_backend_dropdown = self.create_dropdown_row(
-                postproc_parent, "LLM Provider", ["openai", "anthropic"],
+                postproc_parent, "LLM Provider", ["groq", "openai", "anthropic"],
                 self.postproc_backend_var, self.on_postproc_backend_changed,
-                tooltip="openai: GPT-4o-mini - Fast and affordable\nanthropic: Claude Haiku - High quality",
+                tooltip="groq: Llama 3.3 70B - Ultra-fast (uses your Groq key)\nopenai: GPT-4o-mini - Fast and affordable\nanthropic: Claude Haiku - High quality",
                 width=140,
             )
             
             # API Configuration button
-            if postproc_backend == "openai":
+            if postproc_backend == "groq":
+                api_key = self.config.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
+            elif postproc_backend == "openai":
                 api_key = self.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
             else:
                 api_key = self.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -15034,11 +15042,27 @@ class WayfinderApp(ctk.CTk):
         if not changed:
             return []
         save_config(self.config)
+        for var_attr, cfg_key in (
+            ("gpu_var", "use_gpu"),
+            ("postproc_enabled_var", "post_processing_enabled"),
+            ("raw_transcription_var", "raw_transcription"),
+        ):
+            var = getattr(self, var_attr, None)
+            if var is not None and cfg_key in changed:
+                try:
+                    var.set(bool(self.config.get(cfg_key)))
+                except Exception:
+                    pass
         if "use_gpu" in changed or "model_path" in changed:
             self._apply_transcription_hardware_change(bool(self.config.get("use_gpu")))
         if "model_path" in changed and hasattr(self, "model_btn"):
             try:
                 self.model_btn.configure(text=self.get_model_display())
+            except Exception:
+                pass
+        if hasattr(self, "_refresh_basic_settings"):
+            try:
+                self._refresh_basic_settings()
             except Exception:
                 pass
         message = describe_changes(changed)
@@ -15629,6 +15653,7 @@ class WayfinderApp(ctk.CTk):
         save_config(self.config)
         display_map = {
             "llama_cpp": "Local (llama.cpp)",
+            "groq": "Cloud (Groq Llama)",
             "anthropic": "Cloud (Anthropic Claude)",
             "openai": "Cloud (OpenAI GPT)",
         }
@@ -15731,20 +15756,18 @@ class WayfinderApp(ctk.CTk):
                 first_installed = display_name
         
         if not current_display:
-            if first_installed:
-                # Auto-select the first installed model and save to config
+            if first_installed and not current_model_path:
+                # Auto-select the first installed model in memory if none configured
                 current_display = first_installed
                 installed_data = model_data[first_installed]
                 self.config["llama_cpp_model_path"] = installed_data["path"]
                 self.config["llama_cpp_model_requires_feature"] = installed_data[
                     "info"
                 ].get("requires_feature")
-                save_config(self.config)
-                # Changing the model must drop the OLD one: both caches are keyed by
-                # model path, so a switch ADDS an entry and leaves the previous
-                # weights resident behind a key nothing will ask for again.
                 _release_cleanup_residency()
                 print(f"[Config] Auto-selected installed model: {installed_data['info']['name']}")
+            elif first_installed:
+                current_display = first_installed
             elif model_options:
                 # Default to first option if nothing installed
                 current_display = model_options[0]

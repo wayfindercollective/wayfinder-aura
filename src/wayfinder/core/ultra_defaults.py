@@ -141,6 +141,8 @@ def apply_ultra_defaults(
     # Opt-in on Free. Normal needs no model; the styles Ultra unlocks need it on.
     if not config.get("post_processing_enabled", False):
         _set("post_processing_enabled", True)
+    if config.get("raw_transcription", False):
+        _set("raw_transcription", False)
 
     if (
         recommended_model_path

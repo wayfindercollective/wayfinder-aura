@@ -432,6 +432,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Groq Whisper API settings (ultra-fast cloud transcription)
     # Get API key from: https://console.groq.com/keys
     "groq_whisper_model": "whisper-large-v3",  # whisper-large-v3 (same quality as local, 10x faster)
+    "groq_llm_model": "llama-3.3-70b-versatile",  # Groq LLM model for post-processing
     "groq_api_key": "",  # Groq API key (stored in plaintext config.json, chmod 600; loaded into GROQ_API_KEY env var)
     
     # Floating indicator settings

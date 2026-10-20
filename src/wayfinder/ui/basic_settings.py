@@ -233,6 +233,9 @@ class BasicSettingsView:
         )
 
         self.frame.bind("<Configure>", self._resize, add="+")
+        parent_canvas = getattr(parent, "_parent_canvas", None)
+        if parent_canvas is not None:
+            parent_canvas.bind("<Configure>", self._resize, add="+")
         controller.on_change = self.refresh
         self.refresh_microphones()
         self.refresh()
@@ -698,16 +701,19 @@ class BasicSettingsView:
         self.repetition_switch = self._switch(slot, self.repetition_var, self._toggle_repetition)
 
         postproc_on = bool(self.app.config.get("post_processing_enabled", False))
+        tone_unlocked = bool(
+            hasattr(self.app, "feature_gate") and self.app.feature_gate.has_feature("tone_system")
+        )
         slot = self._row(
             parent, "AI post-processing",
             description="Use a local LLM to rewrite dictated text for writing styles.",
-            last=not postproc_on, advanced=True,
+            last=not (postproc_on and tone_unlocked), advanced=True,
         )
         self.postproc_var = ctk.BooleanVar(master=self.frame, value=postproc_on)
         self.app.postproc_enabled_var = self.postproc_var
         self.postproc_switch = self._switch(slot, self.postproc_var, self._toggle_postproc)
 
-        if postproc_on:
+        if postproc_on and tone_unlocked:
             if hasattr(self.app, "_build_inline_model_section"):
                 llm_wrap = ctk.CTkFrame(parent, fg_color="transparent")
                 llm_wrap.pack(fill="x", pady=(SPACING["xs"], SPACING["xs"]))
@@ -741,9 +747,17 @@ class BasicSettingsView:
                 width=230,
             )
 
-    def _build_remote_processing_rows(self, parent) -> None:
+    def _persist_config(self) -> None:
+        wm = sys.modules.get("wayfinder_main")
+        saver = getattr(wm, "save_config", None) if wm is not None else None
+        if callable(saver):
+            saver(self.app.config)
+            return
         from wayfinder.config import save_config
 
+        save_config(self.app.config)
+
+    def _build_remote_processing_rows(self, parent) -> None:
         provider_map = {"Groq (Fast)": "groq_whisper", "OpenAI": "openai_whisper"}
         provider_rev = {v: k for k, v in provider_map.items()}
         self.app._remote_provider_map = provider_map
@@ -786,7 +800,7 @@ class BasicSettingsView:
             def _pick_groq_asr(label: str):
                 model_id = groq_asr_map.get(label, "whisper-large-v3")
                 self.app.config["groq_whisper_model"] = model_id
-                save_config(self.app.config)
+                self._persist_config()
                 if hasattr(self.app, "log"):
                     self.app.log(f"⚙ Groq speech model set to: {model_id}")
 
@@ -844,14 +858,13 @@ class BasicSettingsView:
         if postproc_on:
             pp_backend = self.app.config.get("post_processing_backend", "")
             # Default to Groq when Groq is active or has a key configured and OpenAI does not.
+            # Never call save_config during UI construction.
             if pp_backend not in ("groq", "openai", "anthropic"):
                 pp_backend = "groq" if (is_groq_asr or (groq_key and not openai_key)) else "openai"
                 self.app.config["post_processing_backend"] = pp_backend
-                save_config(self.app.config)
             elif pp_backend == "openai" and is_groq_asr and groq_key and not openai_key:
                 pp_backend = "groq"
                 self.app.config["post_processing_backend"] = "groq"
-                save_config(self.app.config)
 
             llm_provider_map = {
                 "Groq (uses Groq key)": "groq",
@@ -874,7 +887,7 @@ class BasicSettingsView:
             def _pick_llm_provider(label: str):
                 backend_id = llm_provider_map.get(label, "groq")
                 self.app.config["post_processing_backend"] = backend_id
-                save_config(self.app.config)
+                self._persist_config()
                 if hasattr(self.app, "on_postproc_backend_changed"):
                     try:
                         self.app.on_postproc_backend_changed(backend_id)
@@ -907,7 +920,7 @@ class BasicSettingsView:
                 def _pick_groq_llm(label: str):
                     model_id = groq_llm_map.get(label, "llama-3.3-70b-versatile")
                     self.app.config["groq_llm_model"] = model_id
-                    save_config(self.app.config)
+                    self._persist_config()
                     if hasattr(self.app, "log"):
                         self.app.log(f"⚙ Groq cleanup model set to: {model_id}")
 
@@ -930,7 +943,7 @@ class BasicSettingsView:
 
                 def _pick_cloud_llm(model_id: str, k=cfg_key):
                     self.app.config[k] = model_id
-                    save_config(self.app.config)
+                    self._persist_config()
 
                 self._menu(slot, list(models), self.cloud_llm_model_var, _pick_cloud_llm, width=220)
 
@@ -1341,11 +1354,23 @@ class BasicSettingsView:
             self.preprocess_var.set(str(config.get("audio_preprocessing", "light")).capitalize())
         if hasattr(self, "ducking_var"):
             self.ducking_var.set(bool(config.get("audio_ducking_enabled", True)))
+        mode_rebuilt = False
         if hasattr(self, "proc_mode_var"):
             want_mode = "Remote" if config.get("processing_mode", "local") == "remote" else "Local"
             if self.proc_mode_var.get() != want_mode:
                 self.proc_mode_var.set(want_mode)
                 self.rebuild_processing_mode_rows(config.get("processing_mode", "local"))
+                mode_rebuilt = True
+        if hasattr(self, "postproc_var") and not mode_rebuilt:
+            want_postproc = bool(config.get("post_processing_enabled", False))
+            if self.postproc_var.get() != want_postproc:
+                self.postproc_var.set(want_postproc)
+                self.rebuild_processing_mode_rows(config.get("processing_mode", "local"))
+        if hasattr(self, "chunked_var"):
+            chunk_label = {"off": "Off", "auto": "Auto", "on": "On"}.get(
+                str(config.get("chunked_mode", "auto")).lower(), "Auto"
+            )
+            self.chunked_var.set(chunk_label)
         if hasattr(self, "whisper_model_button") and self.whisper_model_button.winfo_exists():
             if hasattr(self.app, "get_model_display"):
                 self.whisper_model_button.configure(text=self.app.get_model_display())
@@ -1353,10 +1378,12 @@ class BasicSettingsView:
             self.adv_language_var.set(str(config.get("language", "en")))
         if hasattr(self, "repetition_var"):
             self.repetition_var.set(bool(config.get("collapse_whisper_repetitions", True)))
-        if hasattr(self, "postproc_var"):
-            self.postproc_var.set(bool(config.get("post_processing_enabled", False)))
         if hasattr(self, "auto_enter_var"):
             self.auto_enter_var.set(bool(config.get("press_enter_after_dictation", False)))
+        if hasattr(self, "gamer_mode_var"):
+            self.gamer_mode_var.set(bool(config.get("gamer_mode", True)))
+        if hasattr(self, "game_send_var"):
+            self.game_send_var.set(bool(config.get("game_chat_send", True)))
         if hasattr(self, "hotkey_key_var"):
             code_to_name = getattr(self.app, "_hotkey_code_to_name", {})
             cur_code = config.get("hotkey_key", 67)
@@ -1533,17 +1560,13 @@ class BasicSettingsView:
         self._ov_offset_timer = self.app.after(150, lambda: self.app._apply_overlay_position(px))
 
     def _toggle_gamer_mode(self) -> None:
-        from wayfinder.config import save_config
-
         self.app.config["gamer_mode"] = bool(self.gamer_mode_var.get())
-        save_config(self.app.config)
+        self._persist_config()
         if hasattr(self.app, "log"):
             self.app.log("🎮 " + ("Gamer mode on" if self.gamer_mode_var.get() else "Gamer mode off"))
 
     def _toggle_game_send(self) -> None:
-        from wayfinder.config import save_config
-
         self.app.config["game_chat_send"] = bool(self.game_send_var.get())
-        save_config(self.app.config)
+        self._persist_config()
         if hasattr(self.app, "log"):
             self.app.log("🎮 " + ("Game messages send automatically" if self.game_send_var.get() else "Game messages left in chat"))

@@ -431,7 +431,10 @@ def test_real_workspace_can_switch_views_without_resetting_config(monkeypatch, l
         assert app.config == before
 
         app.app_state = AppState.IDLE
-        assert app._basic_settings_view.advanced_section.winfo_manager() == ""
+        assert (
+            app._basic_settings_view.advanced_section is None
+            or app._basic_settings_view.advanced_section.winfo_manager() == ""
+        )
         app._workspace.advanced_switch.toggle()
         app.update()
         _assert_native_hero_is_aligned(app)
