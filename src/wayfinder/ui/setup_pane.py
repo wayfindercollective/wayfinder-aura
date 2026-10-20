@@ -638,7 +638,8 @@ class SetupPane:
         self._dep_frame = ctk.CTkScrollableFrame(
             self.card,
             fg_color="transparent",
-            scrollbar_button_color=COLORS["bg_elevated"],
+            scrollbar_button_color=COLORS["scrollbar_thumb"],
+            scrollbar_button_hover_color=COLORS["scrollbar_thumb_hover"],
         )
         self._dep_frame.pack(fill="both", expand=True, padx=pad, pady=(0, SPACING["xs"]))
 

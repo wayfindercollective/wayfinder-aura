@@ -46,6 +46,10 @@ def _k(*names):
     return None
 
 
+# macOS Fn/Globe key (kVK_Function = 0x3F = 63, evdev KEY_FN = 464).
+_DARWIN_FN_VK = 63
+_FN_KEY = KeyCode.from_vk(_DARWIN_FN_VK) if KeyCode is not None else None
+
 # Mapping from evdev key codes to pynput Key objects
 # Uses _k() so missing keys (e.g. Key.insert on macOS) are skipped safely.
 _raw_evdev_map = {
@@ -62,6 +66,7 @@ _raw_evdev_map = {
     100: _k("alt_r"),
     125: _k("cmd"),   # Super/Windows/Command key
     126: _k("cmd_r"),
+    464: _FN_KEY,     # Fn / Globe key (macOS virtual key 63; Linux KEY_FN)
     # Special keys
     1:   _k("esc"),
     14:  _k("backspace"),
@@ -122,6 +127,8 @@ for _names, _label in [
 
 if hasattr(Key, 'insert'):
     PYNPUT_TO_NAME[Key.insert] = "Insert"
+if _FN_KEY is not None:
+    PYNPUT_TO_NAME[_FN_KEY] = "Fn (Globe)"
 
 # Modifier key sets for checking combinations
 MODIFIER_KEYS = {}
@@ -139,12 +146,14 @@ for _mod, _key_names in [
 # this table lets the shared modifier matcher accept it; the live state is
 # populated from Quartz in ``pynput_hotkey_listener`` below.
 MODIFIER_KEYS.setdefault("fn", set())
+if _FN_KEY is not None:
+    MODIFIER_KEYS["fn"].add(_FN_KEY)
 
 # Flat set of every modifier key — Detect skips pure modifier presses and waits for a real key.
 _ALL_MODIFIER_KEYS = {k for ks in MODIFIER_KEYS.values() for k in ks}
-# macOS Detect may bind these alone (tap/hold). Right-hand keys only: the left
-# ones are pressed constantly as part of ordinary shortcuts.
-_SOLO_CAPTURE_KEYS = {k for k in (_k("alt_r"), _k("cmd_r")) if k is not None}
+# macOS Detect may bind these alone (tap/hold). Right-hand keys and Fn/Globe:
+# the left ones are pressed constantly as part of ordinary shortcuts.
+_SOLO_CAPTURE_KEYS = {k for k in (_k("alt_r"), _k("cmd_r"), _FN_KEY) if k is not None}
 # Windows: Right Ctrl, and Right Alt / Alt Gr (the Mac's Right Option). Many
 # laptops (e.g. LG Gram) have no Right Ctrl. Alt Gr alone types nothing, and
 # an Alt Gr + key combo (Alt Gr+4 = euro) cancels the gesture. The Windows keys
@@ -540,6 +549,8 @@ def _darwin_key_pressed(evdev_code: object) -> bool:
     """Read physical key state so a missed key-up cannot wedge a latch."""
     if sys.platform != "darwin":
         return False
+    if evdev_code == 464:
+        return _darwin_fn_pressed()
     virtual_key = _darwin_virtual_keycode(evdev_code)
     if virtual_key is None:
         return False
@@ -1000,6 +1011,19 @@ def pynput_hotkey_listener(
                 injected = bool(
                     CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID)
                 )
+                # pynput's _darwin backend omits kVK_Function (63) from its
+                # MODIFIER_KEYS table, so bare Fn/Globe flag changes never reach
+                # on_press/on_release unless forwarded here.
+                if (
+                    event_type == getattr(Quartz, "kCGEventFlagsChanged", 12)
+                    and keycode == _DARWIN_FN_VK
+                    and _FN_KEY is not None
+                ):
+                    if fn_active:
+                        on_press(_FN_KEY, injected=injected)
+                    else:
+                        on_release(_FN_KEY, injected=injected)
+                    return event
                 current_key = (
                     config_ref.get("hotkey_key", hotkey_key)
                     if config_ref is not None else hotkey_key

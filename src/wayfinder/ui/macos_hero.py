@@ -34,6 +34,11 @@ class MacOSHeroLayer:
         self._last_contents = None
         self._last_data = None
         self._size = (0, 0)
+        self._geometry = None
+        self._layout_ancestors = ()
+        self._layout_binding = None
+        self._geometry_job = None
+        self._closed = False
 
     @classmethod
     def try_create(cls, owner, canvas):
@@ -116,9 +121,35 @@ class MacOSHeroLayer:
                 native_renderer,
             )
             result.update_geometry()
+            result._watch_layout()
             return result
         except Exception:
             return None
+
+    def _watch_layout(self) -> None:
+        # A Canvas Configure event does not fire when only an ancestor moves,
+        # or when the window gets taller without changing the strip's size.
+        # Toplevel bind tags receive descendant events, so one binding covers
+        # the complete anchor chain without polling or per-frame Python work.
+        ancestors = []
+        widget = self.canvas
+        while widget is not None:
+            ancestors.append(widget)
+            if widget is self.owner:
+                break
+            widget = getattr(widget, "master", None)
+        self._layout_ancestors = tuple(ancestors)
+        self._layout_binding = self.owner.bind("<Configure>", self._on_layout_configure, add="+")
+
+    def _on_layout_configure(self, event) -> None:
+        if self._closed or event.widget not in self._layout_ancestors or self._geometry_job is not None:
+            return
+        self._geometry_job = self.owner.after_idle(self._sync_layout)
+
+    def _sync_layout(self) -> None:
+        self._geometry_job = None
+        if not self._closed:
+            self.update_geometry()
 
     def update_geometry(self) -> bool:
         """Align the native layer with the Tk canvas in content-view points."""
@@ -133,6 +164,9 @@ class MacOSHeroLayer:
             x = float(self.canvas.winfo_rootx() - self.owner.winfo_rootx())
             top = float(self.canvas.winfo_rooty() - self.owner.winfo_rooty())
             y = content_height - top - height
+            geometry = (x, y, width, height)
+            if geometry == self._geometry:
+                return True
             if self.native_renderer is not None:
                 self.native_renderer.set_frame(x, y, width, height)
             else:
@@ -143,6 +177,7 @@ class MacOSHeroLayer:
             self._size = (width, height)
             if self.metal_renderer is not None:
                 self.metal_renderer.set_size(width, height)
+            self._geometry = geometry
             return True
         except Exception:
             return False
@@ -257,6 +292,16 @@ class MacOSHeroLayer:
             pass
 
     def close(self) -> None:
+        self._closed = True
+        try:
+            if self._geometry_job is not None:
+                self.owner.after_cancel(self._geometry_job)
+                self._geometry_job = None
+            if self._layout_binding is not None:
+                self.owner.unbind("<Configure>", self._layout_binding)
+                self._layout_binding = None
+        except Exception:
+            pass  # The Tk window can already be gone during shutdown.
         if self.native_renderer is not None:
             self.native_renderer.close()
         elif self.metal_renderer is not None:

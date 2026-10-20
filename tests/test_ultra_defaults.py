@@ -527,3 +527,36 @@ def test_ultra_model_progress_updates_button_and_banner():
     assert any("42%" in kw.get("text", "") for kw in banner_updates)
 
 
+def test_ultra_defaults_enables_cleanup_when_raw_transcription_was_on(monkeypatch):
+    cfg = _free_config(raw_transcription=True, post_processing_enabled=False)
+    changed = apply_ultra_defaults(
+        cfg,
+        _gate(),
+        gpu_capable=True,
+        recommended_model_path="~/models/" + RECOMMENDED_SPEECH_MODEL,
+        activated_now=True,
+    )
+    assert cfg["raw_transcription"] is False
+    assert cfg["post_processing_enabled"] is True
+    assert cfg["use_gpu"] is True
+    assert cfg["chunked_mode"] == "auto"
+    assert "raw_transcription" in changed
+    assert "post_processing_enabled" in changed
+
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    gate = _gate()
+    gate.refresh_pending = False
+    app, events = _app(
+        gate,
+        _free_config(raw_transcription=True, post_processing_enabled=False),
+    )
+    app._recommended_speech_model_on_disk = lambda: "~/models/" + RECOMMENDED_SPEECH_MODEL
+    refreshed = []
+    app._refresh_basic_settings = lambda: refreshed.append(True)
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app, activated_now=True)
+    assert app.config["raw_transcription"] is False
+    assert app.config["post_processing_enabled"] is True
+    assert refreshed == [True]
+
+
+
