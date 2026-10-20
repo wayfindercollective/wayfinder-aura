@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-20
+
 ### Added
 
 - **A simple workspace, on by default.** Dictate and Settings share one clean
