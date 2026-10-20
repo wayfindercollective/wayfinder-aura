@@ -138,19 +138,19 @@ def test_restore_that_does_not_hold_backs_off_for_a_minute(monkeypatch, wt):
     assert len(fake.restored) == 2      # tries again after the pause
 
 
-def test_repeated_demotions_back_off(monkeypatch, wt):
+def test_restores_that_hold_are_never_paused(monkeypatch, wt):
+    """Demoted on every window switch (20 Oct): every restore must go ahead,
+    or the pill would stay hidden behind the window just switched to."""
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
     clock, reports = Clock(), []
     keeper = keeper_for(wt, reports, clock)
-    for _ in range(wt.BURST + 1):
+    for _ in range(20):                     # 20 switches in 4 s
         fake.stack.insert(0, fake.stack.pop(fake._index(2)))
-        keeper.check()
-        clock.t += 1
-    assert reports[-1]["held"] is False
-    fake.stack.insert(0, fake.stack.pop(fake._index(2)))
-    restores = len(fake.restored)
-    keeper.check()
-    assert len(fake.restored) == restores   # paused
+        assert keeper.check() == 1
+        assert wt.normal_windows_above(PILL) == 0
+        clock.t += 0.2
+    assert len(fake.restored) == 20
+    assert all(r["held"] for r in reports)
 
 
 def test_keeper_leaves_a_hidden_pill_alone(monkeypatch, wt):

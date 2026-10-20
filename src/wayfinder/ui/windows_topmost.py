@@ -28,11 +28,10 @@ _WINEVENT_SKIPOWNPROCESS = 0x0002
 _MAX_WALK = 5000  # z-order walk bound (a desktop has a few hundred windows)
 
 REPORT_EVERY_S = 30.0
-# A restore that doesn't hold, or more than BURST restores in BURST_WINDOW_S,
-# means something keeps pushing the pill down: stop for BACKOFF_S rather than
-# fight it every second (and flicker).
-BURST = 3
-BURST_WINDOW_S = 10.0
+# A restore that doesn't hold means something re-demotes the pill at once (or
+# a window in a higher band sits above it): stop for BACKOFF_S rather than
+# fight it every second. Restores that hold are cheap and never paused, even
+# when they come on every window switch, or the pill would stay hidden.
 BACKOFF_S = 60.0
 
 if sys.platform == "win32":
@@ -151,7 +150,6 @@ class TopmostKeeper:
         self._front = front
         self._pending: Optional[dict] = None
         self._last_report = float("-inf")
-        self._recent: list[float] = []
         self._paused_until = float("-inf")
         self._hook = None
         self._proc = None  # keep the ctypes callback alive while hooked
@@ -171,10 +169,8 @@ class TopmostKeeper:
                 return 0
             restore_topmost(hwnd)
             held = normal_windows_above(hwnd) == 0
-            self._recent = [t for t in self._recent if now - t < BURST_WINDOW_S] + [now]
-            if not held or len(self._recent) > BURST:
+            if not held:
                 self._paused_until = now + BACKOFF_S
-                self._recent = []
             self._note(now, above, held)
             return above
         except Exception:
@@ -187,7 +183,7 @@ class TopmostKeeper:
         front = self._front()
         if front and (not p["fronts"] or p["fronts"][-1] != front) and len(p["fronts"]) < 5:
             p["fronts"].append(front)
-        p["held"] = p["held"] and held and now >= self._paused_until
+        p["held"] = p["held"] and held
         self._pending = p
         self._flush(now)
 
