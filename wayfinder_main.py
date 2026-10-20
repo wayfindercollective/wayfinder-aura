@@ -2443,9 +2443,12 @@ class BenchmarkRunner:
                 cfg["post_processing_backend"] = "llama_cpp"
                 cfg["llama_cpp_model_path"] = m["path"]
                 # Benchmark neutral cleanup without borrowing an Ultra writing
-                # style. fast_filler_removal must be off so every GGUF is timed.
+                # style. fast_filler_removal must be off and normal_llm_cleanup
+                # on so every GGUF is actually timed through llama.cpp rather
+                # than short-circuiting to normal_filler_removal regex (0.0s).
                 cfg["output_tone"] = "minimal"
                 cfg["fast_filler_removal"] = False
+                cfg["normal_llm_cleanup"] = True
 
                 # Warm-up (load + first tokens); discard timing
                 process_with_config(sample_text, cfg)
@@ -3819,9 +3822,9 @@ def _cloud_cleanup_models(provider: str) -> list[str]:
     return list(ANTHROPIC_CLEANUP_MODELS if provider == "anthropic" else OPENAI_CLEANUP_MODELS)
 
 
-# macOS: bare right-hand modifiers usable as a tap/hold record hotkey (evdev
-# KEY_RIGHTALT / KEY_RIGHTMETA). Right Option is the macOS default.
-MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command"}
+# macOS: bare right-hand modifiers and Fn/Globe usable as a tap/hold record
+# hotkey (evdev KEY_RIGHTALT / KEY_RIGHTMETA / KEY_FN). Right Option is default.
+MACOS_SOLO_HOTKEYS = {100: "Right Option", 126: "Right Command", 464: "Fn (Globe)"}
 # Windows: Right Alt / Alt Gr (KEY_RIGHTALT, the Mac's Right Option; the
 # Windows default) and Right Ctrl (evdev KEY_RIGHTCTRL). Many laptops have no
 # Right Ctrl. Alt Gr alone types nothing; Alt Gr + a key cancels the gesture.
@@ -3849,6 +3852,7 @@ def _keycode_display(code: int) -> str:
         59: "F1", 60: "F2", 61: "F3", 62: "F4", 63: "F5", 64: "F6",
         65: "F7", 66: "F8", 67: "F9", 68: "F10", 87: "F11", 88: "F12",
         70: "ScrollLock", 119: "Pause", 57: "Space", 28: "Enter", 1: "Esc",
+        464: "Fn (Globe)",
         274: "Mouse Middle", 275: "Mouse Side", 276: "Mouse Extra",
         277: "Mouse Forward", 278: "Mouse Back",
     }
@@ -8301,12 +8305,12 @@ class WayfinderApp(ctk.CTk):
         
         hero_inner = ctk.CTkFrame(self.hero_frame, fg_color="transparent")
         self._hero_inner = hero_inner
-        hero_inner.pack(fill="x", padx=20, pady=16)
+        hero_inner.pack(fill="x", padx=20, pady=(4, 6))
         
         # === Waveform Visualizer Canvas - elegant silk ribbon ===
         self.hero_canvas = ctk.CTkCanvas(
             hero_inner,
-            height=round(64 * _hero_visual_scale(self.ui_scale)),
+            height=round(44 * _hero_visual_scale(self.ui_scale)),
             bg=COLORS["bg_card"],
             highlightthickness=0,
         )
@@ -9871,7 +9875,7 @@ class WayfinderApp(ctk.CTk):
         if basic == getattr(self, "_workspace_hero_layout", None):
             return
         self._workspace_hero_layout = basic
-        self._hero_inner.pack_configure(pady=SPACING["lg"])
+        self._hero_inner.pack_configure(pady=(2, SPACING["xs"]))
         self._hero_mic_container.pack_forget()
         self.status_label.pack_forget()
         self._hero_hotkey_chip.pack_forget()
@@ -9879,11 +9883,11 @@ class WayfinderApp(ctk.CTk):
         self._hero_mic_container.pack()
         self.status_label.configure(font=(
             self.font_header[0],
-            self.font_sizes["title" if basic else "heading"],
+            self.font_sizes["body" if basic else "heading"],
             "bold",
         ))
-        self.status_label.pack(pady=(SPACING["md"], 0))
-        self._hero_hotkey_chip.pack(pady=(SPACING["sm"], 0))
+        self.status_label.pack(pady=(SPACING["xs"], 0))
+        self._hero_hotkey_chip.pack(pady=(2, 0))
         for name in ("_dictate_frame", "_dictate_scroll", "_style_frame", "_style_scroll"):
             widget = getattr(self, name, None)
             if widget is not None:
@@ -10605,25 +10609,50 @@ class WayfinderApp(ctk.CTk):
         # --- Pipeline headline (current setup) ---
         if pipeline.get("total_time") is not None or pipeline.get("asr_time") is not None:
             _section("YOUR SETUP")
-            total = pipeline.get("total_time")
             asr_t = pipeline.get("asr_time")
-            pp_t = pipeline.get("pp_time")
             asr_name = pipeline.get("asr_model_name") or pipeline.get("asr_model") or "speech model"
             asr_mode = (pipeline.get("asr_mode") or "").upper() or "?"
-            pp_name = pipeline.get("pp_model_name") or "cleanup"
+
+            # Reflect live cleanup state rather than a stale snapshot:
+            raw_on = bool(self.config.get("raw_transcription", False))
+            pp_live_on = not raw_on and bool(self.config.get("post_processing_enabled", False))
+            cur_pp_path = str(self.config.get("llama_cpp_model_path", "") or "")
+            cur_pp_file = Path(os.path.expanduser(cur_pp_path)).name if cur_pp_path else ""
+            pp_name = None
+            pp_t = None
+            if pp_live_on:
+                for _mid, _info in LLM_GGUF_MODELS.items():
+                    if _info.get("filename") == cur_pp_file:
+                        pp_name = _info.get("name", _mid)
+                        break
+                if not pp_name:
+                    pp_name = pipeline.get("pp_model_name") or (Path(cur_pp_file).stem if cur_pp_file else None)
+                for _mid, _r in pp_results.items():
+                    if _r.get("filename") == cur_pp_file or _r.get("model_name") == pp_name:
+                        cand = _r.get("avg_time")
+                        if cand is not None and cand > 0.005:
+                            pp_t = cand
+                        break
+                if pp_t is None:
+                    cand = pipeline.get("pp_time")
+                    if cand is not None and cand > 0.005 and pipeline.get("pp_model_name") == pp_name:
+                        pp_t = cand
+
+            total = round((asr_t or 0.0) + (pp_t or 0.0), 3) if asr_t is not None else pipeline.get("total_time")
             if total is not None:
-                _line(f"Total: {format_bench_seconds(total)}  (10s of speech + cleanup)", bright=True)
+                suffix = "(10s of speech + cleanup)" if (pp_live_on and pp_t is not None) else "(10s of speech)"
+                _line(f"Total: {format_bench_seconds(total)}  {suffix}", bright=True)
             asr_part = format_bench_seconds(asr_t)
             if asr_t and pipeline.get("audio_seconds"):
                 rtf = pipeline["audio_seconds"] / asr_t
                 asr_part = f"{format_bench_seconds(asr_t)} ({rtf:.0f}× realtime)"
             _line(f"  Speech-to-text ({asr_name} · {asr_mode}):  {asr_part}")
-            if pipeline.get("pp_enabled") and pp_t is not None:
+            if not pp_live_on or not pp_name:
+                _line("  Cleanup model:  None", muted=True)
+            elif pp_t is not None:
                 _line(f"  Cleanup ({pp_name}):  {format_bench_seconds(pp_t)}")
-            elif not pipeline.get("pp_enabled", True):
-                _line("  Cleanup: off", muted=True)
             else:
-                _line("  Cleanup: —", muted=True)
+                _line(f"  Cleanup ({pp_name}):  not timed yet (run Compare CPU vs GPU)", muted=True)
 
         # --- Speech-to-text per whisper model ---
         if benchmark_results:
@@ -10719,8 +10748,8 @@ class WayfinderApp(ctk.CTk):
                     _line(f"{name}: failed — {result['error'][:40]}", muted=True)
                     continue
                 t = result.get("avg_time")
-                if t is None:
-                    _line(f"{name}: —", muted=True)
+                if t is None or t <= 0.005:
+                    _line(f"{name}: not timed yet (re-run Compare CPU vs GPU)", muted=True)
                     continue
                 mark = "  ← current" if result.get("is_current") else ""
                 _line(f"{name}: {format_bench_seconds(t)}{mark}")
@@ -20041,6 +20070,38 @@ class WayfinderApp(ctk.CTk):
                 height=height, wrap="none",
             )
             box.pack(fill="x")
+            # Let mouse-wheel scrolling glide past this textbox unless the user
+            # explicitly clicked inside it to edit/scroll the word list.
+            active_in_box = [False]
+            tb = getattr(box, "_textbox", None)
+
+            def _find_scroll_canvas(w):
+                cur = w
+                while cur is not None:
+                    canvas = getattr(cur, "_parent_canvas", None)
+                    if canvas is not None:
+                        return canvas
+                    cur = getattr(cur, "master", None)
+                return None
+
+            def _on_wheel(event):
+                if active_in_box[0]:
+                    return None
+                canvas = _find_scroll_canvas(box)
+                if canvas is not None:
+                    if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
+                        canvas.yview_scroll(-3, "units")
+                    else:
+                        canvas.yview_scroll(3, "units")
+                return "break"
+
+            if tb is not None:
+                tb.bind("<Button-1>", lambda _e: active_in_box.__setitem__(0, True), add="+")
+                tb.bind("<FocusOut>", lambda _e: active_in_box.__setitem__(0, False), add="+")
+                tb.bind("<Leave>", lambda _e: active_in_box.__setitem__(0, False), add="+")
+                tb.bind("<Escape>", lambda _e: (active_in_box.__setitem__(0, False), body.focus_set()), add="+")
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    tb.bind(seq, _on_wheel)
             return box
 
         _label("Words and names — one per line", muted=False, top=4)
@@ -22079,7 +22140,7 @@ class WayfinderApp(ctk.CTk):
                 body = ctk.CTkFrame(content_area, fg_color="transparent")
                 body.pack(fill="both", expand=True)
 
-                scroll = ctk.CTkScrollableFrame(body, fg_color="transparent")
+                scroll = ctk.CTkScrollableFrame(body, fg_color="transparent", height=380)
                 scroll.pack(fill="both", expand=True, padx=4, pady=(6, 2))
 
                 # tile records: (tile, name_lbl, meta_lbl, mark_lbl, path)
@@ -22228,7 +22289,7 @@ class WayfinderApp(ctk.CTk):
                 clear_content()
                 set_tab("download")
 
-                scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent")
+                scroll = ctk.CTkScrollableFrame(content_area, fg_color="transparent", height=440)
                 scroll.pack(fill="both", expand=True, padx=4, pady=6)
 
                 categories = [

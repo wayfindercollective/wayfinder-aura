@@ -24,12 +24,12 @@ class Workspace:
         self.frame.pack(fill="both", expand=True)
         self.advanced_var = ctk.BooleanVar(master=self.frame, value=not basic_mode_enabled(app.config))
         self.nav = ctk.CTkFrame(self.frame, fg_color="transparent")
-        self.nav.pack(fill="x", padx=SPACING["2xl"], pady=(0, SPACING["md"]))
+        self.nav.pack(fill="x", padx=SPACING["2xl"], pady=(0, SPACING["xs"]))
         self.tabs = ctk.CTkSegmentedButton(
             self.nav, values=["Dictate", "Settings"],
             command=lambda value: app._switch_tab(value.lower()),
             font=(app.font_body[0], app.font_sizes["body"]),
-            height=36, corner_radius=RADIUS["md"], border_width=SPACING["xs"],
+            height=32, corner_radius=RADIUS["md"], border_width=SPACING["xs"],
             fg_color=COLORS["bg_input"], selected_color=COLORS["bg_elevated"],
             selected_hover_color=COLORS["bg_elevated"], unselected_color=COLORS["bg_input"],
             unselected_hover_color=COLORS["bg_hover"], text_color=COLORS["text_primary"],
@@ -92,7 +92,7 @@ class Workspace:
         if not self._mode and self._pane is not None:
             self._mode = True
             self.frame.configure(fg_color=COLORS["bg_card"], border_width=0)
-            self.nav.pack(fill="x", padx=SPACING["2xl"], pady=(0, SPACING["md"]), before=self.body)
+            self.nav.pack(fill="x", padx=SPACING["2xl"], pady=(0, SPACING["xs"]), before=self.body)
             self._sidebar.grid_remove()
             self.body.grid_columnconfigure(0, minsize=0)
             self._pane.grid_configure(column=0, columnspan=2, padx=0)

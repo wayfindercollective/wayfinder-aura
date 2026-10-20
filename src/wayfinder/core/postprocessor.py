@@ -202,7 +202,7 @@ MODEL_TIERS = {
 }
 
 # Cloud backend identifiers - these always use large/capable models
-CLOUD_BACKENDS = {"openai", "anthropic"}
+CLOUD_BACKENDS = {"openai", "anthropic", "groq"}
 
 # Known model-specific issues
 MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
@@ -3544,6 +3544,8 @@ class OpenAIBackend(PostProcessorBackend):
     
     def get_name(self) -> str:
         if self.base_url:
+            if "groq.com" in self.base_url:
+                return "Groq (Cloud)"
             if "x.ai" in self.base_url:
                 return "xAI Grok (Cloud)"
             elif "azure" in self.base_url.lower():
@@ -3553,11 +3555,19 @@ class OpenAIBackend(PostProcessorBackend):
         return "OpenAI (Cloud)"
     
     def is_available(self) -> bool:
-        """Check if openai is installed and API key is set."""
+        """Check if openai (or groq for Groq URLs) is installed and API key is set."""
+        if not self.api_key:
+            return False
         try:
-            import openai
-            return bool(self.api_key)
+            import openai  # noqa: F401
+            return True
         except ImportError:
+            if "groq.com" in (self.base_url or ""):
+                try:
+                    import groq  # noqa: F401
+                    return True
+                except ImportError:
+                    pass
             return False
     
     def _get_client(self):
@@ -3567,19 +3577,23 @@ class OpenAIBackend(PostProcessorBackend):
         
         if not self.api_key:
             raise PostProcessingError(
-                "OpenAI API key not set. "
-                "Set OPENAI_API_KEY environment variable or configure in settings."
+                "API key not set. Configure your API key in Settings."
             )
         
         try:
             import openai
-            # Use custom base_url if provided (for xAI Grok, Azure, etc.)
+            # Use custom base_url if provided (for Groq, xAI Grok, Azure, etc.)
             if self.base_url:
                 self._client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
             else:
                 self._client = openai.OpenAI(api_key=self.api_key)
             return self._client
-            
+        except ImportError:
+            if "groq.com" in (self.base_url or ""):
+                import groq
+                self._client = groq.Groq(api_key=self.api_key)
+                return self._client
+            raise
         except Exception as e:
             raise PostProcessingError(f"Failed to initialize OpenAI client: {e}")
     
@@ -3828,6 +3842,18 @@ def get_backend(config: dict) -> PostProcessorBackend:
             model=config.get("anthropic_model", "claude-3-haiku-20240307"),
             max_tokens=config.get("post_processing_max_tokens", 1024),
             temperature=config.get("post_processing_temperature", 0.1),
+        )
+    elif backend_type == "groq":
+        _api_key = (
+            config.get("groq_api_key", "")
+            or os.environ.get("GROQ_API_KEY", "")
+        )
+        return OpenAIBackend(
+            api_key=_api_key,
+            model=config.get("groq_llm_model", "llama-3.3-70b-versatile"),
+            max_tokens=config.get("post_processing_max_tokens", 1024),
+            temperature=config.get("post_processing_temperature", 0.1),
+            base_url="https://api.groq.com/openai/v1",
         )
     elif backend_type == "openai":
         # API key: prefer config value, then env var, then "lm-studio" for local servers

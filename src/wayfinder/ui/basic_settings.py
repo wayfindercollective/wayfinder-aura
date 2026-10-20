@@ -281,20 +281,14 @@ class BasicSettingsView:
         return control
 
     def _section(self, parent, title: str, *, subtitle: str | None = None, ultra: bool = False):
-        card = ctk.CTkFrame(
-            parent,
-            fg_color=COLORS["bg_surface"],
-            corner_radius=RADIUS["md"],
-            border_width=1,
-            border_color=COLORS["border_subtle"],
-        )
-        card.pack(fill="x", pady=(0, SPACING["md"]))
+        card = ctk.CTkFrame(parent, fg_color="transparent", border_width=0)
+        card.pack(fill="x", pady=(SPACING["sm"], SPACING["md"]))
         header = ctk.CTkFrame(card, fg_color="transparent")
-        header.pack(fill="x", padx=SPACING["lg"], pady=(SPACING["md"], SPACING["xs"]))
+        header.pack(fill="x", pady=(SPACING["xs"], SPACING["xs"]))
         ctk.CTkLabel(
             header, text=title.upper(),
             font=self._caption_font,
-            text_color=COLORS["text_secondary"],
+            text_color=COLORS["accent"],
             anchor="w",
         ).pack(side="left")
         if ultra:
@@ -303,16 +297,18 @@ class BasicSettingsView:
                 font=(self.app.font_body[0], self.app.font_sizes["caption"], "bold"),
                 text_color=COLORS["accent_yellow"],
             ).pack(side="left", padx=(SPACING["sm"], 0))
+        ctk.CTkFrame(
+            header, fg_color=COLORS["border_subtle"], height=1,
+        ).pack(side="left", fill="x", expand=True, padx=(SPACING["md"], 0))
         if subtitle:
             ctk.CTkLabel(
                 card, text=subtitle,
                 font=self._hint_font,
                 text_color=COLORS["text_muted"],
-                anchor="w", justify="left", wraplength=480,
-            ).pack(fill="x", padx=SPACING["lg"], pady=(0, SPACING["xs"]))
-        ctk.CTkFrame(card, fg_color=COLORS["border_subtle"], height=1).pack(fill="x", padx=SPACING["lg"])
+                anchor="w", justify="left", wraplength=540,
+            ).pack(fill="x", pady=(0, SPACING["xs"]))
         body = ctk.CTkFrame(card, fg_color="transparent")
-        body.pack(fill="x", padx=SPACING["lg"], pady=(SPACING["xs"], SPACING["sm"]))
+        body.pack(fill="x")
         return card, body
 
     def _menu(self, parent, values, variable, command, *, width=210):
@@ -746,6 +742,8 @@ class BasicSettingsView:
             )
 
     def _build_remote_processing_rows(self, parent) -> None:
+        from wayfinder.config import save_config
+
         provider_map = {"Groq (Fast)": "groq_whisper", "OpenAI": "openai_whisper"}
         provider_rev = {v: k for k, v in provider_map.items()}
         self.app._remote_provider_map = provider_map
@@ -753,10 +751,11 @@ class BasicSettingsView:
         cur_backend = self.app.config.get("transcription_backend", "groq_whisper")
         if cur_backend not in provider_rev:
             cur_backend = "groq_whisper"
+        is_groq_asr = cur_backend == "groq_whisper"
 
         slot = self._row(
-            parent, "Cloud provider",
-            description="Cloud speech-to-text service.",
+            parent, "Speech-to-text provider",
+            description="Cloud service that transcribes your voice.",
             advanced=True,
         )
         self.remote_provider_var = ctk.StringVar(
@@ -764,11 +763,46 @@ class BasicSettingsView:
         )
         self.app.remote_provider_var = self.remote_provider_var
         self.remote_provider_menu = self._menu(
-            slot, list(provider_map.keys()), self.remote_provider_var, self.app._on_remote_provider_changed,
+            slot, list(provider_map.keys()), self.remote_provider_var, self._choose_remote_provider,
         )
 
+        if is_groq_asr:
+            groq_asr_map = {
+                "Whisper Large v3": "whisper-large-v3",
+                "Whisper Large v3 Turbo": "whisper-large-v3-turbo",
+            }
+            groq_asr_rev = {v: k for k, v in groq_asr_map.items()}
+            cur_groq_asr = self.app.config.get("groq_whisper_model", "whisper-large-v3")
+            slot = self._row(
+                parent, "Groq speech model",
+                description="Whisper model running on Groq's LPU hardware.",
+                advanced=True,
+            )
+            self.groq_asr_model_var = ctk.StringVar(
+                master=self.frame,
+                value=groq_asr_rev.get(cur_groq_asr, "Whisper Large v3"),
+            )
+
+            def _pick_groq_asr(label: str):
+                model_id = groq_asr_map.get(label, "whisper-large-v3")
+                self.app.config["groq_whisper_model"] = model_id
+                save_config(self.app.config)
+                if hasattr(self.app, "log"):
+                    self.app.log(f"⚙ Groq speech model set to: {model_id}")
+
+            self._menu(slot, list(groq_asr_map.keys()), self.groq_asr_model_var, _pick_groq_asr, width=220)
+        else:
+            slot = self._row(
+                parent, "OpenAI speech model",
+                description="OpenAI's hosted Whisper transcription model.",
+                advanced=True,
+            )
+            ctk.CTkLabel(
+                slot, text="whisper-1", font=self._body_font, text_color=COLORS["text_secondary"],
+            ).pack(anchor="e")
+
         slot = self._row(
-            parent, "Language",
+            parent, "Specific language",
             description="Force a specific spoken language or auto-detect.",
             advanced=True,
         )
@@ -779,15 +813,15 @@ class BasicSettingsView:
             slot, list(self._LANGUAGE_CODES), self.adv_language_var, self._choose_specific_language,
         )
 
-        if cur_backend == "groq_whisper":
-            api_key = self.app.config.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
-        else:
-            api_key = self.app.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+        groq_key = self.app.config.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
+        openai_key = self.app.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+        api_key = groq_key if is_groq_asr else openai_key
         status = "Configured ✓" if api_key else "Configure key…"
+        key_title = "Groq API key" if is_groq_asr else "OpenAI API key"
 
         slot = self._row(
-            parent, "Cloud API key",
-            description="API key for cloud transcription.",
+            parent, key_title,
+            description=f"API key used for {'Groq' if is_groq_asr else 'OpenAI'} cloud requests.",
             advanced=True,
         )
         self.remote_api_btn = ctk.CTkButton(
@@ -800,7 +834,7 @@ class BasicSettingsView:
         postproc_on = bool(self.app.config.get("post_processing_enabled", False))
         slot = self._row(
             parent, "AI post-processing",
-            description="Use a cloud LLM (OpenAI or Anthropic) to rewrite transcriptions.",
+            description="Use a cloud LLM to rewrite transcriptions for cleanup and styles.",
             last=not postproc_on, advanced=True,
         )
         self.postproc_var = ctk.BooleanVar(master=self.frame, value=postproc_on)
@@ -808,46 +842,116 @@ class BasicSettingsView:
         self.postproc_switch = self._switch(slot, self.postproc_var, self._toggle_postproc)
 
         if postproc_on:
-            pp_backend = self.app.config.get("post_processing_backend", "openai")
-            if pp_backend not in ("openai", "anthropic"):
-                pp_backend = "openai"
+            pp_backend = self.app.config.get("post_processing_backend", "")
+            # Default to Groq when Groq is active or has a key configured and OpenAI does not.
+            if pp_backend not in ("groq", "openai", "anthropic"):
+                pp_backend = "groq" if (is_groq_asr or (groq_key and not openai_key)) else "openai"
+                self.app.config["post_processing_backend"] = pp_backend
+                save_config(self.app.config)
+            elif pp_backend == "openai" and is_groq_asr and groq_key and not openai_key:
+                pp_backend = "groq"
+                self.app.config["post_processing_backend"] = "groq"
+                save_config(self.app.config)
+
+            llm_provider_map = {
+                "Groq (uses Groq key)": "groq",
+                "OpenAI": "openai",
+                "Anthropic": "anthropic",
+            }
+            llm_provider_rev = {v: k for k, v in llm_provider_map.items()}
+
             slot = self._row(
-                parent, "LLM provider",
-                description="Cloud model provider for text cleanup and styles.",
+                parent, "Cleanup LLM provider",
+                description="Which cloud service runs text cleanup and writing styles.",
                 advanced=True,
             )
-            self.postproc_backend_var = ctk.StringVar(master=self.frame, value=pp_backend)
+            self.postproc_backend_var = ctk.StringVar(
+                master=self.frame,
+                value=llm_provider_rev.get(pp_backend, "Groq (uses Groq key)"),
+            )
             self.app.postproc_backend_var = self.postproc_backend_var
+
+            def _pick_llm_provider(label: str):
+                backend_id = llm_provider_map.get(label, "groq")
+                self.app.config["post_processing_backend"] = backend_id
+                save_config(self.app.config)
+                if hasattr(self.app, "on_postproc_backend_changed"):
+                    try:
+                        self.app.on_postproc_backend_changed(backend_id)
+                    except Exception:
+                        pass
+                self.rebuild_processing_mode_rows("remote")
+
             self._menu(
-                slot, ["openai", "anthropic"],
-                self.postproc_backend_var, self.app.on_postproc_backend_changed,
+                slot, list(llm_provider_map.keys()),
+                self.postproc_backend_var, _pick_llm_provider, width=220,
             )
 
-            if pp_backend == "openai":
-                llm_key = self.app.config.get("openai_api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+            if pp_backend == "groq":
+                groq_llm_map = {
+                    "Llama 3.3 70B Versatile": "llama-3.3-70b-versatile",
+                    "Llama 3.1 8B Instant": "llama-3.1-8b-instant",
+                }
+                groq_llm_rev = {v: k for k, v in groq_llm_map.items()}
+                cur_groq_llm = self.app.config.get("groq_llm_model", "llama-3.3-70b-versatile")
+                slot = self._row(
+                    parent, "Groq cleanup model",
+                    description="Shares your Groq API key above — no extra key needed.",
+                    last=True, advanced=True,
+                )
+                self.groq_llm_model_var = ctk.StringVar(
+                    master=self.frame,
+                    value=groq_llm_rev.get(cur_groq_llm, "Llama 3.3 70B Versatile"),
+                )
+
+                def _pick_groq_llm(label: str):
+                    model_id = groq_llm_map.get(label, "llama-3.3-70b-versatile")
+                    self.app.config["groq_llm_model"] = model_id
+                    save_config(self.app.config)
+                    if hasattr(self.app, "log"):
+                        self.app.log(f"⚙ Groq cleanup model set to: {model_id}")
+
+                self._menu(slot, list(groq_llm_map.keys()), self.groq_llm_model_var, _pick_groq_llm, width=220)
             else:
-                llm_key = self.app.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
-            llm_status = "Configured ✓" if llm_key else "Configure key…"
-            slot = self._row(
-                parent, "LLM API key",
-                description="Configure API key and model for cloud LLM cleanup.",
-                last=True, advanced=True,
-            )
-            self.postproc_config_btn = ctk.CTkButton(
-                slot, text=llm_status, width=210, height=36,
-                command=self.app.open_postproc_settings, **self._button_style(),
-            )
-            self.postproc_config_btn.pack(anchor="e")
-            self.app.postproc_config_btn = self.postproc_config_btn
+                from wayfinder.core.cloud_keys import ANTHROPIC_CLEANUP_MODELS, OPENAI_CLEANUP_MODELS
+
+                is_oai = pp_backend == "openai"
+                models = OPENAI_CLEANUP_MODELS if is_oai else ANTHROPIC_CLEANUP_MODELS
+                cfg_key = "openai_model" if is_oai else "anthropic_model"
+                cur_m = self.app.config.get(cfg_key, models[0])
+                if cur_m not in models:
+                    cur_m = models[0]
+                slot = self._row(
+                    parent, "OpenAI cleanup model" if is_oai else "Anthropic cleanup model",
+                    description="Cloud LLM used for cleanup and styles.",
+                    advanced=True,
+                )
+                self.cloud_llm_model_var = ctk.StringVar(master=self.frame, value=cur_m)
+
+                def _pick_cloud_llm(model_id: str, k=cfg_key):
+                    self.app.config[k] = model_id
+                    save_config(self.app.config)
+
+                self._menu(slot, list(models), self.cloud_llm_model_var, _pick_cloud_llm, width=220)
+
+                llm_key = openai_key if is_oai else (
+                    self.app.config.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+                )
+                llm_status = "Configured ✓" if llm_key else "Configure key…"
+                slot = self._row(
+                    parent, "OpenAI API key" if is_oai else "Anthropic API key",
+                    description="Configure API key for cloud LLM cleanup.",
+                    last=True, advanced=True,
+                )
+                self.postproc_config_btn = ctk.CTkButton(
+                    slot, text=llm_status, width=210, height=36,
+                    command=self.app.open_postproc_settings, **self._button_style(),
+                )
+                self.postproc_config_btn.pack(anchor="e")
+                self.app.postproc_config_btn = self.postproc_config_btn
 
     def _build_advanced_vocabulary_section(self, parent) -> None:
-        vocab_card = ctk.CTkFrame(
-            parent,
-            fg_color=COLORS["bg_surface"],
-            corner_radius=RADIUS["md"],
-            border_width=1,
-            border_color=COLORS["border_subtle"],
-        )
+        vocab_card = ctk.CTkFrame(parent, fg_color="transparent", border_width=0)
         vocab_card.pack(fill="x", pady=(0, SPACING["md"]))
         self.app._vocabulary_tile = vocab_card
         if hasattr(self.app, "_render_vocabulary_tile"):
@@ -1295,6 +1399,11 @@ class BasicSettingsView:
         self.raw_var.set(raw)
         self._shared_bool("raw_transcription_var", raw)
         self.app._on_raw_transcription_changed()
+        if hasattr(self.app, "_update_benchmark_results_display"):
+            try:
+                self.app._update_benchmark_results_display()
+            except Exception:
+                pass
         self.refresh()
 
     def _toggle_raw(self) -> None:
@@ -1302,6 +1411,11 @@ class BasicSettingsView:
         self.cleanup_var.set(not raw)
         self._shared_bool("raw_transcription_var", raw)
         self.app._on_raw_transcription_changed()
+        if hasattr(self.app, "_update_benchmark_results_display"):
+            try:
+                self.app._update_benchmark_results_display()
+            except Exception:
+                pass
         self.refresh()
 
     def _choose_language(self, value: str) -> None:
@@ -1360,9 +1474,19 @@ class BasicSettingsView:
         if hasattr(self.app, "_on_repetition_cleanup_changed"):
             self.app._on_repetition_cleanup_changed()
 
+    def _choose_remote_provider(self, value: str) -> None:
+        if hasattr(self.app, "_on_remote_provider_changed"):
+            self.app._on_remote_provider_changed(value)
+        self.rebuild_processing_mode_rows("remote")
+
     def _toggle_postproc(self) -> None:
         if hasattr(self.app, "toggle_post_processing"):
             self.app.toggle_post_processing()
+        if hasattr(self.app, "_update_benchmark_results_display"):
+            try:
+                self.app._update_benchmark_results_display()
+            except Exception:
+                pass
         self.rebuild_processing_mode_rows(self.app.config.get("processing_mode", "local"))
 
     def _choose_hotkey_key(self, value: str) -> None:
