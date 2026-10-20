@@ -9337,11 +9337,16 @@ class WayfinderApp(ctk.CTk):
         scroll.pack(fill="both", expand=True)
         self._dictate_scroll = scroll
 
-        # Last transcription card
+        # Last transcription card — centered column under the hero/tabs
         trans_card = ctk.CTkFrame(
-            scroll, **panel_style("section", COLORS),
+            scroll,
+            fg_color=COLORS["bg_surface"],
+            corner_radius=RADIUS["lg"],
+            border_width=1,
+            border_color=COLORS["border_subtle"],
         )
-        trans_card.pack(fill="x", pady=(0, 12))
+        trans_card._wf_manages_wrap = True
+        trans_card.pack(fill="x", padx=SPACING["lg"], pady=(SPACING["sm"], 12))
 
         # Inline banners live at the top of the Dictate tab so runtime problems are
         # visible on the main screen (not just buried in the History/Activity log).
@@ -9546,12 +9551,12 @@ class WayfinderApp(ctk.CTk):
 
         # Card header
         header = ctk.CTkFrame(trans_card, fg_color="transparent")
-        header.pack(fill="x", padx=16, pady=(12, 8))
+        header.pack(fill="x", padx=20, pady=(14, 10))
         
         self._transcription_heading = ctk.CTkLabel(
             header,
             text="Last dictation",
-            font=(self.font_header[0], self.font_sizes["caption"]),
+            font=(self.font_header[0], self.font_sizes["caption"], "bold"),
             text_color=COLORS["text_secondary"],
         )
         self._transcription_heading.pack(side="left")
@@ -9562,7 +9567,7 @@ class WayfinderApp(ctk.CTk):
             text="Copy",
             font=(self.font_body[0], self.font_sizes["small"]),
             width=60,
-            height=24,
+            height=26,
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["bg_elevated"],
             text_color=COLORS["text_secondary"],
@@ -9571,52 +9576,52 @@ class WayfinderApp(ctk.CTk):
         )
         self.copy_btn.pack(side="right")
         self._dictate_mic_test_toggle = ctk.CTkButton(
-            header, text="Test mic", width=76, height=24,
+            header, text="Test mic", width=76, height=26,
             font=(self.font_body[0], self.font_sizes["small"]),
             fg_color="transparent", hover_color=COLORS["bg_hover"],
             text_color=COLORS["text_secondary"], corner_radius=RADIUS["sm"],
             command=self._toggle_basic_mic_test,
         )
         self._dictate_mic_test_toggle.pack(side="right", padx=(0, SPACING["sm"]))
+
+        ctk.CTkFrame(
+            trans_card, fg_color=COLORS["border_subtle"], height=1,
+        ).pack(fill="x", padx=20)
         
         # Transcription text
         self.transcription_label = ctk.CTkLabel(
             trans_card,
             text="Nothing dictated yet.",
             font=(self.font_body[0], self.font_sizes["body"]),
-            text_color=COLORS["text_secondary"],
-            wraplength=380,
-            justify="left",
-            anchor="w",
+            text_color=COLORS["text_muted"],
+            wraplength=520,
+            justify="center",
+            anchor="center",
         )
-        self.transcription_label.pack(fill="x", padx=16, pady=(0, 8))
-        if IS_WINDOWS and not IS_MACOS:
-            # Wrap to the card, capped at a readable measure: the fixed 380
-            # filled a quarter of the card on a wide window. CTkFrame.bind
-            # lands on its canvas, and CTk scales wraplength itself, so pass
-            # design units.
-            def _rewrap_transcription(event, label=self.transcription_label):
-                if event.width <= 40:
-                    return
-                try:
-                    width = event.width / label._get_widget_scaling() - 32
-                    label.configure(wraplength=int(min(760, max(240, width))))
-                except Exception:
-                    pass
+        self.transcription_label.pack(fill="x", padx=20, pady=(16, 18))
 
-            trans_card.bind("<Configure>", _rewrap_transcription, add="+")
+        def _rewrap_transcription(event, label=self.transcription_label):
+            if event.width <= 40:
+                return
+            try:
+                width = event.width / label._get_widget_scaling() - 44
+                label.configure(wraplength=int(min(620, max(220, width))))
+            except Exception:
+                pass
+
+        trans_card.bind("<Configure>", _rewrap_transcription, add="+")
 
         # Compact setup row: model · Local/Remote · hotkey (always useful, no dead void).
         setup_row = ctk.CTkFrame(trans_card, fg_color="transparent")
-        setup_row.pack(fill="x", padx=16, pady=(0, 12))
+        setup_row.pack(fill="x", padx=20, pady=(0, 12))
         self._dictate_setup_label = ctk.CTkLabel(
             setup_row,
             text=self._dictate_setup_chip_text(),
             font=(self.font_mono[0], self.font_sizes["caption"]),
             text_color=COLORS["text_muted"],
-            anchor="w",
+            anchor="center",
         )
-        self._dictate_setup_label.pack(side="left")
+        self._dictate_setup_label.pack(anchor="center")
         self._dictate_setup_row = setup_row
 
         # Mic test lives here, where people check their mic before dictating (it
@@ -9624,9 +9629,33 @@ class WayfinderApp(ctk.CTk):
         mic_card = ctk.CTkFrame(
             scroll, **panel_style("section", COLORS),
         )
-        mic_card.pack(fill="x", pady=(0, SPACING["md"]))
+        mic_card.pack(fill="x", padx=SPACING["lg"], pady=(0, SPACING["md"]))
         self._dictate_mic_card = mic_card
         self._build_audio_calibration_section(mic_card)
+
+        self._dictate_col_pad = SPACING["lg"]
+
+        def _center_dictate_column(event):
+            if event.width <= 60:
+                return
+            try:
+                scaling = trans_card._get_widget_scaling()
+                avail = event.width / scaling
+                pad_x = max(SPACING["lg"], int((avail - 600) / 2))
+                if pad_x == getattr(self, "_dictate_col_pad", None):
+                    return
+                self._dictate_col_pad = pad_x
+                if trans_card.winfo_manager() == "pack":
+                    trans_card.pack_configure(padx=pad_x)
+                if mic_card.winfo_manager() == "pack":
+                    mic_card.pack_configure(padx=pad_x)
+            except Exception:
+                pass
+
+        scroll.bind("<Configure>", _center_dictate_column, add="+")
+        scroll_canvas = getattr(scroll, "_parent_canvas", None)
+        if scroll_canvas is not None:
+            scroll_canvas.bind("<Configure>", _center_dictate_column, add="+")
 
         # Quick tips — only for pre-welcome / first session; hidden after welcome
         # completes or the first successful dictation (see _hide_dictate_tips).
@@ -9674,7 +9703,10 @@ class WayfinderApp(ctk.CTk):
             self.last_transcription = demo_tx
             try:
                 self.transcription_label.configure(
-                    text=demo_tx, text_color=COLORS["text_primary"],
+                    text=demo_tx,
+                    text_color=COLORS["text_primary"],
+                    justify="left" if len(demo_tx) > 70 else "center",
+                    anchor="center",
                 )
                 self._hide_dictate_tips()
             except Exception:
@@ -9741,8 +9773,9 @@ class WayfinderApp(ctk.CTk):
     def _toggle_basic_mic_test(self) -> None:
         self._dictate_mic_test_open = not getattr(self, "_dictate_mic_test_open", False)
         if self._dictate_mic_test_open:
+            pad_x = getattr(self, "_dictate_col_pad", SPACING["lg"])
             self._dictate_mic_card.pack(
-                fill="x", pady=(0, SPACING["md"]), after=self._dictate_transcription_card,
+                fill="x", padx=pad_x, pady=(0, SPACING["md"]), after=self._dictate_transcription_card,
             )
         else:
             self._dictate_mic_card.pack_forget()
@@ -9906,7 +9939,7 @@ class WayfinderApp(ctk.CTk):
         for name in ("_dictate_transcription_card", "_dictate_mic_card"):
             widget = getattr(self, name, None)
             if widget is not None:
-                widget.configure(border_width=0 if basic else 1)
+                widget.configure(border_width=1)
         if basic:
             self._dictate_mic_test_toggle.pack(side="right", padx=(0, SPACING["sm"]))
             if not getattr(self, "_dictate_mic_test_open", False):
@@ -9914,8 +9947,9 @@ class WayfinderApp(ctk.CTk):
             self._dictate_tips_card.pack_forget()
         else:
             self._dictate_mic_test_toggle.pack_forget()
+            pad_x = getattr(self, "_dictate_col_pad", SPACING["lg"])
             self._dictate_mic_card.pack(
-                fill="x", pady=(0, SPACING["md"]), after=self._dictate_transcription_card,
+                fill="x", padx=pad_x, pady=(0, SPACING["md"]), after=self._dictate_transcription_card,
             )
         setup_row = getattr(self, "_dictate_setup_row", None)
         if setup_row is not None:
@@ -26030,6 +26064,8 @@ class WayfinderApp(ctk.CTk):
             self.transcription_label.configure(
                 text=self.last_transcription,
                 text_color=COLORS["text_primary"],
+                justify="left" if len(self.last_transcription) > 70 else "center",
+                anchor="center",
             )
         try:
             self._hide_dictate_tips()
