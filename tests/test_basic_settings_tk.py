@@ -160,7 +160,7 @@ def test_only_non_obvious_options_have_visible_descriptions(view):
     result, _app, _root, _downloader = view
     assert [hint.cget("text") for _row, _labels, hint, _control in result._rows if hint is not None] == [
         "Better recognition with Whisper Turbo.",
-        "Keeps ums and ahs; no cleanup or AI rewriting.",
+        "Removes ums and ahs; applies corrections and writing style.",
     ]
 
 
@@ -183,9 +183,12 @@ def test_free_gpu_switch_never_enables_gpu(view):
 
 def test_raw_switch_is_the_shared_setting_not_a_second_preference(view):
     result, app, _root, _downloader = view
-    result.raw_switch.toggle()
+    assert result.cleanup_var.get() is True
+    result.cleanup_switch.toggle()
+    assert result.cleanup_var.get() is False
     assert app.config["raw_transcription"] is True
-    result.raw_switch.toggle()
+    result.cleanup_switch.toggle()
+    assert result.cleanup_var.get() is True
     assert app.config["raw_transcription"] is False
 
 
@@ -198,6 +201,7 @@ def test_changes_in_advanced_settings_project_back_into_basic_widgets(view):
     )
     before = deepcopy(app.config)
     result.refresh()
+    assert result.cleanup_var.get() is False
     assert result.raw_var.get() is True
     assert result.gpu_var.get() is True
     assert result.premium_var.get() is True
@@ -426,55 +430,39 @@ def test_real_workspace_can_switch_views_without_resetting_config(monkeypatch, l
         assert app._header_upgrade_button.winfo_ismapped()
         assert app.config == before
 
-        app.app_state = AppState.RECORDING
+        app.app_state = AppState.IDLE
+        assert app._basic_settings_view.advanced_section.winfo_manager() == ""
         app._workspace.advanced_switch.toggle()
         app.update()
-        assert app._sidebar.winfo_manager() == "grid"
-        assert not app._workspace.footer.winfo_manager()
-        loader = app._settings_loader
-        assert loader.frame.winfo_ismapped()
-        assert loader.label.cget("text") == "Loading advanced settings…"
-        assert not getattr(app, "_settings_build_complete", False)
-        # A user can still change their mind before the controls are built.
-        loader.advanced_switch.toggle()
-        app.update()
-        assert app._settings_loader is None
-        assert not loader.frame.winfo_exists()
-        assert app.tab_frames["settings"] is app._basic_settings_frame
-        app.app_state = AppState.IDLE
-        app._set_advanced_mode(True)
-        app.update()
-        _finish_staged_settings(app)
         _assert_native_hero_is_aligned(app)
-        assert app._settings_build_complete
-        assert app._advanced_open
-        advanced_frame = app.tab_frames["settings"]
-        assert app._tab_pane.cget("corner_radius") == wm.RADIUS["pane"]
-        assert advanced_frame.cget("fg_color") == app._tab_pane.cget("fg_color")
-        assert not app._basic_settings_frame.winfo_manager()
-        assert app._advanced_mode_switch.master is app._settings_scroll
-        assert app._settings_scroll._scrollbar._button_color == basic_scroll._scrollbar._button_color
-        assert app._settings_scroll._scrollbar._button_hover_color == basic_scroll._scrollbar._button_hover_color
-        assert app._advanced_mode_switch.get()
-        assert not app._workspace.version.winfo_ismapped()
+        assert app.config["advanced_mode"] is True
+        assert not app._sidebar.winfo_manager()
+        assert app._workspace.nav.winfo_manager() == "pack"
+        assert app._workspace.footer.winfo_ismapped()
+        assert app._workspace.version.winfo_ismapped()
+        assert app.tab_frames["settings"] is app._basic_settings_frame
+        assert app._basic_settings_view._advanced_built is True
+        assert app._basic_settings_view.advanced_section.winfo_manager() == "pack"
+        assert len(app._basic_settings_view._advanced_rows) >= 15
         _snapshot_own_test_window(app, "advanced")
         app._switch_tab("dictate")
         app.update()
         _assert_children_do_not_cover_bottom_border(app._dictate_mic_card)
         _snapshot_own_test_window(app, "dictate_advanced")
-        app._switch_tab("games", inspection=True)
+        app._switch_tab("settings")
         app.update()
-        _assert_children_do_not_cover_bottom_border(app._games_scroll.winfo_children()[0])
-        _snapshot_own_test_window(app, "games")
-        app._advanced_mode_switch.toggle()
+        app._workspace.advanced_switch.toggle()
         app.update()
+        assert app.config["advanced_mode"] is False
         assert app.tab_frames["settings"] is app._basic_settings_frame
+        assert app._basic_settings_view.advanced_section.winfo_manager() == ""
         assert not app._sidebar.winfo_manager()
         assert app._workspace.footer.winfo_ismapped()
         app._set_advanced_mode(True)
         app.update()
-        assert app.tab_frames["settings"] is advanced_frame
-        app.config["advanced_mode"] = before["advanced_mode"]
+        assert app._basic_settings_view.advanced_section.winfo_manager() == "pack"
+        app._set_advanced_mode(before["advanced_mode"])
+        app.update()
         assert app.config == before
     finally:
         native = getattr(app, "_macos_hero_layer", None)

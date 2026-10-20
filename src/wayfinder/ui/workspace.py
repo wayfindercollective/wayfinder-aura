@@ -89,52 +89,34 @@ class Workspace:
         self.advanced_var.set(not basic)
         tier = "Ultra" if self.app.feature_gate.is_premium else "Free"
         self.version.configure(text=f"v{__version__} · {tier}")
-        if self._mode != basic and self._pane is not None:
-            self._mode = basic
-            if basic:
-                self.frame.configure(fg_color=COLORS["bg_card"], border_width=0)
-                self.nav.pack(fill="x", padx=SPACING["2xl"], pady=(0, SPACING["md"]), before=self.body)
-                self._sidebar.grid_remove()
-                self.body.grid_columnconfigure(0, minsize=0)
-                self._pane.grid_configure(column=0, columnspan=2, padx=0)
-                self._pane.configure(
-                    fg_color=COLORS["bg_card"], bg_color=COLORS["bg_card"], border_width=0,
-                )
-                backdrop = self.frame.cget("bg_color")
-                self.app.hero_frame.configure(
-                    border_width=0, bg_color=backdrop,
-                    # Joined panels need transparent top corners, but solid
-                    # lower corners where they meet the rest of the surface.
-                    background_corner_colors=(backdrop, backdrop, COLORS["bg_card"], COLORS["bg_card"]),
-                )
-                self.app.hero_frame.pack_configure(pady=0)
-                self.body.pack_configure(pady=0)
-                self.footer.pack(
-                    side="bottom", fill="x", padx=SPACING["lg"],
-                    pady=(SPACING["sm"], SPACING["lg"]), before=self.body,
-                )
-            else:
-                self.frame.configure(fg_color="transparent", border_width=0)
-                self.nav.pack_forget()
-                self.footer.pack_forget()
-                self._sidebar.grid()
-                self.body.grid_columnconfigure(0, minsize=180)
-                self._pane.grid_configure(column=1, columnspan=1, padx=(SPACING["md"], 0))
-                self._pane.configure(**self._pane_style)
-                self.app.hero_frame.configure(border_width=1, background_corner_colors=None)
-                self.app.hero_frame.pack_configure(pady=(0, SPACING["md"]))
-                self.body.pack_configure(pady=0)
+        if not self._mode and self._pane is not None:
+            self._mode = True
+            self.frame.configure(fg_color=COLORS["bg_card"], border_width=0)
+            self.nav.pack(fill="x", padx=SPACING["2xl"], pady=(0, SPACING["md"]), before=self.body)
+            self._sidebar.grid_remove()
+            self.body.grid_columnconfigure(0, minsize=0)
+            self._pane.grid_configure(column=0, columnspan=2, padx=0)
+            self._pane.configure(
+                fg_color=COLORS["bg_card"], bg_color=COLORS["bg_card"], border_width=0,
+            )
+            backdrop = self.frame.cget("bg_color")
+            self.app.hero_frame.configure(
+                border_width=0, bg_color=backdrop,
+                # Joined panels need transparent top corners, but solid
+                # lower corners where they meet the rest of the surface.
+                background_corner_colors=(backdrop, backdrop, COLORS["bg_card"], COLORS["bg_card"]),
+            )
+            self.app.hero_frame.pack_configure(pady=0)
+            self.body.pack_configure(pady=0)
+            self.footer.pack(
+                side="bottom", fill="x", padx=SPACING["lg"],
+                pady=(SPACING["sm"], SPACING["lg"]), before=self.body,
+            )
             if self._page_host is not None:
-                self._page_host.pack_configure(
-                    padx=0 if basic else CONTENT_PANE_INSET,
-                    pady=0 if basic else RADIUS["lg"] // 2,
-                )
+                self._page_host.pack_configure(padx=0, pady=0)
             scale_controls = getattr(self.app, "_header_scale_controls", None)
             if scale_controls is not None:
-                if basic:
-                    scale_controls.pack_forget()
-                else:
-                    scale_controls.pack(side="right", padx=(0, SPACING["md"]))
+                scale_controls.pack_forget()
             right_controls = getattr(self.app, "_header_right_controls", None)
             if right_controls is not None:
                 # An empty CTkFrame still requests its default 200px height.
@@ -143,10 +125,12 @@ class Workspace:
                     right_controls.pack(side="right")
                 else:
                     right_controls.pack_forget()
-        tab_ids = self.available_tabs()
+        tab_ids = list(self.available_tabs())
+        active = getattr(self.app, "active_tab", "dictate")
+        if active in ("games", "history") and active not in tab_ids:
+            tab_ids.append(active)
         values = [tab.capitalize() for tab in tab_ids]
         if self.tabs.cget("values") != values:
             self.tabs.configure(values=values)
-        active = getattr(self.app, "active_tab", "dictate")
         if active in tab_ids:
             self.tabs.set(active.capitalize())

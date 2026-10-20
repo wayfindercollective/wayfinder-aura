@@ -8886,20 +8886,12 @@ class WayfinderApp(ctk.CTk):
     def _ensure_tab_created(self, tab_id: str) -> None:
         """Build a tab once, immediately before its first display."""
         if tab_id == "settings" and getattr(self, "_workspace", None) is not None:
-            if basic_mode_enabled(self.config):
-                self._create_basic_settings_tab()
-                return
             loader = getattr(self, "_settings_loader", None)
             if loader is not None and not getattr(self, "_settings_build_complete", False):
                 self._select_settings_frame(loader.frame)
                 return
-            advanced = getattr(self, "_advanced_settings_frame", None)
-            if advanced is not None:
-                self._select_settings_frame(advanced)
-            elif self.tab_frames.get("settings") is getattr(self, "_basic_settings_frame", None):
-                basic = self.tab_frames.pop("settings", None)
-                if basic is not None and basic.winfo_manager() == "pack":
-                    basic.pack_forget()
+            self._create_basic_settings_tab()
+            return
         settings_staged = (
             tab_id == "settings" and hasattr(self, "_settings_build_complete")
         )
@@ -9815,24 +9807,27 @@ class WayfinderApp(ctk.CTk):
         view.refresh()
 
     def _set_advanced_mode(self, enabled: bool) -> None:
-        """Change only presentation; keep both settings views and all values."""
+        """Change only presentation; reveal or hide the scrollable Advanced section."""
         hide_all_tooltips()
         self.config["advanced_mode"] = bool(enabled)
         save_config(self.config)
         if getattr(self, "_hotkey_capture_target", None) is not None:
             self._cancel_hotkey_detect(self._hotkey_capture_target)
-        if enabled and getattr(self, "_workspace", None) is not None and not getattr(self, "_settings_build_complete", False):
-            self._show_advanced_settings_loader()
-            return
-        loader = None
-        if not enabled:
-            loader = getattr(self, "_settings_loader", None)
+        loader = getattr(self, "_settings_loader", None)
+        if not enabled and loader is not None:
             self._settings_loader = None
             job = getattr(self, "_settings_preload_job", None)
             if job is not None:
                 self.after_cancel(job)
                 self._settings_preload_job = None
         self._switch_tab("settings")
+        view = getattr(self, "_basic_settings_view", None)
+        if view is not None:
+            view.refresh()
+            if enabled:
+                view.scroll_to_advanced()
+            else:
+                view.scroll_to_top()
         if loader is not None:
             loader.frame.destroy()
 
@@ -9846,7 +9841,7 @@ class WayfinderApp(ctk.CTk):
         if workspace is None:
             return
         workspace.refresh()
-        if (basic_mode_enabled(self.config) and getattr(self, "active_tab", None) == "style"
+        if (getattr(self, "active_tab", None) == "style"
                 and "style" not in workspace.available_tabs()):
             self._switch_tab("settings")
 
@@ -9872,7 +9867,7 @@ class WayfinderApp(ctk.CTk):
         if workspace is None:
             return
         workspace.refresh()
-        basic = basic_mode_enabled(self.config)
+        basic = True
         if basic == getattr(self, "_workspace_hero_layout", None):
             return
         self._workspace_hero_layout = basic
@@ -11576,6 +11571,12 @@ class WayfinderApp(ctk.CTk):
                 # Re-pack if it was hidden (after the settings scroll content)
                 self.local_benchmark_tile.pack(fill="x", pady=(0, SPACING["gutter"]))
         
+        view = getattr(self, "_basic_settings_view", None)
+        if (view is not None and getattr(view, "_advanced_built", False)
+                and getattr(self, "mode_settings_container", None) is getattr(view, "mode_container", None)):
+            view.rebuild_processing_mode_rows(mode)
+            return
+
         # Clear existing content, including the processing rows this panel built
         # into the Advanced tile (they would otherwise be duplicated on rebuild).
         for widget in self.mode_settings_container.winfo_children():
@@ -20185,6 +20186,7 @@ class WayfinderApp(ctk.CTk):
     def _refresh_entitlement_ui(self) -> None:
         """Refresh controls whose lock state can change after live activation."""
         WayfinderApp._refresh_workspace_navigation(self)
+        WayfinderApp._refresh_basic_settings(self)
         try:
             self._render_vocabulary_tile()
         except Exception:
@@ -21889,6 +21891,9 @@ class WayfinderApp(ctk.CTk):
         if loader is not None:
             loader.when_ready(self.open_model_settings)
             return
+        basic_view = getattr(self, "_basic_settings_view", None)
+        if basic_view is not None and not hasattr(self, "mode_settings_container"):
+            basic_view._ensure_advanced_section()
         container = self.mode_settings_container
 
         def build_panel(content, close_panel):
