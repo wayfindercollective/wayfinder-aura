@@ -231,7 +231,7 @@ def test_an_installed_model_activates_without_a_download(controller):
     downloader.get_model_path.side_effect = None
     ctl.choose_model("Multilingual", False)
     downloader.download_model.assert_not_called()
-    assert app.config["model_path"] == "/models/ggml-base.bin"
+    assert app.config["model_path"] == str(Path("/models/ggml-base.bin"))
     assert app.config["language"] == "auto"
 
 
@@ -268,7 +268,7 @@ def test_download_that_finishes_mid_recording_waits_for_idle(controller):
     app.app_state = AppState.IDLE
     ctl.apply_pending()
     assert app.config["language"] == "auto"
-    assert app.config["model_path"] == "/models/ggml-base.bin"
+    assert app.config["model_path"] == str(Path("/models/ggml-base.bin"))
 
 
 def test_download_cannot_overwrite_an_intervening_advanced_selection(controller):
