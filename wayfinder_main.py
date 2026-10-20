@@ -5332,6 +5332,14 @@ class OverlayController:
                         f"{data.get('name') or ''} {data.get('rect') or ''} "
                         f"scale {data.get('dpr') or '?'}".rstrip()
                     )
+                if data.get("event") == "topmost":
+                    count = int(data.get("restores") or 1)
+                    front = data.get("front") or "another app"
+                    self._log(
+                        f"🫧 Pill was pushed behind {data.get('above')} window(s) — put back on "
+                        f"top (in front: {front}"
+                        + (f"; {count} times since the last report)" if count > 1 else ")")
+                    )
         except Exception:
             pass
 

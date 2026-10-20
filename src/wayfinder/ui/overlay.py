@@ -3238,6 +3238,43 @@ def run_overlay():
         except Exception as e:
             _debug_log(f"screen watch setup failed: {e}")
 
+        # Keep the pill above ordinary windows. 20 Oct: Windows ranked it below
+        # VS Code, Explorer and Slack while it was still flagged topmost, so it
+        # vanished behind them (ui/windows_topmost.py). Check on every
+        # foreground change and once a second; restores are reported to the
+        # main process at most every 30 s, with a count.
+        try:
+            from wayfinder.ui.windows_topmost import TopmostKeeper, foreground_exe
+
+            _restored = {"count": 0, "max_above": 0, "reported": 0.0}
+
+            def _pill_hwnd():
+                return int(overlay.winId()) if overlay.isVisible() else None
+
+            def _report_restore(above: int) -> None:
+                _restored["count"] += 1
+                _restored["max_above"] = max(_restored["max_above"], above)
+                now = time.monotonic()
+                if now - _restored["reported"] < 30.0:
+                    return
+                print(json.dumps({"event": "topmost", "restores": _restored["count"],
+                                  "above": _restored["max_above"],
+                                  "front": foreground_exe()}), flush=True)
+                _restored.update(count=0, max_above=0, reported=now)
+
+            _topmost_keeper = TopmostKeeper(
+                _pill_hwnd, _report_restore,
+                # The foreground event arrives before Windows finishes
+                # reordering; check on a later Qt turn.
+                schedule=lambda fn: QTimer.singleShot(50, fn),
+            )
+            _topmost_keeper.install_foreground_hook()
+            _topmost_timer = QTimer()
+            _topmost_timer.timeout.connect(_topmost_keeper.check)
+            _topmost_timer.start(1000)
+        except Exception as e:
+            _debug_log(f"topmost keeper setup failed: {e}")
+
     # Send ready signal. Report tray availability so the main app's hide-to-tray guard
     # never withdraws the window when there is no tray to restore it from.
     print(json.dumps({"status": "ready", "tray_available": tray_available}), flush=True)
