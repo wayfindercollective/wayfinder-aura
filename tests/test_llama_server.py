@@ -58,6 +58,14 @@ class _FakeProc:
         return self._rc
 
 
+def _ensure_serving(proc, port=8179):
+    """Stub ensure() that, like the real one, hands this thread `proc`."""
+    def ensure(*_a, **_kw):
+        LlamaServerManager._served.proc = proc
+        return port
+    return patch.object(LlamaServerManager, "ensure", side_effect=ensure)
+
+
 class _FakeStream:
     def __init__(self, lines=()):
         self._lines = list(lines)
@@ -367,26 +375,26 @@ class TestWedgedServerRecovery:
         import socket as _socket
         import time as _time
         b = self._backend(tmp_path)
-        with patch.object(LlamaServerManager, "ensure", return_value=8179), \
-             patch.object(LlamaServerManager, "complete", side_effect=_socket.timeout()), \
-             patch.object(LlamaServerManager, "shutdown") as shut:
+        wedged = LlamaServerManager._process = _FakeProc()
+        with _ensure_serving(wedged), \
+             patch.object(LlamaServerManager, "complete", side_effect=_socket.timeout()):
             assert b._server_generate("prompt", 64) is None
-            # The restart moved off-thread so a wedged shutdown (lock wait +
+            # The restart moved off-thread so a wedged stop (lock wait +
             # child termination) cannot eat this dictation's budget — wait for
             # the spawned thread rather than asserting synchronously.
             deadline = _time.time() + 5
-            while not shut.called and _time.time() < deadline:
+            while not wedged.terminated and _time.time() < deadline:
                 _time.sleep(0.01)
-        shut.assert_called_once()
+        assert wedged.terminated and LlamaServerManager._process is None
 
     def test_a_non_timeout_error_does_not_restart(self, tmp_path):
         """Restarting on every transient error would thrash the model load."""
         b = self._backend(tmp_path)
         with patch.object(LlamaServerManager, "ensure", return_value=8179), \
              patch.object(LlamaServerManager, "complete", side_effect=ValueError("bad json")), \
-             patch.object(LlamaServerManager, "shutdown") as shut:
+             patch.object(LlamaServerManager, "restart") as restart:
             assert b._server_generate("prompt", 64) is None
-        shut.assert_not_called()
+        restart.assert_not_called()
 
     def test_start_failure_degrades_to_the_cli(self, tmp_path):
         b = self._backend(tmp_path)
@@ -833,31 +841,31 @@ class TestRepeatedFailurePolicy:
     def test_a_persistently_failing_server_is_eventually_restarted(self):
         import time as _time
         LlamaServerManager._consecutive_failures = 0
-        with patch.object(LlamaServerManager, "shutdown") as shut:
-            results = [LlamaServerManager.note_failure()
-                       for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES)]
-            # The restart runs on its own thread now, so a wedged shutdown
-            # cannot spend the caller's cleanup budget — wait for it.
-            deadline = _time.time() + 5
-            while not shut.called and _time.time() < deadline:
-                _time.sleep(0.01)
+        failing = LlamaServerManager._process = _FakeProc()
+        results = [LlamaServerManager.note_failure(failing)
+                   for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES)]
+        # The restart runs on its own thread now, so a wedged stop cannot
+        # spend the caller's cleanup budget — wait for it.
+        deadline = _time.time() + 5
+        while not failing.terminated and _time.time() < deadline:
+            _time.sleep(0.01)
         assert results[-1] is True and not any(results[:-1])
-        shut.assert_called_once()
+        assert failing.terminated and LlamaServerManager._process is None
 
     def test_a_one_off_failure_does_not_thrash_the_model_load(self):
         LlamaServerManager._consecutive_failures = 0
-        with patch.object(LlamaServerManager, "shutdown") as shut:
+        with patch.object(LlamaServerManager, "restart") as restart:
             assert LlamaServerManager.note_failure() is False
-        shut.assert_not_called()
+        restart.assert_not_called()
 
     def test_success_resets_the_counter(self):
         LlamaServerManager._consecutive_failures = 0
-        with patch.object(LlamaServerManager, "shutdown") as shut:
+        with patch.object(LlamaServerManager, "restart") as restart:
             LlamaServerManager.note_failure()
             LlamaServerManager.note_success()
             for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES - 1):
                 assert LlamaServerManager.note_failure() is False
-        shut.assert_not_called()
+        restart.assert_not_called()
 
 
 class TestSaveMemoryReleasesEverything:
@@ -1024,10 +1032,17 @@ class TestSwitchCancellation:
             stops.append(before_epoch)
             real_shutdown(cls, before_epoch)
 
+        real_restart = LlamaServerManager.restart.__func__
+
+        def recording_restart(cls, failed):
+            stops.append(failed)
+            real_restart(cls, failed)
+
         cancellations = LlamaServerManager.MAX_CONSECUTIVE_FAILURES + 1
         with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
              patch.object(LlamaServerManager, "_serving_model", return_value=True), \
              patch.object(LlamaServerManager, "shutdown", classmethod(recording_shutdown)), \
+             patch.object(LlamaServerManager, "restart", classmethod(recording_restart)), \
              patch("subprocess.Popen", side_effect=popen):
             with patch.object(LlamaServerManager, "_wait_ready", side_effect=switch_mid_load):
                 for _ in range(cancellations):
@@ -1096,10 +1111,12 @@ class TestSwitchCancellation:
 
     @staticmethod
     def _record_stops():
+        """Every stop a counted failure could queue: shutdown() or restart()."""
         stops = []
-        return stops, patch.object(
-            LlamaServerManager, "shutdown",
-            classmethod(lambda cls, before_epoch=None: stops.append(before_epoch)))
+        return stops, patch.multiple(
+            LlamaServerManager,
+            shutdown=classmethod(lambda cls, before_epoch=None: stops.append(before_epoch)),
+            restart=classmethod(lambda cls, failed: stops.append(failed)))
 
     def test_stale_requests_queued_behind_the_new_modes_start_are_not_failures(
             self, tmp_path):
@@ -1192,3 +1209,153 @@ class TestSwitchCancellation:
         Path(model).unlink()
         with pytest.raises(LlamaServerSuperseded):
             LlamaServerManager.ensure(binary, model, 2048, 4, 99, load_epoch=stale)
+
+    def test_a_switch_during_the_last_rungs_reap_does_not_disable_the_server(self, tmp_path):
+        # Sol PR 2 r4: the ladder ran out after the switch and still set
+        # _disabled, so the new mode could never start its server.
+        binary, model = self._files(tmp_path)
+
+        class _SwitchDuringReap(_FakeProc):
+            def kill(self):
+                LlamaServerManager.supersede()
+                super().kill()
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_spawn_attempts",
+                          return_value=[[binary, "-ngl", "99"]]), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=False), \
+             patch("subprocess.Popen", return_value=_SwitchDuringReap()):
+            with pytest.raises(LlamaServerSuperseded):
+                LlamaServerManager.ensure(binary, model, 2048, 4, 99,
+                                          load_epoch=LlamaServerManager.load_epoch())
+        assert LlamaServerManager._disabled is False
+
+    def test_a_switch_behind_spawn_errors_does_not_disable_the_server(self, tmp_path):
+        binary, model = self._files(tmp_path)
+
+        def switch_then_fail(*_a, **_kw):
+            LlamaServerManager.supersede()
+            raise OSError("exec format error")
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_spawn_attempts",
+                          return_value=[[binary, "-ngl", "99"]]), \
+             patch("subprocess.Popen", side_effect=switch_then_fail):
+            with pytest.raises(LlamaServerSuperseded):
+                LlamaServerManager.ensure(binary, model, 2048, 4, 99,
+                                          load_epoch=LlamaServerManager.load_epoch())
+        assert LlamaServerManager._disabled is False
+
+    def test_a_failure_disables_only_the_mode_it_was_configured_in(self, tmp_path):
+        binary, model = self._files(tmp_path)
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=False), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            with pytest.raises(LlamaServerError):
+                LlamaServerManager.ensure(binary, model, 2048, 4, 99,
+                                          load_epoch=LlamaServerManager.load_epoch())
+        assert LlamaServerManager._disabled is True
+        with patch("subprocess.Popen") as popen:
+            with pytest.raises(LlamaServerError):
+                LlamaServerManager.ensure(binary, model, 2048, 4, 99,
+                                          load_epoch=LlamaServerManager.load_epoch())
+        popen.assert_not_called()   # the same mode stops paying for the start
+        LlamaServerManager.supersede()   # GPU off, or another model
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            assert LlamaServerManager.ensure(
+                binary, model, 2048, 4, 0, load_epoch=LlamaServerManager.load_epoch()) == 8179
+
+    @pytest.mark.parametrize("failure", [TimeoutError("timed out"),
+                                         ConnectionResetError("reset by peer")])
+    def test_a_queued_restart_spares_the_replacement_a_switch_started(self, tmp_path, failure):
+        # Sol PR 2 r4: the restart worker ran after the switch's start had
+        # published the new mode's server, and its unconditional stop killed it.
+        old = LlamaServerManager._process = _FakeProc()
+        done, holder = self._hold_the_lock()   # the switch's start, mid-load
+        try:
+            with _ensure_serving(old), \
+                 patch.object(LlamaServerManager, "still_ours", return_value=True), \
+                 patch.object(LlamaServerManager, "complete", side_effect=failure):
+                for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES):
+                    assert self._backend(tmp_path, -1)._server_generate("prompt", 8) is None
+            LlamaServerManager.supersede()
+            new = LlamaServerManager._process = _FakeProc()
+            # Still blocked on the lock: once it is free they finish at once.
+            restarts = [t for t in threading.enumerate() if t.name.startswith(
+                "llama-server-") and t.name.endswith("restart")]
+        finally:
+            done.set()
+            holder.join(5)
+        assert restarts, "the failures queued no restart"
+        for thread in restarts:
+            thread.join(10)
+        assert not new.terminated and LlamaServerManager._process is new
+
+
+class TestRestartsAreBoundToTheChildARequestReached:
+    """A failure is pinned inside ensure(), under the lock: another thread
+    replacing the child before the caller reads it must not redirect the stop."""
+
+    def _files(self, tmp_path):
+        return TestSwitchCancellation._files(tmp_path)
+
+    def test_serving_is_the_child_this_threads_ensure_handed_out(self, tmp_path):
+        binary, model = self._files(tmp_path)
+        first = _FakeProc()
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=first):
+            LlamaServerManager.ensure(binary, model, 2048, 4, 0)
+        LlamaServerManager._process = _FakeProc()   # another thread's respawn
+        assert LlamaServerManager.serving() is first
+        seen = []
+        other = threading.Thread(target=lambda: seen.append(LlamaServerManager.serving()))
+        other.start()
+        other.join(5)
+        assert seen == [None]   # a thread that reached no child pins nothing
+
+    def test_a_reused_server_is_pinned_too(self, tmp_path):
+        binary, model = self._files(tmp_path)
+        live = _FakeProc()
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=live):
+            LlamaServerManager.ensure(binary, model, 2048, 4, 0)
+            LlamaServerManager._served.proc = None
+            LlamaServerManager.ensure(binary, model, 2048, 4, 0)   # reuse
+        assert LlamaServerManager.serving() is live
+
+    def test_a_failed_ensure_pins_nothing(self, tmp_path):
+        binary, model = self._files(tmp_path)
+        LlamaServerManager._served.proc = _FakeProc()   # an earlier request's
+        with patch.object(LlamaServerManager, "_find_port", return_value=None):
+            with pytest.raises(LlamaServerError):
+                LlamaServerManager.ensure(binary, model, 2048, 4, 0)
+        assert LlamaServerManager.serving() is None
+
+    def test_a_failure_after_another_thread_respawned_spares_the_respawn(self, tmp_path):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        binary, model = self._files(tmp_path)
+        backend = LlamaCppCliBackend(
+            llama_binary=str(tmp_path / "llama-simple"), model_path=model,
+            n_gpu_layers=0, residency="auto")
+        reached = _FakeProc()
+        respawn = _FakeProc()
+
+        def ensure_then_respawn(*_a, **_kw):
+            LlamaServerManager._served.proc = reached
+            LlamaServerManager._process = respawn   # lands before serving() is read
+            return 8179
+
+        with patch.object(LlamaServerManager, "ensure", side_effect=ensure_then_respawn), \
+             patch.object(LlamaServerManager, "still_ours", return_value=True), \
+             patch.object(LlamaServerManager, "complete", side_effect=TimeoutError("t")):
+            assert backend._server_generate("prompt", 8) is None
+        for thread in [t for t in threading.enumerate() if t.name == "llama-server-restart"]:
+            thread.join(10)
+        assert not respawn.terminated and LlamaServerManager._process is respawn

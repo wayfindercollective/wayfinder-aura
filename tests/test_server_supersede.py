@@ -12,12 +12,17 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import wayfinder_main
-from wayfinder.core.transcriber import ServerStartSuperseded, WhisperServerBackend
+from wayfinder.core.transcriber import (
+    ServerStartSuperseded,
+    TranscriptionError,
+    WhisperServerBackend,
+)
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shebang fake server")
 
@@ -36,6 +41,7 @@ def _clean_server_state():
     WhisperServerBackend._server_model_path = ""
     WhisperServerBackend._server_use_gpu = None
     WhisperServerBackend._server_disabled = False
+    WhisperServerBackend._server_disabled_epoch = None
 
 
 def _free_port() -> int:
@@ -466,3 +472,178 @@ def test_a_quick_switch_back_to_a_cleanup_style_keeps_its_warm_server(
     release(**release_kwargs)                          # the release runs late
     assert len(spawned) == 1 and spawned[0].poll() is None
     assert _llama_state._process is spawned[0]
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_an_intent_release_spares_the_new_model_a_fresh_request_started(
+        tmp_path, monkeypatch, _llama_state, terminal):
+    # Sol PR 2 r4: the release superseded, a fresh request started the newly
+    # chosen model before the stop took the lock, and the plain stop killed it.
+    config, spawned = _cleanup_setup(tmp_path, monkeypatch)
+    assert _clean_up_from(_snapshot(config)) is not None   # the old model, resident
+    (tmp_path / "new.gguf").touch()
+    config["llama_cpp_model_path"] = str(tmp_path / "new.gguf")
+    loading, loaded = threading.Event(), threading.Event()
+
+    def slow_ready(*_a, **_kw):
+        loading.set()
+        return loaded.wait(10)
+
+    monkeypatch.setattr(_llama_state, "_wait_ready", slow_ready)
+    real_supersede = _llama_state.supersede.__func__
+    fresh = []
+
+    def supersede_then_dictate(cls):
+        cutoff = real_supersede(cls)
+        if not fresh:   # a dictation right after the change, in the new model
+            fresh.append(threading.Thread(
+                target=lambda: _clean_up_from(_snapshot(config)), daemon=True))
+            fresh[0].start()
+            assert loading.wait(5)
+            threading.Timer(0.3, loaded.set).start()
+        return cutoff
+
+    monkeypatch.setattr(_llama_state, "supersede", classmethod(supersede_then_dictate))
+    wayfinder_main._release_cleanup_residency(terminal=terminal)
+    fresh[0].join(10)
+    assert spawned[0].poll() is not None   # the old model is gone either way
+    if terminal:   # Quit and restart stop everything
+        assert spawned[1].poll() is not None and _llama_state._process is None
+    else:
+        assert spawned[1].poll() is None and _llama_state._process is spawned[1]
+
+
+def test_a_stale_backend_missing_its_old_model_does_not_disable_the_new_mode(slow_server):
+    # Sol PR 2 r4: its availability check ran first and disabled the server
+    # for every dictation in the new mode.
+    stale = slow_server(use_gpu=True)
+    WhisperServerBackend.supersede()
+    Path(stale.model_path).unlink()
+    with pytest.raises(ServerStartSuperseded):
+        stale._start_server()
+    assert WhisperServerBackend._server_disabled is False
+    assert not WhisperServerBackend._disabled_now()
+
+
+def test_a_failed_whisper_start_disables_only_the_mode_it_was_configured_in(tmp_path):
+    binary = tmp_path / "whisper-server"
+    binary.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(3)\n")
+    binary.chmod(0o755)
+    model = tmp_path / "ggml-base.bin"
+    model.write_bytes(b"\x00")
+    backend = WhisperServerBackend(
+        whisper_server_binary=str(binary), model_path=str(model), port=_free_port(),
+        use_gpu=False, startup_timeout=STARTUP_TIMEOUT)
+    with pytest.raises(TranscriptionError):
+        backend._start_server()
+    assert WhisperServerBackend._disabled_now()
+    WhisperServerBackend.supersede()   # GPU on, or another model
+    assert not WhisperServerBackend._disabled_now()
+
+
+@pytest.mark.parametrize("how", ["plain", "terminal", "at exit"])
+def test_a_plain_whisper_shutdown_spares_a_start_that_read_the_new_settings(
+        slow_server, how):
+    # A start holding the lock that read the settings after this shutdown's
+    # own supersede is already in the new mode.
+    slow_server()   # creates the server lock
+    held = threading.Event()
+    started = {}
+
+    def start_in_the_new_mode():
+        with WhisperServerBackend._server_lock:
+            epoch = WhisperServerBackend._epoch
+            held.set()
+            deadline = time.monotonic() + 5
+            while WhisperServerBackend._epoch == epoch and time.monotonic() < deadline:
+                time.sleep(0.01)
+            started["proc"] = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"])
+            WhisperServerBackend._server_epoch = WhisperServerBackend._epoch
+            WhisperServerBackend._server_process = started["proc"]
+
+    holder = threading.Thread(target=start_in_the_new_mode, daemon=True)
+    holder.start()
+    assert held.wait(5)
+    if how == "at exit":
+        WhisperServerBackend._shutdown_at_exit()
+    else:
+        WhisperServerBackend.shutdown(terminal=how == "terminal")
+    holder.join(5)
+    new = started["proc"]
+    if how != "plain":
+        assert new.poll() is not None and WhisperServerBackend._server_process is None
+    else:
+        assert new.poll() is None and WhisperServerBackend._server_process is new
+
+
+def _one_attempt_backend(tmp_path, script, startup_timeout=STARTUP_TIMEOUT):
+    binary = tmp_path / "whisper-server"
+    binary.write_text(f"#!{sys.executable}\n{script}\n")
+    binary.chmod(0o755)
+    model = tmp_path / "ggml-base.bin"
+    model.write_bytes(b"\x00")
+    backend = WhisperServerBackend(
+        whisper_server_binary=str(binary), model_path=str(model), port=_free_port(),
+        use_gpu=False, startup_timeout=startup_timeout)
+    attempts = backend._server_cmd_attempts
+    backend._server_cmd_attempts = lambda port: attempts(port)[:1]   # the last rung
+    return backend
+
+
+def test_a_switch_as_the_last_attempt_dies_is_not_a_failed_start(tmp_path, monkeypatch):
+    # The loop's own checks ran before the switch's kill reached the child.
+    backend = _one_attempt_backend(tmp_path, "import sys\nsys.exit(3)")
+
+    def switch_then_read(cls):
+        WhisperServerBackend.supersede()
+        return ""
+
+    monkeypatch.setattr(WhisperServerBackend, "_server_output", classmethod(switch_then_read))
+    with pytest.raises(ServerStartSuperseded):
+        backend._start_server()
+    assert WhisperServerBackend._server_disabled is False
+
+
+def test_a_switch_as_the_startup_wait_runs_out_is_not_a_hang(tmp_path, monkeypatch):
+    backend = _one_attempt_backend(tmp_path, "import time\ntime.sleep(60)", startup_timeout=0.5)
+    probed = []
+
+    def not_ready(_self, _port, timeout=2):
+        if WhisperServerBackend._server_process is not None:   # the readiness probe
+            probed.append(True)
+        return False
+
+    class _SwitchAfterTheLastProbe(subprocess.Popen):
+        def poll(self):
+            if probed and not getattr(self, "_switched", False):
+                self._switched = True
+                WhisperServerBackend.supersede()
+            return super().poll()
+
+    monkeypatch.setattr(WhisperServerBackend, "_is_our_server", not_ready)
+    monkeypatch.setattr(subprocess, "Popen", _SwitchAfterTheLastProbe)
+    with pytest.raises(ServerStartSuperseded):
+        backend._start_server()
+    assert probed, "the readiness loop never probed"
+    assert WhisperServerBackend._server_disabled is False
+
+
+def _main_body(marker):
+    src = Path(wayfinder_main.__file__).read_text()
+    indent = len(marker) - len(marker.lstrip(" "))
+    return src.split(marker, 1)[1].split("\n" + " " * indent + "def ", 1)[0]
+
+
+@pytest.mark.parametrize("marker", ["    def quit_app(self, icon=None, item=None):",
+                                    "    def cleanup_all():",
+                                    "    def _restart_for_overlay_change(self):"])
+def test_quit_and_restart_stop_everything_a_racing_start_too(marker):
+    # Their plain shutdowns would spare a server a dictation started while
+    # they waited for the lock, and leave it running after the app is gone.
+    body = _main_body(marker)
+    assert "WhisperServerBackend.shutdown(terminal=True)" in body
+    assert "WhisperServerBackend.shutdown()" not in body
+    if "overlay" not in marker:
+        assert "_release_cleanup_residency(terminal=True)" in body
+        assert "_release_cleanup_residency()" not in body

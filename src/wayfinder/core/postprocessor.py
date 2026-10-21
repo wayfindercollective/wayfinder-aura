@@ -2839,6 +2839,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         binary = resolve_server_binary(self.llama_binary, use_gpu=requested_ngl != 0)
         if not binary:
             return None  # server not bundled in this build
+        served = None   # the child this request reached, for a bound restart
         try:
             # Pass the port ensure() returned rather than letting complete()
             # re-read the class attribute: a concurrent shutdown (Quit, GPU
@@ -2850,6 +2851,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 deadline=deadline,
                 load_epoch=getattr(self, "_llama_load_epoch", None),
             )
+            served = LlamaServerManager.serving()
             # `deadline` bounds only STARTUP. The generation itself is bounded
             # by the shared cleanup budget, so a server that accepts the socket
             # and then stalls cannot spend the fallback ladder's whole allowance.
@@ -2895,12 +2897,12 @@ class LlamaCppCliBackend(PostProcessorBackend):
             if isinstance(e, (socket.timeout, TimeoutError)) or \
                     isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
                 print("[Post-processing] llama-server timed out - restarting it")
-                # Off this thread: shutdown() can wait ~5s for the lock plus
+                # Off this thread: restart() can wait ~5s for the lock plus
                 # ~10s terminating a wedged child, and this path already sits
-                # deep inside the caller's budget. The epoch machinery makes a
-                # concurrent shutdown-vs-respawn race safe by construction.
+                # deep inside the caller's budget. It stops only the child that
+                # timed out, never a replacement a switch started meanwhile.
                 threading.Thread(
-                    target=LlamaServerManager.shutdown, daemon=True,
+                    target=LlamaServerManager.restart, args=(served,), daemon=True,
                     name="llama-server-restart",
                 ).start()
             else:
@@ -2908,7 +2910,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 # passes the poll()+identity reuse check forever, so every later
                 # dictation would pay the failure before falling back. Bounded so
                 # a one-off blip does not thrash a multi-GB model reload either.
-                restarted = LlamaServerManager.note_failure()
+                restarted = LlamaServerManager.note_failure(served)
                 print(f"[Post-processing] llama-server unavailable "
                       f"({type(e).__name__}: {e}) - falling back to per-call CLI"
                       + (" (restarting it)" if restarted else ""))

@@ -558,17 +558,24 @@ def _supersede_cleanup_loads() -> "int | None":
         return None
 
 
-def _release_cleanup_residency(llama_before_epoch: "int | None" = None) -> None:
+def _release_cleanup_residency(llama_before_epoch: "int | None" = None, *,
+                               terminal: bool = False) -> None:
     """Stop the cleanup server and drop both backends' cached weights.
 
     llama_before_epoch: stop only a server started before that supersede()
-    epoch, leaving one a newer configuration has started. Without it this is
-    a change of intent, so pending snapshots are superseded first.
+    epoch (the CPU/GPU switch's old-mode teardown, which superseded already).
+    Without it this is a change of intent: pending snapshots are superseded
+    here, and again only what predates that is stopped, so a request that
+    read the new settings keeps the server it starts while this waits.
+    terminal: Quit and final cleanup stop everything, a racing start too.
     """
-    if llama_before_epoch is None:
-        _supersede_cleanup_loads()
     try:
         from wayfinder.core.llama_server import LlamaServerManager
+        if terminal:
+            LlamaServerManager.supersede()
+            llama_before_epoch = None
+        elif llama_before_epoch is None:
+            llama_before_epoch = LlamaServerManager.supersede()
         LlamaServerManager.shutdown(before_epoch=llama_before_epoch)
     except Exception:
         pass
@@ -18123,7 +18130,7 @@ class WayfinderApp(ctk.CTk):
             if getattr(self, "warm_mic", None):
                 self.warm_mic.close()
             from wayfinder.core.transcriber import WhisperServerBackend
-            WhisperServerBackend.shutdown()
+            WhisperServerBackend.shutdown(terminal=True)
             self._cleanup_overlay()
             from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
             kill_stale_overlay_from_pidfile()
@@ -22670,13 +22677,13 @@ class WayfinderApp(ctk.CTk):
         # Clean up whisper-server if running
         try:
             from wayfinder.core.transcriber import WhisperServerBackend
-            WhisperServerBackend.shutdown()
+            WhisperServerBackend.shutdown(terminal=True)
         except:
             pass
 
         # Same for the resident cleanup model server.
         try:
-            _release_cleanup_residency()
+            _release_cleanup_residency(terminal=True)
         except:
             pass
 
@@ -26156,11 +26163,11 @@ def main():
         # and leak ~1.5GB VRAM (the tray-Quit path already does this).
         try:
             from wayfinder.core.transcriber import WhisperServerBackend
-            WhisperServerBackend.shutdown()
+            WhisperServerBackend.shutdown(terminal=True)
         except:
             pass
         try:
-            _release_cleanup_residency()
+            _release_cleanup_residency(terminal=True)
         except:
             pass
 

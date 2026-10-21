@@ -126,6 +126,14 @@ class LlamaServerManager:
     # Set when every startup ladder rung failed. The caller then goes straight
     # to the per-call CLI instead of paying a failed startup on every dictation.
     _disabled: bool = False
+    # The switch the failed start was configured under (None: unscoped). The
+    # failure belongs to that mode: after a switch the new mode gets its own
+    # try, and a start the switch cancelled cannot disable the mode after it.
+    _disabled_switch: Optional[int] = None
+    # Per thread: the child the last ensure() on this thread handed out, set
+    # under the lock, so a failure is pinned to the child that request reached
+    # even if another thread replaces it before the caller reads it.
+    _served = threading.local()
     _atexit_registered: bool = False
     # Consecutive request failures that were NOT timeouts. A server that stays
     # alive but always answers HTTP 500 / malformed JSON passes the poll()+
@@ -448,11 +456,13 @@ class LlamaServerManager:
         def _superseded() -> bool:
             return load_epoch is not None and cls._switch_epoch != load_epoch
 
+        cls._served.proc = None   # this request has reached no child yet
         # First, before anything that can fail or wait: a request for a mode
         # the user has left is cancelled, never counted as a server failure.
         if _superseded():
             raise LlamaServerSuperseded("configuration superseded by a switch")
-        if cls._disabled:
+        configured = cls._switch_epoch if load_epoch is None else load_epoch
+        if cls._disabled and cls._disabled_switch in (None, cls._switch_epoch):
             raise LlamaServerError("llama-server disabled after a previous failure")
         if not binary or not Path(binary).exists():
             raise LlamaServerError(f"llama-server binary not found: {binary or '<empty>'}")
@@ -478,6 +488,7 @@ class LlamaServerManager:
             if _superseded():
                 raise LlamaServerSuperseded("configuration superseded by a switch")
             if cls._alive() and cls._requested == want:
+                cls._served.proc = cls._process
                 return cls._port
 
             # Stopping a stale server can wait ~10s in _kill() for a child
@@ -606,6 +617,7 @@ class LlamaServerManager:
                         spawned_ngl = int(cmd[cmd.index("-ngl") + 1])
                         cls._identity = cls._identity_of(
                             cmd[0], model_path, n_ctx, n_threads, spawned_ngl)
+                        cls._served.proc = proc
                         return port
                     errors.append(f"{Path(cmd[0]).name}: not ready "
                                   f"(rc={proc.poll()}) {cls.log_tail()[-300:]}")
@@ -615,7 +627,13 @@ class LlamaServerManager:
                     except Exception:
                         pass
 
+                # A switch or shutdown during the last rung's reap (or behind
+                # spawn errors) is a cancellation, not a machine that cannot
+                # run the server.
+                if cls._epoch != epoch or _superseded():
+                    raise LlamaServerSuperseded("shut down while starting")
                 cls._disabled = True
+                cls._disabled_switch = configured
                 raise LlamaServerError("every llama-server start attempt failed: "
                                        + " | ".join(errors))
             finally:
@@ -703,22 +721,47 @@ class LlamaServerManager:
         cls._consecutive_failures = 0
 
     @classmethod
-    def note_failure(cls) -> bool:
+    def note_failure(cls, failed: Optional[subprocess.Popen] = None) -> bool:
         """Record a non-timeout request failure. True when a restart was begun.
 
-        The restart runs on its own daemon thread: shutdown() can wait ~5s for
+        failed: the child the request reached (serving()), None if it never
+        reached one; the restart stops only that child (see restart()).
+        The restart runs on its own daemon thread: stopping can wait ~5s for
         the lock plus ~10s terminating a wedged child, and note_failure() is
-        called from inside a dictation's cleanup budget. The epoch machinery
-        makes a concurrent shutdown-vs-respawn race safe by construction."""
+        called from inside a dictation's cleanup budget."""
         cls._consecutive_failures += 1
         if cls._consecutive_failures >= cls.MAX_CONSECUTIVE_FAILURES:
             cls._consecutive_failures = 0
             threading.Thread(
-                target=cls.shutdown, daemon=True,
+                target=cls.restart, args=(failed,), daemon=True,
                 name="llama-server-failure-restart",
             ).start()
             return True
         return False
+
+    @classmethod
+    def serving(cls) -> Optional[subprocess.Popen]:
+        """The child the last successful ensure() on this thread handed out."""
+        return getattr(cls._served, "proc", None)
+
+    @classmethod
+    def restart(cls, failed: Optional[subprocess.Popen]) -> None:
+        """Stop `failed` if it is still the published server; the next request
+        starts a fresh one.
+
+        For the failure and timeout restarts, which run later on their own
+        thread: by then a switch may have published a replacement, which is
+        not the server that failed. Leaves _switch_epoch alone, so pending
+        configurations stay current. If the lock is held, a start owns the
+        state and has already stopped or replaced this child itself.
+        """
+        if failed is None or not cls._lock.acquire(timeout=5):
+            return
+        try:
+            if cls._process is failed:
+                cls._stop_locked()
+        finally:
+            cls._lock.release()
 
     @classmethod
     def supersede(cls) -> int:
@@ -797,6 +840,8 @@ class LlamaServerManager:
     def reset_for_tests(cls) -> None:
         cls.shutdown()
         cls._disabled = False
+        cls._disabled_switch = None
+        cls._served = threading.local()
         cls._requested = None
         cls._consecutive_failures = 0
         cls._log_tail = None

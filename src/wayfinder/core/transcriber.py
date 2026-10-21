@@ -764,6 +764,10 @@ class WhisperServerBackend(TranscriptionBackend):
     # then delegates straight to the per-call CLI backend instead of paying
     # the failed-startup cost on every dictation.
     _server_disabled: bool = False
+    # The epoch the failed start was configured under (None: unscoped). The
+    # failure belongs to that mode: after a switch the new mode gets its own
+    # try, and a start the switch cancelled cannot disable the mode after it.
+    _server_disabled_epoch: Optional[int] = None
     # Bumped by supersede()/shutdown(). A startup that began under an older
     # epoch abandons its load and stops its own child: a CPU/GPU switch or Quit
     # never waits for a model load it no longer wants. _server_epoch is the
@@ -1057,8 +1061,12 @@ class WhisperServerBackend(TranscriptionBackend):
         force: restart even if a server appears to be running — recovery uses this to
         replace a wedged-but-listening server that would otherwise look healthy.
         """
+        if WhisperServerBackend._epoch != self._load_epoch:
+            # Configured before a switch: what it finds missing is the old
+            # mode's, so it must not disable the server for the new one.
+            raise ServerStartSuperseded("whisper-server configuration superseded")
         if not self.is_available():
-            WhisperServerBackend._server_disabled = True
+            self._disable_server()
             raise TranscriptionError(
                 f"whisper-server binary not found: {self.whisper_server_binary or '<empty>'}"
             )
@@ -1177,7 +1185,7 @@ class WhisperServerBackend(TranscriptionBackend):
 
                 # Register atexit handler for cleanup (idempotent: shutdown is
                 # safe to call multiple times)
-                atexit.register(WhisperServerBackend.shutdown)
+                atexit.register(WhisperServerBackend._shutdown_at_exit)
 
                 # Wait for server to be ready (model loading takes a few seconds).
                 # macOS/Windows poll every 0.1s: with a warm Metal cache (or the
@@ -1218,15 +1226,19 @@ class WhisperServerBackend(TranscriptionBackend):
 
                 if not died:
                     # Startup hang with budget still available — a real fault; stop trying.
+                    _abandon_if_superseded()
                     self._stop_server_internal(deadline=deadline)
-                    WhisperServerBackend._server_disabled = True
+                    self._disable_server()
                     raise TranscriptionError(
                         f"whisper-server timed out during startup ({self.startup_timeout:g}s)")
 
+            # A child a switch stopped is not a failed start (the check above
+            # it in the loop can race the switch's kill).
+            _abandon_if_superseded()
             WhisperServerBackend._server_process = None
             WhisperServerBackend._server_model_path = ""
             WhisperServerBackend._server_use_gpu = None
-            WhisperServerBackend._server_disabled = True
+            self._disable_server()
             raise TranscriptionError(f"whisper-server failed to start: {last_error}")
         finally:
             WhisperServerBackend._server_lock.release()
@@ -1285,17 +1297,35 @@ class WhisperServerBackend(TranscriptionBackend):
         return cls._epoch
 
     @classmethod
-    def shutdown(cls, before_epoch: Optional[int] = None) -> None:
+    def _disabled_now(cls) -> bool:
+        """Whether a failed start disabled the server for the current mode."""
+        return cls._server_disabled and cls._server_disabled_epoch in (None, cls._epoch)
+
+    def _disable_server(self) -> None:
+        WhisperServerBackend._server_disabled = True
+        WhisperServerBackend._server_disabled_epoch = self._load_epoch
+
+    @classmethod
+    def _shutdown_at_exit(cls) -> None:
+        cls.shutdown(terminal=True)
+
+    @classmethod
+    def shutdown(cls, before_epoch: Optional[int] = None, *, terminal: bool = False) -> None:
         """Stop the whisper-server process. Safe to call multiple times.
 
         A startup in flight is superseded first, so this waits only for it to
         stop its own child, never for the model load to finish.
         before_epoch: stop the resident server only if it was spawned before
         that supersede() epoch. A server started after a CPU/GPU switch is in
-        the new mode and stays.
+        the new mode and stays. Without it the cutoff is this call's own
+        supersede(): a start that read the new settings while this waited for
+        the lock keeps its server.
+        terminal: Quit, restart and final cleanup stop everything, that too.
         """
         if before_epoch is None:
-            cls.supersede()
+            cutoff = cls.supersede()
+            if not terminal:
+                before_epoch = cutoff
         if cls._server_lock is None:
             cls._stop_server_internal()
             return
@@ -1401,7 +1431,7 @@ class WhisperServerBackend(TranscriptionBackend):
             raise TranscriptionError(f"Audio file not found: {audio_path}")
 
         # Server already proved unusable on this machine — go straight to CLI.
-        if WhisperServerBackend._server_disabled:
+        if WhisperServerBackend._disabled_now():
             return self._cli_fallback().transcribe(audio_path, context)
 
         # Ensure server is running
