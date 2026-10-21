@@ -127,6 +127,10 @@ class Engine:
         return cmd, bundle_binary_env(whisper_metal_env(gpu=self.gpu))
 
     def start(self, deadline_s: float) -> float:
+        # The Core ML engine starts twice (cold, during the contention test,
+        # then warm): replacing the handle without stopping it orphaned the
+        # cold server for the rest of the run, and after it.
+        self.stop()
         self.port = free_port()
         cmd, env = self.command()
         self.tail.clear()
