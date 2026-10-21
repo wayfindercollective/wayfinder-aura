@@ -27,6 +27,11 @@ _worker_lock = threading.Lock()
 _preparation_requested = threading.Event()
 _worker = None
 _latest_config = None
+_job_running = threading.Event()
+# The settings a preparation job is for; a request equal on all of them is
+# already being served by the running job.
+_PREPARATION_KEYS = ("model_path", "use_gpu", "whisper_coreml_encoder", "transcription_backend",
+                     "threads", "beam_size", "best_of", "language", "prompt", "custom_vocabulary")
 # The first Core ML load compiles the encoder for the Neural Engine: about
 # 2.5 min on an M1 MacBook Air (2026-10-21), 11 s once compiled. The old 120 s
 # limit killed that compile every time, so the comparison restarted on every
@@ -296,6 +301,14 @@ def record_comparison(cli_binary: str, model_path: str, metal_seconds: float,
     return preferred
 
 
+def coreml_resident() -> bool:
+    """Whether the published dictation server already runs the Core ML twin."""
+    from wayfinder.core.transcriber import WhisperServerBackend as cls
+    proc = cls._server_process
+    return (proc is not None and proc.poll() is None
+            and Path(cls._server_binary or "").parent.name == "whisper-coreml")
+
+
 def coreml_twin(cli_binary: str, model_path: str) -> str | None:
     candidate = prepared_twin(cli_binary, model_path)
     row = comparison(cli_binary, model_path) if candidate else None
@@ -446,11 +459,15 @@ def _measure_probe(probe, clip: Path, cancelled) -> tuple[list, list]:
     return timings, words
 
 
-def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancelled) -> bool:
-    """Publish + hand off an already-warm child, never restart one on a hotkey."""
+def _publish_probe(probe, cancelled, decide=lambda: True) -> bool:
+    """Publish + hand off an already-warm child, never restart one on a hotkey.
+
+    decide() runs under the server lock, after the idle and epoch checks, and
+    says whether to publish."""
     from wayfinder.core.transcriber import WhisperServerBackend
     cls = WhisperServerBackend
     old = None
+    chosen = False
     with _transition_lock:
         if cancelled() or not _idle() or not cls._server_lock.acquire(blocking=False):
             raise InterruptedError("Accelerator switch deferred until idle")
@@ -462,8 +479,8 @@ def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancell
                 # Its config predates a switch or shutdown, whose teardown may
                 # already have run: publishing now would outlive it.
                 return False
-            preferred = record_comparison(cli, source_model, metal, coreml, same_words)
-            if preferred:
+            chosen = decide()
+            if chosen:
                 old = cls._server_process
                 cls._server_epoch = epoch
                 cls._server_process = probe.proc
@@ -480,7 +497,38 @@ def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancell
             cls._server_lock.release()
     if old is not None and old is not probe.proc:
         _stop_probe(old)  # outside arbitration: a slow exit cannot hold the hotkey
-    return preferred
+    return chosen
+
+
+def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancelled) -> bool:
+    """Record the comparison and, if Core ML won, hand over to its probe."""
+    return _publish_probe(probe, cancelled,
+                          lambda: record_comparison(cli, source_model, metal, coreml, same_words))
+
+
+def _hand_off(backend, twin: str, source_model: str, cancelled) -> bool:
+    """Relaunch or reload with Core ML already chosen: its load takes ~11 s on
+    an M1, Metal's under 1 s. Metal serves meanwhile; Core ML loads beside it
+    and takes over at the first idle moment."""
+    _wait_for_idle(cancelled)
+    print("[Whisper] Loading the Core ML encoder beside Metal; Metal serves meanwhile")
+    with _probe_server(backend, str(Path(twin).with_name("whisper-server")),
+                       str(converted_model_path(source_model)), coreml=True,
+                       cancelled=cancelled) as probe:
+        while True:
+            _wait_for_idle(cancelled)
+            try:
+                published = _publish_probe(probe, cancelled)
+            except InterruptedError:
+                if cancelled():
+                    raise
+                continue  # a dictation began after the idle check: wait it out
+            if published:
+                print("[Whisper] macOS encoder: Core ML (took over from Metal)")
+                return True
+            if probe.proc.poll() is not None:
+                raise RuntimeError(f"Core ML server exited before taking over ({probe.proc.returncode})")
+            return False  # configured before a switch: the new mode decides
 
 
 def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
@@ -507,13 +555,21 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
     if cancelled() or not prepare_encoder(cli, source_model, cancelled=cancelled):
         return False
     twin = prepared_twin(cli, source_model)
-    if not twin or comparison(cli, source_model) is not None:
+    if not twin:
         return False
-    clip = _public_probe()
-    if not clip.is_file():
-        return False
+    if comparison(cli, source_model) is not None:
+        # Already compared. If Core ML won, Metal is only serving while it
+        # loads (see get_backend), so bring it up and hand over.
+        if not coreml_twin(cli, source_model) or coreml_resident():
+            return False
+        work = lambda: _hand_off(backend, twin, source_model, cancelled)
+    else:
+        clip = _public_probe()
+        if not clip.is_file():
+            return False
+        work = lambda: _compare_with_probes(config, backend, cli, source_model, twin, clip, cancelled)
     try:
-        return _compare_with_probes(config, backend, cli, source_model, twin, clip, cancelled)
+        return work()
     except InterruptedError:
         raise
     except Exception as exc:
@@ -564,9 +620,11 @@ def schedule_preparation(config: dict, backend) -> None:
     model = Path(os.path.expanduser(str(config.get("model_path", ""))))
     if not model.is_file() or not _binary_twin(cli):
         return
-    keys = ("model_path", "use_gpu", "whisper_coreml_encoder", "transcription_backend", "threads",
-            "beam_size", "best_of", "language", "prompt", "custom_vocabulary")
+    keys = _PREPARATION_KEYS
     with _worker_lock:
+        if (_job_running.is_set() and _latest_config is not None
+                and all(_latest_config.get(k) == config.get(k) for k in keys)):
+            return  # the running job already serves this request
         _latest_config = config
         _preparation_requested.set()
         if _worker is not None and _worker.is_alive():
@@ -579,38 +637,43 @@ def schedule_preparation(config: dict, backend) -> None:
                 # thread teardown. A newer model/settings request cancels old work.
                 _preparation_requested.wait()
                 _preparation_requested.clear()
-                attempts = 0
-                while attempts < 3:
-                    live = _latest_config
-                    snapshot = dict(live)
-                    cancelled = lambda: (_preparation_requested.is_set() or live is not _latest_config
-                                         or any(live.get(k) != snapshot.get(k) for k in keys))
-                    try:
-                        current = get_backend(snapshot)
-                        if not current.use_gpu or not snapshot.get("whisper_coreml_encoder", True):
-                            break
-                        from wayfinder.utils import macos_activity
-                        with macos_activity.held("coreml-preparation", "Converting local speech model"):
-                            prepare_comparison(snapshot, current, cancelled=cancelled)
-                        if cancelled():
-                            _preparation_requested.set()
-                        break
-                    except InterruptedError:
-                        if cancelled():
-                            _preparation_requested.set()
-                            break
-                        # Recording wins. Resume only when quiet; compilation
-                        # is cached and need not be repeated.
+                # Lets schedule_preparation() tell an equal request from a new one.
+                _job_running.set()
+                try:
+                    attempts = 0
+                    while attempts < 3:
+                        live = _latest_config
+                        snapshot = dict(live)
+                        cancelled = lambda: (_preparation_requested.is_set() or live is not _latest_config
+                                             or any(live.get(k) != snapshot.get(k) for k in keys))
                         try:
-                            _wait_for_idle(cancelled)
-                        except InterruptedError:
+                            current = get_backend(snapshot)
+                            if not current.use_gpu or not snapshot.get("whisper_coreml_encoder", True):
+                                break
+                            from wayfinder.utils import macos_activity
+                            with macos_activity.held("coreml-preparation", "Converting local speech model"):
+                                prepare_comparison(snapshot, current, cancelled=cancelled)
                             if cancelled():
                                 _preparation_requested.set()
                             break
-                    except Exception as exc:
-                        print(f"[Whisper] Local encoder preparation deferred ({type(exc).__name__}); keeping Metal")
-                        attempts += 1
-                        time.sleep(1)
+                        except InterruptedError:
+                            if cancelled():
+                                _preparation_requested.set()
+                                break
+                            # Recording wins. Resume only when quiet; compilation
+                            # is cached and need not be repeated.
+                            try:
+                                _wait_for_idle(cancelled)
+                            except InterruptedError:
+                                if cancelled():
+                                    _preparation_requested.set()
+                                break
+                        except Exception as exc:
+                            print(f"[Whisper] Local encoder preparation deferred ({type(exc).__name__}); keeping Metal")
+                            attempts += 1
+                            time.sleep(1)
+                finally:
+                    _job_running.clear()
 
         _worker = threading.Thread(target=run, name="wayfinder-local-encoder", daemon=True)
         _worker.start()

@@ -2365,6 +2365,9 @@ def get_backend(config: dict) -> TranscriptionBackend:
     # Read before any setting: a switch landing between the two reads then
     # cancels this backend's server start rather than mislabelling it.
     load_epoch = config.get(LOAD_EPOCH_KEY)
+    # The caller's settings, before the presets below are folded into a copy:
+    # what the Core ML preparation job is keyed on (see warm_up_transcription).
+    requested_config = config
     if load_epoch is None:
         load_epoch = WhisperServerBackend.load_epoch()
     backend_type = config.get("transcription_backend", "whisper_cpp")
@@ -2597,12 +2600,22 @@ def get_backend(config: dict) -> TranscriptionBackend:
 
             cli_binary = gpu_twin(cli_binary) or cli_binary
         coreml_selected = False
+        coreml_pending = False
         selected_model_path = config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin")
         if (sys.platform == "darwin" and use_gpu_effective
                 and config.get("whisper_coreml_encoder", True)):
-            from wayfinder.utils.macos_coreml import coreml_twin, converted_model_path
+            from wayfinder.utils.macos_coreml import (
+                converted_model_path, coreml_resident, coreml_twin,
+            )
 
             coreml_binary = coreml_twin(cli_binary, config.get("model_path", ""))
+            if (coreml_binary and config.get("whisper_server_mode", True)
+                    and not coreml_resident()):
+                # Its server takes ~11 s to load on an M1, Metal's under 1 s: a
+                # dictation right after launch (or any reload) runs on Metal
+                # while Core ML loads beside it and takes over when idle.
+                coreml_binary = None
+                coreml_pending = True
             if coreml_binary:
                 cli_binary = coreml_binary
                 selected_model_path = str(converted_model_path(config.get("model_path", "")))
@@ -2633,6 +2646,9 @@ def get_backend(config: dict) -> TranscriptionBackend:
             )
             server_backend.bind_to_epoch(load_epoch)
             if server_backend.is_available():
+                if coreml_pending:
+                    from wayfinder.utils.macos_coreml import schedule_preparation
+                    schedule_preparation(requested_config, server_backend)
                 return server_backend
             if sys.platform in ("darwin", "win32") and not Path(
                     os.path.expanduser(str(server_backend.model_path or ""))).is_file():
