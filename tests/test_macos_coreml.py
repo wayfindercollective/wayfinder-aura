@@ -187,9 +187,11 @@ def test_handoff_only_adopts_faster_matching_probe(monkeypatch, preferred):
     assert stop.called is preferred
 
 
-def test_a_probe_whose_config_predates_a_switch_is_not_adopted(monkeypatch):
+@pytest.mark.parametrize("after", ["switch", "quit"])
+def test_a_probe_whose_config_predates_a_switch_is_not_adopted(monkeypatch, after):
     # The old mode's teardown can run while the comparison is still probing;
-    # adopting afterwards would leave its server resident.
+    # adopting afterwards would leave its server resident. After Quit nothing
+    # is adopted, even a probe configured after its supersede.
     import threading
     from unittest.mock import Mock
     from wayfinder.core.transcriber import WhisperServerBackend
@@ -206,7 +208,10 @@ def test_a_probe_whose_config_predates_a_switch_is_not_adopted(monkeypatch):
                             backend=SimpleNamespace(model_path="converted.bin", threads=4,
                                                     whisper_server_binary="coreml-server",
                                                     _load_epoch=cls._epoch))
-    cls.supersede()
+    if after == "switch":
+        cls.supersede()
+    else:
+        monkeypatch.setattr(cls, "_closed", True)
     assert macos_coreml._activate_probe(probe, "cli", "model", 1.0, .5, True, lambda: False) is False
     assert not probe.adopted and cls._server_process is None
     record.assert_not_called()
@@ -596,3 +601,18 @@ def test_dictations_during_the_load_do_not_restart_it(tmp_path, monkeypatch):
     assert finished.wait(5)
     time.sleep(0.3)
     assert cancelled_seen == [] and runs == [1]
+
+
+def test_no_core_ml_preparation_starts_after_quit(monkeypatch):
+    import wayfinder.core.transcriber as transcriber
+    from wayfinder.license import FeatureGate
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(transcriber, "_resolve_whisper_cli_binary", lambda path: "/b/whisper-cli")
+    monkeypatch.setattr(FeatureGate, "has_feature", lambda self, feature: True)
+    monkeypatch.setattr(macos_coreml, "comparison_failures", lambda c, m: 0)
+    monkeypatch.setattr(macos_coreml, "prepare_encoder",
+                        lambda *a, **kw: pytest.fail("a probe started after Quit"))
+    monkeypatch.setattr(transcriber.WhisperServerBackend, "_closed", True)
+    backend = SimpleNamespace(use_gpu=True, whisper_server_binary="/b/whisper-server")
+    assert macos_coreml.prepare_comparison(
+        {"model_path": "/m/ggml-large-v3-turbo-q5_0.bin"}, backend, cancelled=lambda: False) is False

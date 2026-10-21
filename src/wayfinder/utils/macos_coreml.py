@@ -475,7 +475,7 @@ def _publish_probe(probe, cancelled, decide=lambda: True) -> bool:
             if probe.proc.poll() is not None:
                 return False
             epoch = getattr(probe.backend, "_load_epoch", cls._epoch)
-            if epoch != cls._epoch:
+            if epoch != cls._epoch or cls._closed:
                 # Its config predates a switch or shutdown, whose teardown may
                 # already have run: publishing now would outlive it.
                 return False
@@ -546,8 +546,11 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
     source_model = str(config.get("model_path", ""))
     if not source_model or Path(backend.whisper_server_binary).parent.name == "whisper-coreml":
         return False
+    from wayfinder.core.transcriber import WhisperServerBackend
     superseded = cancelled
-    cancelled = lambda: superseded() or not get_feature_gate().has_feature("gpu_acceleration")
+    # A terminal shutdown (Quit) admits no server after it, a probe included.
+    cancelled = lambda: (superseded() or WhisperServerBackend._closed
+                         or not get_feature_gate().has_feature("gpu_acceleration"))
     failures = comparison_failures(cli, source_model)
     if failures >= MAX_COMPARISON_FAILURES:
         print(f"[Whisper] Core ML comparison failed {failures} times on this Mac; keeping Metal")
