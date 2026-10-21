@@ -91,6 +91,87 @@ def _terminate_child(proc: subprocess.Popen, timeout: float = 3.0) -> None:
         pass
 
 
+# One-shot native helpers (whisper-cli, llama-simple and their probes) are not
+# servers, so no server stop reaches them. They run through here: admitted
+# only while the app is open and tracked until they exit, so a terminal
+# shutdown (Quit, overlay restart, final cleanup) stops the running ones and
+# refuses the rest. A fallback racing Quit otherwise outlived os._exit(), its
+# timeout gone with the parent.
+_tracked_lock = threading.Lock()
+_tracked: dict = {}   # Popen -> its stop function
+_tracked_closed = False
+
+
+class HelpersClosed(RuntimeError):
+    """A helper process was refused: the app is shutting down."""
+
+
+def spawn_tracked(command: Sequence[str], *, stop=None, **popen_kwargs) -> subprocess.Popen:
+    """Popen a helper that a terminal shutdown stops (with *stop*, default
+    terminate then kill); refused once one has begun."""
+    with _tracked_lock:
+        if _tracked_closed:
+            raise HelpersClosed("shutting down: no new helper process")
+        proc = subprocess.Popen(command, **popen_kwargs)
+        _tracked[proc] = stop or _terminate_child
+    bind_to_app_lifetime(proc)
+    return proc
+
+
+def forget_tracked(proc: subprocess.Popen) -> None:
+    with _tracked_lock:
+        _tracked.pop(proc, None)
+
+
+def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = None,
+                check: bool = False, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run() through spawn_tracked(): the same arguments and errors."""
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = kwargs["stderr"] = subprocess.PIPE
+    if input is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    proc = spawn_tracked(command, **kwargs)
+    try:
+        with proc:
+            try:
+                stdout, stderr = proc.communicate(input, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                raise
+            except BaseException:
+                proc.kill()
+                raise
+    finally:
+        forget_tracked(proc)
+    if check and proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, stdout, stderr)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+
+def close_tracked(timeout: float = 6.0) -> None:
+    """Terminal shutdown: refuse new helpers and stop every tracked one, in
+    parallel so Quit waits for the slowest, not the sum."""
+    global _tracked_closed
+    with _tracked_lock:
+        _tracked_closed = True
+        running = list(_tracked.items())
+    stoppers = [threading.Thread(target=stop, args=(proc,), daemon=True,
+                                 name="helper-stop") for proc, stop in running]
+    for thread in stoppers:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    for thread in stoppers:
+        thread.join(max(0.0, deadline - time.monotonic()))
+
+
+def reopen_tracked() -> None:
+    """Admit helpers again after a terminal shutdown that did not exit."""
+    global _tracked_closed
+    with _tracked_lock:
+        _tracked_closed = False
+
+
 def run_supervised_command(
     command: Sequence[str],
     parent_pid: int,

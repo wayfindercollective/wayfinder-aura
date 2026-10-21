@@ -23,7 +23,9 @@ from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
-from wayfinder.utils.child_supervisor import bind_to_app_lifetime, wrap_macos_child_command
+from wayfinder.utils.child_supervisor import (
+    HelpersClosed, bind_to_app_lifetime, run_tracked, wrap_macos_child_command,
+)
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
 # subprocess kwargs that hide the child console window on Windows (empty on
@@ -446,6 +448,11 @@ class WhisperCppBackend(TranscriptionBackend):
         Raises:
             TranscriptionError: If transcription fails
         """
+        if WhisperServerBackend._closed:
+            # Quit or restart: nothing starts after a terminal shutdown, its
+            # --help probe included.
+            raise TranscriptionError("Aura is shutting down")
+
         # Validate paths
         if not _existing_file(self.whisper_binary):
             raise TranscriptionError(f"whisper.cpp binary not found: {self.whisper_binary}")
@@ -585,7 +592,7 @@ class WhisperCppBackend(TranscriptionBackend):
                     raise TranscriptionError(
                         f"whisper-cli salvage budget exhausted after {attempt_idx} attempt(s)")
             try:
-                result = subprocess.run(
+                result = run_tracked(
                     cmd,
                     capture_output=True,
                     text=True,
@@ -610,6 +617,8 @@ class WhisperCppBackend(TranscriptionBackend):
                 continue
             except FileNotFoundError:
                 raise TranscriptionError(f"Could not execute whisper.cpp: {binary}")
+            except HelpersClosed:
+                raise TranscriptionError("Aura is shutting down")
 
             if not is_last:
                 from wayfinder.utils.windows_whisper import crashed
@@ -709,7 +718,7 @@ class WhisperCppBackend(TranscriptionBackend):
                 wav.setsampwidth(2)
                 wav.setframerate(16000)
                 wav.writeframes(b"\x00\x00" * 1600)
-            result = subprocess.run(
+            result = run_tracked(
                 [self.whisper_binary, "-m", self.model_path, "-f", probe_wav,
                  "--no-timestamps"],
                 capture_output=True,
@@ -1324,7 +1333,9 @@ class WhisperServerBackend(TranscriptionBackend):
     @classmethod
     def reopen(cls) -> None:
         """Admit starts again after a terminal shutdown that did not exit."""
+        from wayfinder.utils.child_supervisor import reopen_tracked
         cls._closed = False
+        reopen_tracked()
 
     @classmethod
     def _shutdown_at_exit(cls) -> None:
@@ -1347,6 +1358,10 @@ class WhisperServerBackend(TranscriptionBackend):
         if terminal:
             cls._closed = True   # before the supersede: see _start_server()
             cls.supersede()
+            # whisper-cli too: a dictation that fell back just before this
+            # must not outlive the app.
+            from wayfinder.utils.child_supervisor import close_tracked
+            close_tracked()
             before_epoch = None
         elif before_epoch is None:
             before_epoch = cls.supersede()
@@ -1462,6 +1477,10 @@ class WhisperServerBackend(TranscriptionBackend):
         try:
             self._start_server()
         except ServerStartSuperseded:
+            if WhisperServerBackend._closed:
+                # Quit or restart: nothing starts after a terminal shutdown,
+                # whisper-cli included.
+                raise TranscriptionError("Aura is shutting down")
             # A CPU/GPU switch or model change cancelled the load mid-dictation.
             print("[Whisper Server] Startup cancelled by a settings change; "
                   "this dictation uses whisper-cli.")

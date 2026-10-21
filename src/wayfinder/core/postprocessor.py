@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from wayfinder.utils.child_supervisor import run_tracked
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.platform import (
     get_user_llm_models_dir,
@@ -2569,7 +2570,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
             else min(_GPU_PROBE_TIMEOUT, budget)
         try:
             t0 = _t.time()
-            r = subprocess.run(
+            r = run_tracked(
                 [self.llama_binary, "-m", self.model_path, "-ngl", str(ngl), "-n", "16", "warm up"],
                 capture_output=True, text=True, timeout=limit,
                 env=bundle_binary_env(),
@@ -2882,8 +2883,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
         except LlamaServerSuperseded:
             # A switch or shutdown cancelled the start: not a failure, so it
             # must not count toward the restart that would stop the new mode.
-            print("[Post-processing] llama-server start cancelled by a settings "
-                  "change - this cleanup uses the per-call CLI")
+            if LlamaServerManager._closed:
+                print("[Post-processing] llama-server start refused: Aura is shutting down")
+            else:
+                print("[Post-processing] llama-server start cancelled by a settings "
+                      "change - this cleanup uses the per-call CLI")
             return None
         except Exception as e:
             if served is not None:
@@ -3222,6 +3226,11 @@ Cleaned text:"""
                 mode = ("server-GPU" if spawned else "server-CPU") if spawned is not None \
                     else "server"
             else:
+                from wayfinder.core.llama_server import LlamaServerManager
+                if LlamaServerManager._closed:
+                    # Quit or restart: nothing starts after a terminal shutdown,
+                    # llama-simple and its GPU probe included.
+                    raise PostProcessingError("Aura is shutting down")
                 # Fallback: spawn llama-simple. The prompt is POSITIONAL (llama-simple's
                 # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
                 # and -ngl must precede it so the model never sees the flag in context.
@@ -3246,7 +3255,7 @@ Cleaned text:"""
                     raise PostProcessingError(
                         "cleanup budget exhausted before the CLI fallback")
                 cli_timeout = min(float(self.timeout), cli_remaining)
-                result = subprocess.run(
+                result = run_tracked(
                     cmd, capture_output=True, text=True, errors="replace",
                     timeout=cli_timeout,
                     env=bundle_binary_env(),

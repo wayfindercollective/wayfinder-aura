@@ -514,6 +514,37 @@ def _servers_admit_starts_again():
         cls = getattr(sys.modules.get(module), name, None)
         if cls is not None:
             cls._closed = False
+    supervisor = sys.modules.get("wayfinder.utils.child_supervisor")
+    if supervisor is not None:
+        supervisor.reopen_tracked()
+
+
+@pytest.fixture(autouse=True)
+def _tracked_runs_follow_a_patched_subprocess_run(monkeypatch):
+    """The CLI paths spawn one-shot helpers through
+    child_supervisor.run_tracked (a tracked Popen), but many tests stub those
+    helpers by patching subprocess.run. While subprocess.run is patched, the
+    stub stands in for the spawn; the closed-app gate still applies. The
+    registry's own tests leave subprocess.run alone and get the real thing."""
+    import subprocess
+    from wayfinder.utils import child_supervisor
+
+    real_run, real_tracked = subprocess.run, child_supervisor.run_tracked
+
+    def run_tracked(command, **kwargs):
+        if subprocess.run is real_run:
+            return real_tracked(command, **kwargs)
+        if child_supervisor._tracked_closed:
+            raise child_supervisor.HelpersClosed("shutting down: no new helper process")
+        kwargs.pop("stop", None)
+        return subprocess.run(command, **kwargs)
+
+    import importlib
+    for module in ("wayfinder.core.transcriber", "wayfinder.core.postprocessor"):
+        loaded = importlib.import_module(module)
+        if getattr(loaded, "run_tracked", None) is real_tracked:
+            monkeypatch.setattr(loaded, "run_tracked", run_tracked)
+    yield
 
 
 @pytest.fixture(autouse=True)

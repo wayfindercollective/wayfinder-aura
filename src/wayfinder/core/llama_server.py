@@ -892,12 +892,18 @@ class LlamaServerManager:
         supersede and stop everything, a start in flight too."""
         cls._closed = True   # before the supersede: see ensure()
         cls.supersede()
+        # The per-call CLI (llama-simple, its GPU probe) too: a cleanup that
+        # fell back just before this must not outlive the app.
+        from wayfinder.utils.child_supervisor import close_tracked
+        close_tracked()
         cls.shutdown()
 
     @classmethod
     def reopen(cls) -> None:
         """Admit starts again after a close() that did not exit."""
+        from wayfinder.utils.child_supervisor import reopen_tracked
         cls._closed = False
+        reopen_tracked()
 
     @staticmethod
     def _kill(proc: Optional[subprocess.Popen]) -> None:
