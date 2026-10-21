@@ -102,6 +102,8 @@ class LlamaServerManager:
     # Bumped by every shutdown. A startup that finishes after a shutdown began
     # must not publish its child, or Quit leaves a multi-GB process behind.
     _epoch: int = 0
+    # The epoch the published server was started under (see supersede()).
+    _process_epoch: int = 0
     _log_tail: Optional[deque] = None
     _log_thread: Optional[threading.Thread] = None
     # Set when every startup ladder rung failed. The caller then goes straight
@@ -375,10 +377,14 @@ class LlamaServerManager:
         return env
 
     @classmethod
-    def _wait_ready(cls, proc: subprocess.Popen, port: int, deadline: float) -> bool:
-        """Poll /health until the model is loaded, or the child dies."""
+    def _wait_ready(cls, proc: subprocess.Popen, port: int, deadline: float,
+                    epoch: Optional[int] = None) -> bool:
+        """Poll /health until the model is loaded, the child dies, or a shutdown
+        or supersede() moves the epoch away from ``epoch``."""
         import time
         while time.monotonic() < deadline:
+            if epoch is not None and cls._epoch != epoch:
+                return False  # no longer wanted; the caller stops the child
             if proc.poll() is not None:
                 return False  # died during load
             try:
@@ -496,7 +502,13 @@ class LlamaServerManager:
                     attempt_deadline = time.monotonic() + cls.STARTUP_TIMEOUT
                     if deadline is not None:
                         attempt_deadline = min(attempt_deadline, deadline)
-                    if cls._wait_ready(proc, port, attempt_deadline):
+                    ready = cls._wait_ready(proc, port, attempt_deadline, epoch)
+                    if cls._epoch != epoch:
+                        # Cancelled mid-load: not a failed rung, so the ladder must
+                        # not run on into _disabled.
+                        cls._kill(proc)
+                        raise LlamaServerError("shut down while starting")
+                    if ready:
                         # Confirm the child actually loaded the file we named. A
                         # mismatch means silently cleaning every dictation with the
                         # wrong model, which is invisible in the output.
@@ -539,6 +551,7 @@ class LlamaServerManager:
                         if cls._epoch != epoch:
                             cls._kill(proc)
                             raise LlamaServerError("shut down while starting")
+                        cls._process_epoch = epoch
                         cls._process = proc
                         cls._port = port
                         # Reuse keys off the REQUEST; the label keys off the spawn.
@@ -665,8 +678,24 @@ class LlamaServerManager:
         return False
 
     @classmethod
-    def shutdown(cls) -> None:
+    def supersede(cls) -> int:
+        """Cancel any startup in flight without waiting; returns the new epoch.
+
+        Lock-free, for the Tk thread. Pass the result to
+        shutdown(before_epoch=...) to stop only a server started before it.
+        """
+        cls._epoch += 1
+        return cls._epoch
+
+    @classmethod
+    def shutdown(cls, before_epoch: Optional[int] = None) -> None:
         """Stop the resident server (atexit, GPU toggle, model switch).
+
+        before_epoch: stop it only if it was started before that supersede()
+        epoch, so a server started after a CPU/GPU switch (already in the new
+        mode) survives the old mode's cleanup. A startup holding the lock then
+        either predates the supersede (it stops its own child on seeing the new
+        epoch) or follows it (new mode), so neither needs us.
 
         Bounded lock acquisition, because a startup can hold _lock for its whole
         readiness wait and atexit must not hang the app on exit. If the lock is
@@ -678,7 +707,10 @@ class LlamaServerManager:
         """
         acquired = cls._lock.acquire(timeout=5)
         try:
-            if acquired:
+            if before_epoch is not None:
+                if acquired and cls._process is not None and cls._process_epoch < before_epoch:
+                    cls._stop_locked()
+            elif acquired:
                 cls._stop_locked()
             else:
                 # Could not take the lock: another thread owns the shared state,

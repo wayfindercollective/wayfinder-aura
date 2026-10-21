@@ -89,6 +89,10 @@ class TranscriptionError(Exception):
     pass
 
 
+class ServerStartSuperseded(TranscriptionError):
+    """A whisper-server startup was cancelled by a later shutdown or switch."""
+
+
 def _expand_path(value: object) -> str:
     """Expand a config path without letting None/blank masquerade as cwd."""
     if value is None:
@@ -760,6 +764,12 @@ class WhisperServerBackend(TranscriptionBackend):
     # then delegates straight to the per-call CLI backend instead of paying
     # the failed-startup cost on every dictation.
     _server_disabled: bool = False
+    # Bumped by supersede()/shutdown(). A startup that began under an older
+    # epoch abandons its load and stops its own child: a CPU/GPU switch or Quit
+    # never waits for a model load it no longer wants. _server_epoch is the
+    # epoch the resident server was spawned under.
+    _epoch: int = 0
+    _server_epoch: int = 0
 
     # The server has its own short request/restart budget. CLI salvage must not
     # share the already-expired tail of that budget: it needs enough time to
@@ -1068,6 +1078,14 @@ class WhisperServerBackend(TranscriptionBackend):
             if rem <= 0 or not WhisperServerBackend._server_lock.acquire(timeout=rem):
                 raise TranscriptionError(
                     "recovery deadline hit while acquiring the server lock")
+        epoch = WhisperServerBackend._epoch
+
+        def _abandon_if_superseded() -> None:
+            # Not a broken server: _server_disabled stays untouched.
+            if WhisperServerBackend._epoch != epoch:
+                self._stop_server_internal(deadline=deadline)
+                raise ServerStartSuperseded("whisper-server startup superseded")
+
         try:
             # Already running with the right model AND the right CPU/GPU mode?
             # Skipped when force=True so a wedged-but-alive server is replaced
@@ -1091,6 +1109,7 @@ class WhisperServerBackend(TranscriptionBackend):
             # branch is disabled — recovery MUST bind a fresh server, not the wedge.
             # macOS never adopts (see _find_available_port).
             port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
+            _abandon_if_superseded()
 
             if (
                 sys.platform not in ("darwin", "win32")
@@ -1116,6 +1135,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 if deadline is not None and _left() <= 0:
                     raise TranscriptionError(
                         "whisper-server startup exceeded the recovery deadline (before spawn)")
+                _abandon_if_superseded()
                 if attempt:
                     print(f"[Whisper Server] Start failed ({last_error.strip()[-200:]}) — "
                           f"retrying with reduced flags (attempt {attempt + 1})...")
@@ -1135,6 +1155,8 @@ class WhisperServerBackend(TranscriptionBackend):
                 # Windows: the server dies with the app even on a crash (job
                 # object); no-op elsewhere.
                 bind_to_app_lifetime(proc)
+                # Which switch this child belongs to, for shutdown(before_epoch=...).
+                WhisperServerBackend._server_epoch = epoch
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
@@ -1174,9 +1196,14 @@ class WhisperServerBackend(TranscriptionBackend):
                     else:
                         sleep_to, probe_to = poll, 2
                     time.sleep(sleep_to)
+                    _abandon_if_superseded()
                     if self._is_our_server(port, timeout=probe_to):
+                        # A switch during the probe wins over a late "ready".
+                        _abandon_if_superseded()
                         print(f"[Whisper Server] Ready on port {port} (took {time.monotonic() - started:.1f}s)")
                         return
+                    # A child stopped by a concurrent shutdown is not a failed start.
+                    _abandon_if_superseded()
                     if proc.poll() is not None:
                         last_error = WhisperServerBackend._server_output()[-500:]
                         died = True
@@ -1230,12 +1257,37 @@ class WhisperServerBackend(TranscriptionBackend):
         cls._server_use_gpu = None
 
     @classmethod
-    def shutdown(cls) -> None:
-        """Stop the whisper-server process. Safe to call multiple times."""
-        if cls._server_lock is not None:
-            with cls._server_lock:
-                cls._stop_server_internal()
-        else:
+    def supersede(cls) -> int:
+        """Cancel every startup in flight without waiting; returns the new epoch.
+
+        Lock-free, so the Tk thread can call it. Pass the result to
+        shutdown(before_epoch=...) to stop only servers spawned before it.
+        """
+        cls._epoch += 1
+        return cls._epoch
+
+    @classmethod
+    def shutdown(cls, before_epoch: Optional[int] = None) -> None:
+        """Stop the whisper-server process. Safe to call multiple times.
+
+        A startup in flight is superseded first, so this waits only for it to
+        stop its own child, never for the model load to finish.
+        before_epoch: stop the resident server only if it was spawned before
+        that supersede() epoch. A server started after a CPU/GPU switch is in
+        the new mode and stays.
+        """
+        if before_epoch is None:
+            cls.supersede()
+        if cls._server_lock is None:
+            cls._stop_server_internal()
+            return
+        with cls._server_lock:
+            proc = cls._server_process
+            if (
+                before_epoch is not None and proc is not None
+                and cls._server_epoch >= before_epoch
+            ):
+                return
             cls._stop_server_internal()
 
     def is_available(self) -> bool:
@@ -1337,6 +1389,11 @@ class WhisperServerBackend(TranscriptionBackend):
         # Ensure server is running
         try:
             self._start_server()
+        except ServerStartSuperseded:
+            # A CPU/GPU switch or model change cancelled the load mid-dictation.
+            print("[Whisper Server] Startup cancelled by a settings change; "
+                  "this dictation uses whisper-cli.")
+            return self._cli_fallback().transcribe(audio_path, context)
         except TranscriptionError as e:
             print(f"[Whisper Server] Unusable on this machine ({e}). "
                   "Falling back to whisper-cli per dictation.")

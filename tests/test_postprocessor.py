@@ -1542,8 +1542,8 @@ class TestEveryResidencyReleaseGoesThroughOneFunction:
     def test_no_site_stops_the_server_directly(self):
         src = self._main_source()
         body = src.split("def _release_cleanup_residency", 1)[1].split("\ndef ", 1)[0]
-        direct = src.count("LlamaServerManager.shutdown()")
-        assert direct == body.count("LlamaServerManager.shutdown()") == 1, (
+        direct = src.count("LlamaServerManager.shutdown(")
+        assert direct == body.count("LlamaServerManager.shutdown(") == 1, (
             "a call site stops the server without releasing the wheel cache")
 
     def test_turning_cleanup_off_releases_residency(self):

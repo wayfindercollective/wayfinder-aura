@@ -157,7 +157,7 @@ class TestFallbackLadder:
         binary.touch(); model.touch()
         calls = []
 
-        def fake_ready(proc, port, deadline):
+        def fake_ready(proc, port, deadline, epoch=None):
             return len(calls) > 1  # first (GPU) rung fails, second (-ngl 0) works
 
         def fake_popen(cmd, **kw):
@@ -430,7 +430,7 @@ class TestCpuRescueIsReused:
         binary.touch(); model.touch()
         calls = []
 
-        def ready(proc, port, deadline):
+        def ready(proc, port, deadline, epoch=None):
             return len(calls) > 1  # GPU rung fails, -ngl 0 rung works
 
         with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
@@ -492,7 +492,7 @@ class TestShutdownReachesAnUnpublishedChild:
         proc = _FakeProc()
         seen = {}
 
-        def ready(p, port, deadline):
+        def ready(p, port, deadline, epoch=None):
             # Mid-load: this is exactly the window in which a Quit lands.
             seen["starting"] = LlamaServerManager._starting
             return True
@@ -536,7 +536,7 @@ class TestShutdownReachesAnUnpublishedChild:
 
         waited = []
 
-        def ready(p, port, deadline):
+        def ready(p, port, deadline, epoch=None):
             waited.append(1)
             return True
 
@@ -698,7 +698,7 @@ class TestShutdownDuringStartup:
         binary.touch(); model.touch()
         proc = _FakeProc()
 
-        def ready(p, port, deadline):
+        def ready(p, port, deadline, epoch=None):
             LlamaServerManager._epoch += 1   # a shutdown lands mid-load
             return True
 
@@ -733,6 +733,53 @@ class TestShutdownDuringStartup:
              patch("subprocess.Popen", return_value=_FakeProc()):
             assert LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99) == 8179
 
+    def test_a_supersede_mid_load_stops_the_child_without_disabling(self, tmp_path):
+        # A CPU/GPU switch lands while the model loads: the load stops at the
+        # next /health poll, and the ladder does not run on into _disabled.
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        spawned = []
+
+        def popen(cmd, **_kw):
+            spawned.append(_FakeProc())
+            return spawned[-1]
+
+        def health(*_a, **_kw):
+            LlamaServerManager.supersede()
+            raise OSError("still loading")
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch("wayfinder.core.llama_server.urlopen_loopback", side_effect=health), \
+             patch("subprocess.Popen", side_effect=popen):
+            with pytest.raises(LlamaServerError, match="shut down while starting"):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert len(spawned) == 1 and spawned[0].terminated
+        assert LlamaServerManager._disabled is False
+        assert LlamaServerManager._process is None
+
+    def test_old_mode_teardown_keeps_a_server_started_after_the_switch(self, tmp_path):
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+
+        def start(ngl):
+            proc = _FakeProc()
+            with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+                 patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+                 patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+                 patch("subprocess.Popen", return_value=proc):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, ngl)
+            return proc
+
+        old = start(99)
+        switch = LlamaServerManager.supersede()
+        LlamaServerManager.shutdown(before_epoch=switch)
+        assert old.terminated and LlamaServerManager._process is None
+
+        switch = LlamaServerManager.supersede()
+        new = start(0)  # a dictation starts the new mode before the teardown runs
+        LlamaServerManager.shutdown(before_epoch=switch)
+        assert not new.terminated and LlamaServerManager._process is new
+
 
 class TestStartupDeadline:
     """The ladder must fit inside the app's 120s PROCESSING watchdog, which
@@ -757,7 +804,7 @@ class TestStartupDeadline:
         seen = []
         with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
              patch.object(LlamaServerManager, "_wait_ready",
-                          side_effect=lambda p, port, dl: (seen.append(dl), False)[1]), \
+                          side_effect=lambda p, port, dl, epoch=None: (seen.append(dl), False)[1]), \
              patch("subprocess.Popen", return_value=_FakeProc()):
             with pytest.raises(LlamaServerError):
                 LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99,
@@ -773,7 +820,7 @@ class TestStartupDeadline:
         seen = []
         with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
              patch.object(LlamaServerManager, "_wait_ready",
-                          side_effect=lambda p, port, dl: (seen.append(dl), False)[1]), \
+                          side_effect=lambda p, port, dl, epoch=None: (seen.append(dl), False)[1]), \
              patch("subprocess.Popen", return_value=_FakeProc()):
             with pytest.raises(LlamaServerError):
                 LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)

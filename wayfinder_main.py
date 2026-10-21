@@ -525,10 +525,10 @@ STYLE_LABELS = {
 # cache (source installs only). Every caller that means "stop holding the
 # cleanup model" has to release both, so there is one function that does it and
 # no call site that does half the job.
-def _release_cleanup_residency() -> None:
+def _release_cleanup_residency(llama_before_epoch: "int | None" = None) -> None:
     try:
         from wayfinder.core.llama_server import LlamaServerManager
-        LlamaServerManager.shutdown()
+        LlamaServerManager.shutdown(before_epoch=llama_before_epoch)
     except Exception:
         pass
     # BOTH backends cache models, and which one is live depends on whether the
@@ -1055,6 +1055,18 @@ from wayfinder.core.whisper_timings import format_bench_seconds, warm_benchmark_
 # The Linux probe runs whisper-cli with a 30 s timeout; past this the warm-up
 # gives up and the first dictation starts the server instead.
 _GPU_SETUP_WARM_UP_WAIT_S = 45.0
+# A CPU/GPU switch stops the old mode's servers in the background; the new
+# mode's warm-up waits this long for that, then leaves loading to the first
+# dictation.
+_MODEL_TEARDOWN_WAIT_S = 60.0
+
+
+def _model_load_lock(app) -> threading.Lock:
+    """The lock warm-ups load under and switch teardowns stop under (Tk thread)."""
+    lock = getattr(app, "_model_load_lock", None)
+    if lock is None:
+        lock = app._model_load_lock = threading.Lock()
+    return lock
 
 
 class BenchmarkRunner:
@@ -13993,6 +14005,20 @@ class WayfinderApp(ctk.CTk):
 
     def _apply_transcription_hardware_change(self, gpu_on: bool) -> None:
         """Make a CPU/GPU or speech-model change take effect without a restart."""
+        # Every change, CPU-off included, supersedes any warm-up still queued or
+        # running and cancels the model loads in flight, before anything else.
+        self._warm_up_generation = getattr(self, "_warm_up_generation", 0) + 1
+        whisper_epoch = llama_epoch = None
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+            whisper_epoch = WhisperServerBackend.supersede()
+        except Exception:
+            pass
+        try:
+            from wayfinder.core.llama_server import LlamaServerManager
+            llama_epoch = LlamaServerManager.supersede()
+        except Exception:
+            pass
         if (
             gpu_on and not IS_MACOS
             and self.config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
@@ -14029,25 +14055,48 @@ class WayfinderApp(ctk.CTk):
         elif not IS_MACOS:
             self._gpu_setup_done = None
             self._gpu_setup_failed = False
-        # Apply live: drop the resident whisper-server so the next dictation respawns
-        # it in the new CPU/GPU mode — no app restart needed.
-        try:
-            from wayfinder.core.transcriber import WhisperServerBackend
-            WhisperServerBackend.shutdown()
-        except Exception:
-            pass
-        # Same for the resident llama-server: its -ngl is fixed at spawn, so a
-        # CPU/GPU flip must respawn it rather than keep serving in the old mode.
-        try:
-            _release_cleanup_residency()
-        except Exception:
-            pass
+        WayfinderApp._stop_old_mode_models(self, whisper_epoch, llama_epoch)
         if IS_MACOS or getattr(self, "_gpu_setup_done", None) is not None:
             # Load the model again in its new mode. Linux/Windows GPU-on waits for
             # the device selection above; any warm-up still queued is superseded.
             warm = getattr(self, "_warm_up_transcription", None)
             if callable(warm):
                 warm(startup=False)
+
+    def _stop_old_mode_models(self, whisper_epoch, llama_epoch) -> None:
+        """Stop the servers of the mode just left, off the Tk thread.
+
+        Applies the switch live: the next dictation respawns whisper-server and
+        llama-server (whose -ngl is fixed at spawn) in the new mode. Only servers
+        started before the switch's epochs are stopped; teardowns run in order,
+        and the new mode's warm-up waits for this one.
+        """
+        previous = getattr(self, "_model_teardown_done", None)
+        done = threading.Event()
+        self._model_teardown_done = done
+        lock = _model_load_lock(self)
+
+        def _teardown():
+            try:
+                if previous is not None:
+                    previous.wait(_MODEL_TEARDOWN_WAIT_S)
+                # A warm-up past its generation check finishes or abandons its
+                # loads first, so nothing it starts outlives this teardown.
+                with lock:
+                    try:
+                        from wayfinder.core.transcriber import WhisperServerBackend
+                        WhisperServerBackend.shutdown(before_epoch=whisper_epoch)
+                    except Exception:
+                        pass
+                    try:
+                        _release_cleanup_residency(llama_before_epoch=llama_epoch)
+                    except Exception:
+                        pass
+            finally:
+                done.set()
+
+        threading.Thread(target=_teardown, daemon=True,
+                         name="wayfinder-model-teardown").start()
 
     # === One-time Ultra setup (core/ultra_defaults.py) ===
 
@@ -23412,39 +23461,53 @@ class WayfinderApp(ctk.CTk):
         # be read half-applied by the worker (use_gpu on, Vulkan device unset).
         config = dict(self.config)
         gpu_setup = getattr(self, "_gpu_setup_done", None)
+        teardown = getattr(self, "_model_teardown_done", None)
+        lock = _model_load_lock(self)
         generation = getattr(self, "_warm_up_generation", 0) + 1
         self._warm_up_generation = generation
 
         def _warm():
-            gpu_ready = True
+            ready = True
             try:
-                from wayfinder.core.transcriber import warm_up_transcription
-                gpu_ready = WayfinderApp._gpu_device_ready_for_warm_up(self, config, gpu_setup)
-                if not gpu_ready:
+                if teardown is not None and not teardown.wait(_MODEL_TEARDOWN_WAIT_S):
+                    ready = False
+                    print("[Warmup] The previous mode's models are still stopping; warm-up skipped")
+                elif not WayfinderApp._gpu_device_ready_for_warm_up(self, config, gpu_setup):
+                    ready = False
                     # The first dictation starts the server once the device is set.
                     print("[Warmup] GPU device selection unfinished; transcription warm-up skipped")
-                elif self._warm_up_generation != generation:
-                    print("[Warmup] Superseded by a CPU/GPU or model change")
-                else:
-                    if config.get("whisper_server_mode"):
-                        self.log("⏳ Warming up transcription model (first dictation will be instant)…")
-                    loaded = warm_up_transcription(config)
-                    if config.get("whisper_server_mode") and (
-                            loaded or not (IS_MACOS or IS_WINDOWS)):
-                        # macOS/Windows only claim "loaded" when a server really
-                        # started (it used to say so with no model installed at all).
-                        self.log("✅ Transcription model loaded — ready for instant dictation")
             except Exception as e:
+                ready = False
                 self.log(f"⚠️ Transcription warm-up skipped: {e}")
-            # Warm the post-processing LLM too (keeps the cleanup model resident so
-            # the first dictation's grammar/tone pass is instant, not a cold load).
-            try:
-                from wayfinder.core.postprocessor import warm_up_postprocessing
-                # Its llama-server takes the same CPU/GPU mode and Vulkan device.
-                if gpu_ready and self._warm_up_generation == generation:
-                    warm_up_postprocessing(config)
-            except Exception as e:
-                self.log(f"⚠️ Post-processing warm-up skipped: {e}")
+            # Checks and loads happen under the lock a CPU/GPU switch's teardown
+            # takes, so a switch landing between them cannot leave this warm-up's
+            # old-mode models running.
+            with lock:
+                try:
+                    from wayfinder.core.transcriber import warm_up_transcription
+                    if ready and self._warm_up_generation != generation:
+                        ready = False
+                        print("[Warmup] Superseded by a CPU/GPU or model change")
+                    elif ready:
+                        if config.get("whisper_server_mode"):
+                            self.log("⏳ Warming up transcription model (first dictation will be instant)…")
+                        loaded = warm_up_transcription(config)
+                        if config.get("whisper_server_mode") and (
+                                loaded or not (IS_MACOS or IS_WINDOWS)):
+                            # macOS/Windows only claim "loaded" when a server really
+                            # started (it used to say so with no model installed at all).
+                            self.log("✅ Transcription model loaded — ready for instant dictation")
+                except Exception as e:
+                    self.log(f"⚠️ Transcription warm-up skipped: {e}")
+                # Warm the post-processing LLM too (keeps the cleanup model resident so
+                # the first dictation's grammar/tone pass is instant, not a cold load).
+                try:
+                    from wayfinder.core.postprocessor import warm_up_postprocessing
+                    # Its llama-server takes the same CPU/GPU mode and Vulkan device.
+                    if ready and self._warm_up_generation == generation:
+                        warm_up_postprocessing(config)
+                except Exception as e:
+                    self.log(f"⚠️ Post-processing warm-up skipped: {e}")
             if not startup:
                 return
             # Pre-arm Wayland text injection: surface KDE's one-time "allow input control"
