@@ -1055,6 +1055,10 @@ ctk.CTkSlider._mouse_scroll_event = lambda _self, _event: None
 
 from wayfinder.core.whisper_timings import format_bench_seconds, warm_benchmark_results
 
+# The Linux probe runs whisper-cli with a 30 s timeout; past this the warm-up
+# gives up and the first dictation starts the server instead.
+_GPU_SETUP_WARM_UP_WAIT_S = 45.0
+
 
 class BenchmarkRunner:
     """
@@ -23404,24 +23408,33 @@ class WayfinderApp(ctk.CTk):
         but never block startup — the lazy start at first transcription remains
         the fallback.
         """
+        # Snapshot on the Tk thread: a CPU/GPU switch after this point must not
+        # be read half-applied by the worker (use_gpu on, Vulkan device unset).
+        config = dict(self.config)
+        gpu_setup = getattr(self, "_gpu_setup_done", None)
+
         def _warm():
             try:
                 from wayfinder.core.transcriber import warm_up_transcription
-                if self.config.get("whisper_server_mode"):
-                    self.log("⏳ Warming up transcription model (first dictation will be instant)…")
-                loaded = warm_up_transcription(self.config)
-                if self.config.get("whisper_server_mode") and (
-                        loaded or not (IS_MACOS or IS_WINDOWS)):
-                    # macOS/Windows only claim "loaded" when a server really
-                    # started (it used to say so with no model installed at all).
-                    self.log("✅ Transcription model loaded — ready for instant dictation")
+                if not WayfinderApp._gpu_device_ready_for_warm_up(self, config, gpu_setup):
+                    # The first dictation starts the server once the device is set.
+                    print("[Warmup] GPU device selection unfinished; transcription warm-up skipped")
+                else:
+                    if config.get("whisper_server_mode"):
+                        self.log("⏳ Warming up transcription model (first dictation will be instant)…")
+                    loaded = warm_up_transcription(config)
+                    if config.get("whisper_server_mode") and (
+                            loaded or not (IS_MACOS or IS_WINDOWS)):
+                        # macOS/Windows only claim "loaded" when a server really
+                        # started (it used to say so with no model installed at all).
+                        self.log("✅ Transcription model loaded — ready for instant dictation")
             except Exception as e:
                 self.log(f"⚠️ Transcription warm-up skipped: {e}")
             # Warm the post-processing LLM too (keeps the cleanup model resident so
             # the first dictation's grammar/tone pass is instant, not a cold load).
             try:
                 from wayfinder.core.postprocessor import warm_up_postprocessing
-                warm_up_postprocessing(self.config)
+                warm_up_postprocessing(config)
             except Exception as e:
                 self.log(f"⚠️ Post-processing warm-up skipped: {e}")
             # Pre-arm Wayland text injection: surface KDE's one-time "allow input control"
@@ -23439,6 +23452,25 @@ class WayfinderApp(ctk.CTk):
             except Exception as e:
                 self.log(f"⚠️ Injection pre-arm skipped: {e}")
         threading.Thread(target=_warm, daemon=True, name="wayfinder-model-warmup").start()
+
+    def _gpu_device_ready_for_warm_up(self, config: dict, gpu_setup) -> bool:
+        """Whether a warm-up with ``config`` would start on the selected GPU.
+
+        Runs on the warm-up thread. ``gpu_setup`` is the device selection that
+        was running when the warm-up was dispatched. Waits for it; a failed one,
+        one still running after the wait, or one replaced by a later CPU/GPU
+        switch means a GPU server now would start on the default device.
+        """
+        if (
+            IS_MACOS or not config.get("use_gpu", False)
+            or config.get("transcription_backend", "whisper_cpp") != "whisper_cpp"
+        ):
+            return True  # CPU, Metal or another backend: no Vulkan device to pick
+        if gpu_setup is not None:
+            gpu_setup.wait(_GPU_SETUP_WARM_UP_WAIT_S)
+            if not gpu_setup.is_set() or getattr(self, "_gpu_setup_done", None) is not gpu_setup:
+                return False
+        return not getattr(self, "_gpu_setup_failed", False)
 
     def _socket_listener_healthy(self, timeout: float = 0.35) -> bool:
         """Return True only when the command socket accepts and answers a ping."""
