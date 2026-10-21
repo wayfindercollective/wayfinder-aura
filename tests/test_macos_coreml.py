@@ -171,7 +171,8 @@ def test_handoff_only_adopts_faster_matching_probe(monkeypatch, preferred):
     cls = WhisperServerBackend
     old = Mock()
     for name in ("_server_process", "_server_port", "_server_model_path", "_server_binary", "_server_use_gpu",
-                 "_server_threads", "_server_log_tail", "_server_log_thread", "_server_disabled"):
+                 "_server_threads", "_server_log_tail", "_server_log_thread", "_server_disabled",
+                 "_server_epoch"):
         monkeypatch.setattr(cls, name, getattr(cls, name))
     monkeypatch.setattr(cls, "_server_lock", threading.Lock())
     cls._server_process = old
@@ -183,6 +184,31 @@ def test_handoff_only_adopts_faster_matching_probe(monkeypatch, preferred):
     assert probe.adopted is preferred
     assert cls._server_process is (proc if preferred else old)
     assert stop.called is preferred
+
+
+def test_a_probe_whose_config_predates_a_switch_is_not_adopted(monkeypatch):
+    # The old mode's teardown can run while the comparison is still probing;
+    # adopting afterwards would leave its server resident.
+    import threading
+    from unittest.mock import Mock
+    from wayfinder.core.transcriber import WhisperServerBackend
+    cls = WhisperServerBackend
+    monkeypatch.setattr(macos_coreml, "_idle", lambda: True)
+    record = Mock(return_value=True)
+    monkeypatch.setattr(macos_coreml, "record_comparison", record)
+    monkeypatch.setattr(cls, "_server_lock", threading.Lock())
+    monkeypatch.setattr(cls, "_server_process", None)
+    monkeypatch.setattr(cls, "_epoch", cls._epoch)
+    proc = Mock()
+    proc.poll.return_value = None
+    probe = SimpleNamespace(proc=proc, port=9000, tail=[], reader=Mock(), adopted=False,
+                            backend=SimpleNamespace(model_path="converted.bin", threads=4,
+                                                    whisper_server_binary="coreml-server",
+                                                    _load_epoch=cls._epoch))
+    cls.supersede()
+    assert macos_coreml._activate_probe(probe, "cli", "model", 1.0, .5, True, lambda: False) is False
+    assert not probe.adopted and cls._server_process is None
+    record.assert_not_called()
 
 
 @pytest.mark.parametrize("macos", [True, False])

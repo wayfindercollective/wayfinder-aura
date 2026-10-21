@@ -457,9 +457,15 @@ def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancell
         try:
             if probe.proc.poll() is not None:
                 return False
+            epoch = getattr(probe.backend, "_load_epoch", cls._epoch)
+            if epoch != cls._epoch:
+                # Its config predates a switch or shutdown, whose teardown may
+                # already have run: publishing now would outlive it.
+                return False
             preferred = record_comparison(cli, source_model, metal, coreml, same_words)
             if preferred:
                 old = cls._server_process
+                cls._server_epoch = epoch
                 cls._server_process = probe.proc
                 cls._server_port = probe.port
                 cls._server_model_path = probe.backend.model_path
