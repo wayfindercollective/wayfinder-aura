@@ -103,12 +103,17 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
                 wav.setframerate(16000)
                 wav.writeframes(struct.pack("<" + "h" * 1600, *([0] * 1600)))
         
-        # Run whisper - GPU info appears during model init
+        # Run whisper - GPU info appears during model init. Unmasked: after an
+        # earlier pick (GPU off -> on) the mask would renumber the chosen GPU
+        # as device 0, and the probe would then select physical device 0.
+        env = dict(os.environ)
+        env.pop("GGML_VK_VISIBLE_DEVICES", None)
         result = subprocess.run(
             [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"],
             capture_output=True,
             text=True,
             timeout=30,
+            env=env,
         )
         
         devices = parse_ggml_vulkan_devices(result.stdout + result.stderr)

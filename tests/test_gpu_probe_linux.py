@@ -1,8 +1,13 @@
 """Linux: the startup GPU probe (it loads a Whisper model) runs in GPU mode only."""
 
+import os
+import re
+import subprocess
+
 import pytest
 
 from wayfinder.utils import gpu_simple
+from wayfinder.utils import platform as platform_utils
 
 # ggml's device lines, integrated GPU listed first (a hybrid laptop).
 _INIT = (
@@ -45,3 +50,26 @@ def test_a_manual_device_still_wins_without_a_probe(linux, monkeypatch):
                         lambda config=None: pytest.fail("probed with a manual device"))
     env = gpu_simple.setup_gpu_environment({"use_gpu": True, "gpu_device": "0"})
     assert env == {"GGML_VK_VISIBLE_DEVICES": "0"}
+
+
+def test_turning_gpu_back_on_still_picks_the_discrete_gpu(linux, monkeypatch, tmp_path):
+    # GPU on picks device 1 and leaves GGML_VK_VISIBLE_DEVICES=1 set; GPU off
+    # then on probes again. Under that mask ggml lists only the chosen GPU, as
+    # device 0, so a masked probe would move dictation to the integrated GPU.
+    cli = tmp_path / "whisper-cli"
+    cli.write_text("")
+    (tmp_path / "ggml-tiny.en.bin").write_bytes(b"")
+    monkeypatch.setattr(platform_utils, "get_whisper_model_search_dirs", lambda: [tmp_path])
+    devices = _INIT.splitlines()[1:]
+
+    def ggml_probe(argv, **kwargs):
+        mask = kwargs.get("env", os.environ).get("GGML_VK_VISIBLE_DEVICES")
+        shown = devices if mask is None else [devices[int(i)] for i in mask.split(",")]
+        lines = [re.sub(r"ggml_vulkan: \d+ =", f"ggml_vulkan: {n} =", line) for n, line in enumerate(shown)]
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="\n".join(lines))
+
+    monkeypatch.setattr(gpu_simple.subprocess, "run", ggml_probe)
+    config = {"use_gpu": True, "whisper_binary": str(cli)}
+    for _ in ("first switch to GPU", "GPU off, then on again"):
+        assert gpu_simple.setup_gpu_environment(config) == {"GGML_VK_VISIBLE_DEVICES": "1"}
+        assert os.environ["GGML_VK_VISIBLE_DEVICES"] == "1"
