@@ -472,3 +472,34 @@ def test_real_workspace_can_switch_views_without_resetting_config(monkeypatch, l
         if native is not None:
             native.close()
         app.destroy()
+
+
+def test_benchmark_hardware_readout_fills_in(view, monkeypatch):
+    # 1.3.0 imported a module that never existed, so this stayed "Detecting…".
+    from wayfinder.hotkeys.types import EventType
+    from wayfinder.utils import system_info
+
+    result, app, root, _downloader = view
+    monkeypatch.setattr(
+        system_info, "get_system_info",
+        lambda: {"cpu": "Test CPU", "gpu": "Test GPU", "ram": "8 GB"},
+    )
+    app._update_benchmark_results_display = Mock()
+    parent = ctk.CTkFrame(root)
+    result._build_advanced_benchmark_section(parent)
+
+    kind, callback = app.event_queue.get(timeout=5)
+    assert kind == EventType.UI_CALLBACK
+    callback()
+    texts = [
+        widget.cget("text")
+        for widget in _all_widgets(parent)
+        if isinstance(widget, ctk.CTkLabel)
+    ]
+    assert "CPU: Test CPU\nGPU: Test GPU\nRAM: 8 GB" in texts
+
+
+def _all_widgets(widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _all_widgets(child)

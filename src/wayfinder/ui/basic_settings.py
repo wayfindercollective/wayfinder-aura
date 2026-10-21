@@ -1221,8 +1221,8 @@ class BasicSettingsView:
 
         def _probe_hw():
             try:
-                from wayfinder.core.benchmark import BenchmarkRunner
-                detected = BenchmarkRunner.get_system_info()
+                from wayfinder.utils.system_info import get_system_info
+                detected = get_system_info()
             except Exception:
                 return
 

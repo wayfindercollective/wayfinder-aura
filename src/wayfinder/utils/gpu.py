@@ -1042,42 +1042,10 @@ def get_optimal_thread_count() -> int:
 
 
 def get_system_info() -> dict[str, str]:
-    """
-    Detect system hardware: CPU, GPU, RAM.
-    
-    Returns:
-        Dict with "cpu", "gpu", and "ram" keys.
-    """
-    info = {"cpu": "Unknown", "gpu": "Unknown", "ram": "Unknown"}
-    
-    # CPU detection
-    try:
-        with open("/proc/cpuinfo") as f:
-            for line in f:
-                if "model name" in line:
-                    info["cpu"] = line.split(":")[1].strip()
-                    break
-    except Exception:
-        pass
-    
-    # GPU detection
-    gpu_info = get_gpu_info()
-    if gpu_info.is_known:
-        info["gpu"] = gpu_info.name
-    
-    # RAM detection
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if "MemTotal" in line:
-                    mem_kb = int(line.split()[1])
-                    mem_gb = mem_kb / 1024 / 1024
-                    info["ram"] = f"{mem_gb:.0f} GB"
-                    break
-    except Exception:
-        pass
-    
-    return info
+    """Detect system hardware: CPU, GPU, RAM (see ``utils.system_info``)."""
+    from wayfinder.utils.system_info import get_system_info as _get_system_info
+
+    return _get_system_info()
 
 
 

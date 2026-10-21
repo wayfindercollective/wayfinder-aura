@@ -69,6 +69,8 @@ PROVIDERS = {
 # gpt-4-turbo / gpt-3.5-turbo shut down 2026-10-23.
 OPENAI_CLEANUP_MODELS = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"]
 ANTHROPIC_CLEANUP_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-4-6"]
+# Groq cleanup runs the config default (postprocessor.py, groq_llm_model).
+GROQ_CLEANUP_MODELS = ["llama-3.3-70b-versatile"]
 RETIRED_MODEL_REPLACEMENTS = {
     "anthropic_model": {
         "claude-3-haiku-20240307": "claude-haiku-4-5-20251001",
