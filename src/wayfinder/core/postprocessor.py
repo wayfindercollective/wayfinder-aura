@@ -2886,21 +2886,26 @@ class LlamaCppCliBackend(PostProcessorBackend):
                   "change - this cleanup uses the per-call CLI")
             return None
         except Exception as e:
-            load_epoch = getattr(self, "_llama_load_epoch", None)
-            if load_epoch is not None and LlamaServerManager.load_epoch() != load_epoch:
-                # A switch landed after the start, and the stop that came with
-                # it is what failed this request: counting it, or restarting
-                # on it, would stop the server the new mode starts.
-                print("[Post-processing] llama-server request cut off by a settings "
-                      "change - this cleanup uses the per-call CLI")
-                return None
-            if LlamaServerManager.replaced(served):
-                # The child this request reached was stopped or replaced while
-                # it ran: that stop failed the request, and the replacement is
-                # not the server that failed.
-                print("[Post-processing] llama-server replaced during the request "
-                      "- this cleanup uses the per-call CLI")
-                return None
+            if served is not None:
+                # Attributed by the child the request reached, not by the
+                # switch count: a switch whose new mode reused that child left
+                # it published, so its failure is still its own to recover.
+                if LlamaServerManager.replaced(served):
+                    # Stopped or replaced while the request ran: that stop
+                    # failed the request, and the replacement is not the
+                    # server that failed.
+                    print("[Post-processing] llama-server replaced during the "
+                          "request - this cleanup uses the per-call CLI")
+                    return None
+            else:
+                load_epoch = getattr(self, "_llama_load_epoch", None)
+                if load_epoch is not None and LlamaServerManager.load_epoch() != load_epoch:
+                    # No child reached, and a switch landed after the start: the
+                    # stop that came with it is what failed this request, and
+                    # counting it would count against the new mode's server.
+                    print("[Post-processing] llama-server request cut off by a "
+                          "settings change - this cleanup uses the per-call CLI")
+                    return None
             # A server that accepted the connection but never answered is wedged;
             # leaving it up means every future dictation pays the same timeout.
             # Drop it so the next one respawns, and serve THIS one from the CLI.

@@ -147,6 +147,9 @@ class LlamaServerManager:
     # before falling back. Restarting on the FIRST such error would instead
     # thrash a multi-GB model load on a one-off blip; this bounds both.
     _consecutive_failures: int = 0
+    # The child those failures came from: a count belongs to one child, so an
+    # old child's failures never bring a restart of its replacement closer.
+    _failing_child: Optional[subprocess.Popen] = None
     MAX_CONSECUTIVE_FAILURES = 3
     # macOS and Linux: a fresh random key per spawn, handed to the child through
     # its environment (not argv, which any local process can read with ps). The
@@ -529,6 +532,13 @@ class LlamaServerManager:
             # after it moves _epoch past ours, which every check below sees.
             if _superseded():
                 raise LlamaServerSuperseded("configuration superseded by a switch")
+            # A close() that ran while our own stop was terminating the old
+            # child (its lock wait can run out first) already moved _epoch,
+            # so the capture cannot see it; its flag can, since close() sets
+            # it before superseding. One landing after the capture moves
+            # _epoch past ours, which the checks below see.
+            if cls._closed:
+                raise LlamaServerSuperseded("shutting down")
 
             if not cls._atexit_registered:
                 atexit.register(cls.close)
@@ -757,6 +767,7 @@ class LlamaServerManager:
     @classmethod
     def note_success(cls) -> None:
         cls._consecutive_failures = 0
+        cls._failing_child = None
 
     @classmethod
     def note_failure(cls, failed: Optional[subprocess.Popen] = None) -> bool:
@@ -767,9 +778,13 @@ class LlamaServerManager:
         The restart runs on its own daemon thread: stopping can wait ~5s for
         the lock plus ~10s terminating a wedged child, and note_failure() is
         called from inside a dictation's cleanup budget."""
+        if failed is not cls._failing_child:
+            cls._consecutive_failures = 0
+            cls._failing_child = failed
         cls._consecutive_failures += 1
         if cls._consecutive_failures >= cls.MAX_CONSECUTIVE_FAILURES:
             cls._consecutive_failures = 0
+            cls._failing_child = None
             threading.Thread(
                 target=cls.restart, args=(failed,), daemon=True,
                 name="llama-server-failure-restart",
@@ -908,5 +923,6 @@ class LlamaServerManager:
         cls._closed = False
         cls._requested = None
         cls._consecutive_failures = 0
+        cls._failing_child = None
         cls._log_tail = None
         cls._log_thread = None

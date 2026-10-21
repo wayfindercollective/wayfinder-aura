@@ -1407,6 +1407,31 @@ class TestNoStartAfterQuit:
         popen.assert_not_called()
         assert LlamaServerManager._process is None
 
+    def test_a_quit_landing_during_the_old_servers_stop_starts_nothing(self, tmp_path):
+        # Sol PR 2 r6: an unstamped request was stopping the old server when
+        # close() gave up waiting for the lock. The epoch it captured after
+        # the stop already included the Quit, so it spawned with _closed set.
+        binary, model = self._files(tmp_path)
+
+        class _QuitDuringStop(_FakeProc):
+            def terminate(self):
+                # close()'s own steps, after its lock wait ran out
+                LlamaServerManager._closed = True
+                LlamaServerManager.supersede()
+                super().terminate()
+
+        old = _QuitDuringStop()
+        LlamaServerManager._process, LlamaServerManager._requested = old, ("another model",)
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=_FakeProc()) as popen:
+            with pytest.raises(LlamaServerSuperseded):
+                LlamaServerManager.ensure(binary, model, 2048, 4, 0)   # unstamped
+        popen.assert_not_called()
+        assert old.terminated and LlamaServerManager._process is None
+        assert LlamaServerManager._disabled is False
+
     def test_a_restart_that_did_not_exit_starts_again(self, tmp_path):
         binary, model = self._files(tmp_path)
         LlamaServerManager.close()
@@ -1531,3 +1556,80 @@ class TestARequestIsBoundToItsChild:
             LlamaServerManager.ensure(binary, model, 2048, 4, 0)
         assert LlamaServerManager._auth_headers(child) == {"Authorization": "Bearer k1"}
         assert LlamaServerManager._auth_headers(_FakeProc()) == {}
+
+
+class TestAReusedChildStillRecovers:
+    """Sol PR 2 r6: GPU off and on again while a request ran, and the new mode
+    reused the child the request reached. That child stayed published, but its
+    timeout was dropped as a switch cut-off, so the wedged server stayed."""
+
+    def _backend(self, tmp_path):
+        backend = TestSwitchCancellation()._backend(tmp_path, 0)
+        backend._llama_load_epoch = LlamaServerManager.load_epoch()
+        return backend
+
+    @staticmethod
+    def _join_restarts():
+        for thread in threading.enumerate():
+            if thread.name.startswith("llama-server-") and thread.name.endswith("restart"):
+                thread.join(5)
+
+    def test_a_timeout_on_a_reused_child_still_restarts_it(self, tmp_path):
+        child = _FakeProc()
+        LlamaServerManager._process = child
+        backend = self._backend(tmp_path)
+
+        def switches_then_time_out(*_a, **_kw):
+            LlamaServerManager.supersede()   # GPU off...
+            LlamaServerManager.supersede()   # ...and on: the new mode reused it
+            raise TimeoutError("timed out")
+
+        with _ensure_serving(child), \
+             patch.object(LlamaServerManager, "complete", side_effect=switches_then_time_out):
+            assert backend._server_generate("prompt", 8) is None
+            self._join_restarts()
+        assert child.terminated and LlamaServerManager._process is None
+
+    def test_failures_of_a_reused_child_still_count(self, tmp_path):
+        child = _FakeProc()
+        LlamaServerManager._process = child
+        backend = self._backend(tmp_path)
+
+        def switch_then_fail(*_a, **_kw):
+            LlamaServerManager.supersede()
+            raise ConnectionResetError("reset by peer")
+
+        with _ensure_serving(child), \
+             patch.object(LlamaServerManager, "complete", side_effect=switch_then_fail):
+            for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES):
+                assert backend._server_generate("prompt", 8) is None
+            self._join_restarts()
+        assert child.terminated and LlamaServerManager._process is None
+
+    @pytest.mark.parametrize("failure", [TimeoutError("timed out"),
+                                         ConnectionResetError("reset by peer")])
+    def test_a_request_whose_child_the_switch_stopped_is_not_a_failure(self, tmp_path, failure):
+        child, new = _FakeProc(), _FakeProc()
+        LlamaServerManager._process = child
+        backend = self._backend(tmp_path)
+
+        def switch_stops_it(*_a, **_kw):
+            LlamaServerManager.shutdown(before_epoch=LlamaServerManager.supersede())
+            LlamaServerManager._process = new   # the new mode's server
+            raise failure
+
+        with _ensure_serving(child), \
+             patch.object(LlamaServerManager, "complete", side_effect=switch_stops_it):
+            assert backend._server_generate("prompt", 8) is None
+            self._join_restarts()
+        assert child.terminated
+        assert not new.terminated and LlamaServerManager._process is new
+        assert LlamaServerManager._consecutive_failures == 0
+
+    def test_an_old_childs_failures_do_not_count_against_its_replacement(self):
+        old, new = _FakeProc(), _FakeProc()
+        for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES - 1):
+            assert LlamaServerManager.note_failure(old) is False
+        LlamaServerManager._process = new
+        assert LlamaServerManager.note_failure(new) is False
+        assert LlamaServerManager._consecutive_failures == 1
