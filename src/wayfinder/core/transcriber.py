@@ -24,7 +24,8 @@ from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import (
-    HelpersClosed, bind_to_app_lifetime, run_tracked, wrap_macos_child_command,
+    HelpersClosed, bind_to_app_lifetime, run_tracked, signal_supervised,
+    supervised_popen_kwargs, wrap_macos_child_command,
 )
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
@@ -1204,6 +1205,7 @@ class WhisperServerBackend(TranscriptionBackend):
                     stderr=subprocess.STDOUT,
                     env=spawn_env,
                     **_NO_WINDOW,
+                    **supervised_popen_kwargs(),
                 )
                 # Windows: the server dies with the app even on a crash (job
                 # object); no-op elsewhere.
@@ -1290,16 +1292,18 @@ class WhisperServerBackend(TranscriptionBackend):
         than blocking the caller for the full 5s + 2s.
         """
         if cls._server_process is not None:
-            import signal, time
+            import time
             term_wait, kill_wait = 5.0, 2.0
             if deadline is not None:
                 term_wait = max(0.1, min(term_wait, deadline - time.monotonic()))
+            # macOS: the supervisor's whole group, so a SIGKILL cannot orphan
+            # the whisper-server it runs.
             try:
-                cls._server_process.send_signal(signal.SIGTERM)
+                signal_supervised(cls._server_process)
                 try:
                     cls._server_process.wait(timeout=term_wait)
                 except subprocess.TimeoutExpired:
-                    cls._server_process.kill()
+                    signal_supervised(cls._server_process, kill=True)
                     if deadline is not None:
                         kill_wait = max(0.1, min(kill_wait, deadline - time.monotonic()))
                     cls._server_process.wait(timeout=kill_wait)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -58,6 +59,105 @@ def wrap_macos_child_command(
     else:
         supervisor = [sys.executable, str(Path(__file__).resolve())]
     return supervisor, child_env
+
+
+def supervised_popen_kwargs(*, platform_name: str | None = None) -> dict:
+    """Popen options for a command from wrap_macos_child_command.
+
+    macOS: the supervisor leads its own process group, which its native child
+    inherits, so stop_supervised() can end both at once. Killing only the
+    supervisor (SIGKILL cannot be forwarded) used to orphan whisper-server,
+    which then kept the model loaded and port 8178 open.
+    """
+    return {"start_new_session": True} if (platform_name or sys.platform) == "darwin" else {}
+
+
+def signal_supervised(proc: subprocess.Popen, *, kill: bool = False,
+                      platform_name: str | None = None) -> None:
+    """Terminate (or kill) a supervised child: its whole group on macOS."""
+    if proc.returncode is not None:
+        return  # reaped: its pid, and so its group id, may belong to someone else now
+    if (platform_name or sys.platform) == "darwin":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
+            return
+        except OSError:
+            pass  # no such group: spawned without supervised_popen_kwargs
+    try:
+        proc.kill() if kill else proc.terminate()
+    except OSError:
+        pass
+
+
+def stop_supervised(proc: subprocess.Popen, term_wait: float = 5.0, kill_wait: float = 2.0, *,
+                    platform_name: str | None = None) -> None:
+    """SIGTERM, then SIGKILL after *term_wait*; on macOS to the whole group."""
+    if proc.poll() is not None:
+        return
+    signal_supervised(proc, platform_name=platform_name)
+    try:
+        proc.wait(timeout=term_wait)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    signal_supervised(proc, kill=True, platform_name=platform_name)
+    try:
+        proc.wait(timeout=kill_wait)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+# Native helpers an older Aura could leave behind (its supervisor SIGKILLed,
+# or a crash with llama-server, which is not supervised).
+_ORPHAN_HELPERS = re.compile(
+    r"^/.+/Wayfinder Aura[^/]*\.app/Contents/Frameworks/bin/"
+    r"(?:whisper-coreml/)?(?:whisper-server|whisper-cli|llama-server|llama-simple|coreml-compile)(?: |$)"
+)
+
+
+def orphaned_helper_pids(ps_rows: Sequence[str], uid: int) -> list[int]:
+    """PIDs in ``ps -axo uid=,pid=,ppid=,command=`` output that are this user's
+    Aura helpers re-parented to launchd (no live app or supervisor owns them)."""
+    found = []
+    for row in ps_rows:
+        parts = row.split(None, 3)
+        if len(parts) != 4 or parts[0] != str(uid) or parts[2] != "1":
+            continue
+        if _ORPHAN_HELPERS.match(parts[3]):
+            found.append(int(parts[1]))
+    return found
+
+
+def reap_orphaned_helpers(*, platform_name: str | None = None, grace: float = 3.0) -> list[int]:
+    """macOS: stop helpers left by an earlier Aura. Returns the PIDs stopped."""
+    if (platform_name or sys.platform) != "darwin":
+        return []
+
+    def scan() -> list[int]:
+        try:
+            rows = subprocess.check_output(
+                ["ps", "-axo", "uid=,pid=,ppid=,command="], text=True, timeout=5,
+            ).splitlines()
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return orphaned_helper_pids(rows, os.getuid())
+
+    pids = scan()
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + grace
+    while pids and time.monotonic() < deadline and any(parent_process_alive(p) for p in pids):
+        time.sleep(0.1)
+    # SIGKILL only what a fresh scan still shows as the same orphan.
+    for pid in set(pids) & set(scan()) if pids else ():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return pids
 
 
 def bind_to_app_lifetime(proc: subprocess.Popen, *, platform_name: str | None = None) -> bool:

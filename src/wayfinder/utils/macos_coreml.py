@@ -27,6 +27,15 @@ _worker_lock = threading.Lock()
 _preparation_requested = threading.Event()
 _worker = None
 _latest_config = None
+# The first Core ML load compiles the encoder for the Neural Engine: about
+# 2.5 min on an M1 MacBook Air (2026-10-21), 11 s once compiled. The old 120 s
+# limit killed that compile every time, so the comparison restarted on every
+# launch and never finished, holding an extra model copy while it ran.
+COREML_FIRST_LOAD_DEADLINE_S = 600.0
+METAL_PROBE_DEADLINE_S = 120.0
+# A comparison that failed this often for the same model, app build and macOS
+# release is not retried: dictation stays on Metal.
+MAX_COMPARISON_FAILURES = 2
 
 
 def set_dictation_active(active: bool) -> None:
@@ -122,7 +131,9 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
     if shutil.disk_usage(converted.parent.parent).free < manifest["weights_size"] * 3 + 256 * 1024 * 1024:
         print("[Whisper] Local encoder conversion deferred: insufficient temporary disk space; keeping Metal")
         return False
-    from wayfinder.utils.child_supervisor import wrap_macos_child_command
+    from wayfinder.utils.child_supervisor import (
+        stop_supervised, supervised_popen_kwargs, wrap_macos_child_command,
+    )
     from wayfinder.utils.hostexec import bundle_binary_env
     print("[Whisper] Converting downloaded model locally in the background (no additional model download)")
     with tempfile.TemporaryDirectory(prefix=".conversion-", dir=converted.parent.parent) as staging:
@@ -131,24 +142,25 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
         marker = populate_package(model, package, cancelled=cancelled)
         asset = stage / encoder_path(str(converted)).name
         command, env = wrap_macos_child_command([str(compiler), str(package), str(asset)], bundle_binary_env())
-        proc = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                **supervised_popen_kwargs())
         try:
             import time
             deadline = time.monotonic() + 180
             while proc.poll() is None:
-                if cancelled() or time.monotonic() >= deadline:
+                if cancelled():
+                    return False
+                if time.monotonic() >= deadline:
+                    record_comparison_failure(cli_binary, model_path, "coreml-compile timed out")
                     return False
                 time.sleep(0.2)
-            if proc.returncode or cancelled():
+            if cancelled():
+                return False
+            if proc.returncode:
+                record_comparison_failure(cli_binary, model_path, f"coreml-compile exited {proc.returncode}")
                 return False
         finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
+            stop_supervised(proc)
         (asset / COREML_MANIFEST).write_text(json.dumps(marker))
         publish = stage / "ready"
         publish.mkdir(mode=0o700)
@@ -192,6 +204,57 @@ def _comparison_key(cli_binary: str, model_path: str) -> str:
              Path(os.path.expanduser(model_path)), encoder_path(str(converted_model_path(model_path))) / "weights/weight.bin"]
     stamps = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
     return hashlib.sha256(json.dumps([_hardware_identity(), stamps], sort_keys=True).encode()).hexdigest()
+
+
+def _failure_path() -> Path:
+    from wayfinder.utils.platform import get_cache_dir
+    return get_cache_dir() / "coreml-failures.json"
+
+
+def _failure_key(cli_binary: str, model_path: str) -> str:
+    # Not _comparison_key: a failed conversion has no prepared twin to stamp.
+    files = [Path(cli_binary), Path(os.path.expanduser(model_path))]
+    stamps = [(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in files]
+    return hashlib.sha256(json.dumps([_hardware_identity(), stamps], sort_keys=True).encode()).hexdigest()
+
+
+def _read_failures() -> dict:
+    try:
+        rows = json.loads(_failure_path().read_text(encoding="utf-8"))
+        return rows if isinstance(rows, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def comparison_failures(cli_binary: str, model_path: str) -> int:
+    try:
+        row = _read_failures().get(_failure_key(cli_binary, model_path))
+        return int(row["count"]) if isinstance(row, dict) else 0
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        return 0
+
+
+def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> int:
+    """Count a failed conversion or comparison; returns the new count."""
+    try:
+        key = _failure_key(cli_binary, model_path)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+    rows = _read_failures()
+    previous = rows.get(key)
+    count = (int(previous.get("count", 0)) if isinstance(previous, dict) else 0) + 1
+    rows[key] = {"count": count, "reason": reason[:200], "at": int(time.time())}
+    path = _failure_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=".coreml-failures-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(rows, handle)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+    return count
 
 
 def comparison(cli_binary: str, model_path: str) -> dict | None:
@@ -273,13 +336,8 @@ def _wait_for_idle(cancelled) -> None:
 
 
 def _stop_probe(proc) -> None:
-    if proc.poll() is None:
-        proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=2)
+    from wayfinder.utils.child_supervisor import stop_supervised
+    stop_supervised(proc)
 
 
 @contextmanager
@@ -288,7 +346,7 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     import copy
     import socket
     from types import SimpleNamespace
-    from wayfinder.utils.child_supervisor import wrap_macos_child_command
+    from wayfinder.utils.child_supervisor import supervised_popen_kwargs, wrap_macos_child_command
     from wayfinder.utils.hostexec import bundle_binary_env
     from wayfinder.utils.loopback_http import urlopen_loopback
     from wayfinder.utils.macos_ggml_env import whisper_metal_env
@@ -302,16 +360,21 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     candidate.model_path = model
     command = candidate._server_cmd_attempts(port)[0] + ["--host", "127.0.0.1"]
     command, env = wrap_macos_child_command(command, bundle_binary_env(whisper_metal_env(gpu=True)))
-    proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            **supervised_popen_kwargs())
     tail = deque(maxlen=100)
     reader = threading.Thread(target=backend._drain_server_output, args=(proc.stdout, tail), daemon=True)
     reader.start()
     probe = SimpleNamespace(proc=proc, port=port, tail=tail, reader=reader, adopted=False, backend=candidate)
     try:
-        deadline = time.monotonic() + 120
+        deadline = time.monotonic() + (COREML_FIRST_LOAD_DEADLINE_S if coreml else METAL_PROBE_DEADLINE_S)
         while time.monotonic() < deadline:
-            if cancelled() or proc.poll() is not None:
+            if cancelled():
                 raise InterruptedError("Encoder preparation superseded")
+            if proc.poll() is not None:
+                # A crash on load is a failure, not a pause: retrying it as an
+                # interruption looped forever on a Mac where it always crashes.
+                raise RuntimeError(f"probe exited with {proc.returncode}: {''.join(list(tail)[-3:])[-200:]}")
             # Device compilation may continue while recording; only public
             # inference is paused. Verify ownership before trusting loopback.
             rows = subprocess.check_output(["ps", "-axo", "uid=,pid=,ppid=,command="], text=True).splitlines()
@@ -431,6 +494,10 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
         return False
     superseded = cancelled
     cancelled = lambda: superseded() or not get_feature_gate().has_feature("gpu_acceleration")
+    failures = comparison_failures(cli, source_model)
+    if failures >= MAX_COMPARISON_FAILURES:
+        print(f"[Whisper] Core ML comparison failed {failures} times on this Mac; keeping Metal")
+        return False
     if cancelled() or not prepare_encoder(cli, source_model, cancelled=cancelled):
         return False
     twin = prepared_twin(cli, source_model)
@@ -439,6 +506,19 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
     clip = _public_probe()
     if not clip.is_file():
         return False
+    try:
+        return _compare_with_probes(config, backend, cli, source_model, twin, clip, cancelled)
+    except InterruptedError:
+        raise
+    except Exception as exc:
+        count = record_comparison_failure(cli, source_model, f"{type(exc).__name__}: {exc}")
+        print(f"[Whisper] Core ML comparison failed ({type(exc).__name__}, attempt {count} of "
+              f"{MAX_COMPARISON_FAILURES}); keeping Metal")
+        raise
+
+
+def _compare_with_probes(config: dict, backend, cli: str, source_model: str, twin: str,
+                         clip: Path, cancelled) -> bool:
     _wait_for_idle(cancelled)
     print("[Whisper] Background encoder comparison started (public synthetic audio, no microphone)")
     with _probe_server(backend, str(Path(cli).with_name("whisper-server")), backend.model_path,
@@ -452,6 +532,20 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
         preferred = _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancelled)
         print(f"[Whisper] Encoder comparison: Metal={metal:.3f}s CoreML={coreml:.3f}s; selected={'CoreML' if preferred else 'Metal'}")
         return preferred
+
+
+def cancel_preparation(config: dict) -> None:
+    """A switch to *config* (CPU mode) stops the comparison in flight.
+
+    schedule_preparation() is never called in CPU mode, so without this a
+    GPU-mode comparison started before the switch would finish and hot-swap a
+    Core ML server in. The parked worker wakes, sees CPU, and parks again.
+    """
+    global _latest_config
+    with _worker_lock:
+        if _worker is not None and _worker.is_alive():
+            _latest_config = dict(config)
+            _preparation_requested.set()
 
 
 def schedule_preparation(config: dict, backend) -> None:

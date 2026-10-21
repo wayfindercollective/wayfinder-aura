@@ -14100,6 +14100,12 @@ class WayfinderApp(ctk.CTk):
             llama_epoch = LlamaServerManager.supersede()
         except Exception:
             pass
+        if IS_MACOS and not gpu_on:
+            try:
+                from wayfinder.utils.macos_coreml import cancel_preparation
+                cancel_preparation(dict(self.config))
+            except Exception:
+                pass
         if (
             gpu_on and not IS_MACOS
             and self.config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
@@ -23582,6 +23588,17 @@ class WayfinderApp(ctk.CTk):
         self._warm_up_generation = generation
 
         def _warm():
+            if startup and IS_MACOS:
+                # A helper an earlier Aura left running keeps a model loaded and
+                # port 8178 open; a second server would then share that port.
+                try:
+                    from wayfinder.utils.child_supervisor import reap_orphaned_helpers
+
+                    stopped = reap_orphaned_helpers()
+                    if stopped:
+                        print(f"[Warmup] Stopped {len(stopped)} helper process(es) left by an earlier session")
+                except Exception as e:
+                    print(f"[Warmup] Leftover helper check skipped: {e}")
             ready = True
             try:
                 if teardown is not None and not teardown.wait(_MODEL_TEARDOWN_WAIT_S):

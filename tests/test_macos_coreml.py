@@ -214,3 +214,160 @@ def test_export_loads_normalization_before_half_conversion():
     assert "TURBO_CHECKPOINT_SHA256" in exporter
     assert "dtype=np.float32" in exporter
     assert "compute_precision=ct.precision.FLOAT16" in exporter
+
+
+def test_switching_to_cpu_stops_a_comparison_in_flight(tmp_path, monkeypatch):
+    # A GPU-mode comparison running when the user switches to CPU used to
+    # finish and hot-swap a Core ML (GPU) server in: CPU mode never calls
+    # schedule_preparation(), so nothing told the worker.
+    import contextlib
+    import threading
+    import time
+    import wayfinder.core.transcriber as transcriber
+    from wayfinder.utils import macos_activity
+
+    model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+    model.write_bytes(b"test model")
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(macos_coreml, "_worker", None)
+    monkeypatch.setattr(macos_coreml, "_preparation_requested", threading.Event())
+    monkeypatch.setattr(macos_coreml, "_binary_twin", lambda cli: True)
+    monkeypatch.setattr(transcriber, "_resolve_whisper_cli_binary", lambda path: "/bin/whisper-cli")
+    monkeypatch.setattr(transcriber, "get_backend", lambda cfg: SimpleNamespace(use_gpu=cfg["use_gpu"]))
+    monkeypatch.setattr(macos_activity, "held", lambda *a: contextlib.nullcontext())
+    runs, stopped = [], threading.Event()
+
+    def comparison(snapshot, backend, *, cancelled):
+        runs.append(snapshot["use_gpu"])
+        deadline = time.monotonic() + 5
+        while not cancelled() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stopped.set()
+        return False
+
+    monkeypatch.setattr(macos_coreml, "prepare_comparison", comparison)
+    gpu = {"model_path": str(model), "use_gpu": True, "whisper_coreml_encoder": True}
+    macos_coreml.schedule_preparation(gpu, SimpleNamespace(use_gpu=True))
+    deadline = time.monotonic() + 5
+    while not runs:
+        assert time.monotonic() < deadline, "the comparison never started"
+        time.sleep(0.01)
+
+    macos_coreml.cancel_preparation({**gpu, "use_gpu": False})
+
+    assert stopped.wait(2), "the comparison kept running after the switch to CPU"
+    time.sleep(0.3)
+    assert runs == [True], "the worker restarted the GPU comparison in CPU mode"
+
+
+@pytest.fixture
+def comparison_rig(tmp_path, monkeypatch):
+    """_prepare_comparison up to the probes, on a fake Mac."""
+    import wayfinder.core.transcriber as transcriber
+    import wayfinder.license as license_mod
+
+    cli = tmp_path / "bin" / "whisper-cli"
+    cli.parent.mkdir()
+    cli.write_bytes(b"cli")
+    model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+    model.write_bytes(b"model")
+    clip = tmp_path / "probe.wav"
+    clip.write_bytes(b"RIFF")
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(macos_coreml, "_failure_path", lambda: tmp_path / "coreml-failures.json")
+    monkeypatch.setattr(macos_coreml, "_hardware_identity", lambda: {"hardware": "MacBookAir10,1"})
+    monkeypatch.setattr(transcriber, "_resolve_whisper_cli_binary", lambda path: str(cli))
+    monkeypatch.setattr(license_mod, "get_feature_gate",
+                        lambda: SimpleNamespace(has_feature=lambda name: True))
+    monkeypatch.setattr(macos_coreml, "prepared_twin", lambda c, m: str(tmp_path / "twin" / "whisper-cli"))
+    monkeypatch.setattr(macos_coreml, "comparison", lambda c, m: None)
+    monkeypatch.setattr(macos_coreml, "_public_probe", lambda: clip)
+    rig = SimpleNamespace(converted=[], probes=[], cli=cli, model=model,
+                          config={"model_path": str(model)},
+                          backend=SimpleNamespace(use_gpu=True, whisper_server_binary=str(cli.with_name("whisper-server"))))
+
+    def prepare(c, m, *, cancelled):
+        rig.converted.append(m)
+        return True
+
+    monkeypatch.setattr(macos_coreml, "prepare_encoder", prepare)
+    return rig
+
+
+def test_a_comparison_that_keeps_failing_is_not_retried_every_launch(comparison_rig, monkeypatch):
+    # The M1 livelock: the probe timed out on every launch and nothing
+    # remembered it, so each launch converted and loaded the encoder again.
+    rig = comparison_rig
+
+    def probes(*_a):
+        rig.probes.append(1)
+        raise TimeoutError("Encoder device preparation timed out")
+
+    monkeypatch.setattr(macos_coreml, "_compare_with_probes", probes)
+    for _launch in range(macos_coreml.MAX_COMPARISON_FAILURES):
+        with pytest.raises(TimeoutError):
+            macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False)
+    assert macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False) is False
+    assert len(rig.probes) == macos_coreml.MAX_COMPARISON_FAILURES
+    assert len(rig.converted) == macos_coreml.MAX_COMPARISON_FAILURES
+    assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == macos_coreml.MAX_COMPARISON_FAILURES
+
+
+def test_yielding_to_dictation_is_not_a_failure(comparison_rig, monkeypatch):
+    rig = comparison_rig
+
+    def probes(*_a):
+        raise InterruptedError("Public comparison yielded to dictation")
+
+    monkeypatch.setattr(macos_coreml, "_compare_with_probes", probes)
+    for _ in range(3):
+        with pytest.raises(InterruptedError):
+            macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False)
+    assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0
+
+
+def test_a_new_model_file_gets_a_fresh_set_of_attempts(comparison_rig):
+    rig = comparison_rig
+    for _ in range(macos_coreml.MAX_COMPARISON_FAILURES):
+        macos_coreml.record_comparison_failure(str(rig.cli), str(rig.model), "TimeoutError")
+    rig.model.write_bytes(b"model, re-downloaded")
+    assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0
+
+
+def _probe_backend(command):
+    def drain(stream, tail):
+        for line in iter(stream.readline, b""):
+            tail.append(line.decode(errors="replace"))
+
+    return SimpleNamespace(_server_cmd_attempts=lambda port: [list(command)],
+                           _drain_server_output=drain)
+
+
+def test_a_probe_that_crashes_on_load_is_a_failure_not_a_pause():
+    import sys
+
+    backend = _probe_backend([sys.executable, "-c", "print('ggml_metal_init: error'); raise SystemExit(3)"])
+    with pytest.raises(RuntimeError, match="probe exited with 3"):
+        with macos_coreml._probe_server(backend, "/bin/whisper-server", "/m.bin",
+                                        coreml=True, cancelled=lambda: False):
+            pass
+
+
+def test_the_first_core_ml_load_gets_the_neural_engine_compile_time(monkeypatch):
+    import sys
+
+    clock = [0.0]
+    monkeypatch.setattr(macos_coreml.time, "monotonic", lambda: clock[0])
+
+    def tick(seconds):
+        clock[0] += 30.0  # each poll stands for 30 s of Neural Engine compile
+
+    monkeypatch.setattr(macos_coreml.time, "sleep", tick)
+    monkeypatch.setattr(macos_coreml.subprocess, "check_output", lambda *a, **k: "")
+    backend = _probe_backend([sys.executable, "-c", "import time; time.sleep(30)"])
+    with pytest.raises(TimeoutError):
+        with macos_coreml._probe_server(backend, "/bin/whisper-server", "/m.bin",
+                                        coreml=True, cancelled=lambda: False):
+            pass
+    # 2.5 min measured on an M1 Air; the old limit was 120 s.
+    assert clock[0] >= macos_coreml.COREML_FIRST_LOAD_DEADLINE_S >= 300
