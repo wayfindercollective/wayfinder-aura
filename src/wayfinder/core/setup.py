@@ -17,8 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-import requests
-
 from ..config import IS_APPIMAGE, IS_FLATPAK, APPDIR
 from ..utils.hostexec import host_env
 from ..utils.platform import get_user_whisper_models_dir
@@ -1148,6 +1146,8 @@ def _download_model_file_impl(
         log(f"Downloading {target.name} ({size_label})...")
         log(f"From: {url}")
         log("")
+
+        import requests  # here, not at module top: the setup pane imports this module on every launch
 
         from wayfinder.core.download_guard import (
             DownloadBounds,
