@@ -513,8 +513,9 @@ def test_public_tier_copy_matches_runtime_gpu_and_model_gates():
 def test_documented_dictation_defaults_and_auto_enter_warning_match_runtime():
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     support = (REPO / "SUPPORT.md").read_text(encoding="utf-8")
-    main = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
-    normalized_docs = [" ".join(text.split()) for text in (readme, support, main)]
+    # The in-app hint lives in SETTING_TOOLTIPS (ui/components.py).
+    hints = (REPO / "src" / "wayfinder" / "ui" / "components.py").read_text(encoding="utf-8")
+    normalized_docs = [" ".join(text.split()) for text in (readme, support, hints)]
 
     sys.path.insert(0, str(REPO / "src"))
     from wayfinder.config import DEFAULT_CONFIG
@@ -1218,6 +1219,12 @@ def test_flatpak_compiled_python_dependencies_build_from_source():
     for path in dependency_manifests[1:]:
         assert '"cleanup"' not in path.read_text(encoding="utf-8"), path
     assert "pythran" not in manifest and "python-scipy" not in manifest
+    # Pillow 12's build imports pybind11. SciPy's build tools used to install
+    # it as a side effect; dropping SciPy broke the Pillow module.
+    build_tools = json.loads(dependency_manifests[1].read_text(encoding="utf-8"))
+    tool_pins = [cmd for module in build_tools["modules"] for cmd in module["build-commands"]]
+    assert any('"pybind11==' in cmd for cmd in tool_pins)
+    assert manifest.index("  - python-numpy-build-tools.json") < manifest.index("  - name: python-pillow")
 
     assert "-DBUILD_SHARED_LIBS:BOOL=ON" in manifest
     assert "-DBUILD_WITHOUT_LAPACKE:BOOL=ON" in manifest
