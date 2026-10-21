@@ -44,6 +44,11 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+            .github/workflows/release.yml
 
       - name: Create isolated Python environment
         run: python scripts/ci/prepare-python.py
@@ -104,6 +109,11 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+            .github/workflows/release.yml
 
       - name: Create isolated Python environment
         run: python scripts/ci/prepare-python.py
@@ -350,6 +360,8 @@ jobs:
     needs: [quality, release-readiness]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'windows' || inputs.artifacts == 'all'))
     uses: ./.github/workflows/windows-build.yml
+    with:
+      run-tests: false  # quality (ci.yml) ran the Windows suite for this commit
 
   # macOS: Apple Silicon DMG, built with the same commands as macos-build.yml.
   # When ALL signing secrets exist it is Developer ID signed, notarized and
