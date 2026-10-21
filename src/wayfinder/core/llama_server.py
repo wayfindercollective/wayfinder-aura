@@ -147,6 +147,9 @@ class LlamaServerManager:
     # minute. On timeout the caller restarts the server and falls back to the
     # CLI, which is the recovery WhisperServerBackend gets from its deadline.
     REQUEST_TIMEOUT = 30.0
+    # How often a request waiting on _lock re-checks that its configuration
+    # is still current, so a switch during the wait cancels it promptly.
+    _LOCK_POLL_S = 0.25
 
     # ---------------- identity / health ----------------
 
@@ -442,6 +445,13 @@ class LlamaServerManager:
         def _left() -> float:
             return float("inf") if deadline is None else deadline - time.monotonic()
 
+        def _superseded() -> bool:
+            return load_epoch is not None and cls._switch_epoch != load_epoch
+
+        # First, before anything that can fail or wait: a request for a mode
+        # the user has left is cancelled, never counted as a server failure.
+        if _superseded():
+            raise LlamaServerSuperseded("configuration superseded by a switch")
         if cls._disabled:
             raise LlamaServerError("llama-server disabled after a previous failure")
         if not binary or not Path(binary).exists():
@@ -453,16 +463,18 @@ class LlamaServerManager:
 
         # Bounded lock acquisition: a competing startup can hold this for its
         # whole readiness wait, so a deadline must clamp the wait for it too.
-        if deadline is None:
-            cls._lock.acquire()
-        else:
+        # Taken in slices: the holder is often the NEW mode's start, and a
+        # stale request timing out behind it would count as a server failure
+        # (three of those restart the new mode's server).
+        while True:
             rem = _left()
-            if rem <= 0 or not cls._lock.acquire(timeout=rem):
+            if _superseded():
+                raise LlamaServerSuperseded("configuration superseded by a switch")
+            if rem <= 0:
                 raise LlamaServerError("deadline hit acquiring the server lock")
+            if cls._lock.acquire(timeout=min(rem, cls._LOCK_POLL_S)):
+                break
         try:
-            def _superseded() -> bool:
-                return load_epoch is not None and cls._switch_epoch != load_epoch
-
             if _superseded():
                 raise LlamaServerSuperseded("configuration superseded by a switch")
             if cls._alive() and cls._requested == want:

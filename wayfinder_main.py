@@ -544,7 +544,29 @@ def _server_load_epochs() -> dict:
     return epochs
 
 
+def _supersede_cleanup_loads() -> "int | None":
+    """Make every cleanup snapshot read so far stale; returns the new epoch.
+
+    For a change of intent (Save memory, cleanup off, another model or
+    backend, Quit): a dictation that read its settings before it must not
+    start the server again once the release has stopped it.
+    """
+    try:
+        from wayfinder.core.llama_server import LlamaServerManager
+        return LlamaServerManager.supersede()
+    except Exception:
+        return None
+
+
 def _release_cleanup_residency(llama_before_epoch: "int | None" = None) -> None:
+    """Stop the cleanup server and drop both backends' cached weights.
+
+    llama_before_epoch: stop only a server started before that supersede()
+    epoch, leaving one a newer configuration has started. Without it this is
+    a change of intent, so pending snapshots are superseded first.
+    """
+    if llama_before_epoch is None:
+        _supersede_cleanup_loads()
     try:
         from wayfinder.core.llama_server import LlamaServerManager
         LlamaServerManager.shutdown(before_epoch=llama_before_epoch)
@@ -12142,7 +12164,12 @@ class WayfinderApp(ctk.CTk):
             threading.Thread(target=warm_up_postprocessing, args=(cfg,),
                              daemon=True, name="cleanup-warm").start()
         else:
+            # Superseded here, on the Tk thread, and the release then stops only
+            # what predates it: a warm-up for a quick switch back to a cleanup
+            # style is stamped after this, and keeps the server it starts.
+            llama_epoch = _supersede_cleanup_loads()
             threading.Thread(target=_release_cleanup_residency, daemon=True,
+                             kwargs={"llama_before_epoch": llama_epoch},
                              name="cleanup-release").start()
 
     def _style_availability(self) -> dict:

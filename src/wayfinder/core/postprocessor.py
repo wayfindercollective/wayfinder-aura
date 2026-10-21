@@ -2881,6 +2881,14 @@ class LlamaCppCliBackend(PostProcessorBackend):
                   "change - this cleanup uses the per-call CLI")
             return None
         except Exception as e:
+            load_epoch = getattr(self, "_llama_load_epoch", None)
+            if load_epoch is not None and LlamaServerManager.load_epoch() != load_epoch:
+                # A switch landed after the start, and the stop that came with
+                # it is what failed this request: counting it, or restarting
+                # on it, would stop the server the new mode starts.
+                print("[Post-processing] llama-server request cut off by a settings "
+                      "change - this cleanup uses the per-call CLI")
+                return None
             # A server that accepted the connection but never answered is wedged;
             # leaving it up means every future dictation pays the same timeout.
             # Drop it so the next one respawns, and serve THIS one from the CLI.

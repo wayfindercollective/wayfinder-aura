@@ -360,3 +360,109 @@ def test_the_cleanup_style_warm_up_is_stamped(monkeypatch):
         lambda target, args=(), **_kw: SimpleNamespace(start=lambda: started.append(args)))
     wayfinder_main.WayfinderApp._sync_cleanup_residency(SimpleNamespace(config={"use_gpu": True}))
     assert started[0][0][LOAD_EPOCH_KEY] == LlamaServerManager.load_epoch()
+
+
+def _cleanup_setup(tmp_path, monkeypatch):
+    """A cleanup config whose server starts, through the real get_backend()
+    and ensure(), spawn a fake child that is ready at once."""
+    from wayfinder.core.llama_server import LlamaServerManager
+
+    for name in ("llama-simple", "llama-server", "m.gguf"):
+        (tmp_path / name).touch()
+    spawned = []
+    monkeypatch.setattr(LlamaServerManager, "_find_port", lambda: 8179)
+    monkeypatch.setattr(LlamaServerManager, "_wait_ready", lambda *_a, **_kw: True)
+    monkeypatch.setattr(LlamaServerManager, "_serving_model", lambda *_a: True)
+    monkeypatch.setattr(LlamaServerManager, "_owns_listener", lambda *_a: True)
+    monkeypatch.setattr(LlamaServerManager, "still_ours", lambda *_a: True)
+    monkeypatch.setattr(LlamaServerManager, "complete",
+                        lambda **_kw: {"content": "x", "stop_type": "eos"})
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *_a, **_kw: spawned.append(_FakeLlama()) or spawned[-1])
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    config = {"post_processing_backend": "llama_cpp", "llama_cpp_use_cli": True,
+              "llama_cpp_binary": str(tmp_path / "llama-simple"),
+              "llama_cpp_model_path": str(tmp_path / "m.gguf"),
+              "llama_cpp_residency": "auto"}
+    return config, spawned
+
+
+def _snapshot(config):
+    """What a dictation reads: the epochs first, then the settings."""
+    epochs = wayfinder_main._server_load_epochs()
+    snapshot = dict(config)
+    snapshot.update(epochs)
+    return snapshot
+
+
+def _clean_up_from(snapshot):
+    from wayfinder.core import postprocessor
+    return postprocessor.get_backend(snapshot)._server_generate("prompt", 8)
+
+
+@pytest.fixture
+def _llama_state():
+    from wayfinder.core.llama_server import LlamaServerManager
+    LlamaServerManager.reset_for_tests()
+    yield LlamaServerManager
+    LlamaServerManager.reset_for_tests()
+
+
+def test_a_cleanup_read_before_save_memory_starts_no_resident_server(
+        tmp_path, monkeypatch, _llama_state):
+    config, spawned = _cleanup_setup(tmp_path, monkeypatch)
+    snapshot = _snapshot(config)   # the dictation began with the model resident
+    app = SimpleNamespace(config=config, log=lambda *_a: None,
+                          _residency_map={"Save memory (loads per use)": "save_memory"})
+    wayfinder_main.WayfinderApp._on_residency_changed(app, "Save memory (loads per use)")
+    # Its cleanup runs after the user chose Save memory.
+    assert _clean_up_from(snapshot) is None
+    assert spawned == [] and _llama_state._process is None
+    assert _llama_state._consecutive_failures == 0
+
+
+def test_a_cleanup_read_before_a_model_change_does_not_reload_the_old_model(
+        tmp_path, monkeypatch, _llama_state):
+    config, spawned = _cleanup_setup(tmp_path, monkeypatch)
+    assert _clean_up_from(_snapshot(config)) is not None
+    old = spawned[-1]
+    snapshot = _snapshot(config)
+    (tmp_path / "new.gguf").touch()
+    config["llama_cpp_model_path"] = str(tmp_path / "new.gguf")
+    wayfinder_main._release_cleanup_residency()   # what every model change calls
+    assert old.poll() is not None
+    assert _clean_up_from(snapshot) is None
+    assert len(spawned) == 1 and _llama_state._process is None
+
+
+def test_internal_stops_and_old_mode_teardowns_keep_current_snapshots(
+        tmp_path, monkeypatch, _llama_state):
+    config, spawned = _cleanup_setup(tmp_path, monkeypatch)
+    switch_epoch = _llama_state.supersede()   # a CPU/GPU switch
+    snapshot = _snapshot(config)              # read in the new mode
+    wayfinder_main._release_cleanup_residency(llama_before_epoch=switch_epoch)
+    _llama_state.shutdown()                   # a failure or timeout restart
+    assert _clean_up_from(snapshot) is not None
+    assert len(spawned) == 1 and _llama_state._process is spawned[0]
+
+
+def test_a_quick_switch_back_to_a_cleanup_style_keeps_its_warm_server(
+        tmp_path, monkeypatch, _llama_state):
+    config, spawned = _cleanup_setup(tmp_path, monkeypatch)
+    queued = []
+    monkeypatch.setattr(
+        wayfinder_main.threading, "Thread",
+        lambda target, args=(), kwargs=None, **_kw: SimpleNamespace(
+            start=lambda: queued.append((target, args, kwargs or {}))))
+    needed = [False]
+    monkeypatch.setattr("wayfinder.core.postprocessor.cleanup_model_needed",
+                        lambda _cfg: needed[0])
+    app = SimpleNamespace(config=config)
+    wayfinder_main.WayfinderApp._sync_cleanup_residency(app)   # to Normal
+    needed[0] = True
+    wayfinder_main.WayfinderApp._sync_cleanup_residency(app)   # straight back
+    (release, _, release_kwargs), (_, warm_args, _) = queued
+    assert _clean_up_from(warm_args[0]) is not None   # the warm-up runs first
+    release(**release_kwargs)                          # the release runs late
+    assert len(spawned) == 1 and spawned[0].poll() is None
+    assert _llama_state._process is spawned[0]

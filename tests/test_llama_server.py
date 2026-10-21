@@ -8,6 +8,7 @@ CPU, and letting an unread stdout pipe wedge the process.
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1077,3 +1078,117 @@ class TestSwitchCancellation:
         # Unstamped, a backend belongs to the epoch it was built under.
         assert (postprocessor.get_backend(config)._llama_load_epoch
                 == LlamaServerManager.load_epoch())
+
+    @staticmethod
+    def _hold_the_lock():
+        """The new mode's start, holding _lock through its readiness wait."""
+        held, done = threading.Event(), threading.Event()
+
+        def start():
+            with LlamaServerManager._lock:
+                held.set()
+                done.wait(15)
+
+        holder = threading.Thread(target=start, daemon=True)
+        holder.start()
+        assert held.wait(5)
+        return done, holder
+
+    @staticmethod
+    def _record_stops():
+        stops = []
+        return stops, patch.object(
+            LlamaServerManager, "shutdown",
+            classmethod(lambda cls, before_epoch=None: stops.append(before_epoch)))
+
+    def test_stale_requests_queued_behind_the_new_modes_start_are_not_failures(
+            self, tmp_path):
+        # Sol PR 2 r3: they timed out on the lock before any staleness check,
+        # and three such timeouts restarted the new mode's server.
+        binary, model = self._files(tmp_path)
+        done, holder = self._hold_the_lock()
+        stops, recording = self._record_stops()
+        try:
+            with recording, patch("subprocess.Popen") as popen:
+                with pytest.raises(LlamaServerError) as current:
+                    LlamaServerManager.ensure(binary, model, 2048, 4, 0,
+                                              deadline=time.monotonic() + 0.3,
+                                              load_epoch=LlamaServerManager.load_epoch())
+                assert not isinstance(current.value, LlamaServerSuperseded)
+                for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES + 1):
+                    backend = self._backend(tmp_path, -1)
+                    LlamaServerManager.supersede()
+                    assert backend._server_generate(
+                        "prompt", 8, deadline=time.monotonic() + 0.3) is None
+            popen.assert_not_called()
+            assert stops == [] and LlamaServerManager._consecutive_failures == 0
+        finally:
+            done.set()
+            holder.join(5)
+
+    def test_a_switch_during_the_lock_wait_cancels_the_request_promptly(self, tmp_path):
+        done, holder = self._hold_the_lock()
+        switch = threading.Timer(0.2, LlamaServerManager.supersede)
+        try:
+            backend = self._backend(tmp_path, -1)
+            started = time.monotonic()
+            switch.start()
+            with patch("subprocess.Popen") as popen:
+                assert backend._server_generate("prompt", 8, deadline=started + 10) is None
+            assert time.monotonic() - started < 3, "waited out the deadline after a switch"
+            popen.assert_not_called()
+            assert LlamaServerManager._consecutive_failures == 0
+        finally:
+            switch.cancel()
+            done.set()
+            holder.join(5)
+
+    def test_a_lock_wait_that_runs_out_after_a_switch_is_cancelled_not_failed(
+            self, tmp_path):
+        binary, model = self._files(tmp_path)
+        done, holder = self._hold_the_lock()
+        switch = threading.Timer(0.1, LlamaServerManager.supersede)
+        try:
+            # One slice covers the whole wait, so the switch is only seen once
+            # the acquisition has already failed.
+            with patch.object(LlamaServerManager, "_LOCK_POLL_S", 10.0):
+                switch.start()
+                with pytest.raises(LlamaServerSuperseded):
+                    LlamaServerManager.ensure(binary, model, 2048, 4, 99,
+                                              deadline=time.monotonic() + 0.4,
+                                              load_epoch=LlamaServerManager.load_epoch())
+        finally:
+            switch.cancel()
+            done.set()
+            holder.join(5)
+
+    @pytest.mark.parametrize("failure", [TimeoutError("timed out"),
+                                         ConnectionResetError("reset by peer")])
+    def test_a_request_a_switch_cut_off_is_not_a_failure(self, tmp_path, failure):
+        # The request started before the switch; the stop that came with the
+        # switch is what failed it, so neither counting nor a restart applies.
+        def cut_off(**_kw):
+            LlamaServerManager.supersede()
+            raise failure
+
+        stops, recording = self._record_stops()
+        with recording, \
+             patch.object(LlamaServerManager, "ensure", return_value=8179), \
+             patch.object(LlamaServerManager, "still_ours", return_value=True), \
+             patch.object(LlamaServerManager, "complete", side_effect=cut_off):
+            for _ in range(LlamaServerManager.MAX_CONSECUTIVE_FAILURES + 1):
+                assert self._backend(tmp_path, -1)._server_generate("prompt", 8) is None
+            for thread in threading.enumerate():
+                if thread.name.startswith("llama-server-") and thread.name.endswith("restart"):
+                    thread.join(5)
+        assert stops == [] and LlamaServerManager._consecutive_failures == 0
+
+    def test_a_stale_request_for_a_removed_model_is_cancelled_not_failed(self, tmp_path):
+        # The user switched models and deleted the old one: the request read
+        # before the switch must not count its missing file as a failure.
+        binary, model = self._files(tmp_path)
+        stale = LlamaServerManager.load_epoch()
+        LlamaServerManager.supersede()
+        Path(model).unlink()
+        with pytest.raises(LlamaServerSuperseded):
+            LlamaServerManager.ensure(binary, model, 2048, 4, 99, load_epoch=stale)
