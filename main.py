@@ -410,9 +410,13 @@ if "--llm-engine-self-test" in sys.argv:
 if "--app-import-self-test" in sys.argv:
     try:
         from wayfinder_main import WayfinderApp as _imported_app
+        # Data, not code: dictation needs it and only a packaged run proves it shipped.
+        from wayfinder.core.wordlist import COMMON_WORDS, MID_WORDS, STOP_WORDS
 
         if not callable(_imported_app):
             raise RuntimeError("WayfinderApp did not import as a callable class")
+        if not (STOP_WORDS and MID_WORDS and COMMON_WORDS):
+            raise RuntimeError("the English word lists are empty")
         print("APP_IMPORT_SELF_TEST_OK", flush=True)
         sys.exit(0)
     except Exception as _import_error:
