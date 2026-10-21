@@ -525,6 +525,25 @@ STYLE_LABELS = {
 # cache (source installs only). Every caller that means "stop holding the
 # cleanup model" has to release both, so there is one function that does it and
 # no call site that does half the job.
+def _server_load_epochs() -> dict:
+    """The server epochs to stamp on a config snapshot: read them BEFORE the
+    snapshot. A CPU/GPU or model switch writes the config and then supersedes,
+    so a snapshot can carry an older epoch than its settings (its load is then
+    cancelled) but never a newer one (a load the old mode's teardown keeps)."""
+    epochs = {}
+    try:
+        from wayfinder.core.transcriber import LOAD_EPOCH_KEY, WhisperServerBackend
+        epochs[LOAD_EPOCH_KEY] = WhisperServerBackend.load_epoch()
+    except Exception:
+        pass
+    try:
+        from wayfinder.core.llama_server import LOAD_EPOCH_KEY, LlamaServerManager
+        epochs[LOAD_EPOCH_KEY] = LlamaServerManager.load_epoch()
+    except Exception:
+        pass
+    return epochs
+
+
 def _release_cleanup_residency(llama_before_epoch: "int | None" = None) -> None:
     try:
         from wayfinder.core.llama_server import LlamaServerManager
@@ -12116,7 +12135,9 @@ class WayfinderApp(ctk.CTk):
             from wayfinder.core.postprocessor import cleanup_model_needed, warm_up_postprocessing
         except Exception:
             return
+        epochs = _server_load_epochs()
         cfg = dict(self.config)
+        cfg.update(epochs)
         if cleanup_model_needed(cfg):
             threading.Thread(target=warm_up_postprocessing, args=(cfg,),
                              daemon=True, name="cleanup-warm").start()
@@ -23459,7 +23480,11 @@ class WayfinderApp(ctk.CTk):
         """
         # Snapshot on the Tk thread: a CPU/GPU switch after this point must not
         # be read half-applied by the worker (use_gpu on, Vulkan device unset).
+        # Stamped with the server epochs it was read under, so a switch landing
+        # after a stage's generation check still cancels that stage's load.
+        epochs = _server_load_epochs()
         config = dict(self.config)
+        config.update(epochs)
         gpu_setup = getattr(self, "_gpu_setup_done", None)
         teardown = getattr(self, "_model_teardown_done", None)
         lock = _model_load_lock(self)
@@ -24324,7 +24349,18 @@ class WayfinderApp(ctk.CTk):
         ))
 
     def _asr_config_for_dictation(self) -> dict:
-        """Snapshot one dictation's ASR mode while Windows finishes GPU setup."""
+        """Snapshot one dictation's ASR mode while Windows finishes GPU setup.
+
+        Stamped with the server epochs it was read under: its cleanup runs
+        after the transcription, and a switch in between must cancel that
+        cleanup's server start, not let it load the mode just left.
+        """
+        epochs = _server_load_epochs()
+        config = WayfinderApp._asr_config_for_dictation_unstamped(self)
+        config.update(epochs)
+        return config
+
+    def _asr_config_for_dictation_unstamped(self) -> dict:
         from wayfinder.core.gm_asr import effective_asr_config
 
         config = dict(WayfinderApp._gamer_asr_config(self, effective_asr_config(
@@ -25079,8 +25115,10 @@ class WayfinderApp(ctk.CTk):
                     from wayfinder.core.postprocessor import process_with_config
                     self.log("🔧 Post-processing combined text...")
                     original_text = combined_text
-                    combined_text = process_with_config(
-                        combined_text, WayfinderApp._gamer_asr_config(self, self.config))
+                    epochs = _server_load_epochs()
+                    cleanup_cfg = dict(WayfinderApp._gamer_asr_config(self, self.config))
+                    cleanup_cfg.update(epochs)
+                    combined_text = process_with_config(combined_text, cleanup_cfg)
                     if combined_text != original_text:
                         self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
                 except Exception as e:

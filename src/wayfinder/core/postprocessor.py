@@ -2404,6 +2404,13 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # llama_cpp_residency). force_subprocess still wins over all of it — the
         # eval harness relies on that to pin the deterministic one-shot path.
         self.residency = str(residency or "auto").strip().lower()
+        # The switch this configuration was read under: a llama-server start
+        # for it after a CPU/GPU or model switch would load the wrong mode.
+        try:
+            from wayfinder.core.llama_server import LlamaServerManager
+            self._llama_load_epoch = LlamaServerManager.load_epoch()
+        except Exception:
+            self._llama_load_epoch = None
         # Derived from the app's PROCESSING watchdog when the caller knows it,
         # so the ceiling tracks a user who has changed processing_timeout_secs
         # instead of silently staying at a constant that no longer fits.
@@ -2622,6 +2629,12 @@ class LlamaCppCliBackend(PostProcessorBackend):
             return self.llama_binary, requested
         return (self._cpu_sibling() or self.llama_binary), 0
 
+    def bind_to_epoch(self, epoch: Optional[int]) -> None:
+        """Tie llama-server starts to the epoch the config was read under, for
+        a backend built later than that (see llama_server.LOAD_EPOCH_KEY)."""
+        if epoch is not None:
+            self._llama_load_epoch = epoch
+
     def warm_up(self) -> None:
         """Load the resident model + build the compute graph so the first real
         dictation is instant. Runs a real (tiny) cleanup prompt, not a 1-token
@@ -2813,7 +2826,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
         import socket
         try:
             from wayfinder.core.llama_server import (
-                LlamaServerError, LlamaServerManager, resolve_server_binary,
+                LlamaServerError, LlamaServerManager, LlamaServerSuperseded,
+                resolve_server_binary,
             )
         except Exception:
             return None
@@ -2834,6 +2848,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 binary=binary, model_path=self.model_path, n_ctx=self.n_ctx,
                 n_threads=self.n_threads, n_gpu_layers=requested_ngl,
                 deadline=deadline,
+                load_epoch=getattr(self, "_llama_load_epoch", None),
             )
             # `deadline` bounds only STARTUP. The generation itself is bounded
             # by the shared cleanup budget, so a server that accepts the socket
@@ -2859,6 +2874,12 @@ class LlamaCppCliBackend(PostProcessorBackend):
             out["_spawned_ngl"] = LlamaServerManager.spawned_gpu_layers()
             LlamaServerManager.note_success()
             return out
+        except LlamaServerSuperseded:
+            # A switch or shutdown cancelled the start: not a failure, so it
+            # must not count toward the restart that would stop the new mode.
+            print("[Post-processing] llama-server start cancelled by a settings "
+                  "change - this cleanup uses the per-call CLI")
+            return None
         except Exception as e:
             # A server that accepted the connection but never answered is wedged;
             # leaving it up means every future dictation pays the same timeout.
@@ -3760,6 +3781,15 @@ def get_backend(config: dict) -> PostProcessorBackend:
     Returns:
         A PostProcessorBackend instance
     """
+    # Read before any setting: a switch landing between the two reads then
+    # cancels this backend's llama-server start rather than mislabelling it.
+    try:
+        from wayfinder.core.llama_server import LOAD_EPOCH_KEY, LlamaServerManager
+        load_epoch = config.get(LOAD_EPOCH_KEY)
+        if load_epoch is None:
+            load_epoch = LlamaServerManager.load_epoch()
+    except Exception:
+        load_epoch = None
     backend_type = config.get("post_processing_backend", "llama_cpp")
     output_tone = config.get("output_tone", "professional")
     _gpu_unlocked = False
@@ -3894,7 +3924,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
 
         # Use CLI backend if enabled and a usable binary exists
         if use_cli and _cli_present:
-            return LlamaCppCliBackend(
+            backend = LlamaCppCliBackend(
                 llama_binary=llama_binary,
                 model_path=_effective_model_path,
                 n_ctx=config.get("llama_cpp_n_ctx", 2048),
@@ -3911,6 +3941,8 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 custom_vocabulary=_effective_custom_vocabulary,
                 chat_template=config.get("llama_cpp_chat_template", "auto"),
             )
+            backend.bind_to_epoch(load_epoch)
+            return backend
         
         # Fall back to Python bindings (llama-cpp-python)
         return LlamaCppBackend(

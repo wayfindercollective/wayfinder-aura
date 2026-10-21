@@ -817,6 +817,9 @@ class WhisperServerBackend(TranscriptionBackend):
         self.suppress_nst = suppress_nst
         self.prompt = prompt
         self.custom_vocabulary = custom_vocabulary or []
+        # The switch this backend's configuration was read under. A server
+        # start under a later one would load a mode the user has left.
+        self._load_epoch = WhisperServerBackend._epoch
 
         # Lazy-init the class-level lock
         if WhisperServerBackend._server_lock is None:
@@ -1078,7 +1081,7 @@ class WhisperServerBackend(TranscriptionBackend):
             if rem <= 0 or not WhisperServerBackend._server_lock.acquire(timeout=rem):
                 raise TranscriptionError(
                     "recovery deadline hit while acquiring the server lock")
-        epoch = WhisperServerBackend._epoch
+        epoch = self._load_epoch
 
         def _abandon_if_superseded() -> None:
             # Not a broken server: _server_disabled stays untouched.
@@ -1087,6 +1090,10 @@ class WhisperServerBackend(TranscriptionBackend):
                 raise ServerStartSuperseded("whisper-server startup superseded")
 
         try:
+            if WhisperServerBackend._epoch != epoch:
+                # Configured before a CPU/GPU or model switch: start nothing,
+                # and leave whatever the new mode is running alone.
+                raise ServerStartSuperseded("whisper-server configuration superseded")
             # Already running with the right model AND the right CPU/GPU mode?
             # Skipped when force=True so a wedged-but-alive server is replaced
             # instead of mistaken for healthy.
@@ -1255,6 +1262,17 @@ class WhisperServerBackend(TranscriptionBackend):
         cls._server_model_path = ""
         cls._server_binary = None
         cls._server_use_gpu = None
+
+    @classmethod
+    def load_epoch(cls) -> int:
+        """The epoch to read a configuration under; see bind_to_epoch()."""
+        return cls._epoch
+
+    def bind_to_epoch(self, epoch: Optional[int]) -> None:
+        """Tie this backend's server start to the epoch its config was read
+        under, for a backend built later than that (see LOAD_EPOCH_KEY)."""
+        if epoch is not None:
+            self._load_epoch = epoch
 
     @classmethod
     def supersede(cls) -> int:
@@ -2238,6 +2256,12 @@ def warm_up_transcription(config: dict) -> bool:
     return False
 
 
+# A config snapshot carries the WhisperServerBackend.load_epoch() it was read
+# under, so a server start for it after a CPU/GPU or model switch is
+# cancelled however long the snapshot waited (a recording, a queued warm-up).
+LOAD_EPOCH_KEY = "_whisper_load_epoch"
+
+
 def get_backend(config: dict) -> TranscriptionBackend:
     """
     Factory function to create the appropriate transcription backend.
@@ -2248,6 +2272,11 @@ def get_backend(config: dict) -> TranscriptionBackend:
     Returns:
         A TranscriptionBackend instance
     """
+    # Read before any setting: a switch landing between the two reads then
+    # cancels this backend's server start rather than mislabelling it.
+    load_epoch = config.get(LOAD_EPOCH_KEY)
+    if load_epoch is None:
+        load_epoch = WhisperServerBackend.load_epoch()
     backend_type = config.get("transcription_backend", "whisper_cpp")
 
     # License gating (F1): a hand-edited config.json must not unlock a premium backend
@@ -2512,6 +2541,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 prompt=_effective_prompt,
                 custom_vocabulary=_effective_custom_vocabulary,
             )
+            server_backend.bind_to_epoch(load_epoch)
             if server_backend.is_available():
                 return server_backend
             if sys.platform in ("darwin", "win32") and not Path(

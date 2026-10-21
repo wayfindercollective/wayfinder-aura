@@ -46,6 +46,19 @@ class LlamaServerError(RuntimeError):
     """Server could not be started or did not answer."""
 
 
+# The config key a snapshot stamps LlamaServerManager.load_epoch() under
+# (see transcriber.LOAD_EPOCH_KEY).
+LOAD_EPOCH_KEY = "_llama_load_epoch"
+
+
+class LlamaServerSuperseded(LlamaServerError):
+    """A start cancelled by a CPU/GPU switch, model change or shutdown.
+
+    Not a server failure: callers fall back without counting it, so cancelled
+    starts never add up to a restart that kills the new mode's server.
+    """
+
+
 def resolve_server_binary(llama_binary: str, use_gpu: bool = True) -> Optional[str]:
     """Find llama-server next to whatever llama binary is configured.
 
@@ -104,6 +117,10 @@ class LlamaServerManager:
     _epoch: int = 0
     # The epoch the published server was started under (see supersede()).
     _process_epoch: int = 0
+    # Bumped only by supersede(), never by a stop: the switch a configuration
+    # was read under (see load_epoch()). _epoch also moves on every internal
+    # stop, so it cannot say whether a configuration is still current.
+    _switch_epoch: int = 0
     _log_tail: Optional[deque] = None
     _log_thread: Optional[threading.Thread] = None
     # Set when every startup ladder rung failed. The caller then goes straight
@@ -403,7 +420,8 @@ class LlamaServerManager:
     @classmethod
     def ensure(cls, binary: str, model_path: str, n_ctx: int = 2048,
                n_threads: int = 4, n_gpu_layers: int = 99,
-               deadline: Optional[float] = None) -> int:
+               deadline: Optional[float] = None,
+               load_epoch: Optional[int] = None) -> int:
         """Return a port serving `model_path`, starting the server if needed.
 
         deadline: absolute time.monotonic() budget covering EVERY blocking step —
@@ -413,6 +431,10 @@ class LlamaServerManager:
         bumped the session generation and DISCARDED the eventual output. The
         background warm-up passes None (nobody is waiting); a live dictation
         passes a real budget. Same shape as WhisperServerBackend's deadline.
+
+        load_epoch: the load_epoch() the request's configuration was read
+        under. Once a supersede() has moved it, the request is for a mode the
+        user has left: it starts nothing and leaves the running server alone.
         """
         import atexit
         import time
@@ -438,6 +460,11 @@ class LlamaServerManager:
             if rem <= 0 or not cls._lock.acquire(timeout=rem):
                 raise LlamaServerError("deadline hit acquiring the server lock")
         try:
+            def _superseded() -> bool:
+                return load_epoch is not None and cls._switch_epoch != load_epoch
+
+            if _superseded():
+                raise LlamaServerSuperseded("configuration superseded by a switch")
             if cls._alive() and cls._requested == want:
                 return cls._port
 
@@ -452,6 +479,10 @@ class LlamaServerManager:
             # Captured AFTER our own stop, which bumps the epoch itself —
             # otherwise a startup would always invalidate itself.
             epoch = cls._epoch
+            # A supersede() before the capture moved _switch_epoch first; one
+            # after it moves _epoch past ours, which every check below sees.
+            if _superseded():
+                raise LlamaServerSuperseded("configuration superseded by a switch")
 
             if not cls._atexit_registered:
                 atexit.register(cls.shutdown)
@@ -470,7 +501,7 @@ class LlamaServerManager:
                     # shutdown partway down the ladder would otherwise keep spawning
                     # fresh children it has already been told to stop wanting.
                     if cls._epoch != epoch:
-                        raise LlamaServerError("shut down while starting")
+                        raise LlamaServerSuperseded("shut down while starting")
                     # ...and the caller's deadline binds the LADDER, not just each
                     # rung: checking only per-attempt let a ladder that had already
                     # overrun start yet another multi-GB spawn.
@@ -496,7 +527,7 @@ class LlamaServerManager:
                     if cls._epoch != epoch:
                         cls._starting = None
                         cls._kill(proc)
-                        raise LlamaServerError("shut down while starting")
+                        raise LlamaServerSuperseded("shut down while starting")
                     cls._start_drain(proc)
                     # Readiness waits inside the caller's budget, never past it.
                     attempt_deadline = time.monotonic() + cls.STARTUP_TIMEOUT
@@ -507,7 +538,7 @@ class LlamaServerManager:
                         # Cancelled mid-load: not a failed rung, so the ladder must
                         # not run on into _disabled.
                         cls._kill(proc)
-                        raise LlamaServerError("shut down while starting")
+                        raise LlamaServerSuperseded("shut down while starting")
                     if ready:
                         # Confirm the child actually loaded the file we named. A
                         # mismatch means silently cleaning every dictation with the
@@ -550,7 +581,7 @@ class LlamaServerManager:
                         # child: shutdown had already returned, having seen no process.
                         if cls._epoch != epoch:
                             cls._kill(proc)
-                            raise LlamaServerError("shut down while starting")
+                            raise LlamaServerSuperseded("shut down while starting")
                         cls._process_epoch = epoch
                         cls._process = proc
                         cls._port = port
@@ -684,8 +715,15 @@ class LlamaServerManager:
         Lock-free, for the Tk thread. Pass the result to
         shutdown(before_epoch=...) to stop only a server started before it.
         """
+        # _switch_epoch first: see the ordering note in ensure().
+        cls._switch_epoch += 1
         cls._epoch += 1
         return cls._epoch
+
+    @classmethod
+    def load_epoch(cls) -> int:
+        """The epoch to read a configuration under; pass it to ensure()."""
+        return cls._switch_epoch
 
     @classmethod
     def shutdown(cls, before_epoch: Optional[int] = None) -> None:
