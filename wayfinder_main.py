@@ -10934,6 +10934,12 @@ class WayfinderApp(ctk.CTk):
                         # separately (a cold single shot punished the GPU with
                         # setup costs dictation never pays; the resident
                         # whisper-server keeps the model loaded).
+                        if not IS_WINDOWS and not IS_MACOS and not os.environ.get("GGML_VK_VISIBLE_DEVICES"):
+                            # CPU mode skips the startup GPU probe; the GPU run
+                            # still has to land on the discrete GPU.
+                            from wayfinder.utils.gpu_simple import setup_gpu_environment
+
+                            setup_gpu_environment(dict(self.config), force=True)
                         debug_log("Starting GPU test...")
                         timer_state["phase"] = "GPU"
                         _gpu_phase = "GPU Ultra preview" if _gpu_is_preview else "GPU"
@@ -14841,40 +14847,41 @@ class WayfinderApp(ctk.CTk):
     def _apply_transcription_hardware_change(self, gpu_on: bool) -> None:
         """Make a CPU/GPU or speech-model change take effect without a restart."""
         if (
-            gpu_on and IS_WINDOWS and not IS_MACOS
+            gpu_on and not IS_MACOS
             and self.config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
         ):
-            # Startup skips the GPU probe in CPU mode: pick the device now (the
-            # configured gpu_device, else the discrete GPU), off the Tk thread.
+            # Startup skips the GPU probe in CPU mode (Windows and Linux): pick the
+            # device now (the configured gpu_device, else the discrete GPU), off
+            # the Tk thread.
             # Until this finishes, a recording must use the Free Base CPU path:
             # otherwise the new Vulkan server can start on the old/default
             # device and appear stuck in PROCESSING until Aura restarts.
             ready = threading.Event()
-            self._windows_gpu_setup_done = ready
-            self._windows_gpu_setup_failed = False
+            self._gpu_setup_done = ready
+            self._gpu_setup_failed = False
 
-            def _prepare_windows_gpu():
+            def _prepare_gpu():
                 try:
                     setup_gpu_environment(dict(self.config))
                 except Exception as exc:
-                    if self._windows_gpu_setup_done is ready:
-                        self._windows_gpu_setup_failed = True
-                    self.log(f"⚠ Windows GPU setup failed: {exc}")
+                    if self._gpu_setup_done is ready:
+                        self._gpu_setup_failed = True
+                    self.log(f"⚠ GPU setup failed: {exc}")
                 finally:
                     ready.set()
 
             try:
                 from wayfinder.utils.gpu_simple import setup_gpu_environment
 
-                threading.Thread(target=_prepare_windows_gpu, daemon=True,
-                                 name="wayfinder-windows-gpu-setup").start()
+                threading.Thread(target=_prepare_gpu, daemon=True,
+                                 name="wayfinder-gpu-setup").start()
             except Exception as exc:
-                self.log(f"⚠ Could not start Windows GPU setup: {exc}")
-                self._windows_gpu_setup_failed = True
+                self.log(f"⚠ Could not start GPU setup: {exc}")
+                self._gpu_setup_failed = True
                 ready.set()
-        elif IS_WINDOWS and not IS_MACOS:
-            self._windows_gpu_setup_done = None
-            self._windows_gpu_setup_failed = False
+        elif not IS_MACOS:
+            self._gpu_setup_done = None
+            self._gpu_setup_failed = False
         # Apply live: drop the resident whisper-server so the next dictation respawns
         # it in the new CPU/GPU mode — no app restart needed.
         try:
@@ -25082,14 +25089,14 @@ class WayfinderApp(ctk.CTk):
             config["prompt"] = TONE_PROMPTS["minimal"]
             config["vocabulary_replacements"] = []
         if not (
-            IS_WINDOWS and not IS_MACOS and config.get("use_gpu", False)
+            not IS_MACOS and config.get("use_gpu", False)
             and config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
         ):
             return config
-        ready = getattr(self, "_windows_gpu_setup_done", None)
-        cpu_session = getattr(self, "_windows_gpu_cpu_for_session", None)
+        ready = getattr(self, "_gpu_setup_done", None)
+        cpu_session = getattr(self, "_gpu_cpu_for_session", None)
         cpu_session = bool(cpu_session) or bool(ready is not None and not ready.is_set())
-        cpu_session = cpu_session or bool(getattr(self, "_windows_gpu_setup_failed", False))
+        cpu_session = cpu_session or bool(getattr(self, "_gpu_setup_failed", False))
         if not cpu_session:
             return config
 
@@ -25105,8 +25112,8 @@ class WayfinderApp(ctk.CTk):
             if base is not None:
                 config["model_path"] = str(base)
                 break
-        if not getattr(self, "_windows_gpu_setup_notice_logged", False):
-            self._windows_gpu_setup_notice_logged = True
+        if not getattr(self, "_gpu_setup_notice_logged", False):
+            self._gpu_setup_notice_logged = True
             model = Path(str(config.get("model_path", ""))).name
             self.log(f"⌛ GPU setup is unavailable or unfinished; this dictation uses {model} on CPU")
         return config
@@ -25199,12 +25206,12 @@ class WayfinderApp(ctk.CTk):
 
             # New recording session: bump the generation so any still-in-flight work or
             # scheduled callbacks from a previous session are recognised as stale and ignored.
-            if IS_WINDOWS and not IS_MACOS:
-                ready = getattr(self, "_windows_gpu_setup_done", None)
-                self._windows_gpu_cpu_for_session = bool(
+            if not IS_MACOS:
+                ready = getattr(self, "_gpu_setup_done", None)
+                self._gpu_cpu_for_session = bool(
                     ready is not None and not ready.is_set()
                 )
-                self._windows_gpu_setup_notice_logged = False
+                self._gpu_setup_notice_logged = False
             self.session_generation += 1
             gen = self.session_generation
             if self._finish_injection_job is not None:

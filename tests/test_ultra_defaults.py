@@ -260,15 +260,59 @@ def test_windows_first_dictation_uses_base_cpu_until_gpu_selection_finishes(monk
     wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, True)
 
     assert len(workers) == 1
-    assert not app._windows_gpu_setup_done.is_set()
+    assert not app._gpu_setup_done.is_set()
     first = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
     assert first["use_gpu"] is False
     assert first["model_path"] == str(Path("C:/models/ggml-base.en.bin"))
     assert config["use_gpu"] is True and config["model_path"] == TURBO
 
     workers[0]()
-    assert app._windows_gpu_setup_done.is_set()
+    assert app._gpu_setup_done.is_set()
     assert prepared == [config]
+    later = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
+    assert later["use_gpu"] is True and later["model_path"] == TURBO
+
+
+def test_linux_gpu_turned_on_probes_off_the_tk_thread(monkeypatch):
+    # Startup skips the Linux probe in CPU mode, so switching GPU on must pick
+    # the device first; dictations wait on CPU until it has.
+    workers = []
+    prepared = []
+
+    class DeferredThread:
+        def __init__(self, target, **_kwargs):
+            workers.append(target)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(
+        "wayfinder.utils.gpu_simple.setup_gpu_environment",
+        lambda config: prepared.append(config),
+    )
+    monkeypatch.setattr(
+        "wayfinder.core.transcriber.WhisperServerBackend.shutdown", lambda: None
+    )
+    monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency", lambda: None)
+    monkeypatch.setattr(
+        wayfinder_main, "_resolve_whisper_model",
+        lambda name: Path("/models") / name if name == "ggml-base.en.bin" else None,
+    )
+    config = _free_config(use_gpu=True, model_path=TURBO)
+    app = SimpleNamespace(config=config, log=lambda _message: None)
+
+    wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, True)
+
+    assert len(workers) == 1
+    first = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
+    assert first["use_gpu"] is False
+    assert first["model_path"] == str(Path("/models/ggml-base.en.bin"))
+
+    workers[0]()
+    assert app._gpu_setup_done.is_set() and prepared == [config]
     later = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
     assert later["use_gpu"] is True and later["model_path"] == TURBO
 
@@ -303,14 +347,14 @@ def test_windows_gpu_setup_failure_keeps_dictation_on_cpu(monkeypatch):
     app = SimpleNamespace(
         config=_free_config(use_gpu=True, model_path=TURBO),
         log=lambda _message: None,
-        _windows_gpu_cpu_for_session=False,
+        _gpu_cpu_for_session=False,
     )
 
     wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, True)
     workers[0]()
 
-    assert app._windows_gpu_setup_done.is_set()
-    assert app._windows_gpu_setup_failed is True
+    assert app._gpu_setup_done.is_set()
+    assert app._gpu_setup_failed is True
     fallback = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
     assert fallback["use_gpu"] is False
     assert fallback["model_path"] == str(Path("C:/models/ggml-base.en.bin"))
@@ -324,8 +368,8 @@ def test_windows_gpu_handoff_does_not_change_other_transcription_backends(monkey
     )
     app = SimpleNamespace(
         config=config,
-        _windows_gpu_setup_done=SimpleNamespace(is_set=lambda: False),
-        _windows_gpu_cpu_for_session=True,
+        _gpu_setup_done=SimpleNamespace(is_set=lambda: False),
+        _gpu_cpu_for_session=True,
     )
 
     selected = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
