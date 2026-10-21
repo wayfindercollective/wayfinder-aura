@@ -32,9 +32,6 @@ PyQt6>=6.5.0
 sounddevice>=0.4.6
 numpy>=1.24.0
 
-# Audio Preprocessing (optional but recommended for better accuracy)
-scipy>=1.10.0
-
 # Input Device Monitoring on Linux is provided by `evdev`, but pip-installing it
 # requires linux/input.h kernel headers — stripped on SteamOS (Issue 5). It is
 # moved to requirements-optional.txt; on SteamOS, install `python-evdev` via

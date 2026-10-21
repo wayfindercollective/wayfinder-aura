@@ -80,7 +80,6 @@ Handoff files for the Flathub fork root:
 - `io.wayfindercollective.WayfinderAura.yml`
 - `python-deps.json`
 - `python-numpy-build-tools.json`
-- `python-scipy-build-tools.json`
 - `cargo-sources-maturin.json`
 - `cargo-sources-cryptography.json`
 - `cargo-sources-jiter.json`

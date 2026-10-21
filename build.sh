@@ -113,6 +113,5 @@ else
     echo "Common issues:"
     echo "  - Missing dependencies: pip install -r requirements.txt"
     echo "  - Missing PyQt6: pip install PyQt6"
-    echo "  - Missing scipy: pip install scipy"
     exit 1
 fi

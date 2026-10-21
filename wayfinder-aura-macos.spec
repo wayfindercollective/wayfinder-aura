@@ -117,10 +117,6 @@ a = Analysis(
         'sounddevice',
         'numpy',
         'numpy.core._multiarray_umath',
-        'scipy',
-        'scipy.signal',
-        'scipy.io',
-        'scipy.io.wavfile',
         # macOS hotkey and text injection
         'pynput',
         'pynput.keyboard',
@@ -150,6 +146,9 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        # No SciPy: core.audio_dsp's NumPy filters replace it (a dev install
+        # still has it for tests/test_audio_dsp.py).
+        'scipy',
         # Linux-only modules
         'evdev',
         'dbus',
@@ -257,7 +256,7 @@ app = BUNDLE(
         'LSApplicationCategoryType': 'public.app-category.productivity',
         'NSPrincipalClass': 'NSApplication',
         'NSHighResolutionCapable': True,
-        # NumPy/SciPy wheels in the locked Mac release stack target macOS 14.
+        # NumPy wheels in the locked Mac release stack target macOS 14.
         # Never advertise an older OS than bundled native extensions can load.
         'LSMinimumSystemVersion': '14.0',
         'LSBackgroundOnly': False,

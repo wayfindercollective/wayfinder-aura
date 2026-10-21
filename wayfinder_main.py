@@ -6444,13 +6444,11 @@ class WayfinderApp(ctk.CTk):
             # Linux/Windows already refreshed online in main.py before the UI.
             self.after(500, self._refresh_license_background)
 
-        # SciPy's signal stack is deliberately absent from the first-frame import path. Warm it
-        # once immediately after the UI maps so first-dictation processing stays just as snappy.
-        # The worker exits after the import; this does not add a resident background service.
-        # macOS: Core Audio delivers 16 kHz directly and "light" preprocessing is
-        # numpy-only, so the ~0.5s / 77 MB import only pays off for medium/heavy
-        # (the lazy import still covers any later need).
-        if not IS_MACOS or self.config.get("audio_preprocessing", "light") in ("medium", "heavy"):
+        # Warm the rumble filter's cached impulse response once, right after the UI maps, so
+        # the first Medium/Heavy dictation does not pay for it. The worker exits after that
+        # one computation; this does not add a resident background service. Light (the
+        # default) never runs the filter, so only Medium/Heavy warm it.
+        if self.config.get("audio_preprocessing", "light") in ("medium", "heavy"):
             self.after(
                 100,
                 lambda: threading.Thread(

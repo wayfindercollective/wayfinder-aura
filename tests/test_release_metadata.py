@@ -1197,7 +1197,6 @@ def test_flatpak_compiled_python_dependencies_build_from_source():
         "python-cffi",
         "python-cryptography",
         "python-numpy",
-        "python-scipy",
         "python-pillow",
         "python-jiter",
         "python-pydantic-core",
@@ -1207,7 +1206,6 @@ def test_flatpak_compiled_python_dependencies_build_from_source():
     dependency_manifests = [
         PYTHON_DEPS,
         REPO / "flatpak" / "python-numpy-build-tools.json",
-        REPO / "flatpak" / "python-scipy-build-tools.json",
     ]
     for path in dependency_manifests:
         text = path.read_text(encoding="utf-8")
@@ -1219,7 +1217,7 @@ def test_flatpak_compiled_python_dependencies_build_from_source():
     # NumPy's extensions disappeared only during the final cleanup stage.
     for path in dependency_manifests[1:]:
         assert '"cleanup"' not in path.read_text(encoding="utf-8"), path
-    assert "/lib/python*/site-packages/pythran*" in manifest
+    assert "pythran" not in manifest and "python-scipy" not in manifest
 
     assert "-DBUILD_SHARED_LIBS:BOOL=ON" in manifest
     assert "-DBUILD_WITHOUT_LAPACKE:BOOL=ON" in manifest
