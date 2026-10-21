@@ -88,7 +88,7 @@ cleanup:
   - /lib/python*/site-packages/pip*
   - /lib/python*/site-packages/setuptools*
   - /lib/python*/site-packages/wheel*
-  # Source-build frontends are needed while constructing NumPy, not at
+  # Source-build frontends are needed while constructing NumPy and Pillow, not at
   # runtime. Keep these paths explicit: generated build-only cleanup='*' can
   # claim native libraries imported by a later build-tool module.
   - /bin/pybind11-config
@@ -284,8 +284,9 @@ modules:
         url: https://github.com/OpenMathLib/OpenBLAS/archive/v0.3.34.tar.gz
         sha256: cd7e129868320cc2d033afa920e31202dfe0b8066a5b66661900ccc0f197dfed
 
-  # NumPy uses Meson's PEP 517 backend. These are pure-Python build
-  # tools and are removed from the final app by the explicit top-level cleanup.
+  # NumPy uses Meson's PEP 517 backend and Pillow 12 imports pybind11 while
+  # building. These are pure-Python build tools and are removed from the final
+  # app by the explicit top-level cleanup.
   - python-numpy-build-tools.json
 
   # Build Maturin itself from source once, then use it as the offline PEP 517
