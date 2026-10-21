@@ -11,8 +11,9 @@ def editor(request):
     import tkinter as tk
 
     import wayfinder_main as wm
+    from wayfinder.ui import components
 
-    before_wheel_active = wm._WHEEL_SCROLL_ACTIVE
+    before_wheel_active = components._WHEEL_SCROLL_ACTIVE
     try:
         root = ctk.CTk()
     except tk.TclError as exc:
@@ -32,7 +33,7 @@ def editor(request):
         yield root, page._parent_canvas, box._textbox
     finally:
         root.destroy()
-        wm._WHEEL_SCROLL_ACTIVE = before_wheel_active
+        components.set_wheel_scroll_active(before_wheel_active)
 
 
 def _wheel(root, text, delta, *, shift=False):

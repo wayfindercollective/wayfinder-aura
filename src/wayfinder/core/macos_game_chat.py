@@ -205,22 +205,30 @@ def _researched() -> list[GameEntry]:
             for name, status, note, aliases, _sources in RESEARCHED_GAMES]
 
 
-def game_list() -> list[GameEntry]:
-    """Every game the Games tab shows, sorted by name. Profiles and the
-    hand-written entries win over researched ones with the same name."""
-    entries = [profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
+def merge_game_entries(entries: list[GameEntry], researched: list[GameEntry]) -> list[GameEntry]:
+    """The Games tab rows sorted by name. Profiles and the hand-written entries
+    win over researched ones with the same name. Shared by all three platforms."""
     names = {e.name.lower() for e in entries}
-    entries += [e for e in _researched() if e.name.lower() not in names]
-    return sorted(entries, key=lambda e: e.name.lower())
+    merged = list(entries) + [e for e in researched if e.name.lower() not in names]
+    return sorted(merged, key=lambda e: e.name.lower())
+
+
+def filter_games(entries: list[GameEntry], query: str) -> list[GameEntry]:
+    """Case-insensitive match on the name or an alias; empty query = all."""
+    q = " ".join((query or "").lower().split())
+    if not q:
+        return entries
+    return [e for e in entries if q in e.name.lower() or any(q in a for a in e.aliases)]
+
+
+def game_list() -> list[GameEntry]:
+    """Every game the Games tab shows, sorted by name."""
+    return merge_game_entries([profile_entry(p) for p in PROFILES] + list(INFO_ONLY), _researched())
 
 
 def search_games(query: str) -> list[GameEntry]:
     """Case-insensitive match on the name or an alias; empty query = all."""
-    q = " ".join((query or "").lower().split())
-    if not q:
-        return game_list()
-    return [e for e in game_list()
-            if q in e.name.lower() or any(q in a for a in e.aliases)]
+    return filter_games(game_list(), query)
 
 
 def match_profile(bundle_id: Optional[str], app_name: Optional[str]) -> Optional[GameProfile]:
