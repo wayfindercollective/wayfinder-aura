@@ -1039,12 +1039,9 @@ ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
 # the "reload". The other three sliders (overlay scale, overlay position,
 # ducking percent) were changing SILENTLY whenever the pointer crossed them.
 #
-# VERSION-DEPENDENT, verified both ways: CustomTkinter 6.0 (what the AppImage
-# ships, and where this bug was reported) binds the wheel on sliders; 5.2.2
-# (what the Flatpak pins and vendors) has no slider wheel handling at all, so
-# there the assignment is an inert no-op. requirements.txt allows >=5.2.0 and
-# therefore 6.x, while flatpak/python-deps.json pins <6 — the two packages run
-# different CustomTkinter majors, which is worth resolving separately.
+# VERSION-DEPENDENT, verified both ways: CustomTkinter 6.0 (what every package
+# now ships) binds the wheel on sliders; 5.2.2 had no slider wheel handling at
+# all, so there the assignment was an inert no-op.
 #
 # Sliders stay usable by drag; only the wheel is dropped, which is the
 # conventional behaviour for a slider inside a scrolling page. (An earlier
