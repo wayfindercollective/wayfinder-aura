@@ -2863,12 +2863,15 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 req_timeout = min(LlamaServerManager.REQUEST_TIMEOUT, req_remaining)
             # Ownership is re-proved per request: the startup check cannot speak
             # for a connection opened later. Cheap next to the request itself.
-            if not LlamaServerManager.still_ours(port):
+            # Bound to the child ensure() handed out, and sent with that child's
+            # key: a replacement on the same port refuses it rather than
+            # answering a request another child's failure would be pinned to.
+            if not LlamaServerManager.still_ours(port, served):
                 raise LlamaServerError(
                     f"port {port} is no longer proven to be our server")
             out = LlamaServerManager.complete(
                 prompt=prompt, n_predict=n_predict, port=port,
-                timeout=req_timeout,
+                timeout=req_timeout, child=served,
                 **self._sampling_profile(),
             )
             # Label from what the server was ACTUALLY spawned with, so a GPU
@@ -2890,6 +2893,13 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 # on it, would stop the server the new mode starts.
                 print("[Post-processing] llama-server request cut off by a settings "
                       "change - this cleanup uses the per-call CLI")
+                return None
+            if LlamaServerManager.replaced(served):
+                # The child this request reached was stopped or replaced while
+                # it ran: that stop failed the request, and the replacement is
+                # not the server that failed.
+                print("[Post-processing] llama-server replaced during the request "
+                      "- this cleanup uses the per-call CLI")
                 return None
             # A server that accepted the connection but never answered is wedged;
             # leaving it up means every future dictation pays the same timeout.

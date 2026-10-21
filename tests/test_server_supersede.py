@@ -499,16 +499,16 @@ def test_an_intent_release_spares_the_new_model_a_fresh_request_started(
             fresh.append(threading.Thread(
                 target=lambda: _clean_up_from(_snapshot(config)), daemon=True))
             fresh[0].start()
-            assert loading.wait(5)
-            threading.Timer(0.3, loaded.set).start()
+            if loading.wait(1 if terminal else 5):
+                threading.Timer(0.3, loaded.set).start()
         return cutoff
 
     monkeypatch.setattr(_llama_state, "supersede", classmethod(supersede_then_dictate))
     wayfinder_main._release_cleanup_residency(terminal=terminal)
     fresh[0].join(10)
     assert spawned[0].poll() is not None   # the old model is gone either way
-    if terminal:   # Quit and restart stop everything
-        assert spawned[1].poll() is not None and _llama_state._process is None
+    if terminal:   # Quit admits no start after it: the dictation's is refused
+        assert len(spawned) == 1 and _llama_state._process is None
     else:
         assert spawned[1].poll() is None and _llama_state._process is spawned[1]
 
@@ -647,3 +647,79 @@ def test_quit_and_restart_stop_everything_a_racing_start_too(marker):
     if "overlay" not in marker:
         assert "_release_cleanup_residency(terminal=True)" in body
         assert "_release_cleanup_residency()" not in body
+    else:
+        # The re-exec'd app starts its own cleanup server; a failed exec is
+        # still this process, which needs both servers back.
+        assert "LlamaServerManager.close()" in body
+        assert "WhisperServerBackend.reopen()" in body and "LlamaServerManager.reopen()" in body
+
+
+def test_the_terminal_release_closes_the_cleanup_server():
+    body = _main_body("def _release_cleanup_residency(")
+    assert "LlamaServerManager.close()" in body
+
+
+def _sleeper():
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def test_no_whisper_start_is_admitted_after_a_terminal_shutdown(slow_server):
+    # Sol PR 2 r5: a dictation that read its settings just after Quit's
+    # supersede started a server once the shutdown was done, and os._exit()
+    # then orphaned it.
+    slow_server()   # creates the server lock
+    WhisperServerBackend.shutdown(terminal=True)
+    late = slow_server()   # read under the epoch the Quit left behind
+    with pytest.raises(ServerStartSuperseded):
+        late._start_server()
+    assert WhisperServerBackend._server_process is None
+    assert not WhisperServerBackend._disabled_now()
+    WhisperServerBackend.reopen()   # a restart that did not exit
+    thread, proc, outcome = _start_in_background(slow_server())
+    assert proc.poll() is None
+    WhisperServerBackend.supersede()
+    thread.join(10)
+
+
+def test_the_closed_flag_alone_refuses_a_start_waiting_for_the_lock(slow_server):
+    # Independent of the epoch check, which also catches every start that
+    # read its settings before a terminal shutdown's supersede.
+    late = slow_server()
+    outcome = {}
+
+    def start():
+        try:
+            late._start_server()
+            outcome["result"] = "started"
+        except Exception as exc:  # recorded for the assertions
+            outcome["result"] = exc
+
+    with WhisperServerBackend._server_lock:   # the terminal stop holds it
+        thread = threading.Thread(target=start, daemon=True)
+        thread.start()
+        time.sleep(0.3)   # past the entry checks, waiting for the lock
+        WhisperServerBackend._closed = True
+    thread.join(5)
+    assert isinstance(outcome.get("result"), ServerStartSuperseded)
+    assert WhisperServerBackend._server_process is None
+
+
+def test_a_server_reused_after_quick_switches_survives_their_teardowns(
+        slow_server, monkeypatch):
+    # Sol PR 2 r5: GPU on, off and on again before the teardowns ran. A
+    # dictation reused the resident server, and the off switch's teardown,
+    # still seeing the old mode's spawn, stopped it under the dictation.
+    slow_server()
+    resident = _sleeper()
+    WhisperServerBackend._server_epoch = WhisperServerBackend._epoch
+    WhisperServerBackend._server_process = resident
+    off = WhisperServerBackend.supersede()
+    on = WhisperServerBackend.supersede()
+    monkeypatch.setattr(WhisperServerBackend, "_server_reusable", lambda self: True)
+    slow_server()._start_server()   # the dictation, configured after both
+    WhisperServerBackend.shutdown(before_epoch=off)
+    WhisperServerBackend.shutdown(before_epoch=on)
+    assert resident.poll() is None and WhisperServerBackend._server_process is resident
+    # Not reused by the next mode, it goes with that mode's teardown.
+    WhisperServerBackend.shutdown(before_epoch=WhisperServerBackend.supersede())
+    assert resident.poll() is not None

@@ -504,6 +504,19 @@ def no_host_binaries(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
 # =============================================================================
 
 @pytest.fixture(autouse=True)
+def _servers_admit_starts_again():
+    """A terminal shutdown (Quit, cleanup_all, exit) closes both server
+    managers for the rest of the process; a test that runs one must not leave
+    every later test's server start refused."""
+    yield
+    for module, name in (("wayfinder.core.transcriber", "WhisperServerBackend"),
+                         ("wayfinder.core.llama_server", "LlamaServerManager")):
+        cls = getattr(sys.modules.get(module), name, None)
+        if cls is not None:
+            cls._closed = False
+
+
+@pytest.fixture(autouse=True)
 def reset_voice_profile():
     """Reset the global voice profile singleton between tests."""
     yield

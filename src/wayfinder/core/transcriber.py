@@ -771,9 +771,14 @@ class WhisperServerBackend(TranscriptionBackend):
     # Bumped by supersede()/shutdown(). A startup that began under an older
     # epoch abandons its load and stops its own child: a CPU/GPU switch or Quit
     # never waits for a model load it no longer wants. _server_epoch is the
-    # epoch the resident server was spawned under.
+    # epoch the resident server's configuration was last validated under: by
+    # the start that spawned it, or by the latest start that reused it.
     _epoch: int = 0
     _server_epoch: int = 0
+    # Set by a terminal shutdown (Quit, restart, exit): no start is admitted
+    # after it, so a dictation that read its settings just before cannot
+    # leave a child behind for os._exit() to orphan.
+    _closed: bool = False
 
     # The server has its own short request/restart budget. CLI salvage must not
     # share the already-expired tail of that budget: it needs enough time to
@@ -1065,6 +1070,8 @@ class WhisperServerBackend(TranscriptionBackend):
             # Configured before a switch: what it finds missing is the old
             # mode's, so it must not disable the server for the new one.
             raise ServerStartSuperseded("whisper-server configuration superseded")
+        if WhisperServerBackend._closed:
+            raise ServerStartSuperseded("whisper-server shutting down")
         if not self.is_available():
             self._disable_server()
             raise TranscriptionError(
@@ -1102,10 +1109,19 @@ class WhisperServerBackend(TranscriptionBackend):
                 # Configured before a CPU/GPU or model switch: start nothing,
                 # and leave whatever the new mode is running alone.
                 raise ServerStartSuperseded("whisper-server configuration superseded")
+            # Again under the lock: a start that passed the entry check before
+            # a Quit must not spawn once the Quit's stop has run.
+            if WhisperServerBackend._closed:
+                raise ServerStartSuperseded("whisper-server shutting down")
             # Already running with the right model AND the right CPU/GPU mode?
             # Skipped when force=True so a wedged-but-alive server is replaced
             # instead of mistaken for healthy.
             if not force and self._server_reusable():
+                # Validated for this start's epoch, so it is that mode's server
+                # now: a teardown from an earlier switch (GPU off then on again
+                # before it ran) must not stop it under the dictation.
+                WhisperServerBackend._server_epoch = max(
+                    WhisperServerBackend._server_epoch, epoch)
                 return
 
             # Kill any existing server (different config, or force-replace a wedge).
@@ -1306,6 +1322,11 @@ class WhisperServerBackend(TranscriptionBackend):
         WhisperServerBackend._server_disabled_epoch = self._load_epoch
 
     @classmethod
+    def reopen(cls) -> None:
+        """Admit starts again after a terminal shutdown that did not exit."""
+        cls._closed = False
+
+    @classmethod
     def _shutdown_at_exit(cls) -> None:
         cls.shutdown(terminal=True)
 
@@ -1320,12 +1341,15 @@ class WhisperServerBackend(TranscriptionBackend):
         the new mode and stays. Without it the cutoff is this call's own
         supersede(): a start that read the new settings while this waited for
         the lock keeps its server.
-        terminal: Quit, restart and final cleanup stop everything, that too.
+        terminal: Quit, restart and final cleanup stop everything, that too,
+        and admit no start after it (see reopen()).
         """
-        if before_epoch is None:
-            cutoff = cls.supersede()
-            if not terminal:
-                before_epoch = cutoff
+        if terminal:
+            cls._closed = True   # before the supersede: see _start_server()
+            cls.supersede()
+            before_epoch = None
+        elif before_epoch is None:
+            before_epoch = cls.supersede()
         if cls._server_lock is None:
             cls._stop_server_internal()
             return

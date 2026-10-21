@@ -572,11 +572,11 @@ def _release_cleanup_residency(llama_before_epoch: "int | None" = None, *,
     try:
         from wayfinder.core.llama_server import LlamaServerManager
         if terminal:
-            LlamaServerManager.supersede()
-            llama_before_epoch = None
-        elif llama_before_epoch is None:
-            llama_before_epoch = LlamaServerManager.supersede()
-        LlamaServerManager.shutdown(before_epoch=llama_before_epoch)
+            LlamaServerManager.close()
+        else:
+            if llama_before_epoch is None:
+                llama_before_epoch = LlamaServerManager.supersede()
+            LlamaServerManager.shutdown(before_epoch=llama_before_epoch)
     except Exception:
         pass
     # BOTH backends cache models, and which one is live depends on whether the
@@ -18131,12 +18131,24 @@ class WayfinderApp(ctk.CTk):
                 self.warm_mic.close()
             from wayfinder.core.transcriber import WhisperServerBackend
             WhisperServerBackend.shutdown(terminal=True)
+            # The cleanup server too: the re-exec'd app starts its own, and
+            # this one would stay resident beside it.
+            from wayfinder.core.llama_server import LlamaServerManager
+            LlamaServerManager.close()
             self._cleanup_overlay()
             from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
             kill_stale_overlay_from_pidfile()
         except Exception:
             pass
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except OSError as e:
+            # Still this process, so dictation needs its servers back.
+            from wayfinder.core.llama_server import LlamaServerManager
+            from wayfinder.core.transcriber import WhisperServerBackend
+            WhisperServerBackend.reopen()
+            LlamaServerManager.reopen()
+            print(f"[Restart] could not restart Aura ({e}); restart it to apply the change")
 
     def clear_log(self):
         self.log_textbox.configure(state="normal")
