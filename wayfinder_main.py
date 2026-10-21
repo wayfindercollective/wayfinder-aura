@@ -14042,10 +14042,12 @@ class WayfinderApp(ctk.CTk):
             _release_cleanup_residency()
         except Exception:
             pass
-        if IS_MACOS:
+        if IS_MACOS or getattr(self, "_gpu_setup_done", None) is not None:
+            # Load the model again in its new mode. Linux/Windows GPU-on waits for
+            # the device selection above; any warm-up still queued is superseded.
             warm = getattr(self, "_warm_up_transcription", None)
             if callable(warm):
-                warm()
+                warm(startup=False)
 
     # === One-time Ultra setup (core/ultra_defaults.py) ===
 
@@ -21945,7 +21947,7 @@ class WayfinderApp(ctk.CTk):
             self.config["model_path"] = relative_path
             save_config(self.config)
             if IS_MACOS:
-                self._warm_up_transcription()
+                self._warm_up_transcription(startup=False)
             self.log(f"⚙ Model: {model_name}")
             # Update the button in main UI if visible
             if hasattr(self, 'model_btn'):
@@ -23397,25 +23399,32 @@ class WayfinderApp(ctk.CTk):
             self.log("🖥️ X11 detected - using evdev")
         self._start_evdev_listener()
 
-    def _warm_up_transcription(self):
+    def _warm_up_transcription(self, startup: bool = True):
         """Pre-load the transcription model in the background (whisper-server mode).
 
         Makes the first dictation instant without the user warming anything up.
         A no-op for per-invocation backends. Daemon thread; failures are logged
         but never block startup — the lazy start at first transcription remains
-        the fallback.
+        the fallback. ``startup=False`` (a CPU/GPU or model change) reloads the
+        models only. Each call supersedes the models of any warm-up still queued.
         """
         # Snapshot on the Tk thread: a CPU/GPU switch after this point must not
         # be read half-applied by the worker (use_gpu on, Vulkan device unset).
         config = dict(self.config)
         gpu_setup = getattr(self, "_gpu_setup_done", None)
+        generation = getattr(self, "_warm_up_generation", 0) + 1
+        self._warm_up_generation = generation
 
         def _warm():
+            gpu_ready = True
             try:
                 from wayfinder.core.transcriber import warm_up_transcription
-                if not WayfinderApp._gpu_device_ready_for_warm_up(self, config, gpu_setup):
+                gpu_ready = WayfinderApp._gpu_device_ready_for_warm_up(self, config, gpu_setup)
+                if not gpu_ready:
                     # The first dictation starts the server once the device is set.
                     print("[Warmup] GPU device selection unfinished; transcription warm-up skipped")
+                elif self._warm_up_generation != generation:
+                    print("[Warmup] Superseded by a CPU/GPU or model change")
                 else:
                     if config.get("whisper_server_mode"):
                         self.log("⏳ Warming up transcription model (first dictation will be instant)…")
@@ -23431,9 +23440,13 @@ class WayfinderApp(ctk.CTk):
             # the first dictation's grammar/tone pass is instant, not a cold load).
             try:
                 from wayfinder.core.postprocessor import warm_up_postprocessing
-                warm_up_postprocessing(config)
+                # Its llama-server takes the same CPU/GPU mode and Vulkan device.
+                if gpu_ready and self._warm_up_generation == generation:
+                    warm_up_postprocessing(config)
             except Exception as e:
                 self.log(f"⚠️ Post-processing warm-up skipped: {e}")
+            if not startup:
+                return
             # Pre-arm Wayland text injection: surface KDE's one-time "allow input control"
             # approval now (a benign no-op keystroke), so it can't race the first real
             # dictation on a fresh install/rebuild and garble the output. No-op unless wtype

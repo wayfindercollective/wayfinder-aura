@@ -326,6 +326,8 @@ class _WarmUpRig:
 
         self.workers = {}
         self.warmed = []
+        self.post_warmed = []
+        self.pre_armed = []
         rig = self
 
         class DeferredThread:
@@ -354,29 +356,68 @@ class _WarmUpRig:
             lambda config: self.warmed.append(
                 (config["use_gpu"], os.environ.get("GGML_VK_VISIBLE_DEVICES"))) or True,
         )
-        monkeypatch.setattr("wayfinder.core.postprocessor.warm_up_postprocessing", lambda config: None)
+        monkeypatch.setattr(
+            "wayfinder.core.postprocessor.warm_up_postprocessing",
+            lambda config: self.post_warmed.append(
+                (config["use_gpu"], os.environ.get("GGML_VK_VISIBLE_DEVICES"))),
+        )
         self.config = _free_config(model_path=TURBO, whisper_server_mode=True)
-        self.app = SimpleNamespace(config=self.config, log=lambda _m: None,
-                                   _portal_typing_in_play=lambda: True)
+        app = SimpleNamespace(config=self.config, log=lambda _m: None,
+                              _portal_typing_in_play=lambda: self.pre_armed.append(1) or True)
+        app._warm_up_transcription = (
+            lambda startup=True: wayfinder_main.WayfinderApp._warm_up_transcription(app, startup))
+        self.app = app
 
     def warm_up(self):
         wayfinder_main.WayfinderApp._warm_up_transcription(self.app)
         return self.workers.pop("wayfinder-model-warmup")
+
+    def queued_warm_up(self):
+        """The warm-up a CPU/GPU switch queued, if any."""
+        return self.workers.pop("wayfinder-model-warmup", None)
 
     def switch_gpu(self, on):
         self.config["use_gpu"] = on
         wayfinder_main.WayfinderApp._apply_transcription_hardware_change(self.app, on)
 
 
-def test_startup_warm_up_keeps_the_cpu_config_it_was_started_with(monkeypatch):
+def test_turning_gpu_on_during_the_startup_warm_up_warms_the_chosen_gpu(monkeypatch):
     # The one-time Ultra setup turns GPU on while the CPU startup warm-up is
     # still queued. Reading the live config there would start a Vulkan server
-    # before the device is chosen, on device 0, and keep it.
+    # before the device is chosen, on device 0, and keep it; a CPU server is
+    # wasted work, and without a second warm-up the first GPU dictation is cold.
     rig = _WarmUpRig(monkeypatch)
-    warm = rig.warm_up()
+    startup = rig.warm_up()
     rig.switch_gpu(True)
-    warm()
-    assert rig.warmed == [(False, None)]
+    after_switch = rig.queued_warm_up()
+    assert after_switch is not None
+    startup()
+    assert rig.warmed == [] and rig.post_warmed == []
+    assert rig.pre_armed == [1]  # the startup-only injection pre-arm still runs
+    rig.workers.pop("wayfinder-gpu-setup")()
+    after_switch()
+    assert rig.warmed == [(True, "1")] and rig.post_warmed == [(True, "1")]
+    assert rig.pre_armed == [1]  # a switch reloads the models only
+
+
+def test_a_switch_warm_up_waits_for_the_device_selection(monkeypatch):
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(True)
+    waiter = rig.real_thread(target=rig.queued_warm_up(), daemon=True)
+    waiter.start()
+    waiter.join(0.2)
+    assert waiter.is_alive() and rig.warmed == [] and rig.post_warmed == []
+    rig.workers["wayfinder-gpu-setup"]()
+    waiter.join(5)
+    assert not waiter.is_alive()
+    assert rig.warmed == [(True, "1")] and rig.post_warmed == [(True, "1")]
+
+
+def test_a_cpu_switch_queues_no_warm_up_on_linux(monkeypatch):
+    # As before: only GPU-on reloads here (macOS reloads on every switch).
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(False)
+    assert rig.queued_warm_up() is None
 
 
 def test_a_gpu_warm_up_waits_for_the_device_selection(monkeypatch):
@@ -395,21 +436,41 @@ def test_a_gpu_warm_up_waits_for_the_device_selection(monkeypatch):
 def test_a_gpu_warm_up_is_dropped_when_gpu_is_switched_off_meanwhile(monkeypatch):
     rig = _WarmUpRig(monkeypatch)
     rig.switch_gpu(True)
+    after_switch = rig.queued_warm_up()
     warm = rig.warm_up()
     select = rig.workers.pop("wayfinder-gpu-setup")
     rig.switch_gpu(False)
     select()
     warm()
-    assert rig.warmed == []
+    after_switch()
+    assert rig.warmed == [] and rig.post_warmed == []
 
 
 def test_a_gpu_warm_up_is_dropped_when_the_device_selection_fails(monkeypatch):
+    # Dictation runs Base on the CPU then; a GPU llama-server on the default
+    # device would only be thrown away.
     rig = _WarmUpRig(monkeypatch, setup_fails=True)
     rig.switch_gpu(True)
-    warm = rig.warm_up()
+    after_switch = rig.queued_warm_up()
     rig.workers["wayfinder-gpu-setup"]()
-    warm()
+    after_switch()
+    assert rig.warmed == [] and rig.post_warmed == []
+
+
+def test_off_and_on_again_warms_once_on_the_second_selection(monkeypatch):
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(True)
+    first = rig.queued_warm_up()
+    first_select = rig.workers.pop("wayfinder-gpu-setup")
+    rig.switch_gpu(False)
+    rig.switch_gpu(True)
+    second = rig.queued_warm_up()
+    first_select()
+    first()
     assert rig.warmed == []
+    rig.workers.pop("wayfinder-gpu-setup")()
+    second()
+    assert rig.warmed == [(True, "1")] and rig.post_warmed == [(True, "1")]
 
 
 def test_windows_gpu_setup_failure_keeps_dictation_on_cpu(monkeypatch):
