@@ -532,6 +532,18 @@ def test_real_z_order_walk_finds_a_real_window(wt):
         root.destroy()
 
 
+def _z_order_index(wt, hwnd):
+    """Position of *hwnd* in the real top-level z-order (0 = top)."""
+    h = wt._user32.GetTopWindow(None)
+    for i in range(wt._MAX_WALK):
+        if not h:
+            break
+        if h == hwnd:
+            return i
+        h = wt._user32.GetWindow(h, wt._GW_HWNDNEXT)
+    raise AssertionError(f"window {hwnd} not found in the z-order")
+
+
 @windows_only
 def test_a_demoted_pill_is_restored_into_a_real_anchors_band(wt):
     """Finding 3 (Sol pill r4), MAJOR: the previous version of this fixture
@@ -572,7 +584,13 @@ def test_a_demoted_pill_is_restored_into_a_real_anchors_band(wt):
 
             assert wt.normal_windows_above(pill_hwnd) == 0   # ordering: repaired
             assert wt._user32.GetWindowLongW(pill_hwnd, wt._GWL_EXSTYLE) & wt._WS_EX_TOPMOST  # style: restored
-            assert wt.topmost_above(pill_hwnd) == anchor_hwnd  # anchor: still above, not un-topped
+            # anchor: still topmost and still above the pill, not un-topped. Not
+            # topmost_above(pill) == anchor: a real desktop has other topmost
+            # windows (the taskbar, tray tools), and the pill rightly lands at
+            # the bottom of that band, below all of them (node 4, 2026-10-22).
+            assert wt._user32.GetWindowLongW(anchor_hwnd, wt._GWL_EXSTYLE) & wt._WS_EX_TOPMOST
+            assert _z_order_index(wt, anchor_hwnd) < _z_order_index(wt, pill_hwnd)
+            assert wt.topmost_above(pill_hwnd) is not None  # inside the topmost band
             assert wt._user32.GetForegroundWindow() == before_fg  # focus: untouched
         finally:
             ordinary.destroy()
