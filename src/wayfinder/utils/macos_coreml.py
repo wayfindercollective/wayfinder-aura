@@ -31,12 +31,11 @@ _latest_config = None
 # older one is for a mode the user has left.
 _latest_epoch = None
 _job_running = threading.Event()
-# Bumped by every model or CPU/GPU change (cancel_preparation). A backend
-# built before one is for a model the user has left: it schedules no
-# hand-over, and a job started before one cannot publish (Sol mac r3).
-_selection_generation = 0
-# Failure keys a successful Core ML dictation cleared this session.
+# runtime_key()s a successful Core ML dictation cleared this session.
 _runtime_proven = set()
+# Serializes the failure memory's read-modify-write: two chunks failing on
+# one incident must not both count (Sol mac r4).
+_failure_lock = threading.RLock()
 # Failure keys counted this session: one failed attempt per launch, so the
 # automatic retries cannot spend the whole allowance at once.
 _session_failures = set()
@@ -296,51 +295,60 @@ def clear_comparison_failures(cli_binary: str, model_path: str) -> None:
         key = _failure_key(cli_binary, model_path)
     except (OSError, ValueError, subprocess.SubprocessError):
         return
-    _session_failures.discard(key)
-    rows = _read_failures()
-    if rows.pop(key, None) is not None:
-        _write_failures(rows)
+    with _failure_lock:
+        _session_failures.discard(key)
+        rows = _read_failures()
+        if rows.pop(key, None) is not None:
+            _write_failures(rows)
 
 
 def reset_comparison_failures() -> None:
     """The user's retry (turning GPU acceleration on): every model gets a
     fresh Core ML attempt."""
-    _session_failures.clear()
-    try:
-        _failure_path().unlink()
-    except FileNotFoundError:
-        pass
+    with _failure_lock:
+        _session_failures.clear()
+        try:
+            _failure_path().unlink()
+        except FileNotFoundError:
+            pass
 
 
-def _runtime_key(config: dict) -> tuple[str, str]:
+def runtime_key(config: dict) -> tuple[str, str]:
+    """The (whisper-cli, source model) a Core ML server's failures count against,
+    as _prepare_comparison resolves them."""
     from wayfinder.core.transcriber import _resolve_whisper_cli_binary
     return (_resolve_whisper_cli_binary(config.get("whisper_binary", "")),
             str(config.get("model_path", "")))
 
 
-def record_runtime_failure(config: dict, reason: str) -> int:
+def record_runtime_failure(key: tuple[str, str], reason: str) -> int:
     """A loaded Core ML server failed a dictation or exited on its own.
 
     Counted like a failed preparation: a load proves nothing, so a server
     that loads but cannot transcribe would otherwise be handed over again
     after every dictation. Metal serves the rest of the session; the next
-    launch tries once more, then the backoff applies (Sol mac r3)."""
-    cli, model = _runtime_key(config)
-    _runtime_proven.discard((cli, model))
-    return record_comparison_failure(cli, model, f"Core ML runtime: {reason}")
+    launch tries once more, then the backoff applies (Sol mac r3). One
+    launch counts once: two chunks failing on one incident, or a death
+    after a failed request, are one failure (Sol mac r4)."""
+    cli, model = key
+    with _failure_lock:
+        _runtime_proven.discard(key)
+        try:
+            failure_key = _failure_key(cli, model)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return 0
+        if failure_key in _session_failures:
+            return comparison_failures(cli, model)
+        return record_comparison_failure(cli, model, f"Core ML runtime: {reason}")
 
 
-def record_runtime_success(config: dict) -> None:
+def record_runtime_success(key: tuple[str, str]) -> None:
     """A Core ML dictation succeeded: that ends the failure streak (once a session)."""
-    key = _runtime_key(config)
-    if key in _runtime_proven:
-        return
-    clear_comparison_failures(*key)
-    _runtime_proven.add(key)
-
-
-def selection_generation() -> int:
-    return _selection_generation
+    with _failure_lock:
+        if key in _runtime_proven:
+            return
+        clear_comparison_failures(*key)
+        _runtime_proven.add(key)
 
 
 def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> int:
@@ -349,13 +357,14 @@ def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> 
         key = _failure_key(cli_binary, model_path)
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
-    _session_failures.add(key)
-    rows = _read_failures()
-    previous = rows.get(key)
-    count = (int(previous.get("count", 0)) if isinstance(previous, dict) else 0) + 1
-    rows[key] = {"count": count, "reason": reason[:200], "at": int(time.time())}
-    _write_failures(rows)
-    return count
+    with _failure_lock:
+        _session_failures.add(key)
+        rows = _read_failures()
+        previous = rows.get(key)
+        count = (int(previous.get("count", 0)) if isinstance(previous, dict) else 0) + 1
+        rows[key] = {"count": count, "reason": reason[:200], "at": int(time.time())}
+        _write_failures(rows)
+        return count
 
 
 def comparison(cli_binary: str, model_path: str) -> dict | None:
@@ -576,11 +585,12 @@ def _measure_probe(probe, clip: Path, cancelled) -> tuple[list, list]:
     return timings, words
 
 
-def _publish_probe(probe, cancelled, decide=lambda: True) -> bool:
+def _publish_probe(probe, cancelled, decide=lambda: True, coreml_key=None) -> bool:
     """Publish + hand off an already-warm child, never restart one on a hotkey.
 
     decide() runs under the server lock, after the idle and epoch checks, and
-    says whether to publish."""
+    says whether to publish. coreml_key (runtime_key) marks a Core ML child:
+    its exit then counts as a Core ML failure."""
     from wayfinder.core.transcriber import WhisperServerBackend
     from wayfinder.utils.child_supervisor import forget_tracked, track_existing
     cls = WhisperServerBackend
@@ -612,6 +622,8 @@ def _publish_probe(probe, cancelled, decide=lambda: True) -> bool:
             if not chosen:
                 return False
             old = retiring
+            cls._note_core_ml_exit()   # the retiring record's, if it died on its own
+            cls._server_coreml_key = coreml_key
             cls._server_epoch = epoch
             cls._server_process = probe.proc
             cls._server_port = probe.port
@@ -638,7 +650,8 @@ def _publish_probe(probe, cancelled, decide=lambda: True) -> bool:
 def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancelled) -> bool:
     """Record the comparison and, if Core ML won, hand over to its probe."""
     return _publish_probe(probe, cancelled,
-                          lambda: record_comparison(cli, source_model, metal, coreml, same_words))
+                          lambda: record_comparison(cli, source_model, metal, coreml, same_words),
+                          coreml_key=(cli, source_model))
 
 
 def _hand_off(backend, cli: str, twin: str, source_model: str, cancelled) -> bool:
@@ -653,7 +666,7 @@ def _hand_off(backend, cli: str, twin: str, source_model: str, cancelled) -> boo
         while True:
             _wait_for_idle(cancelled)
             try:
-                published = _publish_probe(probe, cancelled)
+                published = _publish_probe(probe, cancelled, coreml_key=(cli, source_model))
             except InterruptedError:
                 if cancelled():
                     raise
@@ -764,12 +777,9 @@ def cancel_preparation(config: dict) -> None:
     starts next (a model change's warm-up) is never replaced by the old
     job's (Sol mac r2).
     """
-    global _latest_config, _latest_epoch, _selection_generation
+    global _latest_config, _latest_epoch
     from wayfinder.core.transcriber import WhisperServerBackend
     with _worker_lock:
-        # Before the worker check: with no worker yet, a backend built for
-        # the old model must still schedule nothing.
-        _selection_generation += 1
         if _worker is None or not _worker.is_alive():
             return
         _latest_config, _latest_epoch = dict(config), WhisperServerBackend._epoch
@@ -790,13 +800,13 @@ def schedule_preparation(config: dict, backend) -> None:
         return
     from wayfinder.core.transcriber import LOAD_EPOCH_KEY, WhisperServerBackend
     epoch = getattr(backend, "_load_epoch", WhisperServerBackend._epoch)
-    generation = getattr(backend, "_coreml_generation", None)
     keys = _PREPARATION_KEYS
     with _worker_lock:
-        if epoch != WhisperServerBackend._epoch or generation not in (None, _selection_generation):
+        if epoch != WhisperServerBackend._epoch:
             # Read before a switch (a dictation that waited, or one's Metal
-            # fallback after the user picked another model): the switch's
-            # own path decides what to prepare, a CPU switch nothing at all.
+            # fallback after the user picked another model, which supersedes
+            # the epoch too): the switch's own path decides what to prepare,
+            # a CPU switch nothing at all.
             return
         if (_job_running.is_set() and _latest_config is not None and _latest_epoch == epoch
                 and all(_latest_config.get(k) == config.get(k) for k in keys)):
@@ -818,15 +828,12 @@ def schedule_preparation(config: dict, backend) -> None:
                 try:
                     attempts = 0
                     while attempts < 3:
-                        with _worker_lock:
-                            live, job_epoch = _latest_config, _latest_epoch
-                            job_generation = _selection_generation
+                        live, job_epoch = _latest_config, _latest_epoch
                         snapshot = dict(live)
                         if job_epoch is not None:
                             snapshot[LOAD_EPOCH_KEY] = job_epoch
                         cancelled = lambda: (_preparation_requested.is_set() or live is not _latest_config
                                              or WhisperServerBackend._epoch != job_epoch
-                                             or _selection_generation != job_generation
                                              or any(live.get(k) != snapshot.get(k) for k in keys))
                         try:
                             if cancelled():

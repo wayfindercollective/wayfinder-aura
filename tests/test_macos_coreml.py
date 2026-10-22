@@ -175,7 +175,7 @@ def test_handoff_only_adopts_faster_matching_probe(monkeypatch, preferred):
     old = Mock()
     for name in ("_server_process", "_server_port", "_server_model_path", "_server_binary", "_server_use_gpu",
                  "_server_threads", "_server_log_tail", "_server_log_thread", "_server_disabled",
-                 "_server_epoch"):
+                 "_server_epoch", "_server_coreml_key"):
         monkeypatch.setattr(cls, name, getattr(cls, name))
     monkeypatch.setattr(cls, "_server_lock", threading.Lock())
     cls._server_process = old
@@ -186,6 +186,7 @@ def test_handoff_only_adopts_faster_matching_probe(monkeypatch, preferred):
     assert macos_coreml._activate_probe(probe, "cli", "model", 1.0, .5, True, lambda: False) is preferred
     assert probe.adopted is preferred
     assert cls._server_process is (proc if preferred else old)
+    assert cls._server_coreml_key == (("cli", "model") if preferred else None)   # its exit counts
     assert stop.called is preferred
 
 
@@ -493,6 +494,12 @@ def test_a_compared_model_hands_over_instead_of_comparing_again(
     assert bool(calls) is handed_off
 
 
+class _Loads(list):
+    def __init__(self):
+        super().__init__()
+        self.keys = []
+
+
 def _hand_off_rig(monkeypatch, outcomes, alive=True):
     from contextlib import contextmanager
     from unittest.mock import Mock
@@ -501,14 +508,15 @@ def _hand_off_rig(monkeypatch, outcomes, alive=True):
     proc.poll.return_value = None if alive else 1
     proc.returncode = None if alive else 1
     probe = SimpleNamespace(proc=proc, adopted=False)
-    loads = []
+    loads = _Loads()
 
     @contextmanager
     def probe_server(backend, binary, model, *, coreml, cancelled):
         loads.append((binary, model, coreml))
         yield probe
 
-    def publish(_probe, _cancelled):
+    def publish(_probe, _cancelled, coreml_key=None):
+        loads.keys.append(coreml_key)
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -528,6 +536,7 @@ def test_the_hand_over_waits_out_a_dictation_without_reloading(monkeypatch):
                                   "/m.bin", lambda: False) is True
     assert outcomes == [] and len(loads) == 1   # one load, published at the next idle
     assert loads[0] == ("/b/whisper-coreml/whisper-server", "/derived/m.bin", True)
+    assert loads.keys == [("/b/whisper-cli", "/m.bin")] * 2   # the published server's exit counts
 
 
 def test_a_switch_cancels_the_hand_over(monkeypatch):
@@ -720,7 +729,7 @@ def test_a_hand_over_quit_cut_short_is_not_a_core_ml_failure(comparison_rig, mon
     _ready_once_listening(monkeypatch, str(twin.with_name("whisper-server")))
     loaded, quit_done = threading.Event(), threading.Event()
 
-    def publish(probe, cancelled, decide=None):
+    def publish(probe, cancelled, decide=None, coreml_key=None):
         loaded.set()
         assert quit_done.wait(10)
         return False
@@ -805,7 +814,7 @@ def _published_server_rig(monkeypatch):
     cls = WhisperServerBackend
     for name in ("_server_process", "_server_port", "_server_model_path", "_server_binary", "_server_use_gpu",
                  "_server_threads", "_server_log_tail", "_server_log_thread", "_server_disabled",
-                 "_server_epoch", "_server_ready"):
+                 "_server_epoch", "_server_ready", "_server_coreml_key"):
         monkeypatch.setattr(cls, name, getattr(cls, name))
     monkeypatch.setattr(cls, "_server_lock", threading.Lock())
     monkeypatch.setattr(macos_coreml, "_idle", lambda: True)
@@ -955,8 +964,7 @@ def test_a_success_ends_the_failure_streak(comparison_rig, monkeypatch, success)
         monkeypatch.setattr(macos_coreml, "_comparison_key", lambda c, m: "compared")
         macos_coreml.record_comparison(str(rig.cli), str(rig.model), 1.0, 0.55, True)
     else:
-        macos_coreml.record_runtime_success({"whisper_binary": str(rig.cli),
-                                             "model_path": str(rig.model)})
+        macos_coreml.record_runtime_success((str(rig.cli), str(rig.model)))
     assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0
     assert macos_coreml.comparison_blocked(str(rig.cli), str(rig.model)) is None
 
@@ -1184,11 +1192,11 @@ class _Words:
 def _runtime_memory(monkeypatch):
     seen = SimpleNamespace(failures=[], successes=0)
 
-    def failed(config, reason):
+    def failed(key, reason):
         seen.failures.append(reason)
         return len(seen.failures)
 
-    def succeeded(config):
+    def succeeded(key):
         seen.successes += 1
 
     monkeypatch.setattr(macos_coreml, "record_runtime_failure", failed)
@@ -1219,21 +1227,68 @@ def _metal_takes_over(monkeypatch, rig, clock=None):
 
 def test_core_ml_that_died_after_selection_is_not_reloaded_under_the_dictation(monkeypatch, tmp_path):
     rig = _resident_core_ml(monkeypatch, tmp_path, alive=False)
-    seen = _runtime_memory(monkeypatch)
     assert rig.backend.transcribe(rig.audio) == "metal words"
     assert rig.served == [rig.audio]
     assert rig.scheduled == [(rig.config, rig.twin)], "Core ML was not brought back by the hand-over"
-    assert seen.failures == ["server exited"], "a Core ML server that died was not counted"
 
 
-def test_a_core_ml_server_we_stopped_is_not_a_failure(monkeypatch, tmp_path):
-    # Every stop of ours clears the record first: nothing died.
+def _published_core_ml(monkeypatch, *, exited, key=("/bin/whisper-cli", "/models/turbo.bin")):
     from wayfinder.core import transcriber
-    rig = _resident_core_ml(monkeypatch, tmp_path, alive=False)
-    monkeypatch.setattr(transcriber.WhisperServerBackend, "_server_process", None)
+    cls = transcriber.WhisperServerBackend
+    proc = SimpleNamespace(poll=lambda: 9 if exited else None, wait=lambda timeout=None: 9)
+    for name, value in {"_server_process": proc, "_server_coreml_key": key, "_server_model_path": "/derived/turbo.bin",
+                        "_server_binary": CORE_ML_SERVER, "_server_use_gpu": True, "_closed": False}.items():
+        monkeypatch.setattr(cls, name, value)
+    monkeypatch.setattr(transcriber, "signal_supervised", lambda proc, kill=False: None)
+    return cls, proc
+
+
+@pytest.mark.parametrize("exited,closed,key,counted", [
+    (True, False, ("/bin/whisper-cli", "/models/turbo.bin"), ["server exited (9)"]),
+    (False, False, ("/bin/whisper-cli", "/models/turbo.bin"), []),   # we stopped a live one
+    (True, True, ("/bin/whisper-cli", "/models/turbo.bin"), []),     # Quit
+    (True, False, None, []),                                       # a Metal server
+])
+def test_a_core_ml_server_that_exited_on_its_own_counts_once(monkeypatch, exited, closed, key, counted):
+    # Sol mac r4: a death while idle was replaced by get_backend's Metal
+    # selection without being counted, so idle deaths looped without backoff.
+    # Every replacement of a published record goes through this stop.
     seen = _runtime_memory(monkeypatch)
-    assert rig.backend.transcribe(rig.audio) == "metal words"
-    assert seen.failures == []
+    cls, _proc = _published_core_ml(monkeypatch, exited=exited, key=key)
+    monkeypatch.setattr(cls, "_closed", closed)
+    cls._stop_server_internal()
+    cls._stop_server_internal()
+    assert seen.failures == counted
+    assert cls._server_coreml_key is None and cls._server_process is None
+
+
+def test_a_core_ml_death_before_selection_counts_when_metal_replaces_it(monkeypatch):
+    # The real Metal start get_backend chose: it stops the dead record first.
+    from wayfinder.core import transcriber
+    seen = _runtime_memory(monkeypatch)
+    backend, _config, _scheduled = _darwin_selection(monkeypatch, resident=False)
+    cls, _proc = _published_core_ml(monkeypatch, exited=True)
+    monkeypatch.setattr(cls, "_server_lock", __import__("threading").Lock())
+    monkeypatch.setattr(cls, "_server_disabled", False)
+
+    def no_spawn(*_args, **_kwargs):
+        raise OSError("spawn stubbed")
+
+    monkeypatch.setattr(transcriber.subprocess, "Popen", no_spawn)
+    with pytest.raises(OSError, match="spawn stubbed"):
+        backend._start_server()
+    assert seen.failures == ["server exited (9)"]
+
+
+def test_a_hand_over_over_a_dead_core_ml_record_counts_its_exit(monkeypatch):
+    seen = _runtime_memory(monkeypatch)
+    cls, old, probe = _published_server_rig(monkeypatch)
+    old.poll.return_value = 9
+    monkeypatch.setattr(cls, "_server_coreml_key", ("/bin/whisper-cli", "/models/a.bin"))
+    monkeypatch.setattr(macos_coreml, "_stop_probe", lambda proc: None)
+    assert macos_coreml._publish_probe(probe, lambda: False, coreml_key=("/bin/whisper-cli", "/models/b.bin"))
+    assert seen.failures == ["server exited (9)"]
+    assert cls._server_coreml_key == ("/bin/whisper-cli", "/models/b.bin")
 
 
 def test_a_failed_core_ml_request_recovers_on_metal(monkeypatch, tmp_path):
@@ -1301,16 +1356,23 @@ def test_a_core_ml_timeout_cascade_stays_inside_the_processing_watchdog(monkeypa
     assert elapsed < 120.0
 
 
-@pytest.mark.parametrize("cause", ["quit", "mode switch", "model change", "another recovery"])
+def _pick_another_model(monkeypatch, config):
+    """What every applied model change runs (WayfinderApp._retire_coreml_preparation)."""
+    import wayfinder_main
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    wayfinder_main.WayfinderApp._retire_coreml_preparation(SimpleNamespace(config=config))
+
+
+@pytest.mark.parametrize("cause", ["quit", "mode switch", "model change", "another recovery", "abandoned"])
 def test_a_request_something_else_cut_short_is_not_a_core_ml_failure(monkeypatch, tmp_path, cause):
     from wayfinder.core import transcriber
     cls = transcriber.WhisperServerBackend
     rig = _resident_core_ml(monkeypatch, tmp_path, alive=True)
     seen = _runtime_memory(monkeypatch)
-    _metal_takes_over(monkeypatch, rig)
+    starts = _metal_takes_over(monkeypatch, rig)
     monkeypatch.setattr(macos_coreml, "_worker", None)
-    monkeypatch.setattr(macos_coreml, "_selection_generation", macos_coreml._selection_generation)
     monkeypatch.setattr(cls, "_epoch", cls._epoch)
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
 
     def post(req, timeout):
         if ":8178/" in req.full_url:
@@ -1319,7 +1381,9 @@ def test_a_request_something_else_cut_short_is_not_a_core_ml_failure(monkeypatch
             elif cause == "mode switch":
                 monkeypatch.setattr(cls, "_epoch", cls._epoch + 1)
             elif cause == "model change":
-                macos_coreml.cancel_preparation({"model_path": "/models/other.bin"})
+                _pick_another_model(monkeypatch, {"model_path": "/models/other.bin"})
+            elif cause == "abandoned":
+                cls.abandon_requests()
             else:
                 monkeypatch.setattr(cls, "_server_process", SimpleNamespace(poll=lambda: None))
             raise ConnectionResetError("the server was stopped")
@@ -1329,8 +1393,99 @@ def test_a_request_something_else_cut_short_is_not_a_core_ml_failure(monkeypatch
     try:
         rig.backend.transcribe(rig.audio)
     except transcriber.TranscriptionError:
-        pass   # Quit and a mode switch start nothing after them
+        pass   # Quit, a switch and a retired dictation start nothing after them
     assert seen.failures == []
+    if cause == "abandoned":
+        assert starts == [], "a retired dictation's request restarted a server"
+
+
+@pytest.mark.parametrize("retire", ["force reset", "cancel", "processing watchdog", "paste watchdog",
+                                    "overlay restart", "quit"])
+def test_every_retirement_abandons_the_requests_in_flight(retire):
+    # Sol mac r4: sleep during PROCESSING retires the dictation through
+    # _do_force_reset; its late timeout still counted as a Core ML failure.
+    marker = {"force reset": "    def _do_force_reset(self):",
+              "cancel": "    def cancel_recording(self) -> bool:",
+              "processing watchdog": "    def _on_processing_timeout(self, gen: int, timeout_s: float) -> None:",
+              "paste watchdog": "    def _on_paste_timeout(self, gen: int) -> None:",
+              "overlay restart": "    def _restart_for_overlay_change(self):",
+              "quit": "    def quit_app(self, icon=None, item=None):"}[retire]
+    body = _body(marker)
+    bump = body.index("self.session_generation += 1")
+    assert body.index("_abandon_transcription_requests()", bump) - bump < 60
+
+
+def test_abandoning_requests_moves_the_backend_counter():
+    import wayfinder_main
+    from wayfinder.core.transcriber import WhisperServerBackend
+    before = WhisperServerBackend._abandoned
+    try:
+        wayfinder_main._abandon_transcription_requests()
+        assert WhisperServerBackend._abandoned == before + 1
+    finally:
+        WhisperServerBackend._abandoned = before
+
+
+def test_a_late_timeout_after_sleep_restarts_nothing_and_counts_nothing(monkeypatch, tmp_path):
+    # The sleep handler's force reset lands while the request is in flight.
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=True)
+    seen = _runtime_memory(monkeypatch)
+    starts = _metal_takes_over(monkeypatch, rig)
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+    salvage = []
+    rig.twin._cli_fallback = lambda: salvage.append("cli") or pytest.fail("salvaged a retired dictation")
+
+    def post(req, timeout):
+        cls.abandon_requests()
+        raise TimeoutError("timed out after the Mac woke")
+
+    monkeypatch.setattr(transcriber, "urlopen_loopback", post)
+    with pytest.raises(transcriber.TranscriptionError, match="abandoned"):
+        rig.backend.transcribe(rig.audio)
+    assert starts == [] and salvage == [] and seen.failures == []
+    assert rig.scheduled == []
+
+
+def test_a_retired_dictation_whose_server_start_was_superseded_salvages_nothing(monkeypatch, tmp_path):
+    # Force reset, then a model pick: the old backend's start is superseded.
+    # A live dictation salvages on whisper-cli; a retired one does nothing.
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=True)
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+
+    def superseded(*_args, **_kwargs):
+        cls.abandon_requests()
+        raise transcriber.ServerStartSuperseded("a model change")
+
+    rig.backend._start_server = superseded
+    rig.backend._cli_fallback = lambda: pytest.fail("a retired dictation salvaged on whisper-cli")
+    with pytest.raises(transcriber.TranscriptionError, match="abandoned"):
+        rig.backend.transcribe(rig.audio)
+
+
+def test_two_chunks_failing_on_one_incident_count_once(comparison_rig):
+    # Sol mac r4: both passed served_by before either recovery replaced the
+    # process, and counted 1, 2: the whole allowance in one launch.
+    import threading
+    rig = comparison_rig
+    key = (str(rig.cli), str(rig.model))
+    start = threading.Barrier(2)
+    counts = []
+
+    def fail():
+        start.wait(2)
+        counts.append(macos_coreml.record_runtime_failure(key, "request failed (TimeoutError)"))
+
+    threads = [threading.Thread(target=fail) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert sorted(counts) == [1, 1]
+    assert macos_coreml.comparison_failures(*key) == 1
 
 
 def test_a_core_ml_server_that_loads_but_fails_dictation_backs_off(monkeypatch, tmp_path):
@@ -1343,7 +1498,7 @@ def test_a_core_ml_server_that_loads_but_fails_dictation_backs_off(monkeypatch, 
     cli, model = tmp_path / "whisper-cli", tmp_path / "ggml-large-v3-turbo-q5_0.bin"
     cli.write_bytes(b"cli")
     model.write_bytes(b"model")
-    monkeypatch.setattr(macos_coreml, "_runtime_key", lambda config: (str(cli), str(model)))
+    monkeypatch.setattr(macos_coreml, "runtime_key", lambda config: (str(cli), str(model)))
     monkeypatch.setattr(macos_coreml, "_failure_path", lambda: tmp_path / "coreml-failures.json")
     monkeypatch.setattr(macos_coreml, "_hardware_identity", lambda: {"hardware": "MacBookAir10,1"})
     monkeypatch.setattr(macos_coreml, "_session_failures", set())
@@ -1373,11 +1528,9 @@ def test_a_core_ml_server_that_loads_but_fails_dictation_backs_off(monkeypatch, 
 
 def test_a_core_ml_warm_up_after_its_server_died_warms_metal(monkeypatch, tmp_path):
     rig = _resident_core_ml(monkeypatch, tmp_path, alive=False)
-    seen = _runtime_memory(monkeypatch)
     assert rig.backend.warm_up() is True
     assert rig.served == ["warm-up"]
     assert rig.scheduled == [(rig.config, rig.twin)]
-    assert seen.failures == ["server exited"]
 
 
 def test_a_resident_core_ml_backend_still_serves_while_loaded(monkeypatch, tmp_path):
@@ -1395,11 +1548,13 @@ def test_a_resident_core_ml_backend_still_serves_while_loaded(monkeypatch, tmp_p
 @pytest.mark.parametrize("picked", [True, False])
 def test_a_late_metal_fallback_after_another_model_is_picked_schedules_nothing(
         monkeypatch, tmp_path, picked):
-    # Sol mac r3: A's request starts; the user picks B, whose warm-up retires
-    # A's job and loads B; A's interrupted request recovers on its Metal twin,
-    # and its hand-over re-requested A, whose Core ML then replaced B.
+    # Sol mac r3/r4: A's chunk is still in flight (a force reset retired it,
+    # or it is the Welcome test); the user picks B, which loads; A's request
+    # fails, and its Metal twin replaced B and re-requested A's Core ML.
     import threading
     from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    monkeypatch.setattr(cls, "_epoch", cls._epoch)
     rig = _resident_core_ml(monkeypatch, tmp_path, alive=True)
     seen = _runtime_memory(monkeypatch)
     model_a = tmp_path / "turbo-a.bin"
@@ -1412,21 +1567,32 @@ def test_a_late_metal_fallback_after_another_model_is_picked_schedules_nothing(
     monkeypatch.setattr(macos_coreml, "_job_running", threading.Event())
     monkeypatch.setattr(macos_coreml, "_latest_config", None)
     monkeypatch.setattr(macos_coreml, "_latest_epoch", None)
-    monkeypatch.setattr(macos_coreml, "_selection_generation", macos_coreml._selection_generation)
     monkeypatch.setattr(macos_coreml, "schedule_preparation", _REAL_SCHEDULE_PREPARATION)
-    _metal_takes_over(monkeypatch, rig)
     model_b = {"model_path": str(tmp_path / "turbo-b.bin"), "use_gpu": True}
+    b_server = SimpleNamespace(poll=lambda: None)
+    if picked:
+        # The twin's real start: superseded, it spawns and stops nothing.
+        monkeypatch.setattr(cls, "_server_lock", threading.Lock())
+        monkeypatch.setattr(transcriber.subprocess, "Popen",
+                            lambda *a, **k: pytest.fail("A's twin spawned a server over B's"))
+        cli = SimpleNamespace(transcribe=lambda audio, context="", deadline=None: "a's words")
+        rig.twin._cli_fallback = lambda: cli
+    else:
+        _metal_takes_over(monkeypatch, rig)
 
     def post(req, timeout):
         if ":8178/" in req.full_url:
             if picked:
-                macos_coreml.cancel_preparation(model_b)
+                _pick_another_model(monkeypatch, model_b)
+                monkeypatch.setattr(cls, "_server_process", b_server)   # B's warm-up loaded B
+                monkeypatch.setattr(cls, "_server_coreml_key", None)
             raise ConnectionResetError("B's warm-up stopped A's server")
         return _Words("a's words")
 
     monkeypatch.setattr(transcriber, "urlopen_loopback", post)
     assert rig.backend.transcribe(rig.audio) == "a's words"
     if picked:
+        assert cls._server_process is b_server, "A's Metal twin replaced B's server"
         assert macos_coreml._latest_config == model_b, "A's late fallback re-requested A's Core ML"
         assert seen.failures == [], "a model change counted as a Core ML failure"
     else:
@@ -1434,18 +1600,25 @@ def test_a_late_metal_fallback_after_another_model_is_picked_schedules_nothing(
         assert seen.failures == ["request failed (ConnectionResetError)"]
 
 
-def test_a_model_change_with_no_job_running_still_retires_older_backends(monkeypatch):
+def test_a_model_change_supersedes_backends_built_for_the_old_model(monkeypatch):
+    # Even with no preparation job running: an old backend starts nothing.
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    monkeypatch.setattr(cls, "_epoch", cls._epoch)
     monkeypatch.setattr(macos_coreml, "_worker", None)
-    monkeypatch.setattr(macos_coreml, "_selection_generation", macos_coreml._selection_generation)
-    before = macos_coreml.selection_generation()
-    macos_coreml.cancel_preparation({"model_path": "/models/b.bin"})
-    assert macos_coreml.selection_generation() != before
+    old = transcriber.WhisperServerBackend(whisper_server_binary="/bin/whisper-server",
+                                           model_path="/models/a.bin")
+    _pick_another_model(monkeypatch, {"model_path": "/models/b.bin"})
+    with pytest.raises(transcriber.ServerStartSuperseded):
+        old._start_server()
 
 
-@pytest.mark.parametrize("path", ["tray", "save and apply"])
+@pytest.mark.parametrize("path", ["tray", "save and apply", "a download finishing after the pick"])
 def test_a_model_picked_mid_dictation_waits_for_idle(monkeypatch, tmp_path, path):
     # Sol mac r3: loading it mid-dictation reloaded the server under the
     # running request, whose recovery then brought the old model back.
+    # Sol mac r4: a download started earlier that finished after the pick
+    # replaced the pick in the queue.
     import wayfinder.license as license_mod
     import wayfinder_main
     from wayfinder.state import AppState
@@ -1473,11 +1646,17 @@ def test_a_model_picked_mid_dictation_waits_for_idle(monkeypatch, tmp_path, path
         wayfinder_main.WayfinderApp._apply_model_from_tray(app, "large-v3-turbo-q8_0")
     else:
         wayfinder_main.WayfinderApp._set_active_whisper_model(app, str(model_b))
+    if path.startswith("a download"):
+        downloaded = tmp_path / "ggml-small.en.bin"
+        downloaded.write_bytes(b"c")
+        assert wayfinder_main.WayfinderApp._activate_downloaded_model(
+            app, "whisper", str(downloaded)) == "skipped"
     assert config["model_path"] == "~/models/turbo-a.bin" and events == []
     app.app_state = AppState.IDLE
     wayfinder_main.WayfinderApp._flush_pending_model_activations(app)
     assert os.path.expanduser(config["model_path"]) == str(model_b)
     assert events == ["retire", "warm-up"]
+    assert app._pending_model_pick is None   # the next dictation's downloads apply again
 
 
 def test_a_core_ml_backend_salvages_through_metal_cli(monkeypatch):

@@ -309,6 +309,16 @@ def _resolve_whisper_model(filename: str) -> Path | None:
     return None
 
 
+def _abandon_transcription_requests() -> None:
+    """The dictation was retired: its requests still in flight restart no
+    whisper-server and count no Core ML failure (Sol mac r4)."""
+    try:
+        from wayfinder.core.transcriber import WhisperServerBackend
+        WhisperServerBackend.abandon_requests()
+    except Exception:
+        pass
+
+
 def _model_display_name(path: str) -> str:
     """Catalog name for a model file path (e.g. "Large v3 Turbo Q5"), else its filename."""
     name = Path(os.path.expanduser(str(path or ""))).name
@@ -18177,6 +18187,7 @@ class WayfinderApp(ctk.CTk):
         # the chunks that did finish, or report silence. The generation never
         # comes back, so the reopen cannot revive it.
         self.session_generation += 1
+        _abandon_transcription_requests()
         try:
             self._close_audio_ducking()
             if getattr(self, "warm_mic", None):
@@ -21098,12 +21109,20 @@ class WayfinderApp(ctk.CTk):
     # === Auto-activate a model the user just downloaded ===
 
     def _retire_coreml_preparation(self) -> None:
-        """A model change retires the Core ML job for the old model before
-        anything loads the new one: once this returns, that job cannot hand
-        its server over the new model's (Sol mac r2). Its failure memory
-        stays; only turning GPU acceleration on resets that."""
+        """A model change retires the old model's work before anything loads
+        the new one. The whisper load epoch moves on, as for a CPU/GPU switch:
+        a backend built for the old model (a retired chunk still in flight,
+        its Metal twin) can start no server and schedule no hand-over (Sol mac
+        r4). Then the Core ML job for it is retired: once this returns, it
+        cannot hand its server over the new model's (Sol mac r2). Its failure
+        memory stays; only turning GPU acceleration on resets that."""
         if not IS_MACOS:
             return
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+            WhisperServerBackend.supersede()
+        except Exception:
+            pass
         try:
             from wayfinder.utils.macos_coreml import cancel_preparation
             cancel_preparation(dict(self.config))
@@ -21121,6 +21140,8 @@ class WayfinderApp(ctk.CTk):
             pending = {}
             self._pending_model_activations = pending
         pending["whisper"] = (str(path), None)  # the latest pick wins
+        # ...over a download finishing during this dictation too (Sol mac r4).
+        self._pending_model_pick = str(path)
         self.log(f"⚙ Switching to {_model_display_name(path)} when this dictation finishes")
         return True
 
@@ -21178,6 +21199,11 @@ class WayfinderApp(ctk.CTk):
             if pending is None:
                 pending = {}
                 self._pending_model_activations = pending
+            pick = getattr(self, "_pending_model_pick", None)
+            if role == "whisper" and pick is not None:
+                # The model the user picked during this dictation wins.
+                self.log(f"✓ {name} downloaded — keeping your pick, {_model_display_name(pick)}")
+                return "skipped"
             pending[role] = (path, model_info)  # latest download per role wins
             self.log(f"✓ {name} downloaded — switching to it when this dictation finishes")
             return "deferred"
@@ -21236,6 +21262,7 @@ class WayfinderApp(ctk.CTk):
             return
         items = list(pending.items())
         pending.clear()
+        self._pending_model_pick = None
         for role, (path, model_info) in items:
             if self._apply_downloaded_model(role, path, model_info):
                 self.log(f"✓ {_model_display_name(path)} is now active")
@@ -22751,6 +22778,7 @@ class WayfinderApp(ctk.CTk):
         # handling events meanwhile: a chunked dictation cut short must not
         # be typed as partial text, or reported as silence, on the way out.
         self.session_generation += 1
+        _abandon_transcription_requests()
         # Signal all background threads to stop
         self.stop_event.set()
         if hasattr(self, '_evdev_stop_event'):
@@ -23125,6 +23153,7 @@ class WayfinderApp(ctk.CTk):
         # injected into whatever the user has focused now; then route through on_error, which
         # resets the overlay to ready + state to IDLE and (in Game Mode) plays the error cue.
         self.session_generation += 1
+        _abandon_transcription_requests()
         self.on_error(
             f"Processing exceeded {timeout_s:.0f}s — likely a stuck transcription or "
             "post-processing step. Reset to idle; see the activity log for details.",
@@ -23164,6 +23193,7 @@ class WayfinderApp(ctk.CTk):
         # fresh one every later paste would queue behind it forever.
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.session_generation += 1
+        _abandon_transcription_requests()
         text = getattr(self, "_pasting_text", "") or ""
         copied = False
         if text:
@@ -25983,6 +26013,7 @@ class WayfinderApp(ctk.CTk):
 
         # Invalidate chunk callbacks/results before detaching the recorder.
         self.session_generation += 1
+        _abandon_transcription_requests()
         if self._duration_update_job is not None:
             try:
                 self.after_cancel(self._duration_update_job)
@@ -26024,6 +26055,7 @@ class WayfinderApp(ctk.CTk):
     def _do_force_reset(self):
         # Bump the generation so every in-flight worker + scheduled callback becomes stale.
         self.session_generation += 1
+        _abandon_transcription_requests()
         self.log("🧹 Reset — returning to idle")
 
         # Cancel any pending delayed overlay reset / recording duration timer.

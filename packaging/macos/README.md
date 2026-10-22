@@ -92,9 +92,10 @@ After a relaunch the first dictation therefore runs on Metal (about 2 seconds
 on an M1) while Core ML loads (about 6–11 seconds). A failed Core ML request
 is retried on Metal within the same recovery budget as Metal's own.
 A preparation that fails, or a loaded Core ML server that fails a dictation
-or exits on its own, keeps Metal for the rest of that launch. Two failures for
-the same chip, files and model wait a day before the next try, doubling to at
-most a week. A finished comparison or a successful Core ML dictation clears
+or exits on its own, keeps Metal for the rest of that launch. A launch counts
+at most one failure, and a dictation cut short by sleep, Escape, Quit or a
+settings change counts none. Two failures for the same chip, files and model
+wait a day before the next try, doubling to at most a week. A finished comparison or a successful Core ML dictation clears
 the count (loading alone does not), and turning GPU acceleration on in
 Settings gives every model a fresh try.
 Setting it to false and restarting is the advanced Metal-only escape hatch.

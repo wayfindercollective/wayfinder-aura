@@ -97,14 +97,7 @@ class ServerStartSuperseded(TranscriptionError):
 
 
 class CoreMLNotLoaded(TranscriptionError):
-    """A Core ML server serves only once it is loaded; see _ready_only_fallback.
-
-    died: the resident Core ML server exited on its own (every stop of ours
-    clears the record first), which counts as a Core ML failure."""
-
-    def __init__(self, message: str, died: bool = False):
-        super().__init__(message)
-        self.died = died
+    """A Core ML server serves only once it is loaded; see _ready_only_fallback."""
 
 
 def _expand_path(value: object) -> str:
@@ -816,6 +809,14 @@ class WhisperServerBackend(TranscriptionBackend):
     # after it, so a dictation that read its settings just before cannot
     # leave a child behind for os._exit() to orphan.
     _closed: bool = False
+    # macos_coreml.runtime_key() of a published Core ML server, cleared with
+    # its record: when that record is stopped or replaced after the server
+    # exited on its own, the exit counts as a Core ML failure, once.
+    _server_coreml_key: Optional[tuple] = None
+    # Bumped when the app retires a dictation (force reset, cancel, a
+    # watchdog): its requests still in flight restart no server and count no
+    # Core ML failure (Sol mac r4).
+    _abandoned: int = 0
 
     # The server has its own short request/restart budget. CLI salvage must not
     # share the already-expired tail of that budget: it needs enough time to
@@ -872,8 +873,6 @@ class WhisperServerBackend(TranscriptionBackend):
         # hand-over brings Core ML back once it is loaded (Sol mac r2).
         self._ready_only_fallback: Optional["WhisperServerBackend"] = None
         self._ready_only_config: Optional[dict] = None
-        # macos_coreml.selection_generation() when get_backend built it (Mac).
-        self._coreml_generation: Optional[int] = None
 
         # Lazy-init the class-level lock
         if WhisperServerBackend._server_lock is None:
@@ -1172,12 +1171,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 # Core ML is not resident (it died, or a recovery would replace
                 # it): never load it under a dictation. Decided under the lock,
                 # so no start, restart or recovery spawns it here.
-                cls = WhisperServerBackend
-                proc = cls._server_process
-                raise CoreMLNotLoaded("Core ML server not loaded", died=(
-                    proc is not None and proc.poll() is not None
-                    and cls._server_binary == self.whisper_server_binary
-                    and cls._server_model_path == self.model_path))
+                raise CoreMLNotLoaded("Core ML server not loaded")
 
             # Kill any existing server (different config, or force-replace a wedge).
             self._stop_server_internal(deadline=deadline)
@@ -1317,6 +1311,36 @@ class WhisperServerBackend(TranscriptionBackend):
             WhisperServerBackend._server_lock.release()
 
     @classmethod
+    def abandon_requests(cls) -> None:
+        """The app retired a dictation: see _abandoned. Lock-free, for the Tk thread."""
+        cls._abandoned += 1
+
+    @classmethod
+    def _note_core_ml_exit(cls) -> None:
+        """Before a published record is stopped or replaced: a Core ML server
+        that already exited on its own is a Core ML failure. Every stop of
+        ours passes here first and clears the key, so each exit counts once,
+        whether found by a dictation, a warm-up, get_backend picking Metal or
+        a hand-over (Sol mac r4)."""
+        proc, key = cls._server_process, cls._server_coreml_key
+        cls._server_coreml_key = None
+        if proc is None or key is None or cls._closed:
+            return
+        try:
+            code = proc.poll()
+        except Exception:
+            return
+        if code is None:
+            return
+        try:
+            from wayfinder.utils.macos_coreml import record_runtime_failure
+            count = record_runtime_failure(key, f"server exited ({code})")
+            print(f"[Whisper] Core ML server exited ({code}, failure {count}); "
+                  "Metal serves for the rest of this session")
+        except Exception as exc:
+            print(f"[Whisper] Core ML exit not recorded ({type(exc).__name__})")
+
+    @classmethod
     def _stop_server_internal(cls, deadline: float = None) -> None:
         """Internal: stop the server process without acquiring the lock.
 
@@ -1324,6 +1348,7 @@ class WhisperServerBackend(TranscriptionBackend):
         to the remaining budget — under a deadline we escalate to SIGKILL sooner rather
         than blocking the caller for the full 5s + 2s.
         """
+        cls._note_core_ml_exit()
         if cls._server_process is not None:
             import time
             term_wait, kill_wait = 5.0, 2.0
@@ -1450,9 +1475,7 @@ class WhisperServerBackend(TranscriptionBackend):
         try:
             self._start_server()
             return True
-        except CoreMLNotLoaded as exc:
-            if exc.died:
-                self._record_coreml_failure("server exited")
+        except CoreMLNotLoaded:
             fallback = self._ready_only_fallback
             try:
                 return fallback.warm_up()
@@ -1533,14 +1556,14 @@ class WhisperServerBackend(TranscriptionBackend):
             print(f"[Whisper] Core ML hand-over not scheduled ({type(exc).__name__})")
 
     def _record_coreml_failure(self, reason: str) -> None:
-        """Count a failure of the loaded Core ML server, never one a switch,
-        Quit or a model change caused (Sol mac r3)."""
+        """Count a failure of the loaded Core ML server, never one Quit or a
+        mode or model change caused (both supersede the epoch; Sol mac r3)."""
         cls = WhisperServerBackend
-        if cls._closed or cls._epoch != self._load_epoch or not self._selection_current():
+        if cls._closed or cls._epoch != self._load_epoch:
             return
         try:
-            from wayfinder.utils.macos_coreml import record_runtime_failure
-            count = record_runtime_failure(self._ready_only_config, reason)
+            from wayfinder.utils.macos_coreml import record_runtime_failure, runtime_key
+            count = record_runtime_failure(runtime_key(self._ready_only_config), reason)
             print(f"[Whisper] Core ML failed ({reason}, failure {count}); "
                   "Metal serves for the rest of this session")
         except Exception as exc:
@@ -1548,21 +1571,10 @@ class WhisperServerBackend(TranscriptionBackend):
 
     def _record_coreml_success(self) -> None:
         try:
-            from wayfinder.utils.macos_coreml import record_runtime_success
-            record_runtime_success(self._ready_only_config)
+            from wayfinder.utils.macos_coreml import record_runtime_success, runtime_key
+            record_runtime_success(runtime_key(self._ready_only_config))
         except Exception as exc:
             print(f"[Whisper] Core ML success not recorded ({type(exc).__name__})")
-
-    def _selection_current(self) -> bool:
-        """False once the user picked another model or mode after this backend was built."""
-        generation = getattr(self, "_coreml_generation", None)
-        if generation is None:
-            return True
-        try:
-            from wayfinder.utils.macos_coreml import selection_generation
-            return generation == selection_generation()
-        except Exception:
-            return True
 
     def _serve_on_metal(self, audio_path: str, context: str) -> str:
         print("[Whisper] Core ML is not loaded; this dictation runs on Metal")
@@ -1575,6 +1587,7 @@ class WhisperServerBackend(TranscriptionBackend):
         """Transcribe audio via the whisper-server HTTP API."""
         if not Path(audio_path).exists():
             raise TranscriptionError(f"Audio file not found: {audio_path}")
+        abandoned_at = WhisperServerBackend._abandoned
 
         # Server already proved unusable on this machine — go straight to CLI.
         if WhisperServerBackend._disabled_now():
@@ -1583,15 +1596,15 @@ class WhisperServerBackend(TranscriptionBackend):
         # Ensure server is running
         try:
             self._start_server()
-        except CoreMLNotLoaded as exc:
-            if exc.died:
-                self._record_coreml_failure("server exited")
+        except CoreMLNotLoaded:
             return self._serve_on_metal(audio_path, context)
         except ServerStartSuperseded:
             if WhisperServerBackend._closed:
                 # Quit or restart: nothing starts after a terminal shutdown,
                 # whisper-cli included.
                 raise TranscriptionError("Aura is shutting down")
+            if WhisperServerBackend._abandoned != abandoned_at:
+                raise TranscriptionError("dictation abandoned")
             # A CPU/GPU switch or model change cancelled the load mid-dictation.
             print("[Whisper Server] Startup cancelled by a settings change; "
                   "this dictation uses whisper-cli.")
@@ -1722,6 +1735,11 @@ class WhisperServerBackend(TranscriptionBackend):
                 # CLI salvage gets a separate, fixed window below: sharing this
                 # deadline starved salvage whenever the retry consumed the last
                 # second, producing a false "No speech detected" after valid audio.
+                if WhisperServerBackend._abandoned != abandoned_at:
+                    # Retired while in flight (sleep, Escape, the watchdog): no
+                    # restart and no Core ML failure for words nobody will type.
+                    # A restart here could replace the next dictation's server.
+                    raise TranscriptionError("dictation abandoned")
                 recovery_deadline = time.monotonic() + float(self.timeout)
                 print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
                 coreml = self._ready_only_fallback is not None
@@ -2476,12 +2494,6 @@ def get_backend(config: dict) -> TranscriptionBackend:
     # Read before any setting: a switch landing between the two reads then
     # cancels this backend's server start rather than mislabelling it.
     load_epoch = config.get(LOAD_EPOCH_KEY)
-    # Likewise: a model change after this read stops this backend scheduling
-    # a Core ML hand-over for the model the user left.
-    coreml_generation = None
-    if sys.platform == "darwin":
-        from wayfinder.utils.macos_coreml import selection_generation
-        coreml_generation = selection_generation()
     # The caller's settings, before the presets below are folded into a copy:
     # what the Core ML preparation job is keyed on (see warm_up_transcription).
     requested_config = config
@@ -2766,7 +2778,6 @@ def get_backend(config: dict) -> TranscriptionBackend:
                     custom_vocabulary=_effective_custom_vocabulary,
                 )
                 backend.bind_to_epoch(load_epoch)
-                backend._coreml_generation = coreml_generation
                 return backend
 
             server_binary = _derive_whisper_server_binary(cli_binary)
