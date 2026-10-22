@@ -1940,7 +1940,8 @@ class TestCleanupAfterAReset:
 
         def escape():
             cls.abandon_requests()
-            app.session_generation += 1
+            if seen.reset != "token":   # "token": a retirement alone (Sol mac r9)
+                app.session_generation += 1
 
         def ensure(**_kwargs):
             if seen.reset == "start":   # Escape, and the start is cancelled
@@ -1950,7 +1951,7 @@ class TestCleanupAfterAReset:
 
         def complete(**_kwargs):
             seen.requests += 1
-            if seen.reset == "request":   # Escape, as the request runs
+            if seen.reset in ("request", "token"):   # Escape, as the request runs
                 escape()
             raise socket.timeout()
 
@@ -2012,7 +2013,7 @@ class TestCleanupAfterAReset:
             assert len(seen.restarts) == 1 and len(seen.cli) == 1
             assert wayfinder_main.EventType.TRANSCRIPTION_DONE in events
 
-    @pytest.mark.parametrize("reset", ["request", None])
+    @pytest.mark.parametrize("reset", ["request", "token", None])
     def test_chunked(self, app, cleanup, reset):
         seen, gen = cleanup
         seen.reset = reset

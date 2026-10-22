@@ -33,7 +33,7 @@ import urllib.request
 import weakref
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from wayfinder.utils.child_supervisor import release_supervised, signal_supervised, spawn_supervised
 from wayfinder.utils.hostexec import bundle_binary_env
@@ -448,7 +448,8 @@ class LlamaServerManager:
     def ensure(cls, binary: str, model_path: str, n_ctx: int = 2048,
                n_threads: int = 4, n_gpu_layers: int = 99,
                deadline: Optional[float] = None,
-               load_epoch: Optional[int] = None) -> int:
+               load_epoch: Optional[int] = None,
+               retired: Optional[Callable[[], bool]] = None) -> int:
         """Return a port serving `model_path`, starting the server if needed.
 
         deadline: absolute time.monotonic() budget covering EVERY blocking step —
@@ -462,6 +463,10 @@ class LlamaServerManager:
         load_epoch: the load_epoch() the request's configuration was read
         under. Once a supersede() has moved it, the request is for a mode the
         user has left: it starts nothing and leaves the running server alone.
+
+        retired: whether the app has retired the dictation this request cleans
+        up for. Checked after every wait, as a switch is: once it says so, the
+        request stops, spawns and disables nothing (Sol mac r9).
         """
         import atexit
         import time
@@ -472,11 +477,17 @@ class LlamaServerManager:
         def _superseded() -> bool:
             return load_epoch is not None and cls._switch_epoch != load_epoch
 
+        def _unwanted() -> None:
+            # A request for a mode the user has left, or for a dictation the
+            # app retired, is cancelled, never counted as a server failure.
+            if _superseded():
+                raise LlamaServerSuperseded("configuration superseded by a switch")
+            if retired is not None and retired():
+                raise LlamaServerSuperseded("the dictation was retired")
+
         cls._served.proc = None   # this request has reached no child yet
-        # First, before anything that can fail or wait: a request for a mode
-        # the user has left is cancelled, never counted as a server failure.
-        if _superseded():
-            raise LlamaServerSuperseded("configuration superseded by a switch")
+        # First, before anything that can fail or wait.
+        _unwanted()
         if cls._closed:
             raise LlamaServerSuperseded("shutting down")
         configured = cls._switch_epoch if load_epoch is None else load_epoch
@@ -496,15 +507,13 @@ class LlamaServerManager:
         # (three of those restart the new mode's server).
         while True:
             rem = _left()
-            if _superseded():
-                raise LlamaServerSuperseded("configuration superseded by a switch")
+            _unwanted()
             if rem <= 0:
                 raise LlamaServerError("deadline hit acquiring the server lock")
             if cls._lock.acquire(timeout=min(rem, cls._LOCK_POLL_S)):
                 break
         try:
-            if _superseded():
-                raise LlamaServerSuperseded("configuration superseded by a switch")
+            _unwanted()
             # Again under the lock: a request that passed the entry check
             # before a Quit must not start a child once the Quit's stop ran.
             if cls._closed:
@@ -531,8 +540,7 @@ class LlamaServerManager:
             epoch = cls._epoch
             # A supersede() before the capture moved _switch_epoch first; one
             # after it moves _epoch past ours, which every check below sees.
-            if _superseded():
-                raise LlamaServerSuperseded("configuration superseded by a switch")
+            _unwanted()
             # A close() that ran while our own stop was terminating the old
             # child (its lock wait can run out first) already moved _epoch,
             # so the capture cannot see it; its flag can, since close() sets
@@ -559,6 +567,9 @@ class LlamaServerManager:
                     # fresh children it has already been told to stop wanting.
                     if cls._epoch != epoch:
                         raise LlamaServerSuperseded("shut down while starting")
+                    # A retirement during the port scan, or during the last
+                    # rung's readiness wait or reap: no spawn on its behalf.
+                    _unwanted()
                     # ...and the caller's deadline binds the LADDER, not just each
                     # rung: checking only per-attempt let a ladder that had already
                     # overrun start yet another multi-GB spawn.
@@ -676,6 +687,8 @@ class LlamaServerManager:
                 # run the server.
                 if cls._epoch != epoch or _superseded():
                     raise LlamaServerSuperseded("shut down while starting")
+                # Nor does a retired request's failure disable the server.
+                _unwanted()
                 cls._disabled = True
                 cls._disabled_switch = configured
                 raise LlamaServerError("every llama-server start attempt failed: "

@@ -535,7 +535,9 @@ def test_the_hand_over_waits_out_a_dictation_without_reloading(monkeypatch):
     assert macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-cli", "/b/whisper-coreml/whisper-cli",
                                   "/m.bin", lambda: False) is True
     assert outcomes == [] and len(loads) == 1   # one load, published at the next idle
-    assert loads[0] == ("/b/whisper-coreml/whisper-server", "/derived/m.bin", True)
+    server, derived, coreml = loads[0]   # paths in the platform's own separators
+    assert (Path(server), Path(derived), coreml) == (
+        Path("/b/whisper-coreml/whisper-server"), Path("/derived/m.bin"), True)
     assert loads.keys == [("/b/whisper-cli", "/m.bin")] * 2   # the published server's exit counts
 
 
@@ -762,6 +764,7 @@ def test_a_hand_over_quit_cut_short_is_not_a_core_ml_failure(comparison_rig, mon
     assert macos_coreml.comparison_blocked(str(rig.cli), str(rig.model)) is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the compiler stand-in is a shell script")
 def test_a_compile_quit_cut_short_is_not_a_core_ml_failure(tmp_path, monkeypatch):
     import threading
     from wayfinder.utils import child_supervisor, macos_coreml_convert

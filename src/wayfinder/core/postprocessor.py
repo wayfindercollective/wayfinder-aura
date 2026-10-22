@@ -1961,8 +1961,10 @@ class LlamaCppBackend(PostProcessorBackend):
           # hold can span the whole inference — the same trade the resident
           # CLI path makes; the RLock keeps nested acquisition safe.
           with LlamaCppCliBackend._residency_lock:
+            _check_dictation()   # the lock wait can span another inference
             load_started = time.monotonic()
             model = self._get_model()
+            _check_dictation()   # retired during the load
 
             # Format the full prompt
             full_prompt = format_prompt(prompt_template, text)
@@ -2028,6 +2030,8 @@ class LlamaCppBackend(PostProcessorBackend):
 
             return result if result else text
             
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"llama.cpp processing failed: {e}")
     
@@ -2626,6 +2630,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
                     # settles the verdict.
                     return (self._cpu_sibling() or self.llama_binary), 0
             ok = self._probe_gpu_ok(requested, budget=budget)
+            # A retirement during the probe may have stopped it: no verdict.
+            _check_dictation()
             if not ok and budget is not None and budget < _GPU_PROBE_TIMEOUT:
                 # A budget-clamped failure may be the clamp, not the GPU.
                 # Don't poison the cache — but remember the burn, so this key
@@ -2863,8 +2869,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 n_threads=self.n_threads, n_gpu_layers=requested_ngl,
                 deadline=deadline,
                 load_epoch=getattr(self, "_llama_load_epoch", None),
+                retired=_retired_dictation,
             )
             served = LlamaServerManager.serving()
+            _check_dictation()   # retired during the start: no request for it
             # `deadline` bounds only STARTUP. The generation itself is bounded
             # by the shared cleanup budget, so a server that accepts the socket
             # and then stalls cannot spend the fallback ladder's whole allowance.
@@ -2895,6 +2903,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
         except LlamaServerSuperseded:
             # A switch or shutdown cancelled the start: not a failure, so it
             # must not count toward the restart that would stop the new mode.
+            # A retirement cancelled it: nothing to fall back to either.
+            _check_dictation()
             if LlamaServerManager._closed:
                 print("[Post-processing] llama-server start refused: Aura is shutting down")
             else:
@@ -3153,6 +3163,7 @@ Cleaned text:"""
             # The resident wheel call cannot be interrupted once entered — there
             # is no timeout on llama-cpp-python's __call__ — so the only honest
             # bound is refusing to start it with the budget already gone.
+            _check_dictation()   # no model load for a retired dictation
             resident = (self._resident_model()
                         if time.monotonic() < overall_deadline else None)
             served = None if resident is not None else self._server_generate(
@@ -3175,6 +3186,8 @@ Cleaned text:"""
                 # the wheel. Freeing weights mid-inference is a native-crash risk,
                 # not merely a Python exception.
                 with LlamaCppCliBackend._residency_lock:
+                    # The lock wait can span another dictation's inference.
+                    _check_dictation()
                     # Lookup-to-lock window: release may have closed THIS object
                     # between _resident_model() above and acquiring the lock.
                     # close() only ever runs under the lock, so "still the
@@ -3270,6 +3283,7 @@ Cleaned text:"""
                     raise PostProcessingError(
                         "cleanup budget exhausted before the CLI fallback")
                 cli_timeout = min(float(self.timeout), cli_remaining)
+                _check_dictation()   # retired during the GPU probe
                 result = run_tracked(
                     cmd, capture_output=True, text=True, errors="replace",
                     timeout=cli_timeout,
@@ -4362,7 +4376,10 @@ def _process_with_config(text: str, config: dict) -> str:
         
         print(f"[Post-processing] 🎯 Style: {tone} | Model: {model_name} | Input: {input_words} words")
         
-        # Process with the built prompt (prompt already includes the text)
+        # Process with the built prompt (prompt already includes the text).
+        # Not for a dictation retired while the backend was built: a cloud
+        # request or a model load on its behalf (Sol mac r9).
+        _check_dictation()
         start_time = time.time()
         result = backend.process(text, prompt)
         elapsed = time.time() - start_time

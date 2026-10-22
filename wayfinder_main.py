@@ -25342,7 +25342,11 @@ class WayfinderApp(ctk.CTk):
                     if combined_text != original_text:
                         self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
                 except RequestAbandoned:
-                    return   # retired: nothing to emit for it
+                    # Retired: nothing to emit for it, the finally's "did not
+                    # complete" included (Sol mac r9). The retirement owns the
+                    # state: each one advances the generation and resets the UI.
+                    emitted = True
+                    return
                 except Exception as e:
                     self.log(f"⚠ Post-processing error: {e}")
                     # Continue with original combined text

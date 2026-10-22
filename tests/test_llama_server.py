@@ -1660,3 +1660,160 @@ class TestARetiredDictation:
              transcriber.dictation_requests(cls.request_token()):
             assert backend._server_generate("prompt", 64) is None
         ensure.assert_called_once()
+
+
+class TestARetiredStart:
+    """Sol mac r9: the real ensure() checks the retirement after each of its
+    waits, as it checks a switch: nothing is stopped, spawned or disabled on
+    behalf of a dictation the app retired."""
+
+    @staticmethod
+    def _files(tmp_path):
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        return str(binary), str(model)
+
+    def test_a_retirement_during_the_port_scan_spawns_nothing(self, tmp_path):
+        binary, model = self._files(tmp_path)
+        retired = []
+
+        def scan():
+            retired.append(True)
+            return 8179
+
+        with patch.object(LlamaServerManager, "_find_port", side_effect=scan), \
+             patch("subprocess.Popen") as popen, \
+             pytest.raises(LlamaServerSuperseded):
+            LlamaServerManager.ensure(binary, model, 2048, 4, 99, retired=lambda: bool(retired))
+        popen.assert_not_called()
+        assert LlamaServerManager._disabled is False
+
+    def test_a_retirement_during_a_failed_load_runs_no_next_rung_and_disables_nothing(self, tmp_path):
+        binary, model = self._files(tmp_path)
+        retired = []
+
+        def not_ready(proc, port, deadline, epoch=None):
+            retired.append(True)
+            return False
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", side_effect=not_ready), \
+             patch("subprocess.Popen", return_value=_FakeProc()) as popen, \
+             pytest.raises(LlamaServerSuperseded):
+            LlamaServerManager.ensure(binary, model, 2048, 4, 99, retired=lambda: bool(retired))
+        assert popen.call_count == 1   # the GPU rung only: no CPU rung after it
+        assert LlamaServerManager._disabled is False
+
+    def test_a_retirement_during_the_last_rung_disables_nothing(self, tmp_path):
+        binary, model = self._files(tmp_path)
+        retired = []
+        rungs = []
+
+        def not_ready(proc, port, deadline, epoch=None):
+            rungs.append(proc)
+            if len(rungs) == 2:   # the CPU rung, the last one
+                retired.append(True)
+            return False
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", side_effect=not_ready), \
+             patch.object(LlamaServerManager, "_spawn_attempts",
+                          side_effect=lambda *a: [["llama-server", "-ngl", "99"],
+                                                  ["llama-server", "-ngl", "0"]]), \
+             patch("subprocess.Popen", side_effect=lambda *a, **k: _FakeProc()), \
+             pytest.raises(LlamaServerSuperseded):
+            LlamaServerManager.ensure(binary, model, 2048, 4, 99, retired=lambda: bool(retired))
+        assert len(rungs) == 2 and LlamaServerManager._disabled is False
+
+    def test_a_retirement_during_the_stop_of_the_old_server_spawns_nothing(self, tmp_path):
+        binary, model = self._files(tmp_path)
+        LlamaServerManager._process = _FakeProc()   # a server for another model
+        retired = []
+        stop = LlamaServerManager._stop_locked
+
+        def stopping():
+            retired.append(True)
+            stop()
+
+        with patch.object(LlamaServerManager, "_stop_locked", side_effect=stopping), \
+             patch.object(LlamaServerManager, "_find_port", return_value=8179) as scan, \
+             patch("subprocess.Popen") as popen, \
+             pytest.raises(LlamaServerSuperseded):
+            LlamaServerManager.ensure(binary, model, 2048, 4, 99, retired=lambda: bool(retired))
+        popen.assert_not_called()
+        scan.assert_not_called()
+
+    def test_a_retirement_during_the_lock_wait_stops_and_spawns_nothing(self, tmp_path):
+        import threading
+        binary, model = self._files(tmp_path)
+        old = LlamaServerManager._process = _FakeProc()
+        retired = threading.Event()
+        outcome = {}
+
+        def start():
+            try:
+                LlamaServerManager.ensure(binary, model, 2048, 4, 99, retired=retired.is_set)
+            except Exception as exc:
+                outcome["error"] = exc
+
+        with patch("subprocess.Popen") as popen:
+            LlamaServerManager._lock.acquire()   # another start holds it
+            try:
+                waiter = threading.Thread(target=start, daemon=True)
+                waiter.start()
+                waiter.join(0.2)
+                assert waiter.is_alive(), "ensure() did not wait for the lock"
+                retired.set()
+                waiter.join(5)
+                assert not waiter.is_alive(), "a retired start kept waiting for the lock"
+            finally:
+                LlamaServerManager._lock.release()
+        assert isinstance(outcome.get("error"), LlamaServerSuperseded)
+        popen.assert_not_called()
+        assert not old.terminated and not old.killed
+
+    def test_the_cleanup_ends_abandoned_with_nothing_counted(self, tmp_path):
+        """Through _server_generate: the real ensure() sees the retirement
+        during the port scan, and the request ends as RequestAbandoned."""
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        backend = TestWedgedServerRecovery._backend(None, tmp_path)
+
+        def scan():
+            cls.abandon_requests()
+            return 8179
+
+        with patch.object(cls, "_abandoned", cls._abandoned), \
+             patch.object(LlamaServerManager, "_find_port", side_effect=scan), \
+             patch.object(LlamaServerManager, "note_failure") as failure, \
+             patch("subprocess.Popen") as popen, \
+             transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._server_generate("prompt", 64)
+        popen.assert_not_called()
+        failure.assert_not_called()
+        assert LlamaServerManager._disabled is False
+
+    def test_a_server_that_loads_for_a_retired_dictation_is_kept_but_not_asked(self, tmp_path):
+        """Retired during a load that succeeds: the server is published for
+        the next dictation, and this request sends it nothing."""
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        backend = TestWedgedServerRecovery._backend(None, tmp_path)
+
+        def ready(proc, port, deadline, epoch=None):
+            cls.abandon_requests()
+            return True
+
+        with patch.object(cls, "_abandoned", cls._abandoned), \
+             patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", side_effect=ready), \
+             patch.object(LlamaServerManager, "_owns_listener", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch.object(LlamaServerManager, "complete") as complete, \
+             patch("subprocess.Popen", return_value=_FakeProc()), \
+             transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._server_generate("prompt", 64)
+        complete.assert_not_called()
+        assert LlamaServerManager._process is not None and LlamaServerManager._port == 8179

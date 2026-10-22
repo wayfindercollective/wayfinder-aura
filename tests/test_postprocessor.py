@@ -1843,3 +1843,191 @@ class TestPostLlmHygiene:
             "llama_cpp_model_path": "/tmp/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
         })
         assert out == loud
+
+
+class TestARetiredDictationsCleanup:
+    """Sol mac r9: a dictation the app retires while its cleanup runs gets no
+    model load, no inference, no cloud request, no GPU verdict and no CLI run:
+    the cleanup ends as RequestAbandoned instead."""
+
+    @pytest.fixture
+    def retire(self, monkeypatch):
+        """Runs the test under a dictation's token; calling it retires that
+        dictation."""
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        with transcriber.dictation_requests(cls.request_token()):
+            yield cls.abandon_requests
+
+    @staticmethod
+    def _cli_backend(tmp_path, n_gpu_layers=0):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        binary = tmp_path / "llama-simple"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        return LlamaCppCliBackend(llama_binary=str(binary), model_path=str(model),
+                                  output_tone="professional", n_gpu_layers=n_gpu_layers)
+
+    @staticmethod
+    def _resident(backend):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        model = MagicMock(return_value={"choices": [{"text": "...Cleaned text: done."}]})
+        LlamaCppCliBackend._resident_cache[backend._resident_cache_key()] = model
+        return model
+
+    def test_retired_during_the_resident_load(self, tmp_path, retire):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        from wayfinder.core.transcriber import RequestAbandoned
+        b = self._cli_backend(tmp_path)
+        model = self._resident(b)
+        try:
+            with patch.object(b, "_resident_model", side_effect=lambda: retire() or model), \
+                 patch.object(b, "_server_generate") as server, \
+                 patch("wayfinder.core.postprocessor.run_tracked") as cli, \
+                 pytest.raises(RequestAbandoned):
+                b.process("this text was retired meanwhile", "")
+        finally:
+            LlamaCppCliBackend._resident_cache.pop(b._resident_cache_key(), None)
+        model.assert_not_called()
+        server.assert_not_called()
+        cli.assert_not_called()
+
+    def test_retired_before_the_cleanup_loads_nothing(self, tmp_path, retire):
+        from wayfinder.core.transcriber import RequestAbandoned
+        b = self._cli_backend(tmp_path)
+        retire()
+        with patch.object(b, "_resident_model") as load, \
+             patch.object(b, "_server_generate") as server, \
+             pytest.raises(RequestAbandoned):
+            b.process("this text was retired already", "")
+        load.assert_not_called()
+        server.assert_not_called()
+
+    @pytest.mark.parametrize("path", ["resident", "in-process"])
+    def test_retired_while_waiting_for_the_residency_lock(self, tmp_path, monkeypatch, path):
+        import threading
+        from wayfinder.core import transcriber
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        from wayfinder.core.postprocessor import LlamaCppBackend
+        loaded = threading.Event()
+        outcome = {}
+        if path == "resident":
+            b = self._cli_backend(tmp_path)
+            model = self._resident(b)
+            text = "this text was retired meanwhile"
+
+            def lookup():
+                loaded.set()
+                return model
+            hook = patch.object(b, "_resident_model", side_effect=lookup)
+        else:   # the in-process backend loads under the lock: wait at build_prompt
+            b = LlamaCppBackend(model_path="m.gguf")
+            model = MagicMock()
+            text = "this text was retired meanwhile"
+            monkeypatch.setattr(LlamaCppBackend, "is_available", lambda self: True)
+            loaded.set()
+            get_model = MagicMock(return_value=model)
+            hook = patch.object(b, "_get_model", get_model)
+
+        def dictation(token):
+            with transcriber.dictation_requests(token):
+                try:
+                    outcome["result"] = b.process(text, "{text}")
+                except Exception as exc:
+                    outcome["error"] = exc
+
+        token = cls.request_token()
+        try:
+            with hook:
+                with LlamaCppCliBackend._residency_lock:   # another dictation's inference
+                    worker = threading.Thread(target=dictation, args=(token,), daemon=True)
+                    worker.start()
+                    assert loaded.wait(5)
+                    worker.join(0.2)   # now waiting for the lock
+                    cls.abandon_requests()
+                worker.join(5)
+        finally:
+            if path == "resident":
+                LlamaCppCliBackend._resident_cache.pop(b._resident_cache_key(), None)
+        assert isinstance(outcome.get("error"), transcriber.RequestAbandoned), outcome
+        model.assert_not_called()
+        if path == "in-process":
+            get_model.assert_not_called()   # no load either
+
+    def test_retired_during_the_gpu_probe(self, tmp_path, retire):
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        from wayfinder.core.transcriber import RequestAbandoned
+        b = self._cli_backend(tmp_path, n_gpu_layers=-1)
+        key = (b.llama_binary, b.model_path, 99)
+        LlamaCppCliBackend._gpu_probe.pop(key, None)
+        try:
+            with patch.object(b, "_resident_model", return_value=None), \
+                 patch.object(b, "_server_generate", return_value=None), \
+                 patch.object(b, "_probe_gpu_ok", side_effect=lambda *a, **k: retire() or False), \
+                 patch("wayfinder.core.postprocessor.run_tracked") as cli, \
+                 pytest.raises(RequestAbandoned):
+                b.process("this text was retired meanwhile", "")
+            assert key not in LlamaCppCliBackend._gpu_probe   # no false verdict
+            assert key not in LlamaCppCliBackend._gpu_probe_clamped
+            cli.assert_not_called()
+        finally:
+            LlamaCppCliBackend._gpu_probe.pop(key, None)
+            LlamaCppCliBackend._gpu_probe_clamped.discard(key)
+
+    def test_retired_during_a_cached_gpu_target(self, tmp_path, retire):
+        """The CLI run itself checks too: here the target needs no probe."""
+        from wayfinder.core.transcriber import RequestAbandoned
+        b = self._cli_backend(tmp_path)
+        with patch.object(b, "_resident_model", return_value=None), \
+             patch.object(b, "_server_generate", return_value=None), \
+             patch.object(b, "_subprocess_target",
+                          side_effect=lambda deadline=None: retire() or (b.llama_binary, 0)), \
+             patch("wayfinder.core.postprocessor.run_tracked") as cli, \
+             pytest.raises(RequestAbandoned):
+            b.process("this text was retired meanwhile", "")
+        cli.assert_not_called()
+
+    def test_retired_during_the_in_process_model_load(self, retire):
+        from wayfinder.core.postprocessor import LlamaCppBackend
+        from wayfinder.core.transcriber import RequestAbandoned
+        b = LlamaCppBackend(model_path="m.gguf")
+        model = MagicMock()
+        with patch.object(LlamaCppBackend, "is_available", return_value=True), \
+             patch.object(b, "_get_model", side_effect=lambda: retire() or model), \
+             pytest.raises(RequestAbandoned):   # not a PostProcessingError
+            b.process("this text was retired meanwhile", "{text}")
+        model.assert_not_called()
+
+    @pytest.mark.parametrize("backend_type", ["openai", "anthropic", "llama_cpp"])
+    def test_retired_while_the_backend_is_built(self, monkeypatch, retire, backend_type):
+        import wayfinder.license as license_module
+        from wayfinder.core import postprocessor
+        from wayfinder.core.transcriber import RequestAbandoned
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        backend = MagicMock()
+        backend.is_available.return_value = True
+        backend.process.return_value = "cleaned"
+        monkeypatch.setattr(postprocessor, "get_backend",
+                            lambda _config: retire() or backend)
+        config = {"post_processing_enabled": True, "post_processing_backend": backend_type,
+                  "output_tone": "professional", "fast_filler_removal": False}
+        with pytest.raises(RequestAbandoned):
+            postprocessor._process_with_config("so this one was retired while it was built", config)
+        backend.process.assert_not_called()
+
+    def test_an_unretired_cleanup_still_dispatches(self, monkeypatch, retire):
+        import wayfinder.license as license_module
+        from wayfinder.core import postprocessor
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        backend = MagicMock()
+        backend.is_available.return_value = True
+        backend.process.return_value = "So this one was kept."
+        monkeypatch.setattr(postprocessor, "get_backend", lambda _config: backend)
+        config = {"post_processing_enabled": True, "post_processing_backend": "openai",
+                  "output_tone": "professional", "fast_filler_removal": False}
+        assert postprocessor._process_with_config("so this one was kept okay", config) \
+            == "So this one was kept."
