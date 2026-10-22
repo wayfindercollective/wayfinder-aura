@@ -476,6 +476,12 @@ class OverlayState(Enum):
     ERROR = auto()
 
 
+# A dictation is in progress in exactly these two states (Sol pill r4) — used
+# by set_state() to drive GlassmorphicOverlay._on_active_changed, which
+# run_overlay() wires to the Windows topmost keeper's set_active().
+ACTIVE_OVERLAY_STATES = (OverlayState.LISTENING, OverlayState.PROCESSING)
+
+
 # === Color Palettes ===
 
 @dataclass
@@ -1201,6 +1207,15 @@ class GlassmorphicOverlay(QWidget):
         # pill actually ends up, not just whichever handler ran. None off
         # Windows / in tray_only mode, where nothing wires it.
         self._on_hidden_changed: Optional[Callable[[bool], None]] = None
+        # Same idea, for whether a dictation is actually in progress: fires
+        # exactly when self._state crosses into/out of ACTIVE_OVERLAY_STATES
+        # (LISTENING, PROCESSING), from the same one place as
+        # _on_hidden_changed above. run_overlay() wires this to the Windows
+        # topmost keeper's set_active() (Sol pill r4), so the pill can never
+        # stay buried for a whole back-off during a recording, whatever
+        # command or automatic transition got it there. None off Windows /
+        # in tray_only mode.
+        self._on_active_changed: Optional[Callable[[bool], None]] = None
         self._target_width = 200
         self._current_width = 200.0
         
@@ -1947,6 +1962,20 @@ class GlassmorphicOverlay(QWidget):
                 self._on_hidden_changed(True)
             elif old_state == OverlayState.HIDDEN and state != OverlayState.HIDDEN:
                 self._on_hidden_changed(False)
+
+        # Same idea for whether a dictation is actually in progress
+        # (LISTENING through PROCESSING) — keeper.set_active() (Sol pill r4)
+        # uses this to cap how long it can leave the pill buried while
+        # recording continues, from the one place self._state really
+        # changes rather than the "show" command handler alone, so every
+        # path here (a plain "show", the transient remap above, the idle
+        # watchdog, an error auto-return) is covered the same way
+        # _on_hidden_changed already is.
+        if self._on_active_changed is not None:
+            old_active = old_state in ACTIVE_OVERLAY_STATES
+            new_active = state in ACTIVE_OVERLAY_STATES
+            if new_active != old_active:
+                self._on_active_changed(new_active)
 
         # Track when we entered PROCESSING state
         if state == OverlayState.PROCESSING:
@@ -3106,13 +3135,11 @@ def run_overlay():
                     # timer, exactly when the pill actually leaves HIDDEN — a
                     # transient overlay's "show ready" can remap straight back
                     # to HIDDEN (see set_state()) and must NOT resume them.
+                    # It also drives the keeper's set_active() the same way,
+                    # through overlay._on_active_changed (Sol pill r4) — no
+                    # separate call needed here for LISTENING.
                     overlay.set_state(state)
                     _update_tray(state)
-                    # A new dictation starting is worth an immediate attempt,
-                    # not whatever's left of a pause from earlier contention
-                    # (ui/windows_topmost.py note_recording_started()).
-                    if _topmost_keeper is not None and state == OverlayState.LISTENING:
-                        _topmost_keeper.note_recording_started()
                 _emit_cmd_ack(cmd, ok=True, state_name=state_name)
             except Exception as e:
                 _debug_log(f"SHOW failed: {e}")
@@ -3344,6 +3371,18 @@ def run_overlay():
                         _topmost_timer.start(1000)
 
             overlay._on_hidden_changed = _sync_topmost_with_hidden_state
+
+            def _sync_topmost_active_with_state(active: bool) -> None:
+                # Wired to overlay._on_active_changed below, driven from the
+                # same one place in set_state() as _sync_topmost_with_hidden_
+                # state above — every path that changes overlay._state
+                # (show, the transient remap, the idle watchdog, an error
+                # auto-return) is covered, not just the "show" command
+                # handler (ui/windows_topmost.py set_active(), Sol pill r4;
+                # replaces note_recording_started()).
+                _topmost_keeper.set_active(active)
+
+            overlay._on_active_changed = _sync_topmost_active_with_state
             # Match whatever overlay._state already is at construction time —
             # "transient" mode starts HIDDEN (mapped offscreen, no set_state()
             # call yet; see run_overlay() above), so the keeper must start
@@ -3354,6 +3393,7 @@ def run_overlay():
             else:
                 _topmost_keeper.install_foreground_hook()
                 _topmost_timer.start(1000)
+            _topmost_keeper.set_active(overlay._state in ACTIVE_OVERLAY_STATES)
         except Exception as e:
             _debug_log(f"topmost keeper setup failed: {e}")
 

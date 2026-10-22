@@ -48,13 +48,25 @@ MAX_BACKOFF_S = 8 * BACKOFF_S
 # set and repairs then ran every second forever). 16 is already far past the
 # saturation point and leaves headroom even if BACKOFF_S/MAX_BACKOFF_S change.
 _MAX_CONTEND_LEVEL = 16
-# A pause is set against the window found above the pill (the "blocker"),
-# not the foreground window — two different things (see check()'s paused
-# branch). When that walk can't settle on a single blocker (two z-order
-# walks a moment apart, during real churn, can disagree), cap the pause
-# short rather than give an un-attributed demotion the same long pause as a
-# confirmed, persistent one.
-UNKNOWN_BLOCKER_BACKOFF_S = 30.0
+# No repair action runs more than once every REPAIR_COOLDOWN_S, whatever
+# resets the pause or the contention key — a foreground change included (Sol
+# pill r4: two ordinary windows alternating visibility/foreground every tick
+# each looked like a brand new contender, so the fresh-try reset fired every
+# time and skipped BACKOFF_S/CONTENTION_AFTER_S entirely: 120 repairs in 120
+# ticks). This is a flat floor underneath that back-off, not a replacement
+# for it, and it also bounds ACTIVE_MAX_PAUSE_S below.
+REPAIR_COOLDOWN_S = 2.0
+# While keeper.set_active(True) — a dictation is in progress — any pause the
+# keeper sets is capped at this, so a wrong (or simply unknown) cause for a
+# demotion can never leave the pill buried for the rest of a long back-off
+# while recording continues (Sol pill r4: attributing the demotion to
+# whichever window was found "above" the pill misattributed an unseen
+# demoter's work to an innocent window it happened to leave visible behind
+# it, and that window's own pause then held for 479 ticks with zero repairs
+# since it never moved or closed; the pill stayed buried the whole
+# recording). Not used outside a dictation — the back-off is the same as
+# before there, for the same reason restores that hold are never paused.
+ACTIVE_MAX_PAUSE_S = 5.0
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -66,10 +78,7 @@ if sys.platform == "win32":
     _user32.GetWindow.restype = wintypes.HWND
     _user32.GetWindow.argtypes = (wintypes.HWND, wintypes.UINT)
     _user32.IsWindowVisible.argtypes = (wintypes.HWND,)
-    _user32.IsWindow.argtypes = (wintypes.HWND,)
     _user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
-    _user32.SetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_long)
-    _user32.SetWindowLongW.restype = ctypes.c_long
     _user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.c_int, wintypes.UINT)
     _user32.GetForegroundWindow.restype = wintypes.HWND
@@ -159,31 +168,6 @@ def topmost_above(hwnd: int) -> Optional[int]:
     return None
 
 
-def nearest_blocker_above(hwnd: int) -> Optional[int]:
-    """The nearest ordinary (non-topmost, visible, uncloaked) window directly
-    above *hwnd* — the likeliest window actually demoting it — or None if
-    none is found (including if *hwnd* itself isn't found).
-
-    Tracked separately from the foreground window: whatever's fighting for
-    the topmost spot doesn't have to be what has focus — a background
-    utility can demote the pill and exit while the foreground window never
-    changes (see TopmostKeeper.check()'s paused branch).
-    """
-    last = None
-    h = _user32.GetTopWindow(None)
-    for _ in range(_MAX_WALK):
-        if not h:
-            return None
-        if h == hwnd:
-            return last
-        if (_user32.IsWindowVisible(h)
-                and not _user32.GetWindowLongW(h, _GWL_EXSTYLE) & _WS_EX_TOPMOST
-                and not _cloaked(h)):
-            last = h
-        h = _user32.GetWindow(h, _GW_HWNDNEXT)
-    return None
-
-
 def foreground_exe() -> str:
     """The front window's program name (e.g. Code.exe), or "" if unknown."""
     try:
@@ -262,13 +246,14 @@ class TopmostKeeper:
         self._contend_key: Optional[object] = None
         self._contend_since = float("-inf")
         self._contend_level = 0
-        # The window found directly above the pill when a pause was set —
-        # the actual contender, as opposed to _contend_key's foreground
-        # identity (used for logging/backoff grouping, not for who's really
-        # fighting for topmost order). Checked on every paused tick so a
-        # pause outlives neither a closed offender nor one that's no longer
-        # visible (see check()).
-        self._blocker_hwnd: Optional[int] = None
+        # The last time an actual repair ran (restore_topmost() was called),
+        # whatever triggered it — the floor REPAIR_COOLDOWN_S enforces (Sol
+        # pill r4). -inf so the very first check() is never gated by it.
+        self._last_repair_at = float("-inf")
+        # Set by set_active(): a dictation is in progress (overlay LISTENING
+        # through PROCESSING), so any pause below is capped at
+        # ACTIVE_MAX_PAUSE_S (Sol pill r4).
+        self._active = False
         self._hook = None
         self._proc = None  # keep the ctypes callback alive while hooked
         self._suspended = False  # set by suspend(); guards queued callbacks too
@@ -296,19 +281,15 @@ class TopmostKeeper:
             key = None
             if now < self._paused_until:
                 key = key_now()
-                # A pause holds only while BOTH of its reasons still apply:
-                # the same foreground window (closing a window always
-                # changes what the foreground HWND is, so a closed offender
-                # can't keep the pause going by coincidence) AND the window
-                # actually found above the pill when the pause was set. The
-                # foreground window is only who had focus, not necessarily
-                # what's fighting for topmost order — a background utility
-                # can demote the pill and exit while the foreground window
-                # never changes; without the second check the pause would
-                # outlive it (Sol pill r3 reproduced 479 s of zero repair attempts against a
-                # blocker that had already exited).
-                if key == self._contend_key and not self._blocker_gone():
+                if key == self._contend_key:
                     return 0
+                # A different window is in front now (or the offender that
+                # set this pause is gone — closing a window always changes
+                # what the foreground HWND is, so a closed offender can't
+                # keep the pause going): give it an immediate, fresh try
+                # rather than inheriting the old pause. REPAIR_COOLDOWN_S
+                # below still bounds how often that can actually repair
+                # anything, so this reset alone can't turn into a storm.
                 self._paused_until = float("-inf")
             hwnd = self._hwnd()
             if not hwnd:
@@ -316,27 +297,26 @@ class TopmostKeeper:
             above = normal_windows_above(hwnd)
             if not above:
                 self._contend_key = None  # held on its own: contention is over
-                self._blocker_hwnd = None
                 return 0
             if key is None:
                 key = key_now()
             if key != self._contend_key:
                 self._contend_key, self._contend_since, self._contend_level = key, now, 0
-            # The window directly above the pill right now — tracked so a
-            # later pause can be lifted once THIS one is gone, even if the
-            # foreground never changes (see the paused branch above). None
-            # only if this walk and normal_windows_above's just above it
-            # disagree about there being anything above hwnd at all — real
-            # churn, not the common case — in which case the pause below is
-            # capped short instead of trusting an attribution we don't have.
-            blocker = nearest_blocker_above(hwnd)
-            self._blocker_hwnd = blocker
+            # No reset above bypasses this: at most one repair every
+            # REPAIR_COOLDOWN_S, full stop (Sol pill r4). Two ordinary
+            # windows alternating visibility/foreground every tick reset
+            # _contend_key on every single check() and so got a "fresh try"
+            # every time, never even reaching BACKOFF_S/CONTENTION_AFTER_S —
+            # this is the floor underneath that.
+            if now - self._last_repair_at < REPAIR_COOLDOWN_S:
+                return above
+            self._last_repair_at = now
             restore_topmost(hwnd)
             held = normal_windows_above(hwnd) == 0
             if not held:
                 delay = BACKOFF_S
-                if blocker is None:
-                    delay = min(delay, UNKNOWN_BLOCKER_BACKOFF_S)
+                if self._active:
+                    delay = min(delay, ACTIVE_MAX_PAUSE_S)
                 self._paused_until = now + delay
             elif now - self._contend_since >= CONTENTION_AFTER_S:
                 # held right now, but front has been re-demoting it on every
@@ -348,8 +328,8 @@ class TopmostKeeper:
                 # level anyway.
                 level = min(self._contend_level, _MAX_CONTEND_LEVEL)
                 delay = min(BACKOFF_S * (2 ** level), MAX_BACKOFF_S)
-                if blocker is None:
-                    delay = min(delay, UNKNOWN_BLOCKER_BACKOFF_S)
+                if self._active:
+                    delay = min(delay, ACTIVE_MAX_PAUSE_S)
                 self._paused_until = now + delay
                 self._contend_level = min(self._contend_level + 1, _MAX_CONTEND_LEVEL)
             self._note(now, above, held, exe_cache[0] if exe_cache else self._front())
@@ -357,37 +337,45 @@ class TopmostKeeper:
         except Exception:
             return 0  # never let this break the overlay
 
-    def _blocker_gone(self) -> bool:
-        """Cheap check used only while paused: has the window remembered as
-        the blocker closed, or gone invisible, since the pause was set? Never
-        a full z-order walk — fighting for the topmost spot is exactly what a
-        pause exists to avoid; this only looks at the one window already on
-        file. Returns False (keep the pause) when no specific window was
-        identified — that case is handled by capping the pause itself, not
-        by trying to detect its end early.
-        """
-        hwnd = self._blocker_hwnd
-        if hwnd is None:
-            return False
-        try:
-            return not _user32.IsWindow(hwnd) or not _user32.IsWindowVisible(hwnd)
-        except Exception:
-            return False
+    def set_active(self, active: bool) -> None:
+        """Track whether a dictation is in progress (Sol pill r4; replaces
+        note_recording_started() and the per-window blocker-attribution
+        heuristic it was paired with — nearest_blocker_above(), _blocker_hwnd
+        and _blocker_gone() are gone, with no replacement that tries to guess
+        which window is doing the demoting; this flat cap is the fix
+        instead). Call with True when the overlay enters LISTENING and it
+        should stay True through PROCESSING; call with False once it's back
+        to idle (READY/HIDDEN) or in the ERROR banner. Wire it from wherever
+        overlay.py's set_state()
+        actually crosses into/out of {LISTENING, PROCESSING} — every path
+        (show, a transient overlay's remap, the idle watchdog, an error
+        auto-return), not just the "show" command handler alone.
 
-    def note_recording_started(self) -> None:
-        """Call when a new dictation begins (overlay -> LISTENING, i.e. the
-        "show" command with state="listening"): the pill is about to matter
-        again, so it shouldn't have to sit out a pause set against whatever
-        was contending before. Clears any pause/contention tracking and
-        makes one immediate attempt — a no-op (via check()'s own suspended
-        guard) if the overlay is still hidden when this fires.
+        While active, check() caps every pause it sets at ACTIVE_MAX_PAUSE_S
+        regardless of why the repair didn't hold, so the pill can never stay
+        buried for a whole long back-off during a recording — attributing
+        the cause and trusting that attribution is exactly what let a demoter
+        that had already exited look identical to a persistent one.
+
+        Turning active on clears any pause/contention tracking, including
+        REPAIR_COOLDOWN_S's own clock, and makes one immediate attempt — the
+        same as note_recording_started() used to, and still subject to
+        check()'s suspended/hidden guard, just not to a cooldown left over
+        from whatever was contending before active turned on. That one reset
+        can't itself turn into a repair storm: it only ever fires on the
+        False-to-True edge, and every check() after it is back to the normal
+        REPAIR_COOLDOWN_S-gated pace.
         """
-        self._paused_until = float("-inf")
-        self._contend_key = None
-        self._contend_since = float("-inf")
-        self._contend_level = 0
-        self._blocker_hwnd = None
-        self.check()
+        if active and not self._active:
+            self._paused_until = float("-inf")
+            self._contend_key = None
+            self._contend_since = float("-inf")
+            self._contend_level = 0
+            self._last_repair_at = float("-inf")
+            self._active = True
+            self.check()
+        else:
+            self._active = active
 
     def _note(self, now: float, above: int, held: bool, front: str) -> None:
         p = self._pending or {"restores": 0, "above": 0, "fronts": [], "held": True}

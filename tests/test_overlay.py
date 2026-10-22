@@ -919,6 +919,96 @@ def test_set_state_notifies_when_an_error_auto_return_lands_on_hidden():
         overlay.deleteLater()
 
 
+def test_set_state_notifies_active_through_listening_processing_ready():
+    """Sol pill r4: overlay._on_active_changed fires exactly when self._state
+    crosses into/out of ACTIVE_OVERLAY_STATES (LISTENING, PROCESSING) — the
+    Windows topmost keeper's set_active() hangs off this, the same way
+    suspend()/resume() hang off _on_hidden_changed above. PROCESSING must
+    not fire a second "active" notification; only READY (leaving both
+    states) fires "inactive"."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        calls = []
+        overlay._on_active_changed = calls.append
+        overlay._state = OverlayState.READY
+
+        overlay.set_state(OverlayState.LISTENING, animate=False)
+        assert calls == [True]
+
+        overlay.set_state(OverlayState.PROCESSING, animate=False)
+        assert calls == [True]           # still active: no duplicate notify
+
+        # PROCESSING->READY has its own, unrelated minimum-display-time
+        # guard (shows "Processing..." for >=800ms by delaying this exact
+        # transition on a QTimer) — push the recorded start back so this
+        # test exercises the real, immediate transition instead of a timer
+        # callback that a non-interactive test never pumps.
+        overlay._processing_start_time -= 1.0
+        overlay.set_state(OverlayState.READY, animate=False)
+        assert calls == [True, False]
+    finally:
+        overlay.deleteLater()
+
+
+def test_set_state_notifies_active_false_when_an_error_interrupts_a_dictation():
+    """The ERROR banner (set_state()'s own auto-return timer) is not an
+    active dictation state — a recording that errors out must free the
+    keeper from its ACTIVE_MAX_PAUSE_S cap immediately, not keep it active
+    until the ~2s auto-return to READY lands."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        calls = []
+        overlay._on_active_changed = calls.append
+        overlay._state = OverlayState.LISTENING
+
+        overlay.set_state(OverlayState.ERROR, animate=False)
+        assert calls == [False]
+
+        overlay.set_state(OverlayState.READY, animate=False)   # the auto-return's own call
+        assert calls == [False]          # already inactive: no duplicate notify
+    finally:
+        overlay.deleteLater()
+
+
+def test_set_state_notifies_active_through_the_idle_watchdog_remap():
+    """The idle watchdog (process_commands() in run_overlay(), transient
+    mode) calls set_state(READY) on a stuck LISTENING/PROCESSING pill, which
+    set_state() itself remaps to HIDDEN for a transient overlay (see the
+    remap at the top of set_state()) — a single call that must still notify
+    _on_active_changed(False), the same as a real "hide" would, not leave
+    the keeper thinking a dictation is still in progress."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "transient"
+        overlay._state = OverlayState.LISTENING
+        calls = []
+        overlay._on_active_changed = calls.append
+
+        overlay.set_state(OverlayState.READY, animate=False)  # remapped to HIDDEN
+        assert overlay._state == OverlayState.HIDDEN
+        assert calls == [False]
+    finally:
+        overlay.deleteLater()
+
+
 @pytest.mark.parametrize("platform_name, expected", [("linux", "primary"), ("darwin", "pointer")])
 def test_overlay_screen_follows_pointer_on_macos_only(
     monkeypatch, overlay_module, platform_name, expected

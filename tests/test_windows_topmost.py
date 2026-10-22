@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 # The keeper's logic is pure Python driven through a faked user32 (FakeUser32
-# below), so it's tested that way on macOS/Linux too — only the two tests
-# that need a real HWND/windll are Windows-only.
+# below), so it's tested that way on macOS/Linux too — only the tests that
+# need a real HWND/windll are Windows-only.
 windows_only = pytest.mark.skipif(not hasattr(ctypes, "windll"), reason="Windows only")
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,9 +33,6 @@ class FakeUser32:
     def GetWindow(self, h, _cmd):
         i = self._index(h) + 1
         return self.stack[i][0] if i < len(self.stack) else None
-
-    def IsWindow(self, h):
-        return h in [w[0] for w in self.stack]
 
     def IsWindowVisible(self, h):
         return self.stack[self._index(h)][1]
@@ -197,19 +194,26 @@ def test_restore_that_does_not_hold_backs_off_for_a_minute(monkeypatch, wt):
     assert len(fake.restored) == 2      # tries again after the pause
 
 
-def test_restores_that_hold_are_never_paused(monkeypatch, wt):
-    """Demoted on every window switch (20 Oct): every restore must go ahead,
-    or the pill would stay hidden behind the window just switched to."""
+def test_rapid_real_switches_are_throttled_by_the_repair_cooldown_not_backoff(monkeypatch, wt):
+    """Demoted on every window switch (20 Oct): every restore must go ahead
+    before too long, or the pill would stay hidden behind the window just
+    switched to. Sol pill r4 adds a flat REPAIR_COOLDOWN_S floor underneath
+    that (see the alternating-windows test below, finding 2) -- a rapid run
+    of real switches is throttled to the cooldown's pace, not fought every
+    single tick, but each attempt that does run still holds right away, so
+    this never turns into the long, escalating pause a persistent contender
+    gets (see test_delayed_redemotion_against_an_unchanged_foreground_backs_
+    off below)."""
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
     clock, reports = Clock(), []
     keeper = keeper_for(wt, reports, clock)
     for _ in range(20):                     # 20 switches in 4 s
         fake.stack.insert(0, fake.stack.pop(fake._index(2)))
-        assert keeper.check() == 1
-        assert wt.normal_windows_above(PILL) == 0
+        keeper.check()
         clock.t += 0.2
-    assert len(fake.restored) == 20
-    assert all(r["held"] for r in reports)
+    assert len(fake.restored) == 2           # throttled to ~1 per REPAIR_COOLDOWN_S over 4 s
+    assert keeper._paused_until == float("-inf")   # never escalated into a real back-off
+    assert all(r["held"] for r in reports)   # whichever attempts ran all held right away
 
 
 def test_delayed_redemotion_against_an_unchanged_foreground_backs_off(monkeypatch, wt):
@@ -254,7 +258,9 @@ def test_second_window_of_the_same_app_does_not_inherit_the_first_ones_back_off(
     closed, since a bare exe name can't tell them apart. Keying by HWND
     instead must give the second window (or whatever's foreground once the
     first is gone — closing a window means its HWND can never be reported
-    as the foreground window again) an immediate, fresh try."""
+    as the foreground window again) an immediate, fresh try — past the flat
+    REPAIR_COOLDOWN_S floor (Sol pill r4), which no reset bypasses, same as
+    any other attempt."""
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)], sticky=True)
     clock, reports = Clock(), []
     hwnds = iter([201, 202])  # 201: the Code window that trips the back-off; 202: a second one
@@ -263,7 +269,7 @@ def test_second_window_of_the_same_app_does_not_inherit_the_first_ones_back_off(
     assert keeper.check() == 1                 # window 201 demotes it; sticky means it never holds
     assert clock.t < keeper._paused_until      # ...so it's paused for BACKOFF_S against hwnd 201
     assert len(fake.restored) == 1
-    clock.t += 1.0
+    clock.t += wt.REPAIR_COOLDOWN_S
     assert keeper.check() == 1                 # window 202 (same exe!) still inside the pause window
     assert len(fake.restored) == 2             # must get its own attempt, not inherit 201's pause
 
@@ -287,66 +293,105 @@ def test_prolonged_contention_saturates_the_backoff_level_without_raising(monkey
     assert keeper._contend_level <= wt._MAX_CONTEND_LEVEL   # stays saturated, doesn't keep climbing
 
 
-def test_background_contender_exit_lifts_the_pause_even_though_the_foreground_window_never_changed(
-    monkeypatch, wt
-):
-    """Round 3, MAJOR: a background utility (never foreground) repeatedly
-    demoted the pill while Code.exe stayed in front the whole time,
-    tripping the exponential back-off — keyed, before this fix, on the
-    UNCHANGED foreground window — then exited. Because the foreground HWND
-    never changed, the old pause-lifting check (key_now() == contend_key)
-    never fired either: the keeper stayed paused against a blocker that no
-    longer existed, so a LATER, unrelated window landing above the pill
-    (ordinary z-order churn once the utility's gone) got zero repair
-    attempts for up to ~479s. The pill's actual blocker, not just the
-    foreground window, must be checked for existence on every paused tick."""
+def test_active_resumes_repairs_within_the_active_cap_despite_persistent_demotion(monkeypatch, wt):
+    """Finding 1 (Sol pill r4), MAJOR: an unseen demoter repeatedly lowers
+    the pill beneath a persistent, innocent editor window and then exits
+    while recording continues — the editor stays visible and foreground the
+    whole time, so the removed blocker-attribution heuristic kept its pause
+    alive against the (innocent, still-visible) editor forever: 479 ticks,
+    zero repairs, pill buried, despite a dictation being in progress.
+    set_active(True) must cap every pause at ACTIVE_MAX_PAUSE_S regardless
+    of attribution, so repair attempts keep resuming on their own and the
+    pill ends up on top as soon as the actual demotion stops."""
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
     clock, reports = Clock(), []
-    keeper = keeper_for(wt, reports, clock)   # front="Code.exe" the whole time
+    keeper = keeper_for(wt, reports, clock)   # front="Code.exe" (the editor) throughout
+    keeper.set_active(True)
 
-    # The utility (hwnd 2) re-demotes the pill every tick for well past
-    # CONTENTION_AFTER_S, with Code.exe foreground throughout — escalates
-    # the exponential back-off exactly as test_delayed_redemotion... above
-    # does, just not for as long.
-    for _ in range(15):
+    # The demoter keeps lowering the pill behind the editor every tick, well
+    # past CONTENTION_AFTER_S, with the editor foreground throughout — the
+    # same shape test_delayed_redemotion... exercises for the non-active
+    # case in the test below, just longer.
+    attempt_times = []
+    for _ in range(60):
+        fake.stack.insert(0, fake.stack.pop(fake._index(2)))
+        before = len(fake.restored)
+        keeper.check()
+        if len(fake.restored) > before:
+            attempt_times.append(clock.t)
+        clock.t += 1.0
+    assert len(attempt_times) > 1   # repairs kept resuming, not stuck after the first
+    gaps = [b - a for a, b in zip(attempt_times, attempt_times[1:])]
+    assert max(gaps) <= wt.ACTIVE_MAX_PAUSE_S   # never waited longer than the active cap
+
+    # The demoter stops — the editor is no longer re-demoting the pill, with
+    # Code.exe still foreground the whole time (no foreground change to key
+    # a fresh try off of).
+    for _ in range(int(wt.ACTIVE_MAX_PAUSE_S) + 1):
+        clock.t += 1.0
+        keeper.check()
+    assert wt.normal_windows_above(PILL) == 0   # the pill ends up on top
+
+
+def test_the_same_persistent_demotion_follows_ordinary_backoff_when_not_active(monkeypatch, wt):
+    """Companion to the test above: outside a dictation (set_active() never
+    called, or already False), the same persistent re-demotion must follow
+    the plain exponential back-off — no repair storm — rather than being
+    capped at ACTIVE_MAX_PAUSE_S, which is only for while a dictation is
+    actually in progress."""
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
+    clock, reports = Clock(), []
+    keeper = keeper_for(wt, reports, clock)   # front="Code.exe" the whole time, not active
+
+    for _ in range(500):
         fake.stack.insert(0, fake.stack.pop(fake._index(2)))
         keeper.check()
         clock.t += 1.0
-    assert keeper._contend_level > 0
-    paused_until = keeper._paused_until
-    assert paused_until - clock.t > wt.CONTENTION_AFTER_S   # a real pause is in effect, not a sliver
-
-    # The utility exits (its window is gone) and a different, ordinary
-    # window (3) lands above the pill instead — unrelated churn, not the
-    # old blocker — while Code.exe is STILL foreground the whole time.
-    fake.stack.remove((2, True, False, False))
-    fake.stack.insert(0, (3, True, False, False))
-
-    assert clock.t < paused_until               # still well inside the old pause window
-    assert keeper.check() == 1                  # must not return 0 just because Code.exe never changed
-    assert fake.restored[-1] == (PILL, wt._HWND_TOPMOST)   # an actual repair attempt happened
+    assert len(fake.restored) < 20              # well short of fighting every tick
+    assert keeper._paused_until - clock.t > wt.ACTIVE_MAX_PAUSE_S   # a real (uncapped) back-off
 
 
-def test_an_unidentifiable_blocker_caps_the_pause_at_a_short_bound(monkeypatch, wt):
-    """nearest_blocker_above() and normal_windows_above() are two separate
-    z-order walks a moment apart; fast churn can in principle make the
-    first see a demotion the second can no longer attribute to a specific
-    window. Without a cap, that un-attributed case would get the same long
-    pause as a confirmed, persistent blocker — bound it short instead."""
-    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)], sticky=True)
-    monkeypatch.setattr(wt, "nearest_blocker_above", lambda hwnd: None)
-    clock, reports = Clock(), []
-    keeper = keeper_for(wt, reports, clock)
-    assert keeper.check() == 1
-    assert keeper._blocker_hwnd is None
-    assert keeper._paused_until == clock.t + wt.UNKNOWN_BLOCKER_BACKOFF_S
+def test_alternating_windows_never_repair_faster_than_the_cooldown(monkeypatch, wt):
+    """Finding 2 (Sol pill r4), MAJOR: two ordinary windows alternating which
+    one is in front (and above the pill) every tick each look, to the
+    simple "different window in front now, fresh try" reset, like a brand
+    new contender — bypassing BACKOFF_S/CONTENTION_AFTER_S entirely (20 Oct
+    shape: 120 repairs in 120 ticks). REPAIR_COOLDOWN_S is a flat floor that
+    no reset — including this one — can bypass, active or not."""
+    for active in (False, True):
+        fake = use(monkeypatch, wt, [(2, True, False), (3, True, False), (PILL, True, True)])
+        clock, reports = Clock(), []
+        toggle = [3]
+
+        def front_hwnd():
+            toggle[0] = 3 if toggle[0] == 2 else 2
+            return toggle[0]
+
+        keeper = wt.TopmostKeeper(lambda: PILL, reports.append, clock=clock,
+                                  front=lambda: "X.exe", front_hwnd=front_hwnd)
+        if active:
+            keeper.set_active(True)
+
+        which = [2]
+        attempt_times = []
+        for _ in range(120):
+            which[0] = 3 if which[0] == 2 else 2
+            fake.stack.insert(0, fake.stack.pop(fake._index(which[0])))  # that one jumps above the pill
+            before = len(fake.restored)
+            keeper.check()
+            if len(fake.restored) > before:
+                attempt_times.append(clock.t)
+            clock.t += 1.0
+
+        gaps = [b - a for a, b in zip(attempt_times, attempt_times[1:])]
+        assert not gaps or min(gaps) >= wt.REPAIR_COOLDOWN_S   # never more than one repair per cooldown
+        assert len(attempt_times) <= 120 / wt.REPAIR_COOLDOWN_S + 1
 
 
-def test_a_new_dictation_gets_an_immediate_attempt_through_the_keeper(monkeypatch, wt):
-    """The overlay calls note_recording_started() when a dictation begins
-    (the "show" command with state="listening"): a stale pause from
-    whatever was contending before must not make the pill wait — it's
-    about to matter again right now."""
+def test_entering_active_makes_one_immediate_attempt(monkeypatch, wt):
+    """set_active(True) replaces note_recording_started(): a stale pause
+    from whatever was contending before must not make the pill wait — it's
+    about to matter again right now, the moment a dictation starts."""
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)], sticky=True)
     clock, reports = Clock(), []
     keeper = keeper_for(wt, reports, clock)
@@ -354,9 +399,28 @@ def test_a_new_dictation_gets_an_immediate_attempt_through_the_keeper(monkeypatc
     assert clock.t < keeper._paused_until
     restored_before = len(fake.restored)
 
-    keeper.note_recording_started()
+    keeper.set_active(True)
     assert len(fake.restored) > restored_before    # tried again immediately, pause or not
     assert keeper._contend_key is not None          # the fresh attempt re-established tracking
+    assert keeper._active is True
+
+    # Already active: a second set_active(True) must not make another
+    # immediate attempt (idempotent, no repeated repair storm of its own).
+    restored_before = len(fake.restored)
+    keeper.set_active(True)
+    assert len(fake.restored) == restored_before
+
+
+def test_entering_active_is_a_no_op_while_the_pill_cannot_be_seen(monkeypatch, wt):
+    """check()'s own guards (hwnd() returning None covers hidden, cloaked
+    and minimised alike — see ui/overlay.py's _pill_hwnd_for()) still apply
+    to the immediate attempt set_active(True) makes, same as they did for
+    note_recording_started() before it."""
+    reports = []
+    keeper = wt.TopmostKeeper(lambda: None, reports.append)
+    keeper.set_active(True)
+    assert keeper._active is True
+    assert reports == []
 
 
 def test_keeper_leaves_a_hidden_pill_alone(monkeypatch, wt):
@@ -469,85 +533,50 @@ def test_real_z_order_walk_finds_a_real_window(wt):
 
 
 @windows_only
-def test_a_pill_that_kept_ws_ex_topmost_is_restored_above_a_real_ordinary_window(wt):
-    """Round 3: the z-order-walk test above only ever sees an
-    already-topmost window — it never actually demotes anything, so it
-    never exercises restore_topmost() for real. Here the pill (still
-    flagged topmost) is explicitly ranked behind a real ordinary window —
-    legitimate SetWindowPos usage can always place one HWND directly behind
-    another, topmost or not, which is exactly how the original 20 Oct bug
-    showed up — and restore_topmost() must put it back above, without
-    touching the foreground window."""
+def test_a_demoted_pill_is_restored_into_a_real_anchors_band(wt):
+    """Finding 3 (Sol pill r4), MAJOR: the previous version of this fixture
+    put the pill behind a real ordinary window via SetWindowPos and then
+    asserted its OWN WS_EX_TOPMOST flag had survived that — it hadn't:
+    Windows clears a window's topmost status as a side effect of landing it
+    in the normal band (SetWindowPos remarks), so the old fixture was
+    invalid before restore_topmost() was even exercised. Demote with the
+    real HWND_NOTOPMOST instead — the documented way to remove topmost
+    status, confirmed cleared here rather than assumed — with a legitimate
+    topmost anchor still above the pill, and only create the ordinary
+    window afterwards so it's genuinely new activity landing above an
+    already-demoted pill, not a flag this fixture pretends survived."""
     import tkinter as tk
 
-    pill = tk.Tk()
-    ordinary = tk.Toplevel(pill)
-    try:
-        pill.attributes("-topmost", True)
-        pill.update()
-        ordinary.update()
-        pill_hwnd = int(pill.wm_frame(), 16)
-        ordinary_hwnd = int(ordinary.wm_frame(), 16)
-
-        # Demote the pill behind the ordinary window while leaving its own
-        # WS_EX_TOPMOST flag untouched — the 20 Oct shape exactly.
-        wt._user32.SetWindowPos(pill_hwnd, ordinary_hwnd, 0, 0, 0, 0, wt._RESTORE_FLAGS)
-        assert wt.normal_windows_above(pill_hwnd) >= 1
-        assert wt._user32.GetWindowLongW(pill_hwnd, wt._GWL_EXSTYLE) & wt._WS_EX_TOPMOST
-
-        before_fg = wt._user32.GetForegroundWindow()
-        assert wt.restore_topmost(pill_hwnd)
-
-        assert wt.normal_windows_above(pill_hwnd) == 0   # ordering: repaired
-        assert wt._user32.GetWindowLongW(pill_hwnd, wt._GWL_EXSTYLE) & wt._WS_EX_TOPMOST  # style: kept
-        assert wt._user32.GetForegroundWindow() == before_fg  # focus: untouched
-    finally:
-        ordinary.destroy()
-        pill.destroy()
-
-
-@windows_only
-def test_a_pill_that_lost_ws_ex_topmost_is_restored_into_a_real_anchors_band(wt):
-    """Companion to the test above: the pill has lost its own WS_EX_TOPMOST
-    entirely (not just its position), with a legitimate topmost anchor
-    still above it. restore_topmost() must land it just below the anchor
-    and Windows re-sets WS_EX_TOPMOST as a side effect of that insertion —
-    accepted behaviour, per the reviewer — still without touching the
-    foreground window."""
-    import tkinter as tk
-
+    _HWND_NOTOPMOST = -2
     anchor = tk.Tk()
     pill = tk.Toplevel(anchor)
-    ordinary = tk.Toplevel(anchor)
     try:
         anchor.attributes("-topmost", True)
         anchor.update()
         pill.attributes("-topmost", True)
         pill.update()
-        ordinary.update()
 
         anchor_hwnd = int(anchor.wm_frame(), 16)
         pill_hwnd = int(pill.wm_frame(), 16)
-        ordinary_hwnd = int(ordinary.wm_frame(), 16)
 
-        # Demote the pill behind the ordinary window, then strip its own
-        # topmost flag outright (e.g. some other app's z-order fight
-        # cleared it directly, rather than just moving it).
-        wt._user32.SetWindowPos(pill_hwnd, ordinary_hwnd, 0, 0, 0, 0, wt._RESTORE_FLAGS)
-        ex = wt._user32.GetWindowLongW(pill_hwnd, wt._GWL_EXSTYLE)
-        wt._user32.SetWindowLongW(pill_hwnd, wt._GWL_EXSTYLE, ex & ~wt._WS_EX_TOPMOST)
+        assert wt._user32.SetWindowPos(pill_hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0, wt._RESTORE_FLAGS)
         assert not wt._user32.GetWindowLongW(pill_hwnd, wt._GWL_EXSTYLE) & wt._WS_EX_TOPMOST
-        assert wt.normal_windows_above(pill_hwnd) >= 1
 
-        before_fg = wt._user32.GetForegroundWindow()
-        assert wt.restore_topmost(pill_hwnd)
+        ordinary = tk.Toplevel(anchor)
+        ordinary.update()
+        try:
+            assert wt.normal_windows_above(pill_hwnd) >= 1
 
-        assert wt.normal_windows_above(pill_hwnd) == 0   # ordering: repaired
-        assert wt._user32.GetWindowLongW(pill_hwnd, wt._GWL_EXSTYLE) & wt._WS_EX_TOPMOST  # style: restored
-        assert wt.topmost_above(pill_hwnd) == anchor_hwnd  # anchor: still above, not un-topped
-        assert wt._user32.GetForegroundWindow() == before_fg  # focus: untouched
+            before_fg = wt._user32.GetForegroundWindow()
+            assert wt.restore_topmost(pill_hwnd)
+
+            assert wt.normal_windows_above(pill_hwnd) == 0   # ordering: repaired
+            assert wt._user32.GetWindowLongW(pill_hwnd, wt._GWL_EXSTYLE) & wt._WS_EX_TOPMOST  # style: restored
+            assert wt.topmost_above(pill_hwnd) == anchor_hwnd  # anchor: still above, not un-topped
+            assert wt._user32.GetForegroundWindow() == before_fg  # focus: untouched
+        finally:
+            ordinary.destroy()
     finally:
-        ordinary.destroy()
         pill.destroy()
         anchor.destroy()
 
@@ -608,17 +637,30 @@ def test_overlay_hide_show_suspend_and_resume_the_keeper_via_set_state():
     assert 'if overlay._state == OverlayState.HIDDEN:' in win_block
 
 
-def test_a_new_dictation_gets_an_immediate_attempt_through_the_show_handler():
-    """overlay.py's "show" handler must call note_recording_started() when
-    a new dictation begins (state="listening"), not just set_state() — or a
-    stale pause from whatever was contending before makes a brand new
-    dictation wait it out (see the fake-harness test of the same name in
-    this file for the keeper-level behaviour)."""
+def test_overlay_wires_active_state_through_set_state_not_the_show_handler():
+    """Sol pill r4: the "show" command handler used to call
+    note_recording_started() itself for state="listening" — keyed on which
+    COMMAND ran, the same class of bug test_overlay_hide_show_suspend_and_
+    resume_the_keeper_via_set_state above pins for hide/show. set_active()
+    must instead hang off overlay._on_active_changed, driven from set_state()
+    (exercised behaviourally in tests/test_overlay.py's
+    test_set_state_notifies_active_... tests), so every path that changes
+    overlay._state — not just a plain "show" — keeps the keeper's active
+    flag in sync."""
     src = (ROOT / "src" / "wayfinder" / "ui" / "overlay.py").read_text(encoding="utf-8")
+
     show_block = src.split('if command == "show":', 1)[1].split(
         'elif command == "ping":', 1)[0]
-    assert "_topmost_keeper.note_recording_started()" in show_block
-    assert "state == OverlayState.LISTENING" in show_block
+    assert "overlay.set_state(state)" in show_block
+    assert "note_recording_started" not in show_block
+    assert "_topmost_keeper.set_active(" not in show_block
+
+    win_block = src.split('if sys.platform == "win32" and not tray_only:', 1)[1].split(
+        "# Send ready signal.", 1)[0]
+    assert "overlay._on_active_changed = _sync_topmost_active_with_state" in win_block
+    sync_block = win_block.split("def _sync_topmost_active_with_state", 1)[1].split(
+        "overlay._on_active_changed =", 1)[0]
+    assert "_topmost_keeper.set_active(active)" in sync_block
 
 
 def test_main_logs_the_restore():
