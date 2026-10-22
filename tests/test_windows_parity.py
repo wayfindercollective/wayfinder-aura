@@ -1642,7 +1642,9 @@ def test_paste_still_runs_the_same_steps_and_reports_failures(monkeypatch):
     monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
                                                        GetOpenClipboardWindow=lambda: None,
                                                        OpenClipboard=lambda _h: 1,
-                                                       CloseClipboard=lambda: 1))
+                                                       CloseClipboard=lambda: 1,
+                                                       CreateWindowExW=lambda *a, **k: 1,
+                                                       DestroyWindow=lambda _h: 1))
     monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
     monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
     monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
@@ -1650,7 +1652,8 @@ def test_paste_still_runs_the_same_steps_and_reports_failures(monkeypatch):
     monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
     monkeypatch.setattr(iw, "_clipboard_set_windows",
                         lambda t, transient=False, **_: steps.append(("set", t)) or clip.update(v=t) or True)
-    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
+    monkeypatch.setattr(iw, "_mark_open_clipboard", lambda: b"mark")
+    monkeypatch.setattr(iw, "_clipboard_mark", lambda: b"mark")
     monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
     monkeypatch.setattr(iw, "_WATCH_SECONDS", 0.05)
     monkeypatch.setattr(iw.time, "sleep", lambda s: None)
@@ -1681,7 +1684,9 @@ def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
     monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
                                                        GetOpenClipboardWindow=lambda: None,
                                                        OpenClipboard=lambda _h: 1,
-                                                       CloseClipboard=lambda: 1))
+                                                       CloseClipboard=lambda: 1,
+                                                       CreateWindowExW=lambda *a, **k: 1,
+                                                       DestroyWindow=lambda _h: 1))
     monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
     monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
     monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
@@ -1690,7 +1695,8 @@ def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
     monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
     monkeypatch.setattr(iw, "_clipboard_set_windows",
                         lambda t, transient=False, **_: steps.append(("set", t)) or clip.update(v=t) or True)
-    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
+    monkeypatch.setattr(iw, "_mark_open_clipboard", lambda: b"mark")
+    monkeypatch.setattr(iw, "_clipboard_mark", lambda: b"mark")
     monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
     monkeypatch.setattr(iw.time, "sleep", lambda s: None)
 
@@ -1713,17 +1719,29 @@ def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
 # --- Deferred clipboard restore (the Mac's DeferredRestore) -----------------
 
 def _clipboard_fakes(monkeypatch, start):
+    """*clip* tracks the fake clipboard's text and its private mark (Aura's
+    own write proof): any write — Aura's or, in a test, a direct clip.update —
+    clears the mark, since a real EmptyClipboard/SetClipboardData wipes every
+    registered format on the clipboard, same words included."""
     from wayfinder.core import injector_windows as iw
 
-    clip = {"v": start, "seq": 1}
+    clip = {"v": start, "seq": 1, "mark": None}
 
     def fake_set(t, transient=False, **_):
-        clip.update(v=t, seq=clip["seq"] + 1)
+        clip.update(v=t, seq=clip["seq"] + 1, mark=None)
         return True
 
+    def fake_mark_write():
+        mark = f"mark{clip['seq']}".encode()
+        clip["mark"] = mark
+        return mark
+
     monkeypatch.setattr(iw, "_user32", SimpleNamespace(OpenClipboard=lambda _h: 1,
-                                                       CloseClipboard=lambda: 1))
-    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: clip["seq"])
+                                                       CloseClipboard=lambda: 1,
+                                                       CreateWindowExW=lambda *a, **k: 1,
+                                                       DestroyWindow=lambda _h: 1))
+    monkeypatch.setattr(iw, "_mark_open_clipboard", fake_mark_write)
+    monkeypatch.setattr(iw, "_clipboard_mark", lambda: clip["mark"])
     monkeypatch.setattr(iw, "_paste_reporter", None)
     monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
     monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
@@ -1757,7 +1775,7 @@ def test_back_to_back_dictations_never_capture_auras_own_text(monkeypatch):
 def test_a_new_copy_before_the_restore_is_kept(monkeypatch):
     iw, clip = _clipboard_fakes(monkeypatch, "user text")
     iw.inject_text_paste_windows("dictation")
-    clip.update(v="something the user just copied", seq=clip["seq"] + 1)
+    clip.update(v="something the user just copied", seq=clip["seq"] + 1, mark=None)
     iw._pending_restore.flush()
     assert clip["v"] == "something the user just copied"
 
@@ -1765,10 +1783,11 @@ def test_a_new_copy_before_the_restore_is_kept(monkeypatch):
 
 def test_copying_the_same_words_before_the_restore_is_kept(monkeypatch):
     """"Copy last transcription" (or Ctrl+C on the pasted text) puts the same
-    words back: the change counter, not the text, shows it is the user's."""
+    words back: the mark, not the text, shows it is the user's — a real copy
+    clears Aura's private format even when the words match."""
     iw, clip = _clipboard_fakes(monkeypatch, "user text")
     iw.inject_text_paste_windows("dictation")
-    clip.update(v="dictation", seq=clip["seq"] + 1)    # the user's own copy
+    clip.update(v="dictation", seq=clip["seq"] + 1, mark=None)   # the user's own copy
     iw._pending_restore.flush()
     assert clip["v"] == "dictation"
 
@@ -2406,24 +2425,61 @@ def test_a_same_words_copy_right_after_the_write_is_kept(monkeypatch):
     assert rig.fake.writes == ["dictation"] and rig.clipboard == "dictation"
 
 
-@pytest.mark.parametrize("missing", ["window", "mark"])
-def test_the_windows_paste_works_without_its_window_or_mark(monkeypatch, missing):
-    # No window: the hold has no owner, as before. No mark: the change
-    # counter tells a copy made while the restore waited.
+def test_no_owner_window_refuses_the_paste(monkeypatch):
+    # Finding 5: an ownerless hold does not exclude another ownerless
+    # opener, so a paste write with no owner window is refused through the
+    # ordinary write-failure path instead of writing unprotected.
+    from wayfinder.core import injector
     rig, w = _windows_send_rig(monkeypatch)
-    rig.fake.no_windows = missing == "window"
-    if missing == "mark":
-        monkeypatch.setattr(w, "_mark_open_clipboard", lambda: None)
+    rig.fake.no_windows = True
+    with pytest.raises(injector.InjectionError, match="Could not write"):
+        w.inject_text_paste_windows("dictation")
+    assert rig.clipboard == "theirs" and rig.fake.writes == [] and rig.sent == []
+    assert "window" not in rig.fake.events                 # never even tried to open one
+
+
+def test_no_owner_window_at_restore_leaves_an_ownerless_copy_alone(monkeypatch):
+    # Finding 5: no window at restore time must never fall back to an
+    # ownerless hold — the restore does not even try to open the clipboard,
+    # so whatever another ownerless opener copies into the gap survives.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    lines = []
+    monkeypatch.setattr(w, "_paste_reporter", lines.append)
+    rig.fake.no_windows = True
+    assert rig.fake.copy_without_a_window("script's")       # lands in the gap
+    restore()
+    assert rig.fake.events == []                            # no open attempted at all
+    assert rig.fake.writes == ["dictation"]                 # nothing written by the restore
+    assert rig.clipboard == "script's"                       # the ownerless copy survives
+    assert lines and "no clipboard owner window" in lines[0] and "script's" not in lines[0]
+
+
+def test_a_failed_mark_restores_before_close_and_refuses_the_paste(monkeypatch):
+    # Finding 6: without a mark, nothing proves later that the clipboard is
+    # still Aura's — even a same-words copy right after would look like it.
+    # Put the user's clipboard back now, inside the same hold, before it
+    # closes, and refuse the paste instead of pasting unmarked.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
     pending = []
     monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
-    w.inject_text_paste_windows("dictation")
-    pending[0]()
+    monkeypatch.setattr(w, "_mark_open_clipboard", lambda: None)
+    with pytest.raises(injector.InjectionError, match="Could not write"):
+        w.inject_text_paste_windows("dictation")
+    assert pending == []                                     # no restore ever scheduled
+    assert rig.sent == []                                     # never reached Ctrl+V
+    # The restore write landed inside the same hold, before it closed.
+    assert rig.fake.events == [
+        "window", "open", "read", "close", "destroy",         # read the old clipboard
+        "window", "open", "empty", ("set", "dictation"),      # the paste's own write
+        "empty", ("set", "theirs"),                            # Finding 6: restored first
+        "close", "destroy",
+    ]
     assert rig.clipboard == "theirs"
-    assert ("window" in rig.fake.events) is (missing == "mark")
-    w.inject_text_paste_windows("again")
-    rig.fake.copy("again")                                  # the same words, copied
-    pending[1]()
-    assert rig.clipboard == "again" and rig.fake.writes[-1] == "again"
+    # Nothing is pending to overwrite a same-words copy made right after.
+    rig.fake.copy("theirs")
+    w._pending_restore.flush()
+    assert rig.clipboard == "theirs" and pending == []
 
 
 def test_the_cancel_restore_goes_out_under_a_retired_scope(monkeypatch):
