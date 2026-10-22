@@ -35,7 +35,9 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
-from wayfinder.utils.child_supervisor import release_supervised, signal_supervised, spawn_supervised
+from wayfinder.utils.child_supervisor import (
+    release_supervised, signal_supervised, spawn_supervised, wait_supervised,
+)
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 
@@ -945,11 +947,11 @@ class LlamaServerManager:
         try:
             if proc.poll() is None:
                 LlamaServerManager._signal(proc)
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
+                # wait_supervised: on macOS, what it forked into its group
+                # goes with it even if it ignored SIGTERM (Sol mac r13).
+                if not wait_supervised(proc, 5):
                     LlamaServerManager._signal(proc, kill=True)
-                    proc.wait(timeout=5)
+                    wait_supervised(proc, 5)
             release_supervised(proc)
         except Exception:
             pass

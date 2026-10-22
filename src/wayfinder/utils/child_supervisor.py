@@ -164,9 +164,51 @@ def release_supervised(proc) -> None:
         _release_watcher(proc)
 
 
-def wait_supervised(proc: subprocess.Popen, timeout: float) -> bool:
+def _exited_unreaped(proc: subprocess.Popen, timeout: float) -> bool:
+    """Wait up to *timeout* for *proc* to exit without reaping it: until it is
+    reaped, its pid, and so its group id, stay the helper's. kqueue on macOS,
+    waitid(WNOWAIT) where that exists (the Linux tests). True once it exited
+    (or another thread reaped it), False on a timeout."""
+    if proc.returncode is not None:
+        return True
+    if hasattr(select, "kqueue"):
+        kq = select.kqueue()
+        try:
+            try:
+                kq.control([select.kevent(proc.pid, select.KQ_FILTER_PROC,
+                                          select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                          select.KQ_NOTE_EXIT)], 0, 0)
+            except OSError:
+                return True   # already exited: a zombie (or reaped) is not watchable
+            return bool(kq.control(None, 1, timeout))
+        finally:
+            kq.close()
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                return True
+        except ChildProcessError:
+            return True   # reaped meanwhile
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+def wait_supervised(proc: subprocess.Popen, timeout: float, *,
+                    platform_name: str | None = None) -> bool:
     """Wait up to *timeout* for *proc* to exit. Once it is reaped, its watcher
-    is released, so it signals nothing that later takes the pid."""
+    is released, so it signals nothing that later takes the pid.
+
+    macOS: a leader that exited may leave what it forked behind (a worker that
+    ignored SIGTERM, Sol mac r13). Its exit is awaited without the reap, and
+    the group is SIGKILLed while the unreaped leader still holds its id
+    (_signal_group asks that under the reap lock), before the reap."""
+    if _owns_group(proc, platform_name) and (hasattr(select, "kqueue") or hasattr(os, "waitid")):
+        if not _exited_unreaped(proc, timeout):
+            return False
+        _signal_group(proc, signal.SIGKILL)   # what it left in its group
+        timeout = _REAP_LOCK_WAIT             # the reap itself: it has exited
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -194,10 +236,10 @@ def stop_supervised(proc: subprocess.Popen, term_wait: float = 5.0, kill_wait: f
                     platform_name: str | None = None) -> None:
     """SIGTERM, then SIGKILL after *term_wait*; on macOS to the whole group."""
     signal_supervised(proc, platform_name=platform_name)
-    if wait_supervised(proc, term_wait):
+    if wait_supervised(proc, term_wait, platform_name=platform_name):
         return
     signal_supervised(proc, kill=True, platform_name=platform_name)
-    wait_supervised(proc, kill_wait)
+    wait_supervised(proc, kill_wait, platform_name=platform_name)
 
 
 # Native helpers an earlier Aura could leave behind: the app and its watcher
@@ -539,7 +581,9 @@ def run_watcher(child_pid: int, *, pipe_fd: int = 0, term_wait: float = 3.0) -> 
     The app holds the only write end of *pipe_fd*: end of file means it
     exited without letting go of the helper, a crash or SIGKILL included; a
     byte means it reaped the helper. Nothing is signalled once the helper has
-    exited, so a pid reused since is never hit."""
+    exited, so a pid reused since is never hit; the one exception is the
+    group's leftovers at the instant its leader leaves on our SIGTERM (see
+    _kill_leftovers)."""
     watch = _Watch(pipe_fd, child_pid)
     while not watch.child_gone:
         if not watch.wait(None):
@@ -572,7 +616,22 @@ def _end_group(watch: _Watch, term_wait: float) -> None:
                 break
             watch.wait(left)
         if watch.child_gone:
+            if sig == signal.SIGTERM:
+                _kill_leftovers(watch.child_pid)
             return
+
+
+def _kill_leftovers(pgid: int) -> None:
+    """The leader left on SIGTERM, just now: whatever it forked that ignored
+    it goes too (Sol mac r13). Sent the instant its exit is seen. A group id
+    is not reused while the group has a member (POSIX), so a group still
+    there is the helper's; once it is empty this finds none (ESRCH), since an
+    id freed this instant is not handed out again before the pid counter
+    wraps."""
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def run_from_env() -> int:

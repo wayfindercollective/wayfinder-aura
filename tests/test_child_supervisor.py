@@ -157,16 +157,66 @@ def test_a_helper_that_closes_inherited_descriptors_is_still_ours(tmp_path):
 
 
 @posix
-def test_the_group_signal_reaches_what_the_helper_forked(tmp_path):
+@pytest.mark.parametrize("fork_ignores_term", [False, True])
+def test_the_group_signal_reaches_what_the_helper_forked(tmp_path, fork_ignores_term):
+    # Sol mac r13: the leader leaving on SIGTERM ended the stop (and released
+    # the watcher) while a worker it forked, which ignored SIGTERM, ran on.
     grandchild_file = tmp_path / "grandchild.pid"
     proc = _helper(tmp_path,
                    "if os.fork() == 0:\n"
-                   f"    open({str(grandchild_file)!r}, 'w').write(str(os.getpid()))\n"
+                   + ("    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if fork_ignores_term else "")
+                   + f"    open({str(grandchild_file)!r}, 'w').write(str(os.getpid()))\n"
                    "    time.sleep(60)\n"
                    "    os._exit(0)\n")
     grandchild = int(_wait_for(grandchild_file, "the fork")[0])
-    child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
-    assert _gone(grandchild, within=2)
+    try:
+        child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
+        assert proc.returncode == -signal.SIGTERM        # the leader left on SIGTERM
+        assert _gone(grandchild, within=2)
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+@posix
+def test_the_watcher_ends_what_the_helper_forked_when_the_app_dies(tmp_path):
+    # Sol mac r13, Force Quit: the leader leaves on the watcher's SIGTERM, and
+    # the worker it forked, which ignores SIGTERM, must not outlive it.
+    worker_file = tmp_path / "worker.pid"
+    body = ("import os, signal, time\n"
+            "if os.fork() == 0:\n"
+            "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"    open({str(worker_file)!r}, 'w').write(str(os.getpid()))\n"
+            "    time.sleep(60)\n"
+            "    os._exit(0)\n"
+            "time.sleep(60)\n")
+    app = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, sys, time\n"
+         f"sys.path.insert(0, {str(child_supervisor.Path(child_supervisor.__file__).parents[2])!r})\n"
+         "from wayfinder.utils import child_supervisor as cs\n"
+         f"proc = cs.spawn_supervised([sys.executable, '-c', {body!r}],"
+         " env=dict(os.environ), platform_name='darwin')\n"
+         "print(proc.pid, proc._aura_watcher.pid, flush=True)\n"
+         "time.sleep(60)\n"],
+        stdout=subprocess.PIPE, text=True)
+    helper, watcher = map(int, app.stdout.readline().split())
+    worker = int(_wait_for(worker_file, "the worker")[0])
+    try:
+        _boot()
+        app.kill()
+        app.wait()
+        assert _gone(helper, within=3)
+        assert _gone(worker, within=2), "the forked worker outlived the app"
+        assert _gone(watcher, within=3)
+    finally:
+        for pid in (helper, worker, watcher):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 @posix
