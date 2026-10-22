@@ -2731,3 +2731,66 @@ class TestWhisperCliOutputIsUtf8:
 
         monkeypatch.setattr(transcriber, "run_tracked", run)
         assert backend.transcribe(str(audio)) == self.SPOKEN
+
+
+class TestARetiredDictationsHelpers:
+    """Sol mac r10: a tracked helper is refused under the spawn lock once its
+    dictation is retired. whisper-cli's probes then cache nothing, and its
+    transcription ends as RequestAbandoned, not as a shutdown."""
+
+    @staticmethod
+    def _backend(tmp_path):
+        from wayfinder.core import transcriber
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        return transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                             use_gpu=False, timeout=30)
+
+    def test_probes_refused_for_a_retired_dictation_cache_nothing(self, tmp_path, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        backend = self._backend(tmp_path)
+        with transcriber.dictation_requests(cls.request_token()):
+            cls.abandon_requests()
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._supported_flags()
+            assert backend.supports_gpu() is False
+        assert getattr(backend, "_supported_flags_cache", None) is None   # not "no flags"
+        assert backend._gpu_supported is None                              # not "no GPU"
+
+    @pytest.mark.parametrize("at", ["flag-probe", "transcription"])
+    def test_a_transcription_refused_at_the_spawn_lock_is_abandoned(self, tmp_path, monkeypatch, at):
+        import subprocess
+        import threading
+        from wayfinder.core import transcriber
+        from wayfinder.utils import child_supervisor
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        backend = self._backend(tmp_path)
+        if at == "transcription":   # else the --help probe is the first spawn
+            monkeypatch.setattr(backend, "_supported_flags", lambda *a, **k: set())
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        spawned = []
+        real_popen = subprocess.Popen
+        monkeypatch.setattr(subprocess, "Popen",
+                            lambda *a, **k: spawned.append(a) or real_popen(*a, **k))
+        token = cls.request_token()
+        outcome = {}
+
+        def dictation():
+            with transcriber.dictation_requests(token):
+                try:
+                    outcome["result"] = backend.transcribe(str(audio))
+                except BaseException as exc:
+                    outcome["error"] = exc
+
+        with child_supervisor._tracked_lock:   # another helper's spawn
+            worker = threading.Thread(target=dictation, daemon=True)
+            worker.start()
+            worker.join(0.3)
+            assert worker.is_alive(), outcome
+            cls.abandon_requests()
+        worker.join(10)
+        assert isinstance(outcome.get("error"), transcriber.RequestAbandoned), outcome
+        assert spawned == []

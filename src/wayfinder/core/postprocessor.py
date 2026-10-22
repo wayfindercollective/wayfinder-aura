@@ -2499,6 +2499,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 # weights; reloading would wedge again and pin another copy.
                 return None
         if model is None:
+            # Not for a dictation retired meanwhile, during the lock wait
+            # above included (Sol mac r10).
+            _check_dictation()
             try:
                 model = Llama(
                     model_path=self.model_path, n_ctx=self.n_ctx,
@@ -2890,6 +2893,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
             if not LlamaServerManager.still_ours(port, served):
                 raise LlamaServerError(
                     f"port {port} is no longer proven to be our server")
+            _check_dictation()   # the proof can wait on the server: no prompt then
             out = LlamaServerManager.complete(
                 prompt=prompt, n_predict=n_predict, port=port,
                 timeout=req_timeout, child=served,
@@ -3330,10 +3334,10 @@ Cleaned text:"""
             raise PostProcessingError(f"llama timed out after {self.timeout}s")
         except FileNotFoundError:
             raise PostProcessingError(f"Could not execute: {self.llama_binary}")
+        except RequestAbandoned:   # a refused helper included: not a shutdown
+            raise
         except HelpersClosed:
             raise PostProcessingError("Aura is shutting down")
-        except RequestAbandoned:
-            raise
         except Exception as e:
             raise PostProcessingError(f"llama processing failed: {e}")
 
@@ -3562,7 +3566,9 @@ class AnthropicBackend(PostProcessorBackend):
             is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
             gen_temperature = max(self.temperature, 0.8) if is_caricature else self.temperature
 
-            # Call Claude API
+            # Call Claude API, unless the dictation was retired meanwhile,
+            # during the client's setup included (Sol mac r10).
+            _check_dictation()
             message = client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
@@ -3596,6 +3602,8 @@ class AnthropicBackend(PostProcessorBackend):
 
             return result if result else text
 
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"Anthropic API call failed: {e}")
 
@@ -3717,7 +3725,9 @@ class OpenAIBackend(PostProcessorBackend):
             is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
             gen_temperature = max(self.temperature, 0.8) if is_caricature else self.temperature
 
-            # Call OpenAI API
+            # Call OpenAI API, unless the dictation was retired meanwhile,
+            # during the client's setup included (Sol mac r10).
+            _check_dictation()
             response = client.chat.completions.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
@@ -3776,6 +3786,8 @@ class OpenAIBackend(PostProcessorBackend):
 
             return result if result else text
 
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"OpenAI API call failed: {e}")
 

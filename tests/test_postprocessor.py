@@ -6,6 +6,8 @@ refusal/hallucination detection, prompt leakage, settings compatibility,
 backend factory, and the top-level process_with_config entry point.
 """
 
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, PropertyMock
@@ -2031,3 +2033,130 @@ class TestARetiredDictationsCleanup:
                   "output_tone": "professional", "fast_filler_removal": False}
         assert postprocessor._process_with_config("so this one was kept okay", config) \
             == "So this one was kept."
+
+
+class TestARetiredDictationsInnerWaits:
+    """Sol mac r10: the waits inside a cleanup step, after its caller's check
+    (the resident model's lock, the helper spawn lock, a cloud client's
+    setup), end in RequestAbandoned too, with nothing loaded, spawned or sent."""
+
+    @staticmethod
+    def _in_dictation(target):
+        """Run *target* on a worker under a fresh dictation token; returns the
+        worker and its outcome dict."""
+        import threading
+        from wayfinder.core import transcriber
+        token = transcriber.WhisperServerBackend.request_token()
+        outcome = {}
+
+        def run():
+            with transcriber.dictation_requests(token):
+                try:
+                    outcome["result"] = target()
+                except BaseException as exc:
+                    outcome["error"] = exc
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        return worker, outcome
+
+    def test_retired_while_the_resident_load_waits_for_the_lock(self, tmp_path, monkeypatch):
+        import sys
+        import threading
+        import types
+        from wayfinder.core import postprocessor, transcriber
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        loads = []
+        fake = types.ModuleType("llama_cpp")
+        fake.Llama = lambda **kwargs: loads.append(kwargs) or MagicMock()
+        monkeypatch.setitem(sys.modules, "llama_cpp", fake)
+        reached = threading.Event()
+        monkeypatch.setattr(postprocessor, "_wheel_supports_gpu_offload",
+                            lambda: reached.set() or True)   # just before the lock
+        b = TestARetiredDictationsCleanup._cli_backend(tmp_path, n_gpu_layers=-1)
+        LlamaCppCliBackend._resident_cache.pop(b._resident_cache_key(), None)   # uncached
+        with patch.object(b, "_server_generate") as server, \
+             patch("wayfinder.core.postprocessor.run_tracked") as cli:
+            with LlamaCppCliBackend._residency_lock:   # another dictation's inference
+                worker, outcome = self._in_dictation(
+                    lambda: b.process("this text was retired meanwhile", ""))
+                assert reached.wait(5)
+                worker.join(0.2)   # now waiting inside _resident_model()
+                cls.abandon_requests()
+            worker.join(5)
+        assert isinstance(outcome.get("error"), transcriber.RequestAbandoned), outcome
+        assert loads == []   # no Llama(...) for it
+        server.assert_not_called()
+        cli.assert_not_called()
+
+    @pytest.mark.parametrize("probe", [False, True], ids=["cli", "gpu-probe"])
+    def test_retired_while_a_helper_waits_for_the_spawn_lock(self, tmp_path, monkeypatch, probe):
+        """Through the real run_tracked(): the llama-simple run, or the GPU
+        probe in front of it, waits for the tracked-helper lock."""
+        from wayfinder.core import transcriber
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        from wayfinder.utils import child_supervisor
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        b = TestARetiredDictationsCleanup._cli_backend(tmp_path, n_gpu_layers=-1 if probe else 0)
+        key = (b.llama_binary, b.model_path, 99)
+        LlamaCppCliBackend._gpu_probe.pop(key, None)
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def popen(*args, **kwargs):
+            spawned.append(args)
+            return real_popen(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", popen)
+        try:
+            with patch.object(b, "_resident_model", return_value=None), \
+                 patch.object(b, "_server_generate", return_value=None):
+                with child_supervisor._tracked_lock:   # another helper's spawn
+                    worker, outcome = self._in_dictation(
+                        lambda: b.process("this text was retired meanwhile", ""))
+                    worker.join(0.3)   # past every caller check, at the lock
+                    assert worker.is_alive()
+                    cls.abandon_requests()
+                worker.join(10)
+            assert isinstance(outcome.get("error"), transcriber.RequestAbandoned), outcome
+            assert spawned == []
+            assert key not in LlamaCppCliBackend._gpu_probe   # no verdict either
+        finally:
+            LlamaCppCliBackend._gpu_probe.pop(key, None)
+            LlamaCppCliBackend._gpu_probe_clamped.discard(key)
+
+    def test_an_unretired_helper_still_spawns(self):
+        from wayfinder.core import transcriber
+        from wayfinder.utils import child_supervisor
+        cls = transcriber.WhisperServerBackend
+        with transcriber.dictation_requests(cls.request_token()):
+            result = child_supervisor.run_tracked(
+                [sys.executable, "-c", "print('ok')"], capture_output=True, text=True, timeout=30)
+        assert result.stdout.strip() == "ok"
+
+    @pytest.mark.parametrize("kind", ["anthropic", "openai"])
+    def test_retired_during_the_cloud_clients_setup(self, monkeypatch, kind):
+        import wayfinder.license as license_module
+        from wayfinder.core import postprocessor, transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        backend_cls = (postprocessor.AnthropicBackend if kind == "anthropic"
+                       else postprocessor.OpenAIBackend)
+        backend = backend_cls(api_key="placeholder-not-a-key")
+        client = MagicMock()
+        monkeypatch.setattr(backend_cls, "is_available", lambda self: True)
+        monkeypatch.setattr(backend, "_get_client",
+                            lambda: cls.abandon_requests() or client)
+        monkeypatch.setattr(postprocessor, "get_backend", lambda _config: backend)
+        config = {"post_processing_enabled": True, "post_processing_backend": kind,
+                  "output_tone": "professional", "fast_filler_removal": False}
+        with transcriber.dictation_requests(cls.request_token()), \
+             pytest.raises(transcriber.RequestAbandoned):
+            postprocessor._process_with_config("so this one was retired during the setup", config)
+        client.messages.create.assert_not_called()
+        client.chat.completions.create.assert_not_called()

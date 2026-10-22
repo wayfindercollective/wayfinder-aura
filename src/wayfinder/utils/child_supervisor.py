@@ -335,6 +335,21 @@ def _stop_helper_group(proc: subprocess.Popen) -> None:
     stop_supervised(proc, 3.0, 1.0, platform_name="darwin")
 
 
+# Run under _tracked_lock right before every tracked spawn; each raises to
+# refuse it. The transcriber registers one that refuses a helper for a
+# dictation the app retired, however long the caller waited for the lock
+# after its own check (Sol mac r10).
+_spawn_checks: list = []
+
+
+def refuse_spawns_when(check) -> None:
+    """Register *check*: called under the lock before every tracked spawn,
+    it raises to refuse that spawn."""
+    with _tracked_lock:
+        if check not in _spawn_checks:
+            _spawn_checks.append(check)
+
+
 def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
                   **popen_kwargs) -> subprocess.Popen:
     """Popen (or *popen*, such as spawn_supervised) a helper that a terminal
@@ -346,6 +361,8 @@ def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
     with _tracked_lock:
         if _tracked_closed:
             raise HelpersClosed("shutting down: no new helper process")
+        for check in _spawn_checks:
+            check()
         if not _exit_hook_registered:
             # An interpreter exit with no server started (main.py, CLI verbs)
             # runs no server exit hook: this one stops the helpers itself.

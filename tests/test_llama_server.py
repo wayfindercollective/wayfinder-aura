@@ -1817,3 +1817,24 @@ class TestARetiredStart:
                 backend._server_generate("prompt", 64)
         complete.assert_not_called()
         assert LlamaServerManager._process is not None and LlamaServerManager._port == 8179
+
+    def test_retired_during_the_ownership_proof_sends_no_prompt(self, tmp_path):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        backend = TestWedgedServerRecovery._backend(None, tmp_path)
+        LlamaServerManager._process = _FakeProc()
+
+        def proof(*_args):
+            cls.abandon_requests()
+            return True
+
+        with patch.object(cls, "_abandoned", cls._abandoned), \
+             patch.object(LlamaServerManager, "ensure", return_value=8179), \
+             patch.object(LlamaServerManager, "still_ours", side_effect=proof), \
+             patch.object(LlamaServerManager, "complete") as complete, \
+             patch.object(LlamaServerManager, "note_failure") as failure, \
+             transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._server_generate("prompt", 64)
+        complete.assert_not_called()
+        failure.assert_not_called()

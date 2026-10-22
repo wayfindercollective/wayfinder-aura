@@ -24,8 +24,8 @@ from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import (
-    HelpersClosed, bind_to_app_lifetime, run_tracked, signal_supervised,
-    spawn_supervised, wait_supervised,
+    HelpersClosed, bind_to_app_lifetime, refuse_spawns_when, run_tracked,
+    signal_supervised, spawn_supervised, wait_supervised,
 )
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
@@ -131,6 +131,23 @@ def _retired_dictation() -> bool:
 class RequestAbandoned(TranscriptionError):
     """The app retired this dictation (see WhisperServerBackend.abandon_requests):
     nothing may start, stop, retry, salvage or count on its behalf."""
+
+
+class HelperRefused(RequestAbandoned, HelpersClosed):
+    """A tracked helper refused because its dictation was retired. To the
+    dictation it is RequestAbandoned; to a probe it is HelpersClosed, which
+    learns and caches nothing, as for a helper Quit refused (Sol mac r10)."""
+
+
+def _refuse_a_retired_helper() -> None:
+    """No tracked helper (whisper-cli, llama-simple, a GPU or flag probe)
+    starts for a retired dictation, whatever its caller waited on after its
+    own check."""
+    if _retired_dictation():
+        raise HelperRefused("the dictation was retired: no helper for it")
+
+
+refuse_spawns_when(_refuse_a_retired_helper)
 
 
 def _expand_path(value: object) -> str:
@@ -541,6 +558,8 @@ class WhisperCppBackend(TranscriptionBackend):
             _sup = self._supported_flags(
                 probe_timeout=probe_timeout, binary=active_binary
             )
+        except RequestAbandoned:
+            raise
         except HelpersClosed:
             raise TranscriptionError("Aura is shutting down")
         # Retired while the probe ran: no GPU re-test and no attempt (Sol mac
@@ -678,6 +697,8 @@ class WhisperCppBackend(TranscriptionBackend):
                 continue
             except FileNotFoundError:
                 raise TranscriptionError(f"Could not execute whisper.cpp: {binary}")
+            except RequestAbandoned:
+                raise
             except HelpersClosed:
                 raise TranscriptionError("Aura is shutting down")
 
