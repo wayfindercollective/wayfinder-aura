@@ -442,14 +442,24 @@ def type_text(text: str) -> None:
             raise InjectionError(f"{e} (typed {getattr(e, 'typed', 0)} characters)") from e
         finally:
             layout.close()
-    from .injector import _running_under_xwayland, build_xdotool_type_command, typing_chunks
+    from .injector import (
+        _piece_of_a_typing, _running_under_xwayland, build_xdotool_type_command,
+        typing_chunks, xdotool_scheduled_seconds,
+    )
 
     # The injector's hardening: a warm-up key under XWayland (its first synthetic
     # key is dropped) and Shift released again after shifted runs. In pieces,
     # each asked before it starts, so a reset stops the typing (Sol mac r13).
     text = fold_typography_for_typing(text)
     warmup = _running_under_xwayland()
-    for piece in typing_chunks(text, TYPE_DELAY_MS + 1):
-        argv = build_xdotool_type_command(piece, TYPE_DELAY_MS, warmup=warmup)
-        # Never cut a long message off mid-chat: allow twice the typing time.
-        _xdotool(*argv[1:], timeout=10 + 2 * len(piece) * TYPE_DELAY_MS / 1000)
+    def scheduled(piece):
+        return build_xdotool_type_command(piece, TYPE_DELAY_MS, warmup=warmup)
+
+    def seconds(piece):
+        return xdotool_scheduled_seconds(scheduled(piece))
+
+    for index, piece in enumerate(typing_chunks(text, seconds)):
+        argv = scheduled(piece)
+        with _piece_of_a_typing(index):
+            # Never cut a long message off mid-chat: allow twice the typing time.
+            _xdotool(*argv[1:], timeout=10 + 2 * len(piece) * TYPE_DELAY_MS / 1000)

@@ -240,10 +240,17 @@ def test_type_text_without_the_portal_uses_the_hardened_xdotool_command(monkeypa
                         lambda argv, **k: seen.append((argv, k["timeout"])) or _ok())
     text = "RvR “inc” at Emain… GO"
     gc.type_text(text)
-    argv, timeout = seen[0]
     folded = injector.fold_typography_for_typing(text)
-    assert argv == injector.build_xdotool_type_command(folded, gc.TYPE_DELAY_MS, warmup=True)
-    assert timeout >= 10
+
+    def command(piece):
+        return injector.build_xdotool_type_command(piece, gc.TYPE_DELAY_MS, warmup=True)
+
+    # Its gaps and Shift sweeps put it past one piece's half second.
+    pieces = injector.typing_chunks(
+        folded, lambda p: injector.xdotool_scheduled_seconds(command(p)))
+    assert "".join(pieces) == folded and len(pieces) == 2
+    assert [argv for argv, _ in seen] == [command(p) for p in pieces]
+    assert all(timeout >= 10 for _, timeout in seen)
 
     seen.clear()
     gc.type_text("x" * 2000)  # ~24 s of typing at 12 ms per key, in pieces

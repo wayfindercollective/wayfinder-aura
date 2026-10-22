@@ -820,6 +820,53 @@ def test_the_pyautogui_cmd_v_asks_before_v_and_always_releases(monkeypatch, stop
                                ("up", "command")]
 
 
+def test_the_pyautogui_cmd_v_releases_past_the_fail_safe(monkeypatch):
+    # Sol mac r14: PyAutoGUI's public keyUp raises its fail-safe while the
+    # pointer sits in a screen corner, so Command stayed down. Its own sender
+    # releases it.
+    import sys as _sys
+    rig, macos_paste = _mac_paste_rig(monkeypatch)
+
+    class FailSafeException(Exception):
+        pass
+
+    corner = {"now": False}
+    native = ModuleType("platformModule")
+    native._keyDown = lambda key: rig.hotkeys.append(("down", key))
+    native._keyUp = lambda key: rig.hotkeys.append(("up", key))
+
+    def checked(send):
+        def public(key):
+            if corner["now"]:
+                raise FailSafeException("fail-safe: the pointer is in a corner")
+            send(key)
+            corner["now"] = True    # the user's pointer reaches a corner
+        return public
+
+    fake = ModuleType("pyautogui")
+    fake.platformModule = native
+    fake.keyDown, fake.keyUp = checked(native._keyDown), checked(native._keyUp)
+    monkeypatch.setitem(_sys.modules, "pyautogui", fake)
+    monkeypatch.setattr(macos_paste, "post_command_v",
+                        lambda: (_ for _ in ()).throw(RuntimeError("CGEventPost failed")))
+    monkeypatch.setattr(macos_paste.pending_restore, "schedule", lambda restore: None)
+    with pytest.raises(injector.InjectionError, match="fail-safe"):
+        injector.inject_text("words", cancelled=lambda: rig.retired)
+    assert rig.hotkeys == [("down", "command"), ("up", "v"), ("up", "command")]
+
+
+def test_the_real_pyautogui_wrappers_release_past_the_fail_safe(monkeypatch):
+    pyautogui = pytest.importorskip("pyautogui")
+    sent, where = [], iter([(500, 500)])
+    monkeypatch.setattr(pyautogui, "PAUSE", 0)
+    monkeypatch.setattr(pyautogui.platformModule, "_position", lambda: next(where, (0, 0)))
+    monkeypatch.setattr(pyautogui.platformModule, "_keyDown", lambda key: sent.append(("down", key)))
+    monkeypatch.setattr(pyautogui.platformModule, "_keyUp", lambda key: sent.append(("up", key)))
+    with pytest.raises(pyautogui.FailSafeException):
+        injector._pyautogui_command_v(pyautogui)
+    assert sent == [("down", "command"), ("up", "v"), ("up", "command")]
+
+
 def test_a_mac_paste_retired_during_the_snapshot_writes_nothing(monkeypatch):
     # Sol mac r13: the snapshot reads every pasteboard item; a retirement
     # during that read still cleared and wrote the pasteboard.

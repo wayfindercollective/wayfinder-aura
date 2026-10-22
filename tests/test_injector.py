@@ -1323,14 +1323,72 @@ class TestLinuxTypingInPieces:
     def test_pieces_put_the_text_back_together(self):
         import wayfinder.core.injector as injector
         text = "one two three four five six seven eight nine ten " * 8 + "end\r\nnext"
-        pieces = injector.typing_chunks(text, 25)          # 20 characters each
+        pieces = injector.typing_chunks(text, lambda p: len(p) * 0.025)   # 20 characters each
         assert "".join(pieces) == text and len(pieces) > 5
-        assert all(len(p) <= 21 for p in pieces)
+        assert all(len(p) <= 20 for p in pieces)
         assert all(p.endswith(" ") for p in pieces[:-2])   # cut after a space
-        assert injector.typing_chunks("short", 5) == ["short"]
-        assert injector.typing_chunks("", 5) == []
-        crlf = injector.typing_chunks("x" * 15 + "\r\n" + "y" * 20, 1000)
+        assert injector.typing_chunks("short", lambda p: len(p) * 0.005) == ["short"]
+        assert injector.typing_chunks("", lambda p: 1.0) == []
+        crlf_text = "x" * 15 + "\r\n" + "y" * 20
+        crlf = injector.typing_chunks(crlf_text, lambda p: len(p) * 0.5 / 16)   # 16 a piece
+        assert "".join(crlf) == crlf_text
         assert not any(p.endswith("\r") for p in crlf)     # one Enter, not two
+        # A character over the budget alone still goes out, one at a time.
+        assert injector.typing_chunks("abc", lambda p: len(p) * 2.0) == ["a", "b", "c"]
+
+    def test_the_schedule_counts_every_sleep(self):
+        # Sol mac r14: an alternating "aA" piece slept 1.8 s between its keys.
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("aB", 10, warmup=True)
+        # warm-up gap, "a", the gap before "B", "B", the gap before the sweep
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(
+            0.020 + 0.011 + 0.012 + 0.011 + 0.012)
+
+    @pytest.mark.parametrize("text", ["aA" * 300, "Hello World. " * 40, "x" * 600])
+    @pytest.mark.parametrize("speed", ["instant", "fast", "normal", "slow", "very_slow"])
+    def test_no_xdotool_piece_is_scheduled_past_the_budget(self, text, speed):
+        import wayfinder.core.injector as injector
+        delay = injector.TYPING_SPEEDS[speed][0]
+        for warmup in (False, True):
+            def seconds(piece):
+                return injector.xdotool_scheduled_seconds(
+                    injector.build_xdotool_type_command(piece, delay, warmup=warmup))
+            pieces = injector.typing_chunks(text, seconds)
+            assert "".join(pieces) == text
+            assert all(seconds(p) <= injector.TYPING_CHUNK_S for p in pieces)
+
+    def test_very_slow_ydotool_pieces_stay_within_the_budget(self):
+        # Sol mac r14: a 16-character floor made a very slow piece 2.4 s.
+        import wayfinder.core.injector as injector
+        delay, hold = injector.TYPING_SPEEDS["very_slow"]
+        runs = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._require_modifier_release"), \
+             patch("wayfinder.core.injector._check_ydotool_result"), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=lambda argv, **_k: argv[1:2] == ["type"] and runs.append(argv[-1]) or ok):
+            injector._inject_text_type_linux("slow and steady words", "very_slow")
+        assert "".join(runs) == "slow and steady words"
+        assert all(len(p) * (delay + hold) / 1000 <= injector.TYPING_CHUNK_S for p in runs)
+
+    def test_wtype_types_a_dash_as_text(self):
+        # Sol mac r14: wtype read a piece starting with "-" as its options.
+        import wayfinder.core.injector as injector
+        argvs = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        text = "-" + "x" * 499 + "-n --" + " y" * 200
+        with patch("wayfinder.core.injector._require_modifier_release"), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=lambda argv, **_k: argvs.append(argv) or ok):
+            injector._inject_text_wtype(text)
+            injector._inject_text_wtype("-")
+        assert len(argvs) > 2 and any(a[-1].startswith("-") for a in argvs[1:-1])
+        assert all(a[:2] == ["wtype", "--"] and len(a) == 3 for a in argvs)
+        assert "".join(a[-1] for a in argvs[:-1]) == text
 
     @pytest.mark.parametrize("tool", ["xdotool", "wtype", "ydotool"])
     def test_a_reset_mid_typing_stops_at_the_next_piece(self, tool):
@@ -1368,10 +1426,11 @@ class TestLinuxTypingInPieces:
             typed = "".join(call.args[0][-1] for call in runs.call_args_list)
             assert runs.call_count > 1 and typed.replace(" ", "") == text.replace(" ", "")
 
-    @pytest.mark.parametrize("tool", ["xdotool", "wtype"])
-    def test_a_later_piece_failing_is_uncertain_and_never_falls_back(self, tool):
+    @pytest.mark.parametrize("failure", ["exit", "timeout"])
+    @pytest.mark.parametrize("tool", ["xdotool", "wtype", "ydotool"])
+    def test_a_later_piece_failing_is_uncertain_and_never_falls_back(self, tool, failure):
         # Part of the text landed: ydotool or a game-mode paste would type it
-        # all again.
+        # all again, a timed-out ydotool piece too (Sol mac r14).
         import wayfinder.core.injector as injector
         runs = []
         ok = MagicMock(returncode=0, stdout="", stderr="")
@@ -1379,7 +1438,11 @@ class TestLinuxTypingInPieces:
 
         def run(argv, **_k):
             runs.append(argv[0])
-            return ok if len(runs) == 1 else failed
+            if len(runs) == 1:
+                return ok
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, 120)
+            return failed
 
         with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
              patch("wayfinder.core.injector.sys.platform", "linux"), \
@@ -1389,6 +1452,8 @@ class TestLinuxTypingInPieces:
              patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
              patch("wayfinder.core.injector._note_wtype_failure") as noted, \
              patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
              patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
              patch("wayfinder.core.injector.time.sleep"), \
              patch("wayfinder.core.injector.subprocess.run", side_effect=run):
@@ -1418,6 +1483,27 @@ class TestLinuxTypingInPieces:
             with pytest.raises(injector.InjectionCancelled):
                 gc.type_text("gg " * 100)
         assert len(runs) == 1
+
+
+    def test_game_chat_later_piece_timing_out_is_uncertain(self, monkeypatch):
+        import wayfinder.core.injector as injector
+        from wayfinder.core import linux_game_chat as gc
+        runs = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def run(argv, **_k):
+            runs.append(argv)
+            if len(runs) > 1:
+                raise subprocess.TimeoutExpired(argv, 10)
+            return ok
+
+        monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
+        monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
+        monkeypatch.setattr(gc, "_portal", lambda: None)
+        monkeypatch.setattr(gc.subprocess, "run", run)
+        with pytest.raises(injector.InjectionError) as caught:
+            gc.type_text("gg " * 100)
+        assert caught.value.uncertain_delivery is True and len(runs) == 2
 
 
 class TestLinuxClipboardWritersAsk:

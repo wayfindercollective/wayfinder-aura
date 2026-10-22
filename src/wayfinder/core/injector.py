@@ -90,40 +90,73 @@ def _run_key_tool(argv, **kwargs):
 
 
 # A typing tool is one process that nothing can ask between its keys, so a
-# long transcript goes out in pieces of about TYPING_CHUNK_S each, every one
-# its own run of the tool, asked by _run_key_tool first. A reset mid-typing
-# then stops within one piece, and every key a piece pressed it released
-# (Sol mac r13). Most dictations fit in one piece.
+# long transcript goes out in pieces each scheduled to take at most
+# TYPING_CHUNK_S, every one its own run of the tool, asked by _run_key_tool
+# first. A reset mid-typing then stops within one piece, and every key a
+# piece pressed it released (Sol mac r13). Most dictations fit in one piece.
 TYPING_CHUNK_S = 0.5
-_TYPING_CHUNK_MIN_CHARS = 16
 
 
-def typing_chunks(text: str, per_char_ms: float) -> list:
-    """*text* in pieces that take about TYPING_CHUNK_S to type, cut after a
-    space when there is one in the second half of the piece."""
-    size = max(_TYPING_CHUNK_MIN_CHARS, int(TYPING_CHUNK_S * 1000 / max(per_char_ms, 1.0)))
+def typing_chunks(text: str, seconds) -> list:
+    """*text* in pieces whose ``seconds(piece)``, the time the tool is
+    scheduled to take over it, sleeps included, stays within TYPING_CHUNK_S
+    (one character at least), cut after a space when there is one in the
+    second half of the piece (Sol mac r14)."""
     chunks = []
-    while len(text) > size:
-        cut = text.rfind(" ", size // 2, size) + 1 or size
-        if text[cut - 1] == "\r" and text[cut:cut + 1] == "\n":
-            cut += 1   # one Enter, not two
+    while text:
+        low, high = 1, len(text)      # the longest prefix within the budget
+        while low < high:
+            mid = (low + high + 1) // 2
+            if seconds(text[:mid]) <= TYPING_CHUNK_S:
+                low = mid
+            else:
+                high = mid - 1
+        cut = low
+        if cut < len(text):
+            cut = text.rfind(" ", cut // 2, cut) + 1 or cut
+            if text[cut - 1] == "\r" and text[cut] == "\n":
+                cut += -1 if cut > 1 else 1   # one Enter, not two
         chunks.append(text[:cut])
         text = text[cut:]
-    if text:
-        chunks.append(text)
     return chunks
+
+
+def xdotool_scheduled_seconds(argv) -> float:
+    """What an xdotool command from build_xdotool_type_command is scheduled to
+    take: its sleeps, and every typed character at its delay plus a
+    millisecond for the key itself."""
+    total, delay, i = 0.0, 0, 1
+    while i < len(argv):
+        word = argv[i]
+        if word == "sleep":
+            total += float(argv[i + 1])
+        elif word == "--delay":
+            delay = int(argv[i + 1])
+        elif word == "--":
+            total += len(argv[i + 1]) * (delay + 1) / 1000
+        else:
+            i += 1
+            continue
+        i += 2
+    return total
 
 
 @contextlib.contextmanager
 def _piece_of_a_typing(index: int):
-    """A piece after the first failing means part of the text landed: no
-    fallback may type it all again."""
+    """A piece after the first failing, however it fails, means part of the
+    text landed: no fallback may type it all again (Sol mac r14)."""
     try:
         yield
     except InjectionError as err:
         if index:
             err.uncertain_delivery = True
         raise
+    except Exception as exc:
+        if not index:
+            raise
+        err = InjectionError(f"typing stopped part way: {exc}")
+        err.uncertain_delivery = True
+        raise err from exc
 
 
 # Set once a wtype attempt reveals the compositor refuses the virtual-keyboard
@@ -822,17 +855,25 @@ def _pyautogui_command_v(pyautogui, cancelled=None) -> None:
         try:
             pyautogui.keyDown("v")
         finally:
-            _release_quietly(pyautogui.keyUp, "v")
+            _release_quietly(pyautogui, "v")
     finally:
-        _release_quietly(pyautogui.keyUp, "command")
+        _release_quietly(pyautogui, "command")
 
 
-def _release_quietly(key_up, key) -> None:
-    # A failed release must not replace why the paste stopped.
-    try:
-        key_up(key)
-    except Exception:
-        pass
+def _release_quietly(pyautogui, key) -> None:
+    """Key up through PyAutoGUI's own sender first: its public keyUp raises
+    the fail-safe with the pointer in a screen corner, which left Command
+    down (Sol mac r14). A failed release must not replace why the paste
+    stopped."""
+    native = getattr(getattr(pyautogui, "platformModule", None), "_keyUp", None)
+    for key_up in (native, pyautogui.keyUp):
+        if key_up is None:
+            continue
+        try:
+            key_up(key)
+            return
+        except Exception:
+            pass
 
 
 def warmup_clipboard() -> None:
@@ -1328,9 +1369,15 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     _require_modifier_release()
 
     text = fold_typography_for_typing(text)
-    for index, piece in enumerate(typing_chunks(text, key_delay + 1)):
+    def scheduled(piece):
         # Each run is a new XTEST client: each one gets the warm-up.
-        cmd = build_xdotool_type_command(piece, key_delay, warmup=xwayland)
+        return build_xdotool_type_command(piece, key_delay, warmup=xwayland)
+
+    def seconds(piece):
+        return xdotool_scheduled_seconds(scheduled(piece))
+
+    for index, piece in enumerate(typing_chunks(text, seconds)):
+        cmd = scheduled(piece)
         with _piece_of_a_typing(index):
             try:
                 result = _run_key_tool(
@@ -1371,11 +1418,12 @@ def _inject_text_wtype(text: str) -> None:
     # settle): a physically-held modifier corrupts virtual-keyboard typing the
     # same way it corrupts XTEST typing.
     _require_modifier_release()
-    for index, piece in enumerate(typing_chunks(text, 1)):
+    # wtype has no delay: about a millisecond a character.
+    for index, piece in enumerate(typing_chunks(text, lambda p: len(p) / 1000)):
         with _piece_of_a_typing(index):
             try:
                 result = _run_key_tool(
-                    ["wtype", piece],
+                    ["wtype", "--", piece],   # a piece may start with "-"
                     capture_output=True, text=True, timeout=120,
                 )
                 if result.returncode != 0:
@@ -1879,7 +1927,8 @@ def _inject_text_type_linux(
         # uinput-level typing merges with physically-held modifiers in the
         # compositor exactly like the other backends.
         _require_modifier_release()
-        for index, piece in enumerate(typing_chunks(text, key_delay + key_hold)):
+        per_char_s = (key_delay + key_hold) / 1000
+        for index, piece in enumerate(typing_chunks(text, lambda p: len(p) * per_char_s)):
             cmd = [
                 ydotool_bin, "type",
                 "--key-delay", str(key_delay),
@@ -1887,13 +1936,16 @@ def _inject_text_type_linux(
                 "--", piece,
             ]
             with _piece_of_a_typing(index):
-                result = _run_key_tool(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                    env=env,
-                )
+                try:
+                    result = _run_key_tool(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        env=env,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise InjectionError("ydotool timed out after 120s")
                 _check_ydotool_result(result, "type")
     except subprocess.TimeoutExpired:
         raise InjectionError("ydotool timed out after 120s")
