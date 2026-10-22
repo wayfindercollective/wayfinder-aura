@@ -6,6 +6,7 @@ watcher) runs on any POSIX host with platform_name="darwin"."""
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -143,6 +144,69 @@ def test_no_watcher_no_helper(monkeypatch, tmp_path):
                                           platform_name="darwin")
     time.sleep(0.2)
     assert not marker.exists()
+
+
+@posix
+@pytest.mark.parametrize("watcher_body", ["pass", "import time; time.sleep(30)"],
+                         ids=["exits-silently", "never-ready"])
+def test_a_watcher_that_never_reports_ready_starts_no_helper(monkeypatch, tmp_path, watcher_body):
+    # Sol mac r17: the helper waits for the watcher's word, not just its spawn.
+    marker = tmp_path / "ran"
+    _record_spawns(monkeypatch)
+    monkeypatch.setattr(child_supervisor, "_watcher_command",
+                        lambda: [sys.executable, "-c", watcher_body])
+    monkeypatch.setattr(child_supervisor, "WATCHER_READY_TIMEOUT_S", 1.0)
+    with pytest.raises(OSError, match="no crash watcher"):
+        child_supervisor.spawn_supervised(["touch", str(marker)], env=dict(os.environ),
+                                          platform_name="darwin")
+    [watcher] = _Recording.instances                      # the helper was never spawned
+    assert watcher.returncode is not None                 # stopped and reaped
+    time.sleep(0.2)
+    assert not marker.exists()
+
+
+@posix
+def test_an_early_group_sigterm_cannot_end_a_slow_watcher(monkeypatch, tmp_path):
+    # Sol mac r17: a watcher still starting up (here 1 s) did not yet ignore
+    # SIGTERM, so a stop's group SIGTERM right after the spawn ended it and
+    # left a helper that outlasts SIGTERM unwatched.
+    script = child_supervisor.__file__
+    monkeypatch.setattr(child_supervisor, "_watcher_command", lambda: [
+        sys.executable, "-c",
+        f"import runpy, time; time.sleep(1.0); runpy.run_path({script!r}, run_name='__main__')"])
+    proc = _helper(tmp_path, ignores_term=True)
+    watcher = proc._aura_watcher
+    try:
+        os.killpg(proc._aura_gid, signal.SIGTERM)
+        time.sleep(0.5)
+        assert watcher.poll() is None                     # still watching
+        assert proc.poll() is None                        # the helper shrugged it off
+    finally:
+        child_supervisor.stop_supervised(proc, term_wait=1, platform_name="darwin")
+    assert proc.returncode is not None
+    watcher.wait(timeout=5)
+
+
+def test_the_watcher_reports_ready_only_once_it_ignores_sigterm(monkeypatch):
+    ready_read, ready_write = os.pipe()
+    seen_before_ignore = []
+
+    def ignore(sig, how):
+        readable, _, _ = select.select([ready_read], [], [], 0)
+        seen_before_ignore.append((sig, how, bool(readable)))
+
+    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: os.getpid())
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(child_supervisor.signal, "signal", ignore)
+    pid_read, pid_write = os.pipe()
+    os.close(pid_write)                                   # the app went before naming a helper
+    try:
+        assert child_supervisor.run_watcher(pipe_fd=pid_read, ready_fd=ready_write) == 0
+        assert seen_before_ignore == [(signal.SIGTERM, signal.SIG_IGN, False)]
+        assert os.read(ready_read, 8) == child_supervisor.WATCHER_READY
+    finally:
+        for fd in (ready_read, ready_write, pid_read):
+            os.close(fd)
 
 
 @posix
@@ -751,7 +815,7 @@ def test_a_watcher_started_outside_the_protocol_refuses(monkeypatch):
     monkeypatch.delenv(child_supervisor.WATCHER_ENV, raising=False)
     assert child_supervisor.run_from_env() == 2 and watched == []
     monkeypatch.setenv(child_supervisor.WATCHER_ENV, "1")
-    assert child_supervisor.run_from_env() == 0 and watched == [{}]
+    assert child_supervisor.run_from_env() == 0 and watched == [{"ready_fd": 1}]
 
 
 def test_orphaned_helpers_are_only_launchd_parented_aura_binaries():

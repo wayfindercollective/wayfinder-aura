@@ -26,6 +26,11 @@ from typing import Mapping, Sequence
 
 # Set on the watcher (spawn_supervised): the pid it guards comes on its stdin.
 WATCHER_ENV = "WAYFINDER_CHILD_SUPERVISOR"
+# The watcher's one byte on its stdout once it ignores SIGTERM; the helper
+# starts only after it (Sol mac r17). A fresh frozen app on a busy 8 GB Mac
+# can take seconds to get there.
+WATCHER_READY = b"r"
+WATCHER_READY_TIMEOUT_S = 20.0
 
 
 def parent_process_alive(pid: int) -> bool:
@@ -73,8 +78,9 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
 
     macOS: its watcher starts first, the app's own child leading a new
     process group in the app's session, and the helper, the app's own child
-    too, starts inside that group, so the native binary never runs before
-    its watcher does (Sol mac r15). The watcher learns the helper's pid on
+    too, starts inside that group once the watcher reports it ignores
+    SIGTERM, so the native binary never runs before its watcher watches
+    (Sol mac r15, r17). The watcher learns the helper's pid on
     its lifeline pipe. A group keeps its id while it has a member, an exited
     one too until it is reaped (XNU's reap_child_locked leaves the group, as
     Linux's release_task does), so while either of the two is unreaped the
@@ -98,8 +104,19 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
     # The watcher's stdin is the app's lifeline: the app holds the only
     # write end, so the kernel closes it however the app exits.
     watcher = _POPEN(_watcher_command(), process_group=0, env={**os.environ, WATCHER_ENV: "1"},
-                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.DEVNULL, bufsize=0)
+    # Not before the watcher ignores SIGTERM: a stop's group SIGTERM landing
+    # while it still started up would end it, and a helper that outlasts
+    # SIGTERM would then run unwatched (Sol mac r17).
+    try:
+        ready = _watcher_ready(watcher, WATCHER_READY_TIMEOUT_S)
+    except BaseException:
+        _drop_watcher(watcher)
+        raise
+    if not ready:
+        _drop_watcher(watcher)
+        raise OSError(f"no crash watcher for {Path(str(command[0])).name}")
     try:
         proc = _POPEN(command, env=env, process_group=watcher.pid, **popen_kwargs)
     except BaseException:
@@ -120,6 +137,27 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
         _drop_watcher(watcher)
         raise OSError(f"no crash watcher for {Path(str(command[0])).name}") from exc
     return proc
+
+
+def _watcher_ready(watcher: subprocess.Popen, timeout: float) -> bool:
+    """Whether *watcher* reported WATCHER_READY within *timeout*. End of file
+    (it refused or died) or silence is False. Its stdout is closed either
+    way: nothing else comes on it."""
+    try:
+        fd = watcher.stdout.fileno()
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            readable, _, _ = select.select([fd], [], [], left)
+            if readable:
+                return os.read(fd, len(WATCHER_READY)) == WATCHER_READY
+    finally:
+        try:
+            watcher.stdout.close()
+        except (OSError, ValueError, AttributeError):
+            pass
 
 
 def _drop_watcher(watcher: subprocess.Popen) -> None:
@@ -648,7 +686,7 @@ def _read_child_pid(pipe_fd: int):
     return (int(line) if line.isdigit() and int(line) > 1 else None), rest
 
 
-def run_watcher(*, pipe_fd: int = 0, term_wait: float = 3.0) -> int:
+def run_watcher(*, pipe_fd: int = 0, term_wait: float = 3.0, ready_fd: int | None = None) -> int:
     """The helper's watcher (see spawn_supervised): end its group once the app
     is gone.
 
@@ -659,11 +697,19 @@ def run_watcher(*, pipe_fd: int = 0, term_wait: float = 3.0) -> int:
     group (killpg 0), never a number that could have been reused: SIGTERM
     then SIGKILL when the app dies, SIGKILL as soon as the helper leaves
     what it forked behind (Sol mac r13, r14), and SIGKILL straight away if
-    the app died before naming the helper (Sol mac r15)."""
+    the app died before naming the helper (Sol mac r15). With *ready_fd* it
+    writes WATCHER_READY there once SIGTERM is ignored, the app's cue to
+    start the helper (Sol mac r17)."""
     if os.getpgrp() != os.getpid():
         print("child-supervisor: not leading its own group", file=sys.stderr, flush=True)
         return 2
     signal.signal(signal.SIGTERM, signal.SIG_IGN)   # its own group's SIGTERM
+    if ready_fd is not None:
+        # Only now may the helper start (Sol mac r17).
+        try:
+            os.write(ready_fd, WATCHER_READY)
+        except OSError:
+            pass   # the app stopped waiting; its lifeline says the rest
     child_pid, rest = _read_child_pid(pipe_fd)
     if child_pid is None:
         os.killpg(0, signal.SIGKILL)   # a helper that may have started goes
@@ -712,7 +758,7 @@ def run_from_env() -> int:
     if os.environ.get(WATCHER_ENV) != "1":
         print("Invalid child-supervisor request", file=sys.stderr, flush=True)
         return 2
-    return run_watcher()
+    return run_watcher(ready_fd=1)
 
 
 if __name__ == "__main__":
