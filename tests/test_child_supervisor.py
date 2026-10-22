@@ -63,7 +63,7 @@ def test_other_platforms_spawn_plainly():
 
     def popen(command, **kwargs):
         made.append((command, kwargs))
-        return subprocess.Popen(["true"])
+        return subprocess.Popen([sys.executable, "-c", "pass"])
 
     proc = child_supervisor.spawn_supervised(["whisper-server"], env={"A": "1"}, popen=popen,
                                              platform_name="linux")
@@ -169,6 +169,7 @@ def test_the_group_signal_reaches_what_the_helper_forked(tmp_path):
     assert _gone(grandchild, within=2)
 
 
+@posix
 def test_signal_supervised_never_targets_a_reaped_pid(monkeypatch, tmp_path):
     sent = []
     monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
@@ -278,6 +279,7 @@ def test_a_timed_out_tracked_helper_is_killed_with_its_group(monkeypatch, tmp_pa
     assert _gone(grandchild, within=2)
 
 
+@posix
 def test_a_child_outside_its_own_group_is_never_group_signalled(monkeypatch):
     # Its pid is no group id of ours: a group of that number could be anyone's.
     sent = []
@@ -287,6 +289,7 @@ def test_a_child_outside_its_own_group_is_never_group_signalled(monkeypatch):
     assert proc.returncode is not None and sent == []
 
 
+@posix
 def test_only_macos_signals_a_group(monkeypatch):
     sent = []
     monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))

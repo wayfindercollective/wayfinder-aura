@@ -1861,13 +1861,14 @@ class TestARestartCutShortDictationIsNeverTyped:
             assert time.time() < deadline, "the chunk's helper never started"
             time.sleep(0.02)
 
-        def the_dictation_finishes_during_cleanup():
+        def the_dictation_finishes_during_cleanup(*_args):
+            # After the helper stop, before the reopen, as an exec would.
             worker.join(10)
             finalizer.join(10)
+            raise OSError("exec failed")
 
-        from wayfinder.utils import overlay_process
-        monkeypatch.setattr(overlay_process, "kill_stale_overlay_from_pidfile",
-                            the_dictation_finishes_during_cleanup)
+        import os
+        monkeypatch.setattr(os, "execv", the_dictation_finishes_during_cleanup)
         app._restart_for_overlay_change()   # stops the helper; the exec fails
         assert not worker.is_alive(), "the restart did not stop the chunk's helper"
         assert not finalizer.is_alive()

@@ -113,7 +113,7 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
         result = run_tracked(
             [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"],
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",   # whisper.cpp's output, any code page
             timeout=30,
             env=env,
         )

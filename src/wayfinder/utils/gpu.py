@@ -371,7 +371,7 @@ def detect_ggml_devices() -> List[GgmlDevice]:
         result = run_tracked(
             cmd,
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",   # whisper.cpp's output, any code page
             timeout=30,  # Should be fast with tiny model + minimal audio
         )
         

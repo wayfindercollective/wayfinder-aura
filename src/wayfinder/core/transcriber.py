@@ -652,7 +652,11 @@ class WhisperCppBackend(TranscriptionBackend):
                 result = run_tracked(
                     cmd,
                     capture_output=True,
-                    text=True,
+                    # whisper.cpp prints UTF-8 whatever the code page: the
+                    # locale default (cp1252 on Windows) garbled or dropped
+                    # non-ASCII text.
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=attempt_timeout,
                     # Preserve Vulkan selection while dropping PyInstaller's
                     # private library directory from native GPU children.

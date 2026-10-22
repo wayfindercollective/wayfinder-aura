@@ -97,6 +97,8 @@ class TestTheRegistry:
     CUT_OFF = [sys.executable, "-c",
                "import os, time; os.write(1, b'\\xe2\\x82'); time.sleep(30)"]
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="Windows' communicate() decodes in reader threads, which drop the error")
     def test_a_stopped_run_cut_off_mid_character_is_still_stopped(self):
         # communicate() fails to decode what the stop cut off: still Quit's doing.
         outcome = {}
@@ -117,6 +119,8 @@ class TestTheRegistry:
         assert isinstance(outcome.get("error"), child_supervisor.HelperStopped)
         assert isinstance(outcome["error"].__cause__, UnicodeDecodeError)
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="Windows' communicate() decodes in reader threads, which drop the error")
     def test_a_bad_decode_nobody_stopped_keeps_its_own_error(self):
         script = [sys.executable, "-c", "import os; os.write(1, b'\\xe2\\x82')"]
         with pytest.raises(UnicodeDecodeError):

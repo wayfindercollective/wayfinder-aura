@@ -2699,3 +2699,35 @@ class TestRetiredDictationGapsSolR7:
             with transcriber.dictation_requests(token):
                 with pytest.raises(transcriber.RequestAbandoned):
                     transcriber.transcribe_with_config("a.wav", {"post_processing_enabled": True})
+
+
+class TestWhisperCliOutputIsUtf8:
+    """whisper.cpp prints UTF-8 whatever the system code page. Decoded with
+    Windows' default (cp1252), "it’s café" was typed as "itâ€™s cafÃ©", and a
+    byte cp1252 lacks dropped the whole transcript."""
+
+    SPOKEN = "it’s café, naïve — “quoted” Ásgeir"
+
+    def test_non_ascii_text_survives_the_cli(self, tmp_path, monkeypatch):
+        import subprocess
+        import sys
+        from wayfinder.core import transcriber
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        backend = transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                                use_gpu=False, timeout=30)
+        real_run = transcriber.run_tracked
+        speak = f"import sys; sys.stdout.buffer.write({self.SPOKEN.encode()!r})"
+
+        def run(cmd, **kwargs):
+            if "--help" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            # The real decode, with the kwargs the backend passes. They
+            # must name it: CI sets PYTHONUTF8, the shipped app does not.
+            assert kwargs.get("encoding") == "utf-8"
+            return real_run([sys.executable, "-c", speak], **kwargs)
+
+        monkeypatch.setattr(transcriber, "run_tracked", run)
+        assert backend.transcribe(str(audio)) == self.SPOKEN
