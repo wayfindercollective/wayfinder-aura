@@ -330,9 +330,16 @@ def _fmt_delay(seconds: float) -> str:
     return f"{int(seconds)}s" if seconds < 120 else f"{int(seconds // 60)}m"
 
 
-def _schedule_gpu_retry(binary: str) -> float:
-    """Record a GPU failure and compute the next retry time. Returns the delay."""
+def _schedule_gpu_retry(binary: str, cancelled=None, cpu_binary=None) -> Optional[float]:
+    """Record a GPU failure and compute the next retry time. Returns the delay,
+    or None, changing nothing, when *cancelled* says so under the lock: a
+    retired dictation's failure, its wait for this lock included (Sol mac
+    r12). With *cpu_binary*, the CPU fallback is memoized in the same step."""
     with _gpu_state_lock:
+        if cancelled is not None and cancelled():
+            return None
+        if cpu_binary is not None:
+            _CPU_FALLBACK_ACTIVE[binary] = cpu_binary
         state = _gpu_retry_state.setdefault(binary, {"failures": 0, "next_retry": 0.0})
         state["failures"] += 1
         # Clamp the exponent: the delay saturates at _GPU_RETRY_CAP_SECONDS by ~6
@@ -676,10 +683,14 @@ class WhisperCppBackend(TranscriptionBackend):
 
         def _activate_fallback(reason: str) -> None:
             # Retired mid-attempt: the failure may be the reset's (sleep), so
-            # neither the CPU retry nor the memo.
-            WhisperServerBackend._check_not_abandoned(abandoned_at)
-            _CPU_FALLBACK_ACTIVE[self.whisper_binary] = attempts[-1]
-            delay = _schedule_gpu_retry(self.whisper_binary)
+            # neither the CPU retry nor the memo; asked under the lock, after
+            # its wait (Sol mac r12).
+            delay = _schedule_gpu_retry(
+                self.whisper_binary, cpu_binary=attempts[-1],
+                cancelled=lambda: (abandoned_at is not None
+                                   and WhisperServerBackend._abandoned != abandoned_at))
+            if delay is None:
+                raise RequestAbandoned("dictation abandoned")
             _log_gpu_event(
                 f"⚠️ GPU transcription {reason} — switched to CPU "
                 f"(will retry GPU in {_fmt_delay(delay)})"
@@ -814,21 +825,25 @@ class WhisperCppBackend(TranscriptionBackend):
         try:
             with dictation_requests(token):
                 ok = self._gpu_probe_succeeds()
-                if _retired_dictation():
-                    return
-            if ok:
-                with _gpu_state_lock:
-                    _CPU_FALLBACK_ACTIVE.pop(self.whisper_binary, None)
-                    # Keep (halved) failure history so a flapping GPU climbs the
-                    # backoff ladder instead of crash-looping the user's dictations.
-                    state = _gpu_retry_state.get(self.whisper_binary)
-                    if state is not None:
-                        state["failures"] = state["failures"] // 2
-                        state["next_retry"] = 0.0
-                _log_gpu_event("✅ GPU transcription restored — back on the GPU binary")
-            else:
-                delay = _schedule_gpu_retry(self.whisper_binary)
-                _log_gpu_event(f"GPU still unavailable — next retry in {_fmt_delay(delay)}")
+                if ok:
+                    with _gpu_state_lock:
+                        # Retired meanwhile, this lock's wait included: no
+                        # recovery for it (Sol mac r12).
+                        if _retired_dictation():
+                            return
+                        _CPU_FALLBACK_ACTIVE.pop(self.whisper_binary, None)
+                        # Keep (halved) failure history so a flapping GPU climbs the
+                        # backoff ladder instead of crash-looping the user's dictations.
+                        state = _gpu_retry_state.get(self.whisper_binary)
+                        if state is not None:
+                            state["failures"] = state["failures"] // 2
+                            state["next_retry"] = 0.0
+                    _log_gpu_event("✅ GPU transcription restored — back on the GPU binary")
+                else:
+                    delay = _schedule_gpu_retry(self.whisper_binary, cancelled=_retired_dictation)
+                    if delay is None:
+                        return   # nor a backoff
+                    _log_gpu_event(f"GPU still unavailable — next retry in {_fmt_delay(delay)}")
         except HelpersClosed:
             pass   # cut short by Quit: neither a recovery nor a failure
         finally:

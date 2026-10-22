@@ -2026,3 +2026,20 @@ def test_auto_enter_retired_during_its_wait_sends_nothing(monkeypatch):
     with pytest.raises(injector.InjectionCancelled):
         w.press_enter_windows(lambda: True)
     assert sent == []
+
+
+def test_the_clipboard_paste_hands_windows_its_cancellation(monkeypatch):
+    # do_inject's explicit clipboard paste (Sol mac r12): the Windows paste
+    # gets the dictation's cancellation, so it can ask after its own waits.
+    from wayfinder.core import injector
+    from wayfinder.core import injector_windows
+
+    given = []
+    monkeypatch.setattr(injector.sys, "platform", "win32")
+    monkeypatch.setattr(injector_windows, "inject_text_paste_windows",
+                        lambda text, cancelled=None: given.append(cancelled))
+
+    def retired():
+        return False
+    injector.inject_text_clipboard_paste("live words", cancelled=retired)
+    assert given == [retired]

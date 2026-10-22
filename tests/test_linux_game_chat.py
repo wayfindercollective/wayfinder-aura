@@ -116,7 +116,7 @@ def _linux_app(monkeypatch, frontmost):
 
     monkeypatch.setattr(gc, "paste_clipboard", fake_paste)
     monkeypatch.setattr(injector, "inject_text", lambda *a, **k: calls.append(("typed",) + a))
-    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
     monkeypatch.setattr(gc, "_STEAM_WINDOWS", {})
     app = SimpleNamespace(config={}, session_generation=1, log=logs.append)
     app._set_clipboard_from_worker = (
@@ -213,7 +213,7 @@ def test_press_held_releases_the_key_when_the_first_keyup_fails(monkeypatch):
 
     from wayfinder.core import injector
 
-    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
     monkeypatch.setattr(gc, "_portal", lambda: None)
     monkeypatch.setattr(gc.time, "sleep", lambda _s: None)
     calls = []
@@ -232,7 +232,7 @@ def test_press_held_releases_the_key_when_the_first_keyup_fails(monkeypatch):
 def test_type_text_without_the_portal_uses_the_hardened_xdotool_command(monkeypatch):
     from wayfinder.core import injector
 
-    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
     monkeypatch.setattr(injector, "_running_under_xwayland", lambda: True)
     monkeypatch.setattr(gc, "_portal", lambda: None)
     seen = []
@@ -263,7 +263,7 @@ def test_game_paste_rechecks_after_waiting_for_held_keys(monkeypatch):
     front = {"now": (5, "steam_app_1091500", "Cyberpunk 2077")}
     monkeypatch.setattr(gc, "frontmost_app", lambda: front["now"])
     monkeypatch.setattr(injector, "_require_modifier_release",
-                        lambda: front.update(now=(9, "firefox", "Mail")))
+                        lambda *_a: front.update(now=(9, "firefox", "Mail")))
     with pytest.raises(wm.InjectionError, match="left the front"):
         wm.WayfinderApp._inject_into_game_chat(app, "secret plan", 1)
     assert sent == []                     # no keydown went out

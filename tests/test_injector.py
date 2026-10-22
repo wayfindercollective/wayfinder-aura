@@ -1225,3 +1225,44 @@ class TestModifierProbeStaleMask:
 
     def test_without_keymap_calls_the_mask_decides(self):
         assert self._probe(self._lib(mask=0x01, keymap_calls=False)).query() == 0x01
+
+
+class TestARetiredClipboardPaste:
+    """do_inject's explicit clipboard paste (Sol mac r12) asks the dictation's
+    cancellation on Linux: before the clipboard and after the modifier wait."""
+
+    @pytest.mark.parametrize("retire_at", ["before", "modifier-wait", None])
+    def test_a_retired_clipboard_paste_pastes_nothing(self, retire_at):
+        import wayfinder.core.injector as injector
+        state = {"retired": retire_at == "before", "clipboard": "theirs"}
+
+        def wait():
+            if retire_at == "modifier-wait":
+                state["retired"] = True   # Escape, while a modifier was held
+            return True
+
+        writes = []
+
+        def write(text):
+            writes.append(text)
+            state["clipboard"] = text
+
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", side_effect=wait), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._clipboard_read_linux", side_effect=lambda: state["clipboard"]), \
+             patch("wayfinder.core.injector._clipboard_write_linux", side_effect=write), \
+             patch("wayfinder.core.injector.time.sleep"), \
+             patch("wayfinder.core.injector.subprocess.run", return_value=ok) as run:
+            if retire_at is None:
+                injector.inject_text_clipboard_paste("live words", cancelled=lambda: state["retired"])
+                assert any("ctrl+v" in call.args[0] for call in run.call_args_list)
+                return
+            with pytest.raises(injector.InjectionCancelled):
+                injector.inject_text_clipboard_paste("retired words", cancelled=lambda: state["retired"])
+            assert not any("ctrl+v" in call.args[0] for call in run.call_args_list)
+        assert state["clipboard"] == "theirs"      # untouched, or put back
+        if retire_at == "before":
+            assert writes == []                    # not even for a moment
+        assert getattr(injector._injection, "cancelled", None) is None

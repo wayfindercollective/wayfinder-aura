@@ -62,6 +62,12 @@ def _refuse_if_cancelled(cancelled=None) -> None:
         raise InjectionCancelled("the dictation was retired: nothing injected")
 
 
+# The portal keyboard asks too, under its type lock: a typing (or a game chat's
+# keys) that waited there for another one sends nothing for a retired dictation.
+from . import portal_keyboard as _portal_keyboard  # noqa: E402  (stdlib only)
+_portal_keyboard.check_before_keys(_refuse_if_cancelled)
+
+
 # Set once a wtype attempt reveals the compositor refuses the virtual-keyboard
 # protocol (GNOME/Mutter always does; some KWin setups deny it). Selection
 # happens before any attempt, so this session cache lets later injections skip
@@ -1367,6 +1373,8 @@ def _fallback_after_portal_error(err: InjectionError) -> str:
     wtype or xdotool) instead of silently retrying a dead session. Other
     errors (clipboard) keep the xdotool fallback.
     """
+    if isinstance(err, InjectionCancelled):
+        raise err   # refused for a retired dictation: no other tool sends it
     if not getattr(err, "portal_failure", False):
         return _portal_fallback_tool()
     from . import portal_keyboard
@@ -1401,19 +1409,29 @@ def _portal_paste(text: str) -> None:
     if _PORTAL_CLIPBOARD_WRITE is None or not _PORTAL_CLIPBOARD_WRITE(text):
         raise InjectionError("Could not set the clipboard for the paste")
     time.sleep(_PORTAL_PASTE_SETTLE_S)
-    _portal_press("ctrl+v", 0.02)
+    try:
+        _portal_press("ctrl+v", 0.02)
+    except InjectionCancelled:
+        _restore_portal_clipboard(text, previous)   # nothing pasted: now
+        raise
     if previous is not None and previous != text:
         time.sleep(_PORTAL_RESTORE_AFTER_S)
-        try:
-            # Only if the clipboard still holds the dictation: the user may
-            # have copied something new meanwhile. The app's restorer compares
-            # and writes in one Tk step, so no copy can slip in between.
-            if _PORTAL_CLIPBOARD_RESTORE is not None:
-                _PORTAL_CLIPBOARD_RESTORE(text, previous)
-            elif _PORTAL_CLIPBOARD_READ() == text:
-                _PORTAL_CLIPBOARD_WRITE(previous)
-        except Exception:
-            pass
+        _restore_portal_clipboard(text, previous)
+
+
+def _restore_portal_clipboard(text: str, previous) -> None:
+    if previous is None or previous == text:
+        return
+    try:
+        # Only if the clipboard still holds the dictation: the user may
+        # have copied something new meanwhile. The app's restorer compares
+        # and writes in one Tk step, so no copy can slip in between.
+        if _PORTAL_CLIPBOARD_RESTORE is not None:
+            _PORTAL_CLIPBOARD_RESTORE(text, previous)
+        elif _PORTAL_CLIPBOARD_READ() == text:
+            _PORTAL_CLIPBOARD_WRITE(previous)
+    except Exception:
+        pass
 
 
 def _inject_text_portal(text: str, typing_speed: str = "instant") -> None:
@@ -1545,7 +1563,14 @@ def press_enter(cancelled=None) -> None:
     Backs the opt-in "Auto press Enter after dictation" setting: dictate →
     text lands → Enter fires, so chat-style inputs submit hands-free. Uses the
     same tool dispatch as text injection so it works wherever typing works.
+
+    *cancelled*, as for inject_text: asked after every wait, on every platform.
     """
+    with cancellable(cancelled):
+        _press_enter(cancelled)
+
+
+def _press_enter(cancelled=None) -> None:
     if sys.platform == "darwin":
         if not _wait_for_macos_modifier_release():
             raise InjectionError(
@@ -1620,7 +1645,14 @@ def inject_text_clipboard_paste(text: str, cancelled=None) -> None:
 
     Used as the Game Mode fallback when synthetic typing fails, and as the
     native macOS path. Best-effort clipboard restore after paste.
+
+    *cancelled*, as for inject_text: asked after every wait, on every platform.
     """
+    with cancellable(cancelled):
+        _inject_text_clipboard_paste(text, cancelled)
+
+
+def _inject_text_clipboard_paste(text: str, cancelled=None) -> None:
     if not text:
         return
     text = text.strip()
@@ -1632,7 +1664,7 @@ def inject_text_clipboard_paste(text: str, cancelled=None) -> None:
         return
     if sys.platform == "win32":
         from .injector_windows import inject_text_paste_windows
-        inject_text_paste_windows(text)
+        inject_text_paste_windows(text, cancelled)
         return
     if not sys.platform.startswith("linux"):
         raise InjectionError(
@@ -1647,6 +1679,7 @@ def inject_text_clipboard_paste(text: str, cancelled=None) -> None:
             "No text injection tool available for clipboard paste on Linux."
         )
 
+    _refuse_if_cancelled(cancelled)   # the clipboard is not touched for it
     old_clipboard = _clipboard_read_linux()
     _clipboard_write_linux(text)
     time.sleep(0.05)
