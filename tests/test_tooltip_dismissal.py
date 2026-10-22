@@ -9,6 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import wayfinder_main as wm
+from wayfinder.ui import components
 
 
 class _Widget:
@@ -63,4 +64,17 @@ def test_destroyed_tooltip_leaves_the_live_set():
     widget = _Widget()
     tip = wm.ToolTip(widget, "hint")
     tip.on_destroy()
-    assert tip not in wm._LIVE_TOOLTIPS
+    assert tip not in components._LIVE_TOOLTIPS
+
+
+def test_no_tooltip_is_scheduled_during_a_wheel_gesture():
+    widget = _Widget()
+    tip = wm.ToolTip(widget, "hint")
+    components.set_wheel_scroll_active(True)
+    try:
+        tip.on_enter()
+        assert tip.scheduled_id is None
+    finally:
+        components.set_wheel_scroll_active(False)
+    tip.on_enter()
+    assert tip.scheduled_id == "timer-1"

@@ -50,8 +50,10 @@ from .macos_game_chat import (  # noqa: F401 - re-exported: same interface as th
     GameChatAborted,
     GameEntry,
     GameProfile,
+    filter_games,
     gamer_asr_overlay,
     gamer_vocabulary,
+    merge_game_entries,
     profile_entry,
     send_to_chat,
     split_for_chat,
@@ -114,10 +116,7 @@ def game_list() -> list[GameEntry]:
     facts don't hold; the Windows ones do under Wine/Proton)."""
     from .windows_game_chat import _researched
 
-    entries = [_linux_profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
-    names = {e.name.lower() for e in entries}
-    entries += [e for e in _researched() if e.name.lower() not in names]
-    return sorted(entries, key=lambda e: e.name.lower())
+    return merge_game_entries([_linux_profile_entry(p) for p in PROFILES] + list(INFO_ONLY), _researched())
 
 
 def _linux_profile_entry(profile: GameProfile) -> GameEntry:
@@ -132,11 +131,7 @@ def _linux_profile_entry(profile: GameProfile) -> GameEntry:
 
 def search_games(query: str) -> list[GameEntry]:
     """Case-insensitive match on the name or an alias; empty query = all."""
-    q = " ".join((query or "").lower().split())
-    if not q:
-        return game_list()
-    return [e for e in game_list()
-            if q in e.name.lower() or any(q in a for a in e.aliases)]
+    return filter_games(game_list(), query)
 
 
 def match_profile(window_class: Optional[str], window_title: Optional[str]) -> Optional[GameProfile]:

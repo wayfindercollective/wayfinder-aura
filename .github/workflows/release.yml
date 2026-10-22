@@ -276,7 +276,7 @@ jobs:
           XDG_CONFIG_HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-input-self-test | tee /tmp/audio-input-self-test.log
           grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/audio-input-self-test.log
-          # Medium depends on a dynamically imported scipy.signal module, and
+          # Medium's rumble filter must really run in the bundle, and
           # preprocessing's stationary-noise guard is a release-critical defense
           # against confident Whisper hallucinations. Exercise the packaged path.
           XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \

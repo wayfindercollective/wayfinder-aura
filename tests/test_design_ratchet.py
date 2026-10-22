@@ -330,9 +330,11 @@ def _allowed_toplevel_line_ranges(src: str):
 def test_toplevels_only_in_sanctioned_classes():
     ranges = _allowed_toplevel_line_ranges(MAIN_SRC)
     # Guard against the class names being renamed and the test silently passing.
-    assert len(ranges) == len(TOPLEVEL_ALLOWED_CLASSES), (
+    # ToolTip lives in ui/components.py now (the src-package test covers it).
+    components = (SRC_PACKAGE / "ui" / "components.py").read_text(encoding="utf-8")
+    assert len(ranges) + len(_allowed_toplevel_line_ranges(components)) == len(TOPLEVEL_ALLOWED_CLASSES), (
         "expected to locate every sanctioned Toplevel class "
-        f"{sorted(TOPLEVEL_ALLOWED_CLASSES)}; found {len(ranges)} class bodies"
+        f"{sorted(TOPLEVEL_ALLOWED_CLASSES)} in wayfinder_main.py + ui/components.py"
     )
 
     offenders = []

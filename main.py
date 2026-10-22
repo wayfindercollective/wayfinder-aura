@@ -294,8 +294,9 @@ if "--audio-input-self-test" in sys.argv:
         sys.exit(1)
 
 
-# Packaged preprocessing probe. Medium silently degrades to Light when SciPy's
-# dynamically imported signal module is omitted from a bundle, while unbounded
+# Packaged preprocessing probe. Medium silently degrades to Light if the rumble
+# filter cannot run in a bundle (it used to depend on a dynamically imported
+# scipy.signal; now core.audio_dsp's NumPy filters), while unbounded
 # normalization can turn stationary mic noise into hallucinated speech. Exercise
 # those exact package boundaries without opening an audio device or Tk.
 if "--audio-processing-self-test" in sys.argv:
@@ -304,8 +305,8 @@ if "--audio-processing-self-test" in sys.argv:
         from wayfinder.core import recorder as _recorder
 
         _rate = 16000
-        # The Medium rumble filter must really run (SciPy, or the NumPy twins the
-        # Windows bundle ships instead): a 20 Hz hum under a 300 Hz tone.
+        # The Medium rumble filter must really run (core.audio_dsp): a 20 Hz hum
+        # under a 300 Hz tone.
         _t = np.arange(_rate) / _rate
         _hum = (0.2 * np.sin(2 * np.pi * 20 * _t) + 0.2 * np.sin(2 * np.pi * 300 * _t)).astype(np.float32)
         _spectrum = np.abs(np.fft.rfft(_recorder.preprocess_audio(_hum, _rate, "medium")))

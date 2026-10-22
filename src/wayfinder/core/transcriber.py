@@ -749,6 +749,7 @@ class WhisperServerBackend(TranscriptionBackend):
     # this — a single-write-site invariant nothing here guaranteed.
     _server_use_gpu: Optional[bool] = None
     _server_threads: Optional[int] = None  # -t at spawn (macOS/Windows reuse check)
+    _server_vk_devices: Optional[str] = None  # GGML_VK_VISIBLE_DEVICES at spawn
     # whisper-server is intentionally verbose (several KB per request). Its stdout
     # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
     # fills the kernel pipe and blocks the server in write(), which looks exactly like
@@ -1021,6 +1022,15 @@ class WhisperServerBackend(TranscriptionBackend):
                 sys.platform not in ("darwin", "win32")
                 or WhisperServerBackend._server_threads == self.threads
             )
+            # Vulkan picks its device from GGML_VK_VISIBLE_DEVICES at spawn. GPU
+            # setup sets it off the Tk thread after GPU is turned on, so a server
+            # spawned before that finished runs on the default device and must
+            # not be kept once the selection lands.
+            and (
+                not self.use_gpu or sys.platform == "darwin"
+                or WhisperServerBackend._server_vk_devices
+                == os.environ.get("GGML_VK_VISIBLE_DEVICES")
+            )
         )
 
     def _start_server(self, deadline: float = None, force: bool = False) -> None:
@@ -1131,6 +1141,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 WhisperServerBackend._server_use_gpu = self.use_gpu
                 WhisperServerBackend._server_binary = self.whisper_server_binary
                 WhisperServerBackend._server_threads = self.threads
+                WhisperServerBackend._server_vk_devices = spawn_env.get("GGML_VK_VISIBLE_DEVICES")
                 # Start draining BEFORE readiness probes. A chatty startup or repeated
                 # requests must never be able to fill stdout and deadlock inference.
                 WhisperServerBackend._start_server_output_drain(proc)

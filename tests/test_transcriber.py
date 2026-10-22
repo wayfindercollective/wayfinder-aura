@@ -2184,13 +2184,14 @@ class TestServerReuseIdentity:
 
     MODEL = "/models/ggml-base.en.bin"
 
-    def _set_state(self, alive=True, model=MODEL, gpu=False, threads=4):
+    def _set_state(self, alive=True, model=MODEL, gpu=False, threads=4, vk=None):
         from wayfinder.core.transcriber import WhisperServerBackend
         proc = MagicMock()
         proc.poll.return_value = None if alive else 1
         WhisperServerBackend._server_process = proc
         WhisperServerBackend._server_model_path = model
         WhisperServerBackend._server_use_gpu = gpu
+        WhisperServerBackend._server_vk_devices = vk
         # macOS/Windows also match -t (the backend's default is 4); set it
         # rather than inherit whatever an earlier test left on the class.
         WhisperServerBackend._server_threads = threads
@@ -2207,6 +2208,48 @@ class TestServerReuseIdentity:
         WhisperServerBackend._server_use_gpu = None
         WhisperServerBackend._server_threads = None
         WhisperServerBackend._server_binary = None
+        WhisperServerBackend._server_vk_devices = None
+
+    @pytest.fixture
+    def linux(self, monkeypatch):
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(transcriber.sys, "platform", "linux")
+        monkeypatch.delenv("GGML_VK_VISIBLE_DEVICES", raising=False)
+
+    def test_vulkan_device_change_fails_reuse(self, linux, monkeypatch):
+        # GPU just turned on: a dictation started the Vulkan server before the
+        # device selection set GGML_VK_VISIBLE_DEVICES, so it runs on device 0.
+        self._set_state(gpu=True, vk=None)
+        monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "1")
+        assert self._backend(gpu=True)._server_reusable() is False
+        self._set_state(gpu=True, vk="1")
+        assert self._backend(gpu=True)._server_reusable() is True
+
+    def test_a_cpu_server_ignores_the_vulkan_device(self, linux, monkeypatch):
+        self._set_state(gpu=False, vk=None)
+        monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "1")
+        assert self._backend(gpu=False)._server_reusable() is True
+
+    def test_spawn_records_the_vulkan_device_it_started_on(self, linux, monkeypatch, tmp_path):
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        binary = tmp_path / "whisper-server"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        backend = WhisperServerBackend(whisper_server_binary=str(binary),
+                                       model_path=str(model), use_gpu=True)
+        WhisperServerBackend._server_process = None
+        monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "1")
+        new_proc = MagicMock(); new_proc.poll.return_value = None
+        with patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch.object(WhisperServerBackend, "_find_available_port", return_value=8200), \
+             patch.object(WhisperServerBackend, "_is_our_server", return_value=True), \
+             patch("subprocess.Popen", return_value=new_proc) as mock_popen, \
+             patch("time.sleep"):
+            backend._start_server(force=True)
+        assert mock_popen.call_args.kwargs["env"]["GGML_VK_VISIBLE_DEVICES"] == "1"
+        assert backend._server_reusable() is True
+        monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "0")  # the user picked another GPU
+        assert backend._server_reusable() is False
 
     def test_same_model_same_mode_is_reusable(self):
         self._set_state(gpu=False)

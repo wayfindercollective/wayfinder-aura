@@ -35,7 +35,6 @@ dependencies = [
     "PyQt6>=6.5.0",
     "sounddevice>=0.4.6",
     "numpy>=1.24.0",
-    "scipy>=1.10.0",
     "evdev>=1.6.0; sys_platform == 'linux'",
     "pynput>=1.7.6",
     # Linux Gamer mode reads the game window over X11 directly (pynput pulls it
@@ -61,6 +60,9 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.12.0",
     "pytest-timeout>=2.2.0",
+    # tests/test_audio_dsp.py checks core.audio_dsp against scipy.signal; the app
+    # itself no longer uses SciPy.
+    "scipy>=1.10.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "types-requests>=2.28.0",

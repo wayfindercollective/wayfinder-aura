@@ -88,20 +88,16 @@ cleanup:
   - /lib/python*/site-packages/pip*
   - /lib/python*/site-packages/setuptools*
   - /lib/python*/site-packages/wheel*
-  # Source-build frontends are needed while constructing NumPy/SciPy, not at
+  # Source-build frontends are needed while constructing NumPy and Pillow, not at
   # runtime. Keep these paths explicit: generated build-only cleanup='*' can
   # claim native libraries imported by a later build-tool module.
   - /bin/pybind11-config
   - /bin/pyproject-build
-  - /bin/pythran*
-  - /lib/python*/site-packages/beniget*
-  - /lib/python*/site-packages/gast*
   - /lib/python*/site-packages/mesonpy*
   - /lib/python*/site-packages/meson_python*
   - /lib/python*/site-packages/ply*
   - /lib/python*/site-packages/pybind11*
   - /lib/python*/site-packages/pyproject_metadata*
-  - /lib/python*/site-packages/pythran*
 
 modules:
   # PortAudio for sounddevice. In the sandbox, route through the KDE runtime's
@@ -271,7 +267,7 @@ modules:
         commit: eb489de1b4fb3fd0cd935d68ae16ecd4c653ac7d
 
   # Flathub requires source-available runtime dependencies to be built from
-  # source. OpenBLAS backs the explicit NumPy/SciPy source modules below.
+  # source. OpenBLAS backs the explicit NumPy source module below.
   - name: openblas
     buildsystem: cmake-ninja
     builddir: true
@@ -288,8 +284,9 @@ modules:
         url: https://github.com/OpenMathLib/OpenBLAS/archive/v0.3.34.tar.gz
         sha256: cd7e129868320cc2d033afa920e31202dfe0b8066a5b66661900ccc0f197dfed
 
-  # NumPy and SciPy use Meson's PEP 517 backend. These are pure-Python build
-  # tools and are removed from the final app by the explicit top-level cleanup.
+  # NumPy uses Meson's PEP 517 backend and Pillow 12 imports pybind11 while
+  # building. These are pure-Python build tools and are removed from the final
+  # app by the explicit top-level cleanup.
   - python-numpy-build-tools.json
 
   # Build Maturin itself from source once, then use it as the offline PEP 517
@@ -362,22 +359,6 @@ modules:
       - type: archive
         url: https://files.pythonhosted.org/packages/22/fd/89965aa4ac08c74998539fcbf24fa3540f3e15237fbeb6bcf9c908f4aade/numpy-2.5.1.tar.gz
         sha256: a48a113e6afea91f5608793bafa7ef2ad481fefbda87ec5069f483de61cb9fa3
-
-  # SciPy's remaining build frontends need the just-built NumPy import, so
-  # install them after NumPy rather than in the earlier build-tool module.
-  - python-scipy-build-tools.json
-
-  - name: python-scipy
-    buildsystem: simple
-    build-options:
-      no-debuginfo: true
-      ldflags: -lgfortran
-    build-commands:
-      - pip3 install --verbose --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} . --no-build-isolation --no-deps
-    sources:
-      - type: archive
-        url: https://files.pythonhosted.org/packages/a7/25/c2700dfaf6442b4effaa91af24ebce5dc9d31bb4a69706313aae70d72cd0/scipy-1.18.0.tar.gz
-        sha256: 67b2ad2ad54c72ca6d04975a9b2df8c3638c34ddd5b28738e94fc2b57929d378
 
   - name: python-pillow
     buildsystem: simple

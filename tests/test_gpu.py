@@ -380,7 +380,7 @@ class TestSetupGpuEnvironment:
         monkeypatch.setattr("wayfinder.utils.gpu_simple.sys.platform", "linux")
 
         with patch("wayfinder.utils.gpu_simple.get_discrete_gpu", return_value=1):
-            env_set = setup_gpu_environment({"gpu_device": "auto"})
+            env_set = setup_gpu_environment({"gpu_device": "auto", "use_gpu": True})
 
         assert env_set.get("GGML_VK_VISIBLE_DEVICES") == "1"
 
@@ -400,7 +400,7 @@ class TestSetupGpuEnvironment:
         monkeypatch.setattr("wayfinder.utils.gpu_simple.sys.platform", "linux")
 
         with patch("wayfinder.utils.gpu_simple.get_discrete_gpu", return_value=0):
-            env_set = setup_gpu_environment({"gpu_device": "notanumber"})
+            env_set = setup_gpu_environment({"gpu_device": "notanumber", "use_gpu": True})
 
         # Should fall through to auto-detect
         assert env_set.get("GGML_VK_VISIBLE_DEVICES") == "0"
