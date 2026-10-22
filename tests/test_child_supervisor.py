@@ -181,6 +181,35 @@ def test_the_group_signal_reaches_what_the_helper_forked(tmp_path, fork_ignores_
 
 
 @posix
+def test_the_group_kill_waits_for_the_leaders_own_shutdown(tmp_path):
+    # The group SIGKILL follows the leader's exit and never replaces it: a
+    # server finishing its shutdown on SIGTERM gets to finish it.
+    done = tmp_path / "done"
+    proc = _helper(tmp_path,
+                   "def leave(*_):\n"
+                   "    time.sleep(0.3)\n"
+                   f"    open({str(done)!r}, 'w').write('clean')\n"
+                   "    os._exit(0)\n"
+                   "signal.signal(signal.SIGTERM, leave)\n")
+    child_supervisor.signal_supervised(proc, platform_name="darwin")
+    assert child_supervisor.wait_supervised(proc, 5, platform_name="darwin")
+    assert proc.returncode == 0 and done.read_text() == "clean"
+
+
+@posix
+def test_a_leader_still_running_when_the_wait_ends_is_left_to_its_caller(tmp_path):
+    # A wait that times out kills nothing: the caller decides on SIGKILL.
+    proc = _helper(tmp_path, ignores_term=True)
+    try:
+        child_supervisor.signal_supervised(proc, platform_name="darwin")
+        assert not child_supervisor.wait_supervised(proc, 0.3, platform_name="darwin")
+        assert proc.poll() is None
+    finally:
+        child_supervisor.stop_supervised(proc, term_wait=0.2, kill_wait=2, platform_name="darwin")
+        assert _gone(proc.pid, within=2)
+
+
+@posix
 def test_the_watcher_ends_what_the_helper_forked_when_the_app_dies(tmp_path):
     # Sol mac r13, Force Quit: the leader leaves on the watcher's SIGTERM, and
     # the worker it forked, which ignores SIGTERM, must not outlive it.
