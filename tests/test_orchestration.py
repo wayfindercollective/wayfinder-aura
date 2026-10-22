@@ -1195,6 +1195,73 @@ class TestChunkedFinalize:
         assert sleeps == [0.05]
 
 
+class TestChunkRetryAfterReset:
+    def test_a_chunk_re_heard_after_a_reset_builds_no_backend(self, app, monkeypatch, tmp_path):
+        # Sol mac r6: a prompted chunk came back short as the reset landed,
+        # and its re-hear took a fresh abandonment token, so the retired
+        # dictation started, recovered and counted all over again.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 17.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+        built = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                cls.abandon_requests()   # Escape while the chunk is heard
+                return "a"
+
+        def get_backend(_config):
+            built.append(True)
+            return Backend()
+
+        monkeypatch.setattr(transcriber, "get_backend", get_backend)
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the words of the first chunk"]
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+        assert built == [True], "the re-hear of a retired dictation built a backend"
+        assert store[1] == "[error]"
+
+
+    @pytest.mark.parametrize("call", ["single shot", "first chunk"])
+    def test_a_reset_before_the_request_builds_no_backend(self, app, monkeypatch, tmp_path, call):
+        # The dictation's token, not one taken when the request starts.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+        monkeypatch.setattr(transcriber, "get_backend",
+                            lambda _config: pytest.fail("a retired dictation built a backend"))
+
+        def reset_as_the_config_is_read(self):
+            cls.abandon_requests()
+            return {}
+
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", reset_as_the_config_is_read)
+        app.start_recording()
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"\x00")
+        if call == "single shot":
+            app.transcribe_and_inject(str(audio), app.session_generation)
+            event_type, (message, _gen) = app.event_queue.get_nowait()
+            assert event_type == wayfinder_main.EventType.TRANSCRIPTION_ERROR
+            assert "abandoned" in message
+        else:
+            store = []
+            app._transcribe_chunk(str(audio), 0, app.session_generation, store)
+            assert store == ["[error]"]
+
+
 class TestChunkSilenceGuard:
     def test_silent_trailing_chunk_skips_whisper_and_completes_store(
         self, app, monkeypatch, tmp_path

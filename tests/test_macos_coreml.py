@@ -809,6 +809,81 @@ def test_a_compile_quit_cut_short_is_not_a_core_ml_failure(tmp_path, monkeypatch
     assert macos_coreml.comparison_failures(str(cli), str(model)) == 1
 
 
+
+def _helper_stopped(pid, within=5.0):
+    import time
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            with open(f"/proc/{pid}/stat") as stat:
+                if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True   # dead, waiting for init to reap it
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+@pytest.mark.parametrize("helper", ["probe", "compile"])
+def test_a_core_ml_helper_whose_supervisor_died_first_is_stopped(tmp_path, monkeypatch, helper):
+    # Sol mac r6: the probe and compile helpers spawned plainly, so a helper
+    # that outlived its supervisor kept loading after the failure that ended it.
+    import signal
+    import sys
+    from wayfinder.utils import child_supervisor, macos_coreml_convert
+
+    def as_darwin(fn):
+        return lambda *args, **kwargs: fn(*args, **{**kwargs, "platform_name": "darwin"})
+
+    for name in ("wrap_macos_child_command", "spawn_supervised", "signal_supervised", "stop_supervised"):
+        monkeypatch.setattr(child_supervisor, name, as_darwin(getattr(child_supervisor, name)))
+    pid_file = tmp_path / "helper.pid"
+    body = ("import os, signal, time\n"
+            f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+            "os.kill(os.getppid(), signal.SIGKILL)\n"
+            "time.sleep(60)\n")
+    try:
+        if helper == "probe":
+            monkeypatch.setattr(macos_coreml.subprocess, "check_output", lambda *a, **k: "")
+            backend = _probe_backend([sys.executable, "-c", body])
+            with pytest.raises(RuntimeError, match="probe exited"):
+                with macos_coreml._probe_server(backend, "/bin/whisper-server", "/m.bin",
+                                                coreml=True, cancelled=lambda: False):
+                    pass
+        else:
+            cli = tmp_path / "bin" / "whisper-cli"
+            cli.parent.mkdir()
+            cli.write_bytes(b"cli")
+            compiler = cli.with_name("coreml-compile")
+            compiler.write_text(f"#!{sys.executable}\n" + body)
+            compiler.chmod(0o700)
+            model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+            model.write_bytes(b"model")
+            monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+            monkeypatch.setattr(macos_coreml, "_conversion_root", lambda: tmp_path / "derived")
+            monkeypatch.setattr(macos_coreml, "_failure_path", lambda: tmp_path / "coreml-failures.json")
+            monkeypatch.setattr(macos_coreml, "_hardware_identity", lambda: {"hardware": "MacBookAir10,1"})
+            monkeypatch.setattr(macos_coreml, "_binary_twin", lambda c: cli)
+            monkeypatch.setattr(macos_coreml, "prepared_twin", lambda c, m: None)
+            monkeypatch.setattr(macos_coreml_convert, "template_path", lambda: None)
+            monkeypatch.setattr(macos_coreml_convert, "load_bindings", lambda path: {"weights_size": 1})
+            monkeypatch.setattr(macos_coreml_convert, "populate_package", lambda m, p, cancelled: {"format": 2})
+            assert macos_coreml.prepare_encoder(str(cli), str(model), cancelled=lambda: False) is False
+        assert _helper_stopped(int(pid_file.read_text())), "the helper outlived its supervisor's failure"
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+
+
 def _published_server_rig(monkeypatch):
     import threading
     from unittest.mock import Mock
@@ -1853,3 +1928,29 @@ def test_a_pick_at_idle_before_the_flush_runs_is_not_replaced_by_the_queued_one(
 def test_a_core_ml_backend_salvages_through_metal_cli(monkeypatch):
     backend, _config, _scheduled = _darwin_selection(monkeypatch, resident=True)
     assert backend._cli_fallback() is backend._ready_only_fallback._cli_fallback()
+
+
+def test_a_hand_over_that_finds_this_models_core_ml_dead_publishes_nothing(comparison_rig, monkeypatch):
+    # Sol mac r6: the publish counted the retiring Core ML record's death for
+    # the same model, then published that model's Core ML anyway.
+    from contextlib import contextmanager
+    rig = comparison_rig
+    key = (str(rig.cli), str(rig.model))
+    cls, old, probe = _published_server_rig(monkeypatch)
+    old.poll.return_value = 9
+    monkeypatch.setattr(cls, "_server_coreml_key", key)
+    monkeypatch.setattr(cls, "_closed", False)
+    monkeypatch.setattr(macos_coreml, "comparison", lambda c, m: {"preferred": True})
+    monkeypatch.setattr(macos_coreml, "coreml_twin", lambda c, m: "/twin/whisper-cli")
+    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda *a: False)
+    monkeypatch.setattr(macos_coreml, "_stop_probe", lambda proc: pytest.fail("a server was replaced"))
+
+    @contextmanager
+    def probe_server(*_a, **_k):
+        yield probe
+
+    monkeypatch.setattr(macos_coreml, "_probe_server", probe_server)
+    with pytest.raises(InterruptedError):
+        macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False)
+    assert cls._server_process is old and not probe.adopted
+    assert macos_coreml.comparison_failures(*key) == 1

@@ -25,7 +25,7 @@ from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import (
     HelpersClosed, bind_to_app_lifetime, run_tracked, signal_supervised,
-    supervised_popen_kwargs, wrap_macos_child_command,
+    spawn_supervised, wait_supervised, wrap_macos_child_command,
 )
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
@@ -98,6 +98,28 @@ class ServerStartSuperseded(TranscriptionError):
 
 class CoreMLNotLoaded(TranscriptionError):
     """A Core ML server serves only once it is loaded; see _ready_only_fallback."""
+
+
+# The token of the dictation this thread's requests belong to: see
+# dictation_requests().
+_dictation = threading.local()
+
+
+@contextlib.contextmanager
+def dictation_requests(token: Optional[int]):
+    """Run a dictation's requests under *token*, the abandonment count taken
+    when the dictation began (WhisperServerBackend.request_token()). A
+    retirement after that stops every one of them: a re-heard chunk, the
+    Metal twin, whisper-cli and its CPU retry included (Sol mac r6). An
+    enclosing scope keeps its own token."""
+    if token is None or getattr(_dictation, "token", None) is not None:
+        yield
+        return
+    _dictation.token = token
+    try:
+        yield
+    finally:
+        _dictation.token = None
 
 
 class RequestAbandoned(TranscriptionError):
@@ -468,6 +490,10 @@ class WhisperCppBackend(TranscriptionBackend):
             # Quit or restart: nothing starts after a terminal shutdown, its
             # --help probe included.
             raise TranscriptionError("Aura is shutting down")
+        # A retired dictation runs no probe or attempt, and moves nothing to
+        # the CPU (Sol mac r6).
+        abandoned_at = WhisperServerBackend.request_token()
+        WhisperServerBackend._check_not_abandoned(abandoned_at)
 
         # Validate paths
         if not _existing_file(self.whisper_binary):
@@ -589,6 +615,9 @@ class WhisperCppBackend(TranscriptionBackend):
                 attempts.append(_fb)
 
         def _activate_fallback(reason: str) -> None:
+            # Retired mid-attempt: the failure may be the reset's (sleep), so
+            # neither the CPU retry nor the memo.
+            WhisperServerBackend._check_not_abandoned(abandoned_at)
             _CPU_FALLBACK_ACTIVE[self.whisper_binary] = attempts[-1]
             delay = _schedule_gpu_retry(self.whisper_binary)
             _log_gpu_event(
@@ -1236,13 +1265,12 @@ class WhisperServerBackend(TranscriptionBackend):
                 spawn_cmd, spawn_env = wrap_macos_child_command(
                     cmd, bundle_binary_env(whisper_metal_env(cmd))
                 )
-                proc = subprocess.Popen(
+                proc = spawn_supervised(
                     spawn_cmd,
+                    env=spawn_env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    env=spawn_env,
                     **_NO_WINDOW,
-                    **supervised_popen_kwargs(),
                 )
                 # Windows: the server dies with the app even on a crash (job
                 # object); no-op elsewhere.
@@ -1306,16 +1334,24 @@ class WhisperServerBackend(TranscriptionBackend):
                     # Startup hang with budget still available — a real fault; stop trying.
                     _abandon_if_superseded()
                     self._stop_server_internal(deadline=deadline)
+                    # Unless the dictation was retired meanwhile (sleep stalls
+                    # a load too): then nothing is disabled (Sol mac r6).
+                    self._check_not_abandoned(abandoned_at)
                     self._disable_server()
                     raise TranscriptionError(
                         f"whisper-server timed out during startup ({self.startup_timeout:g}s)")
 
-            # A child a switch stopped is not a failed start (the check above
-            # it in the loop can race the switch's kill).
-            _abandon_if_superseded()
-            WhisperServerBackend._server_process = None
-            WhisperServerBackend._server_model_path = ""
-            WhisperServerBackend._server_use_gpu = None
+                # A child a switch stopped is not a failed start (the check
+                # above it in the loop can race the switch's kill).
+                _abandon_if_superseded()
+                # The supervisor exited, but a server it left behind (it was
+                # killed first) still holds the model and port: stop its group
+                # before the next attempt replaces the record (Sol mac r6).
+                self._stop_server_internal(deadline=deadline)
+                # A retired dictation spawns no reduced-flags retry and
+                # disables nothing: its failure may be the reset's doing.
+                self._check_not_abandoned(abandoned_at)
+
             self._disable_server()
             raise TranscriptionError(f"whisper-server failed to start: {last_error}")
         finally:
@@ -1325,6 +1361,13 @@ class WhisperServerBackend(TranscriptionBackend):
     def _check_not_abandoned(cls, abandoned_at: Optional[int]) -> None:
         if abandoned_at is not None and cls._abandoned != abandoned_at:
             raise RequestAbandoned("dictation abandoned")
+
+    @classmethod
+    def request_token(cls) -> int:
+        """The abandonment token a request runs under: its dictation's, taken
+        when the dictation began (see dictation_requests), else the current one."""
+        token = getattr(_dictation, "token", None)
+        return cls._abandoned if token is None else token
 
     @classmethod
     def abandon_requests(cls) -> None:
@@ -1372,15 +1415,15 @@ class WhisperServerBackend(TranscriptionBackend):
                 term_wait = max(0.1, min(term_wait, deadline - time.monotonic()))
             # macOS: the supervisor's whole group, so a SIGKILL cannot orphan
             # the whisper-server it runs.
+            # Waits for the native child too: a supervisor that died first
+            # left it running (Sol mac r6).
             try:
                 signal_supervised(cls._server_process)
-                try:
-                    cls._server_process.wait(timeout=term_wait)
-                except subprocess.TimeoutExpired:
+                if not wait_supervised(cls._server_process, term_wait):
                     signal_supervised(cls._server_process, kill=True)
                     if deadline is not None:
                         kill_wait = max(0.1, min(kill_wait, deadline - time.monotonic()))
-                    cls._server_process.wait(timeout=kill_wait)
+                    wait_supervised(cls._server_process, kill_wait)
             except Exception:
                 pass
         # Identity clears even when no local Popen exists (adopted server /
@@ -1604,9 +1647,15 @@ class WhisperServerBackend(TranscriptionBackend):
 
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """Transcribe audio via the whisper-server HTTP API."""
+        # One token for all this request runs, its Metal twin and whisper-cli
+        # included (see dictation_requests).
+        abandoned_at = WhisperServerBackend.request_token()
+        with dictation_requests(abandoned_at):
+            return self._transcribe(audio_path, context, abandoned_at)
+
+    def _transcribe(self, audio_path: str, context: str, abandoned_at: int) -> str:
         if not Path(audio_path).exists():
             raise TranscriptionError(f"Audio file not found: {audio_path}")
-        abandoned_at = WhisperServerBackend._abandoned
 
         # Server already proved unusable on this machine — go straight to CLI.
         if WhisperServerBackend._disabled_now():
@@ -1633,6 +1682,9 @@ class WhisperServerBackend(TranscriptionBackend):
             print(f"[Whisper Server] Unusable on this machine ({e}). "
                   "Falling back to whisper-cli per dictation.")
             return self._cli_fallback().transcribe(audio_path, context)
+        # Retired while the server started: the server stays for the next
+        # dictation, but this one sends it nothing (Sol mac r6).
+        self._check_not_abandoned(abandoned_at)
         port = WhisperServerBackend._server_port
         # A failure counts against Core ML only while this is still the server.
         served_by = WhisperServerBackend._server_process
@@ -3540,6 +3592,7 @@ def transcribe_with_config(
     config: dict, 
     context: str = "",
     skip_post_processing: bool = False,
+    request_token: Optional[int] = None,
 ) -> str:
     """
     Transcribe using settings from config dictionary.
@@ -3551,6 +3604,8 @@ def transcribe_with_config(
         context: Optional context from previous transcription (helps continuity)
         skip_post_processing: If True, skip LLM post-processing (useful for chunked mode
             where post-processing should happen on the final combined text)
+        request_token: The dictation's WhisperServerBackend.request_token(),
+            taken when it began; a retirement since raises RequestAbandoned
 
     Returns:
         Transcribed text string
@@ -3571,8 +3626,10 @@ def transcribe_with_config(
     
     config["prompt"] = original_prompt
     
-    backend = get_backend(config)
-    text = backend.transcribe(audio_path, context=context)
+    with dictation_requests(request_token):
+        WhisperServerBackend._check_not_abandoned(request_token)
+        backend = get_backend(config)
+        text = backend.transcribe(audio_path, context=context)
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep
     # entitlement checks in get_backend(), but bypass every Aura text rewrite
@@ -3611,6 +3668,8 @@ def transcribe_with_config(
     post_processing_enabled = config.get("post_processing_enabled", True)
     
     if (post_processing_enabled or tone == "minimal") and text and not skip_post_processing:
+        # No cleanup model for words nobody will type.
+        WhisperServerBackend._check_not_abandoned(request_token)
         try:
             from .postprocessor import process_with_config
             import os

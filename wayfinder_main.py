@@ -319,6 +319,16 @@ def _abandon_transcription_requests() -> None:
         pass
 
 
+def _transcription_request_token():
+    """The token a dictation's requests run under, taken when it begins: a
+    retirement after that stops every one of them (Sol mac r6)."""
+    try:
+        from wayfinder.core.transcriber import WhisperServerBackend
+        return WhisperServerBackend.request_token()
+    except Exception:
+        return None
+
+
 def _model_display_name(path: str) -> str:
     """Catalog name for a model file path (e.g. "Large v3 Turbo Q5"), else its filename."""
     name = Path(os.path.expanduser(str(path or ""))).name
@@ -5315,6 +5325,7 @@ class WayfinderApp(ctk.CTk):
         # enumeration without sharing listener-owned file descriptors with Tk.
         self._hotkey_device_names_snapshot: tuple[str, ...] | None = None
         self.session_generation = 0                    # bumped per recording / force_reset; discards stale work
+        self._request_tokens = {}                      # generation -> its transcription request token
         self._finish_injection_job = None              # pending after() id for the delayed overlay reset
         self._welcome_active = False                   # first-run welcome tour up → suppress text injection
         self._welcome_pane = None                      # active WelcomePane, or None
@@ -24689,6 +24700,14 @@ class WayfinderApp(ctk.CTk):
                 self._gpu_setup_notice_logged = False
             self.session_generation += 1
             gen = self.session_generation
+            # Taken with the generation: each request of this dictation, a
+            # re-heard chunk included, runs under it (Sol mac r6).
+            tokens = getattr(self, "_request_tokens", None)
+            if tokens is None:
+                tokens = self._request_tokens = {}
+            tokens[gen] = _transcription_request_token()
+            for old in [g for g in tokens if g < gen - 64]:
+                del tokens[old]
             if self._finish_injection_job is not None:
                 try:
                     self.after_cancel(self._finish_injection_job)
@@ -24920,10 +24939,16 @@ class WayfinderApp(ctk.CTk):
         # code paths (mic-name display, re-resolve) and the next recording use it directly.
         self._resolved_audio_device = self.warm_mic.device
     
+    def _dictation_request_token(self, gen):
+        """The token dictation *gen* took when it began (start_recording), or
+        None, and then each request takes its own."""
+        return (getattr(self, "_request_tokens", None) or {}).get(gen)
+
     def _transcribe_chunk(self, chunk_path: str, chunk_index: int, gen=None, store=None):
         """Transcribe a single chunk in the background."""
         if store is None:
             store = self.chunk_transcriptions
+        request_token = WayfinderApp._dictation_request_token(self, gen)
         try:
             # Skip if this chunk belongs to a superseded session (optimisation — the per-session
             # `store` already isolates writes, so this only avoids wasted transcription work).
@@ -24986,6 +25011,7 @@ class WayfinderApp(ctk.CTk):
                 asr_cfg,
                 context=context,
                 skip_post_processing=True,
+                request_token=request_token,
             )
             raw_session = WayfinderApp._raw_session_enabled(self)
             if context and not raw_session:
@@ -24999,6 +25025,7 @@ class WayfinderApp(ctk.CTk):
                 if chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
                     retry = transcribe_with_config(
                         chunk_path, asr_cfg, context="", skip_post_processing=True,
+                        request_token=request_token,
                     )
                     fuller = prefer_fuller_chunk_text(text, retry)
                     if fuller is not text:
@@ -25393,7 +25420,9 @@ class WayfinderApp(ctk.CTk):
             # Same per-session ASR snapshot as chunks: Windows stays on Base
             # CPU while the initial Ultra GPU device selection is unfinished.
             asr_cfg = WayfinderApp._asr_config_for_dictation(self)
-            text = transcribe_with_config(audio_path, asr_cfg)
+            text = transcribe_with_config(
+                audio_path, asr_cfg,
+                request_token=WayfinderApp._dictation_request_token(self, gen))
             trans_elapsed = time_module.perf_counter() - trans_start
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
             self.event_queue.put((EventType.TRANSCRIPTION_DONE, (text, gen)))

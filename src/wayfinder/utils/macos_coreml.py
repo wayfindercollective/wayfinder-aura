@@ -152,7 +152,7 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
         print("[Whisper] Local encoder conversion deferred: insufficient temporary disk space; keeping Metal")
         return False
     from wayfinder.utils.child_supervisor import (
-        cut_short, forget_tracked, spawn_tracked, stop_supervised, supervised_popen_kwargs,
+        cut_short, forget_tracked, spawn_supervised, spawn_tracked, stop_supervised,
         wrap_macos_child_command,
     )
     from wayfinder.utils.hostexec import bundle_binary_env
@@ -165,8 +165,8 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
         command, env = wrap_macos_child_command([str(compiler), str(package), str(asset)], bundle_binary_env())
         # Tracked: an overlay restart re-execs under the same pid, so the
         # supervisor would not notice; the terminal shutdown stops it instead.
-        proc = spawn_tracked(command, stop=stop_supervised, env=env, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, **supervised_popen_kwargs())
+        proc = spawn_tracked(command, stop=stop_supervised, popen=spawn_supervised, env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             import time
             deadline = time.monotonic() + 180
@@ -473,7 +473,7 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     import socket
     from types import SimpleNamespace
     from wayfinder.utils.child_supervisor import (
-        HelperStopped, cut_short, forget_tracked, spawn_tracked, supervised_popen_kwargs,
+        HelperStopped, cut_short, forget_tracked, spawn_supervised, spawn_tracked,
         wrap_macos_child_command,
     )
     from wayfinder.utils.hostexec import bundle_binary_env
@@ -491,8 +491,8 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     command, env = wrap_macos_child_command(command, bundle_binary_env(whisper_metal_env(gpu=True)))
     # Tracked until published: no server stop reaches a probe, and its
     # supervisor misses an overlay restart's same-pid re-exec.
-    proc = spawn_tracked(command, stop=_stop_probe, env=env, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, **supervised_popen_kwargs())
+    proc = spawn_tracked(command, stop=_stop_probe, popen=spawn_supervised, env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     tail = deque(maxlen=100)
     reader = threading.Thread(target=backend._drain_server_output, args=(proc.stdout, tail), daemon=True)
     reader.start()
@@ -612,35 +612,42 @@ def _publish_probe(probe, cancelled, decide=lambda: True, coreml_key=None) -> bo
             retiring = cls._server_process
             if retiring is probe.proc:
                 retiring = None
-            if retiring is not None and not track_existing(retiring, stop=_stop_probe):
-                # A terminal shutdown began: once published, nothing would stop
-                # the old server before the exit. Leave both to the shutdown.
-                return False
-            try:
-                chosen = decide()
-            finally:
-                if not chosen and retiring is not None:
-                    forget_tracked(retiring)   # still the published server
-            if not chosen:
-                return False
-            old = retiring
-            cls._note_core_ml_exit()   # the retiring record's, if it died on its own
-            cls._server_coreml_key = coreml_key
-            cls._server_epoch = epoch
-            cls._server_process = probe.proc
-            cls._server_port = probe.port
-            cls._server_model_path = probe.backend.model_path
-            cls._server_binary = probe.backend.whisper_server_binary
-            cls._server_use_gpu = True
-            cls._server_threads = probe.backend.threads
-            cls._server_log_tail = probe.tail
-            cls._server_log_thread = probe.reader
-            cls._server_disabled = False
-            cls._server_ready = probe.proc
-            probe.adopted = True
-            # Published now, so the server stops reach it; the old one is
-            # tracked until it is gone.
-            forget_tracked(probe.proc)
+            # Held from the last check to the swap: a failure recorded for
+            # this model this launch (the retiring record's own death, noted
+            # first, included) cancels the publish, and none lands between
+            # the check and the swap (Sol mac r6).
+            with _failure_lock:
+                cls._note_core_ml_exit()   # the retiring record's, if it died on its own
+                if cancelled():
+                    raise InterruptedError("Accelerator switch cancelled")
+                if retiring is not None and not track_existing(retiring, stop=_stop_probe):
+                    # A terminal shutdown began: once published, nothing would stop
+                    # the old server before the exit. Leave both to the shutdown.
+                    return False
+                try:
+                    chosen = decide()
+                finally:
+                    if not chosen and retiring is not None:
+                        forget_tracked(retiring)   # still the published server
+                if not chosen:
+                    return False
+                old = retiring
+                cls._server_coreml_key = coreml_key
+                cls._server_epoch = epoch
+                cls._server_process = probe.proc
+                cls._server_port = probe.port
+                cls._server_model_path = probe.backend.model_path
+                cls._server_binary = probe.backend.whisper_server_binary
+                cls._server_use_gpu = True
+                cls._server_threads = probe.backend.threads
+                cls._server_log_tail = probe.tail
+                cls._server_log_thread = probe.reader
+                cls._server_disabled = False
+                cls._server_ready = probe.proc
+                probe.adopted = True
+                # Published now, so the server stops reach it; the old one is
+                # tracked until it is gone.
+                forget_tracked(probe.proc)
         finally:
             cls._server_lock.release()
     if old is not None:

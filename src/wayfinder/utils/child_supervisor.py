@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -61,95 +62,96 @@ def wrap_macos_child_command(
     return supervisor, child_env
 
 
-def supervised_popen_kwargs(*, platform_name: str | None = None) -> dict:
-    """Popen options for a command from wrap_macos_child_command.
+ALIVE_FD_ENV = "WAYFINDER_SUPERVISOR_ALIVE_FD"
+
+
+def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str], popen=None,
+                     platform_name: str | None = None, **popen_kwargs) -> subprocess.Popen:
+    """Popen a command from wrap_macos_child_command.
 
     macOS: the supervisor leads its own process group, which its native child
     inherits, so stop_supervised() can end both at once. Killing only the
     supervisor (SIGKILL cannot be forwarded) used to orphan whisper-server,
     which then kept the model loaded and port 8178 open.
-    """
-    return {"start_new_session": True} if (platform_name or sys.platform) == "darwin" else {}
 
-
-# The native helpers a supervisor runs; only these are stopped in the group of
-# a supervisor that is already gone.
-_SUPERVISED_HELPERS = frozenset(
-    {"whisper-server", "whisper-cli", "llama-server", "llama-simple", "coreml-compile"})
-
-
-def group_survivors(ps_rows: Sequence[str], pgid: int) -> list[int]:
-    """Helpers left in the group of a supervisor that died first (SIGKILL, a
-    crash), from ``ps -axo pid=,pgid=,comm=`` rows.
-
-    The supervisor is reaped, so its pid is free, but a process group id is
-    never reused while the group has a member. A live process leading the
-    group means the id was reused, and then nothing in it is ours."""
-    found = []
-    for row in ps_rows:
-        parts = row.split(None, 2)
-        if len(parts) != 3:
-            continue
-        try:
-            pid, group = int(parts[0]), int(parts[1])
-        except ValueError:
-            continue
-        if group != pgid:
-            continue
-        if pid == pgid:
-            return []
-        if os.path.basename(parts[2].strip()) in _SUPERVISED_HELPERS:
-            found.append(pid)
-    return found
-
-
-def _group_survivors(pgid: int) -> list[int]:
+    The native child also holds the write end of a pipe whose read end stays
+    here (see _child_alive). A supervisor can die before its child. Once it is
+    reaped its pid is free, but its group id is not while the child lives, and
+    the open pipe is what proves the child still does (Sol mac r6)."""
+    popen = popen or subprocess.Popen
+    if (platform_name or sys.platform) != "darwin":
+        return popen(command, env=env, **popen_kwargs)
+    read_end, write_end = os.pipe()
     try:
-        rows = subprocess.check_output(["ps", "-axo", "pid=,pgid=,comm="], text=True,
-                                       timeout=5).splitlines()
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return group_survivors(rows, pgid)
+        os.set_blocking(read_end, False)
+        child_env = dict(env)
+        child_env[ALIVE_FD_ENV] = str(write_end)
+        passed = tuple(popen_kwargs.pop("pass_fds", ())) + (write_end,)
+        proc = popen(command, env=child_env, start_new_session=True, pass_fds=passed,
+                     **popen_kwargs)
+    except BaseException:
+        os.close(read_end)
+        raise
+    finally:
+        os.close(write_end)   # only the supervisor and its child hold it now
+    try:
+        weakref.finalize(proc, os.close, read_end)
+    except TypeError:
+        os.close(read_end)    # a stand-in without weakrefs: no token
+        return proc
+    proc._aura_child_alive = read_end
+    return proc
 
 
-def _stop_group_survivors(pgid: int, *, kill: bool, grace: float = 1.0) -> list[int]:
-    """Stop what a dead supervisor left running: SIGTERM, then SIGKILL what a
-    fresh scan still finds after *grace*. Returns the PIDs signalled."""
-    pids = _group_survivors(pgid)
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGKILL if kill else signal.SIGTERM)
-        except OSError:
-            pass
-    if kill or not pids:
-        return pids
-    deadline = time.monotonic() + grace
-    while time.monotonic() < deadline and any(parent_process_alive(pid) for pid in pids):
-        time.sleep(0.05)
-    for pid in set(pids) & set(_group_survivors(pgid)):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-    return pids
+def _child_alive(proc: subprocess.Popen) -> bool:
+    """Whether the native child of *proc* (spawn_supervised) still runs: its
+    end of the pipe closes when it exits. Nothing is ever written to it, so a
+    read sees end-of-file or nothing yet."""
+    token = getattr(proc, "_aura_child_alive", None)
+    if not isinstance(token, int):
+        return False
+    try:
+        return os.read(token, 1) != b""
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+
+
+def wait_supervised(proc: subprocess.Popen, timeout: float) -> bool:
+    """Wait up to *timeout* for *proc* and the native child it ran to exit."""
+    deadline = time.monotonic() + timeout
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    while _child_alive(proc):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
 
 
 def signal_supervised(proc: subprocess.Popen, *, kill: bool = False,
                       platform_name: str | None = None) -> None:
     """Terminate (or kill) a supervised child: its whole group on macOS."""
-    if proc.returncode is not None:
-        # Reaped: its pid may belong to someone else now, so it is never
-        # signalled. A supervisor that died before its child left the child
-        # running in its group, though, owning the model and port (Sol mac r5).
-        if (platform_name or sys.platform) == "darwin":
-            _stop_group_survivors(proc.pid, kill=kill)
-        return
+    sig = signal.SIGKILL if kill else signal.SIGTERM
     if (platform_name or sys.platform) == "darwin":
+        if proc.returncode is not None and not _child_alive(proc):
+            # Reaped, and nothing it ran lives: its pid and group id may
+            # belong to someone else now, so neither is signalled.
+            return
+        # Unreaped, its pid (the group id) is still ours. Reaped with its
+        # native child alive (the supervisor SIGKILLed or crashed), the group
+        # id is too: it is never reused while the group has a member, and
+        # nothing outside the group can join it (Sol mac r5/r6).
         try:
-            os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
+            os.killpg(proc.pid, sig)
             return
         except OSError:
-            pass  # no such group: spawned without supervised_popen_kwargs
+            pass  # no such group: spawned without spawn_supervised
+    if proc.returncode is not None:
+        return
     try:
         proc.kill() if kill else proc.terminate()
     except OSError:
@@ -158,21 +160,13 @@ def signal_supervised(proc: subprocess.Popen, *, kill: bool = False,
 
 def stop_supervised(proc: subprocess.Popen, term_wait: float = 5.0, kill_wait: float = 2.0, *,
                     platform_name: str | None = None) -> None:
-    """SIGTERM, then SIGKILL after *term_wait*; on macOS to the whole group."""
-    if proc.poll() is not None:
-        signal_supervised(proc, platform_name=platform_name)   # what it left behind
-        return
+    """SIGTERM, then SIGKILL after *term_wait*; on macOS to the whole group,
+    even when the supervisor died first."""
     signal_supervised(proc, platform_name=platform_name)
-    try:
-        proc.wait(timeout=term_wait)
+    if wait_supervised(proc, term_wait):
         return
-    except subprocess.TimeoutExpired:
-        pass
     signal_supervised(proc, kill=True, platform_name=platform_name)
-    try:
-        proc.wait(timeout=kill_wait)
-    except subprocess.TimeoutExpired:
-        pass
+    wait_supervised(proc, kill_wait)
 
 
 # Native helpers an older Aura could leave behind (its supervisor SIGKILLed,
@@ -284,9 +278,11 @@ class HelperStopped(HelpersClosed):
     may cache or count them."""
 
 
-def spawn_tracked(command: Sequence[str], *, stop=None, **popen_kwargs) -> subprocess.Popen:
-    """Popen a helper that a terminal shutdown stops (with *stop*, default
-    terminate then kill); refused once one has begun."""
+def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
+                  **popen_kwargs) -> subprocess.Popen:
+    """Popen (or *popen*, such as spawn_supervised) a helper that a terminal
+    shutdown stops (with *stop*, default terminate then kill); refused once
+    one has begun."""
     global _exit_hook_registered
     with _tracked_lock:
         if _tracked_closed:
@@ -297,7 +293,7 @@ def spawn_tracked(command: Sequence[str], *, stop=None, **popen_kwargs) -> subpr
             import atexit
             atexit.register(close_tracked)
             _exit_hook_registered = True
-        proc = subprocess.Popen(command, **popen_kwargs)
+        proc = (popen or subprocess.Popen)(command, **popen_kwargs)
         _tracked[proc] = stop or _terminate_child
     bind_to_app_lifetime(proc)
     return proc
@@ -392,6 +388,15 @@ def reopen_tracked() -> None:
         _tracked_closed = False
 
 
+def _alive_fd(value: str | None) -> int | None:
+    try:
+        fd = int(value or "")
+        os.fstat(fd)
+    except (TypeError, ValueError, OSError):
+        return None
+    return fd
+
+
 def run_supervised_command(
     command: Sequence[str],
     parent_pid: int,
@@ -413,7 +418,15 @@ def run_supervised_command(
     child_env = os.environ.copy()
     child_env.pop(COMMAND_ENV, None)
     child_env.pop(PARENT_PID_ENV, None)
-    proc = subprocess.Popen([str(part) for part in command], env=child_env)
+    alive = _alive_fd(child_env.pop(ALIVE_FD_ENV, None))
+    try:
+        # The native child keeps the pipe open for as long as it runs (see
+        # spawn_supervised); this process lets go of it at once.
+        proc = subprocess.Popen([str(part) for part in command], env=child_env,
+                                pass_fds=() if alive is None else (alive,))
+    finally:
+        if alive is not None:
+            os.close(alive)
     while proc.poll() is None:
         if stop.is_set() or not parent_process_alive(parent_pid):
             _terminate_child(proc)

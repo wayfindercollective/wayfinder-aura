@@ -734,3 +734,163 @@ def test_a_server_reused_after_quick_switches_survives_their_teardowns(
     # Not reused by the next mode, it goes with that mode's teardown.
     WhisperServerBackend.shutdown(before_epoch=WhisperServerBackend.supersede())
     assert resident.poll() is not None
+
+
+def _reset_at_first_readiness_probe(ready):
+    """A readiness probe where the reset lands: the first one abandons the
+    dictation; later ones report *ready*. The adoption check before any spawn
+    finds nothing."""
+    probes = []
+
+    def probe(_self, _port, timeout=2):
+        if WhisperServerBackend._server_process is None:
+            return False
+        probes.append(True)
+        if len(probes) == 1:
+            WhisperServerBackend.abandon_requests()
+            return False
+        return ready
+
+    return probe, probes
+
+
+@pytest.mark.parametrize("outcome", ["loads", "dies", "hangs"])
+def test_a_reset_during_readiness_retries_disables_and_salvages_nothing(
+        tmp_path, monkeypatch, outcome):
+    # Sol mac r6: a reset during the first spawn's readiness wait changed
+    # nothing for the start: the reduced-flags attempt spawned, the server
+    # was disabled and whisper-cli ran the retired dictation.
+    from wayfinder.core import transcriber
+    script = {"loads": "import time\ntime.sleep(60)", "dies": "import sys\nsys.exit(3)",
+              "hangs": "import time\ntime.sleep(60)"}[outcome]
+    backend = _one_attempt_backend(tmp_path, script,
+                                   startup_timeout=1.2 if outcome == "hangs" else STARTUP_TIMEOUT)
+    attempts = WhisperServerBackend._server_cmd_attempts.__get__(backend)
+    backend._server_cmd_attempts = lambda port: attempts(port)[:1] * 2   # a retry is left
+    probe, probes = _reset_at_first_readiness_probe(ready=outcome == "loads")
+    monkeypatch.setattr(WhisperServerBackend, "_is_our_server", probe)
+    monkeypatch.setattr(WhisperServerBackend, "_abandoned", WhisperServerBackend._abandoned)
+    monkeypatch.setattr(WhisperServerBackend, "_server_ready", None)
+    spawned = []
+    spawn = transcriber.spawn_supervised
+
+    def counted(*args, **kwargs):
+        spawned.append(spawn(*args, **kwargs))
+        return spawned[-1]
+
+    monkeypatch.setattr(transcriber, "spawn_supervised", counted)
+    monkeypatch.setattr(transcriber, "urlopen_loopback",
+                        lambda *_a, **_k: pytest.fail("a retired dictation was sent to the server"))
+    backend._cli_fallback = lambda: pytest.fail("a retired dictation ran whisper-cli")
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"\x00")
+
+    with pytest.raises(transcriber.RequestAbandoned):
+        backend.transcribe(str(audio))
+    assert probes and len(spawned) == 1
+    assert WhisperServerBackend._server_disabled is False
+    if outcome == "loads":
+        # The load finished, so it stays for the next dictation.
+        assert WhisperServerBackend._server_ready is spawned[0]
+        assert WhisperServerBackend._server_process is spawned[0]
+        assert spawned[0].poll() is None
+    else:
+        assert spawned[0].poll() is not None
+
+
+def _orphaning_server(tmp_path, monkeypatch, attempts, ready=False, ignores_term=False):
+    """A backend whose every attempt runs under the macOS supervisor (on any
+    POSIX host) and whose helper SIGKILLs that supervisor, then stays. Returns
+    the backend and the helper pid files, one per attempt."""
+    import functools
+    from wayfinder.core import transcriber
+    from wayfinder.utils import child_supervisor
+    for name in ("wrap_macos_child_command", "spawn_supervised", "signal_supervised"):
+        monkeypatch.setattr(transcriber, name, functools.partial(
+            getattr(child_supervisor, name), platform_name="darwin"))
+    model = tmp_path / "ggml-base.bin"
+    model.write_bytes(b"\x00")
+    binary = tmp_path / "whisper-server"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    backend = WhisperServerBackend(
+        whisper_server_binary=str(binary), model_path=str(model), port=_free_port(),
+        use_gpu=False, startup_timeout=STARTUP_TIMEOUT)
+    pid_files = [tmp_path / f"helper-{n}.pid" for n in range(attempts)]
+    backend._server_cmd_attempts = lambda port: [
+        [sys.executable, "-c",
+         "import os, signal, time\n"
+         f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+         + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignores_term else "")
+         + ("time.sleep(0.3)\n" if ready else "")   # reported ready first
+         + "os.kill(os.getppid(), signal.SIGKILL)\n"
+         "time.sleep(60)\n"]
+        for pid_file in pid_files]
+    monkeypatch.setattr(WhisperServerBackend, "_is_our_server",
+                        lambda _self, _port, timeout=2: ready and any(p.exists() for p in pid_files))
+    return backend, pid_files
+
+
+def _helper_gone(pid, within=5.0):
+    import os
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            with open(f"/proc/{pid}/stat") as stat:
+                if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True   # dead, waiting for init to reap it
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def test_a_start_whose_supervisors_die_first_leaves_no_helper(tmp_path, monkeypatch):
+    # Sol mac r6: the supervisor died while its helper loaded; the retry
+    # overwrote its handle and the final failure cleared the last one, so
+    # both helpers outlived Quit.
+    backend, pid_files = _orphaning_server(tmp_path, monkeypatch, attempts=2)
+    try:
+        with pytest.raises(TranscriptionError, match="failed to start"):
+            backend._start_server()
+        pids = [int(p.read_text()) for p in pid_files]
+        assert all(_helper_gone(pid) for pid in pids), "a helper outlived its failed start"
+        assert WhisperServerBackend._server_process is None
+    finally:
+        for pid_file in pid_files:
+            if pid_file.exists():
+                try:
+                    import os
+                    import signal
+                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                except (ProcessLookupError, ValueError):
+                    pass
+
+
+@pytest.mark.parametrize("ignores_term", [False, True])
+def test_quit_stops_a_loaded_server_whose_supervisor_died(tmp_path, monkeypatch, ignores_term):
+    backend, pid_files = _orphaning_server(tmp_path, monkeypatch, attempts=1, ready=True,
+                                           ignores_term=ignores_term)
+    monkeypatch.setattr(WhisperServerBackend, "_server_ready", None)
+    try:
+        backend._start_server()
+        proc = WhisperServerBackend._server_process
+        proc.wait(timeout=5)   # the supervisor is gone; its helper is not
+        pid = int(pid_files[0].read_text())
+        assert not _helper_gone(pid, within=0.2)
+        WhisperServerBackend.shutdown(terminal=True)   # SIGTERM, then SIGKILL after 5 s
+        assert _helper_gone(pid, within=1.0), "the helper outlived Quit"
+    finally:
+        WhisperServerBackend.reopen()
+        if pid_files[0].exists():
+            try:
+                import os
+                import signal
+                os.kill(int(pid_files[0].read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass

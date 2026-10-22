@@ -1643,6 +1643,45 @@ class TestGpuCpuFallback:
             backend.transcribe(audio)
         assert backend.whisper_binary not in transcriber._CPU_FALLBACK_ACTIVE
 
+    def test_a_reset_during_the_gpu_attempt_runs_no_cpu_attempt(self, tmp_path, monkeypatch):
+        # Sol mac r6: a dictation retired while its GPU attempt ran still
+        # launched the CPU attempt and memoized CPU for the session.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        marker = tmp_path / "cpu-runs"
+        backend, audio = self._backend(
+            tmp_path, gpu_body="kill -SEGV $$",
+            cpu_body=f'if [ "$1" = "-m" ]; then echo run >> "{marker}"; fi; echo "words nobody will type"',
+        )
+        run = transcriber.run_tracked
+
+        def reset_mid_attempt(cmd, **kwargs):
+            result = run(cmd, **kwargs)
+            if cmd[0] == backend.whisper_binary and cmd[1] == "-m":
+                cls.abandon_requests()   # the sleep handler's reset
+            return result
+
+        monkeypatch.setattr(transcriber, "run_tracked", reset_mid_attempt)
+        with pytest.raises(transcriber.RequestAbandoned):
+            backend.transcribe(audio)
+        assert not marker.exists()
+        assert backend.whisper_binary not in transcriber._CPU_FALLBACK_ACTIVE
+
+    def test_a_retired_dictation_starts_no_whisper_cli(self, tmp_path, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        backend, audio = self._backend(tmp_path, gpu_body='echo "words"', cpu_body=None)
+        backend._supported_flags = lambda **_k: pytest.fail("a retired dictation probed whisper-cli")
+        monkeypatch.setattr(transcriber, "run_tracked",
+                            lambda *_a, **_k: pytest.fail("a retired dictation ran whisper-cli"))
+        token = cls.request_token()
+        cls.abandon_requests()
+        with transcriber.dictation_requests(token):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend.transcribe(audio)
+
     def test_cpu_only_install_unaffected(self, tmp_path):
         """From-source installs (no sibling) keep working exactly as before."""
         backend, audio = self._backend(tmp_path, gpu_body='echo "normal text"', cpu_body=None)
@@ -2496,3 +2535,100 @@ class TestSoundAnnotations:
     def test_dictated_brackets_survive(self, text):
         from wayfinder.core.transcriber import clean_whisper_artifacts
         assert clean_whisper_artifacts(text) == text
+
+
+class TestOneTokenPerDictation:
+    """Sol mac r6: a request nested in a dictation (the Metal twin, whisper-cli,
+    a re-heard chunk) took the abandonment counter afresh, so a reset before
+    it began went unseen."""
+
+    @pytest.fixture(autouse=True)
+    def _counter(self, monkeypatch):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        monkeypatch.setattr(WhisperServerBackend, "_abandoned", WhisperServerBackend._abandoned)
+
+    def test_requests_inside_a_dictation_keep_its_token(self):
+        import threading
+        from wayfinder.core.transcriber import WhisperServerBackend as cls, dictation_requests
+        token = cls.request_token()
+        other = {}
+        with dictation_requests(token):
+            cls.abandon_requests()
+            assert cls.request_token() == token
+            with dictation_requests(cls._abandoned):   # a nested scope cannot renew it
+                assert cls.request_token() == token
+            thread = threading.Thread(target=lambda: other.update(token=cls.request_token()))
+            thread.start()
+            thread.join()
+        assert other["token"] == cls._abandoned   # only this thread's requests
+        assert cls.request_token() == cls._abandoned
+
+    def test_whisper_server_hands_its_token_to_whisper_cli(self, tmp_path, monkeypatch):
+        from wayfinder.core.transcriber import WhisperServerBackend as cls
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"\x00")
+        backend = cls(whisper_server_binary=str(tmp_path / "whisper-server"),
+                      model_path=str(tmp_path / "model.bin"))
+        monkeypatch.setattr(cls, "_disabled_now", classmethod(lambda c: True))
+        token = cls.request_token()
+        seen = []
+
+        class Cli:
+            def transcribe(self, audio_path, context="", deadline=None):
+                cls.abandon_requests()   # a reset as whisper-cli starts
+                seen.append(cls.request_token())
+                return "words"
+
+        backend._cli_fallback = lambda: Cli()
+        assert backend.transcribe(str(audio)) == "words"
+        assert seen == [token]
+
+    def test_a_dictation_retired_before_it_reaches_the_backend_builds_none(self, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(transcriber, "get_backend",
+                            lambda _config: pytest.fail("a retired dictation built a backend"))
+        token = cls.request_token()
+        cls.abandon_requests()
+        with pytest.raises(transcriber.RequestAbandoned):
+            transcriber.transcribe_with_config("chunk.wav", {}, request_token=token)
+
+    def test_a_reset_while_the_backend_is_built_reaches_its_requests(self, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        seen = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                seen.append(cls.request_token())   # what whisper-server's own start checks
+                return "words"
+
+        def build_during_a_reset(_config):
+            cls.abandon_requests()
+            return Backend()
+
+        monkeypatch.setattr(transcriber, "get_backend", build_during_a_reset)
+        token = cls.request_token()
+        transcriber.transcribe_with_config("chunk.wav", {"raw_transcription": True}, request_token=token)
+        assert seen == [token]
+
+    def test_a_dictation_retired_during_asr_gets_no_cleanup(self, monkeypatch):
+        from wayfinder.core import transcriber
+        from wayfinder.core import postprocessor
+        cls = transcriber.WhisperServerBackend
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                cls.abandon_requests()
+                return "words nobody will type"
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        monkeypatch.setattr(postprocessor, "process_with_config",
+                            lambda *_a, **_k: pytest.fail("a retired dictation was cleaned up"))
+        with pytest.raises(transcriber.RequestAbandoned):
+            transcriber.transcribe_with_config(
+                "chunk.wav", {"post_processing_enabled": True}, request_token=cls.request_token())
