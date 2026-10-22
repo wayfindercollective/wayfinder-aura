@@ -1652,14 +1652,16 @@ def test_paste_still_runs_the_same_steps_and_reports_failures(monkeypatch):
     monkeypatch.setattr(iw, "_paste_reporter", lines.append)
     monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
     monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
-                                                       GetOpenClipboardWindow=lambda: None))
+                                                       GetOpenClipboardWindow=lambda: None,
+                                                       OpenClipboard=lambda _h: 1,
+                                                       CloseClipboard=lambda: 1))
     monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
     monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
     monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
     clip = {"v": "old"}
     monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
     monkeypatch.setattr(iw, "_clipboard_set_windows",
-                        lambda t, transient=False: steps.append(("set", t)) or clip.update(v=t) or True)
+                        lambda t, transient=False, **_: steps.append(("set", t)) or clip.update(v=t) or True)
     monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
     monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
     monkeypatch.setattr(iw, "_WATCH_SECONDS", 0.05)
@@ -1689,7 +1691,9 @@ def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
     steps = []
     monkeypatch.setattr(iw, "_paste_reporter", lambda line: None)
     monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1,
-                                                       GetOpenClipboardWindow=lambda: None))
+                                                       GetOpenClipboardWindow=lambda: None,
+                                                       OpenClipboard=lambda _h: 1,
+                                                       CloseClipboard=lambda: 1))
     monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
     monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
     monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
@@ -1697,7 +1701,7 @@ def test_a_diagnostics_failure_never_stops_the_paste(monkeypatch):
     clip = {"v": "old"}
     monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
     monkeypatch.setattr(iw, "_clipboard_set_windows",
-                        lambda t, transient=False: steps.append(("set", t)) or clip.update(v=t) or True)
+                        lambda t, transient=False, **_: steps.append(("set", t)) or clip.update(v=t) or True)
     monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
     monkeypatch.setattr(iw, "_press_keys", lambda vks: steps.append(("keys", tuple(vks))))
     monkeypatch.setattr(iw.time, "sleep", lambda s: None)
@@ -1725,10 +1729,12 @@ def _clipboard_fakes(monkeypatch, start):
 
     clip = {"v": start, "seq": 1}
 
-    def fake_set(t, transient=False):
+    def fake_set(t, transient=False, **_):
         clip.update(v=t, seq=clip["seq"] + 1)
         return True
 
+    monkeypatch.setattr(iw, "_user32", SimpleNamespace(OpenClipboard=lambda _h: 1,
+                                                       CloseClipboard=lambda: 1))
     monkeypatch.setattr(iw, "_clipboard_sequence", lambda: clip["seq"])
     monkeypatch.setattr(iw, "_paste_reporter", None)
     monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
@@ -1965,25 +1971,20 @@ def test_paste_retired_during_its_waits_pastes_nothing(monkeypatch, at):
     # fake SendInput: the check sits in _send (Sol mac r12).
     from wayfinder.core import injector
     rig, w = _windows_send_rig(monkeypatch)
-    sets = []
-    set_clipboard = w._clipboard_set_windows
 
     def wait():
         rig.retired = at == "modifier-wait"
 
-    def fake_set(text, transient=False):
-        sets.append(text)
-        set_clipboard(text, transient)
+    def written(text):
         rig.retired = True
-        return True
 
     monkeypatch.setattr(w, "require_modifier_release_windows", wait)
-    monkeypatch.setattr(w, "_clipboard_set_windows", fake_set)
+    rig.fake.on_write = written
     with pytest.raises(injector.InjectionCancelled):
         w.inject_text_paste_windows("retired words", lambda: rig.retired)
     assert rig.sent == []
     assert rig.clipboard == "theirs"
-    assert sets == ([] if at == "modifier-wait" else ["retired words", "theirs"])
+    assert rig.fake.writes == ([] if at == "modifier-wait" else ["retired words", "theirs"])
 
 
 @pytest.mark.parametrize("paste_error", ["cancelled", "failed"])
@@ -2044,40 +2045,127 @@ def test_the_clipboard_paste_hands_windows_its_cancellation(monkeypatch):
 
 
 
+class _FakeWindows:
+    """user32 + kernel32 for injector_windows, so tests drive its real
+    SendInput and clipboard code. The clipboard keeps Windows' rules, as
+    measured on node 4 (Windows 11): one holder at a time (another app's copy
+    fails while Aura has it open), the change counter moves at each change
+    and again at the close after one, and reads never move it."""
+
+    def __init__(self, clipboard="theirs"):
+        self.sent, self.writes, self.events = [], [], []
+        self.clipboard, self.seq = clipboard, 1
+        self.opened = self._changed = False
+        self.on_open = self.on_write = self.on_send = None
+        self._memory = {}
+
+    def SendInput(self, n, arr, _size):
+        from wayfinder.core import injector_windows as w
+        self.sent.extend((arr[i].u.ki.wVk, arr[i].u.ki.wScan,
+                          bool(arr[i].u.ki.dwFlags & w.KEYEVENTF_KEYUP)) for i in range(n))
+        if self.on_send is not None:
+            self.on_send(n)
+        return n
+
+    def OpenClipboard(self, _hwnd):
+        if self.on_open is not None and self.on_open() is False:
+            return 0
+        if self.opened:
+            return 0
+        self.opened = True
+        self.events.append("open")
+        return 1
+
+    def CloseClipboard(self):
+        assert self.opened, "closed a clipboard Aura did not hold"
+        self.opened = False
+        self.events.append("close")
+        if self._changed:
+            self.seq, self._changed = self.seq + 1, False
+        return 1
+
+    def EmptyClipboard(self):
+        assert self.opened
+        self.events.append("empty")
+        self.clipboard, self.seq, self._changed = None, self.seq + 1, True
+        return 1
+
+    def SetClipboardData(self, fmt, handle):
+        import ctypes
+        assert self.opened
+        if fmt == 13:
+            self.clipboard = ctypes.wstring_at(handle)
+            self.writes.append(self.clipboard)
+            self.events.append(("set", self.clipboard))
+            if self.on_write is not None:
+                self.on_write(self.clipboard)
+        self.seq, self._changed = self.seq + 1, True
+        return handle
+
+    def GetClipboardData(self, fmt):
+        import ctypes
+        assert self.opened
+        self.events.append("read")
+        if fmt != 13 or self.clipboard is None:
+            return 0
+        return self._keep(ctypes.create_unicode_buffer(self.clipboard))
+
+    def GetClipboardSequenceNumber(self):
+        return self.seq
+
+    def RegisterClipboardFormatW(self, name):
+        return 0xC000 + len(name)
+
+    def copy(self, text):
+        """Another app's Ctrl+C: it fails while Aura holds the clipboard."""
+        if self.opened:
+            return False
+        self.clipboard, self.seq = text, self.seq + 3
+        return True
+
+    # kernel32
+    def GlobalAlloc(self, _flags, size):
+        import ctypes
+        return self._keep(ctypes.create_string_buffer(size))
+
+    def GlobalLock(self, handle):
+        return handle
+
+    def GlobalUnlock(self, _handle):
+        return 1
+
+    def _keep(self, buffer):
+        import ctypes
+        address = ctypes.addressof(buffer)
+        self._memory[address] = buffer
+        return address
+
+
+class _Rig(SimpleNamespace):
+    clipboard = property(lambda self: self.fake.clipboard)
+    seq = property(lambda self: self.fake.seq)
+
+
 def _windows_send_rig(monkeypatch):
-    """injector_windows over a fake SendInput and clipboard; returns rig."""
+    """injector_windows over a fake user32/kernel32 (_FakeWindows); returns rig."""
     import time as _time
-    from types import SimpleNamespace
     from wayfinder.core import injector_windows as w
 
-    rig = SimpleNamespace(sent=[], clipboard="theirs", seq=1, retired=False, on_sleep=None,
-                          own_window=False)
-
-    class User32:
-        @staticmethod
-        def SendInput(n, arr, _size):
-            rig.sent.extend((arr[i].u.ki.wVk, arr[i].u.ki.wScan,
-                             bool(arr[i].u.ki.dwFlags & w.KEYEVENTF_KEYUP)) for i in range(n))
-            return n
-
-    def set_clipboard(text, transient=False):
-        rig.clipboard = text
-        rig.seq += 1
-        return True
+    fake = _FakeWindows()
+    rig = _Rig(fake=fake, sent=fake.sent, retired=False, on_sleep=None, own_window=False)
 
     def sleep(seconds):
         if rig.on_sleep is not None:
             rig.on_sleep()
 
-    monkeypatch.setattr(w, "_user32", User32())
+    monkeypatch.setattr(w, "_user32", fake)
+    monkeypatch.setattr(w, "_kernel32", fake)
     monkeypatch.setattr(w, "time", SimpleNamespace(sleep=sleep, monotonic=_time.monotonic,
                                                    time=_time.time, perf_counter=_time.perf_counter))
+    monkeypatch.setattr(w, "_paste_reporter", None)
     monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
     monkeypatch.setattr(w, "_foreground_is_own_process", lambda: rig.own_window)
     monkeypatch.setattr(w, "require_modifier_release_windows", lambda: None)
-    monkeypatch.setattr(w, "_clipboard_get_windows", lambda: rig.clipboard)
-    monkeypatch.setattr(w, "_clipboard_set_windows", set_clipboard)
-    monkeypatch.setattr(w, "_clipboard_sequence", lambda: rig.seq)
     monkeypatch.setattr(w._pending_restore, "schedule", lambda restore: None)
     return rig, w
 
@@ -2119,7 +2207,7 @@ def test_a_windows_paste_retired_during_its_settle(monkeypatch, scope, user_copi
 
     def settle():
         if user_copied:
-            rig.clipboard, rig.seq = "mine", rig.seq + 1   # the user's Ctrl+C
+            assert rig.fake.copy("mine")                    # the user's Ctrl+C
         rig.retired = True
 
     rig.on_sleep = settle
@@ -2145,3 +2233,129 @@ def test_aura_frontmost_leaves_no_retired_text_on_the_windows_clipboard(monkeypa
     with pytest.raises(injector.InjectionError, match="on the clipboard"):
         w.inject_text_windows("live words")
     assert rig.clipboard == "live words"
+
+
+def test_each_send_input_batch_with_a_press_asks(monkeypatch):
+    # Sol mac r13: _send asked once before its chunk loop, so a retirement
+    # during the first SendInput still sent the next chunks' presses. A key
+    # an earlier chunk left down goes back up.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    shift = w._keyboard_input(wVk=w.VK_SHIFT)
+    shift_up = w._keyboard_input(wVk=w.VK_SHIFT, flags=w.KEYEVENTF_KEYUP)
+    pairs = [i for ch in "ab" * 300 for i in w._char_inputs(ch)]
+    rig.fake.on_send = lambda n: setattr(rig, "retired", True)
+    with injector.cancellable(lambda: rig.retired):
+        with pytest.raises(injector.InjectionCancelled):
+            w._send([shift] + pairs + [shift_up])
+    # One chunk (Shift and 255½ characters), then the key-ups for what it
+    # left down: the split character's, then Shift's.
+    assert len(rig.sent) == w._SEND_CHUNK + 2
+    assert rig.sent[w._SEND_CHUNK - 1][2] is False
+    assert rig.sent[-2] == (0, rig.sent[w._SEND_CHUNK - 1][1], True)
+    assert rig.sent[-1] == (w.VK_SHIFT, 0, True)
+    assert sum(1 for e in rig.sent if e[0] == w.VK_SHIFT and not e[2]) == 1
+
+
+def test_a_live_long_send_goes_out_whole(monkeypatch):
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    pairs = [i for ch in "ab" * 300 for i in w._char_inputs(ch)]
+    with injector.cancellable(lambda: False):
+        w._send(pairs)
+    assert len(rig.sent) == len(pairs)
+
+
+@pytest.mark.parametrize("retire", [True, False])
+def test_a_windows_clipboard_write_asks_after_its_open_retries(monkeypatch, retire):
+    # Sol mac r13: OpenClipboard retries while another app holds the
+    # clipboard; a retirement then still emptied and wrote it.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    busy = [True]
+
+    def open_attempt():
+        if busy[0]:
+            busy[0] = False
+            return False                                  # another app has it
+        return None
+
+    rig.fake.on_open = open_attempt
+    rig.on_sleep = lambda: setattr(rig, "retired", retire)
+    with injector.cancellable(lambda: rig.retired):
+        if retire:
+            with pytest.raises(injector.InjectionCancelled):
+                w._clipboard_set_windows("retired words", transient=True)
+            assert rig.fake.events == ["open", "close"] and rig.clipboard == "theirs"
+        else:
+            assert w._clipboard_set_windows("live words", transient=True)
+            assert rig.clipboard == "live words"
+    assert not rig.fake.opened
+
+
+@pytest.mark.parametrize("path", ["paste", "own-window"])
+def test_a_windows_dictation_retired_during_a_clipboard_read_writes_nothing(monkeypatch, path):
+    # Sol mac r13: retired while the paste read the user's clipboard, or while
+    # the own-window refusal waited for it, the write still went out.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    rig.own_window = path == "own-window"
+    rig.fake.on_open = lambda: setattr(rig, "retired", True)
+    with injector.cancellable(lambda: rig.retired):
+        with pytest.raises(injector.InjectionCancelled):
+            if path == "paste":
+                w.inject_text_paste_windows("retired words")
+            else:
+                w.inject_text_windows("retired words")
+    assert rig.fake.writes == [] and rig.clipboard == "theirs" and rig.sent == []
+
+
+def _pasted_with_a_pending_restore(monkeypatch):
+    rig, w = _windows_send_rig(monkeypatch)
+    pending = []
+    monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
+    w.inject_text_paste_windows("dictation")
+    assert rig.clipboard == "dictation" and len(pending) == 1
+    rig.fake.events.clear()
+    return rig, w, pending[0]
+
+
+def test_the_windows_restore_checks_and_writes_under_one_open(monkeypatch):
+    # Sol mac r13: the check and the restore opened the clipboard apart, so a
+    # copy between them was overwritten. While Aura holds it, no app can copy.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    restore()
+    assert rig.clipboard == "theirs"
+    assert rig.fake.events == ["open", "read", "empty", ("set", "theirs"), "close"]
+
+
+def test_the_windows_restore_keeps_a_same_words_copy_made_while_it_waited(monkeypatch):
+    # Sol mac r13: the counter was read before the clipboard opened; the user
+    # copying the same words while it waited looked untouched, and the restore
+    # overwrote their copy.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    busy = [True]
+
+    def open_attempt():
+        if busy[0]:
+            busy[0] = False
+            return False
+        return None
+
+    rig.fake.on_open = open_attempt
+    rig.on_sleep = lambda: rig.fake.copy("dictation")     # the same words, copied
+    restore()
+    assert rig.fake.writes == ["dictation"]               # no "theirs" over it
+    assert rig.clipboard == "dictation" and not rig.fake.opened
+
+
+def test_the_cancel_restore_goes_out_under_a_retired_scope(monkeypatch):
+    # Restores are never refused: the user's clipboard comes back even though
+    # the dictation that wrote it is retired.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    rig.fake.on_write = lambda text: setattr(rig, "retired", text == "retired words")
+    with injector.cancellable(lambda: rig.retired):
+        with pytest.raises(injector.InjectionCancelled):
+            w.inject_text_paste_windows("retired words")
+    assert rig.fake.writes == ["retired words", "theirs"] and rig.sent == []

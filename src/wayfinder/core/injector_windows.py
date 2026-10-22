@@ -174,10 +174,17 @@ def _send(inputs: list[_INPUT]) -> None:
     releases always go out: a key left down repeats in the target app."""
     if not inputs:
         return
-    if any(not (inp.u.ki.dwFlags & KEYEVENTF_KEYUP) for inp in inputs):
-        _refuse_if_cancelled()
     for start in range(0, len(inputs), _SEND_CHUNK):
         chunk = inputs[start : start + _SEND_CHUNK]
+        # Each native batch with a press asks, so a retirement while an
+        # earlier one ran sends no more (Sol mac r13). Keys the batches sent
+        # so far left down go back up first.
+        if any(not (inp.u.ki.dwFlags & KEYEVENTF_KEYUP) for inp in chunk):
+            try:
+                _refuse_if_cancelled()
+            except InjectionCancelled:
+                _send_quietly(_releases_for(inputs[:start]))
+                raise
         n = len(chunk)
         arr = (_INPUT * n)(*chunk)
         sent = _user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
@@ -188,6 +195,30 @@ def _send(inputs: list[_INPUT]) -> None:
                 "The foreground app may block synthetic input (e.g. an elevated "
                 "window while Aura runs unelevated)."
             )
+
+
+def _releases_for(sent: list[_INPUT]) -> list[_INPUT]:
+    """Key-ups for the keys *sent* leaves down, last pressed first. Typing
+    sends each key's press and release together, so normally none."""
+    down: dict = {}
+    for inp in sent:
+        ki = inp.u.ki
+        key = (ki.wVk, ki.wScan, ki.dwFlags & ~KEYEVENTF_KEYUP)
+        if ki.dwFlags & KEYEVENTF_KEYUP:
+            down.pop(key, None)
+        else:
+            down[key] = ki
+    return [_keyboard_input(wVk=ki.wVk, wScan=ki.wScan, flags=ki.dwFlags | KEYEVENTF_KEYUP)
+            for ki in reversed(list(down.values()))]
+
+
+def _send_quietly(inputs: list[_INPUT]) -> None:
+    # Releases only, so never refused; a failure must not replace why the
+    # send stopped.
+    try:
+        _send(inputs)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -466,53 +497,85 @@ def _open_clipboard(retries: int = 5) -> bool:
     return False
 
 
-def _clipboard_get_windows() -> str | None:
-    """Current clipboard text, or None if empty/unavailable/non-text."""
+_clipboard_hold = threading.local()
+
+
+@contextmanager
+def _clipboard_held():
+    """One OpenClipboard for the reads and writes inside it; yields whether
+    the clipboard opened. Nested uses share the outer one. While Aura holds
+    it, another app's OpenClipboard fails, so no copy lands between a check
+    and the write that depends on it (checked on Windows 11, node 4)."""
+    if getattr(_clipboard_hold, "open", False):
+        yield True
+        return
     if not _open_clipboard():
-        return None
+        yield False
+        return
+    _clipboard_hold.open = True
     try:
-        handle = _user32.GetClipboardData(_CF_UNICODETEXT)
-        if not handle:
-            return None
-        ptr = _kernel32.GlobalLock(handle)
-        if not ptr:
-            return None
-        try:
-            return ctypes.wstring_at(ptr)
-        finally:
-            _kernel32.GlobalUnlock(handle)
+        yield True
     finally:
+        _clipboard_hold.open = False
         _user32.CloseClipboard()
 
 
-def _clipboard_set_windows(text: str, transient: bool = False) -> bool:
+def _clipboard_get_windows() -> str | None:
+    """Current clipboard text, or None if empty/unavailable/non-text."""
+    with _clipboard_held() as held:
+        if not held:
+            return None
+        return _read_open_clipboard()
+
+
+def _read_open_clipboard() -> str | None:
+    handle = _user32.GetClipboardData(_CF_UNICODETEXT)
+    if not handle:
+        return None
+    ptr = _kernel32.GlobalLock(handle)
+    if not ptr:
+        return None
+    try:
+        return ctypes.wstring_at(ptr)
+    finally:
+        _kernel32.GlobalUnlock(handle)
+
+
+def _clipboard_set_windows(text: str, transient: bool = False, *, restoring: bool = False) -> bool:
     """Replace clipboard contents with *text* (CF_UNICODETEXT). True on success.
 
     *transient* also marks it as excluded from clipboard history and sync.
+    A dictation's write is refused for a retired dictation once the
+    clipboard is open, after OpenClipboard's retries and right before it is
+    emptied (Sol mac r13); a *restoring* write always goes out.
     """
-    if not _open_clipboard():
+    with _clipboard_held() as held:
+        if not held:
+            return False
+        if not restoring:
+            _refuse_if_cancelled()
+        return _write_open_clipboard(text, transient)
+
+
+def _write_open_clipboard(text: str, transient: bool) -> bool:
+    if not _user32.EmptyClipboard():
         return False
-    try:
-        if not _user32.EmptyClipboard():
-            return False
-        buffer = ctypes.create_unicode_buffer(text)  # NUL-terminated UTF-16
-        size = ctypes.sizeof(buffer)
-        h_global = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, size)
-        if not h_global:
-            return False
-        ptr = _kernel32.GlobalLock(h_global)
-        if not ptr:
-            return False
-        ctypes.memmove(ptr, buffer, size)
-        _kernel32.GlobalUnlock(h_global)
-        # Ownership of h_global passes to the system on success.
-        if not _user32.SetClipboardData(_CF_UNICODETEXT, h_global):
-            return False
-        if transient:
-            _mark_transient()
-        return True
-    finally:
-        _user32.CloseClipboard()
+    buffer = ctypes.create_unicode_buffer(text)  # NUL-terminated UTF-16
+    size = ctypes.sizeof(buffer)
+    h_global = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, size)
+    if not h_global:
+        return False
+    ptr = _kernel32.GlobalLock(h_global)
+    if not ptr:
+        return False
+    ctypes.memmove(ptr, buffer, size)
+    _kernel32.GlobalUnlock(h_global)
+    # Ownership of h_global passes to the system on success.
+    if not _user32.SetClipboardData(_CF_UNICODETEXT, h_global):
+        return False
+    if transient:
+        _mark_transient()
+    return True
 
 
 RESTORE_DELAY_S = 0.8   # as macos_paste.RESTORE_DELAY_S
@@ -587,6 +650,17 @@ def _clipboard_untouched(text: str, ours) -> bool:
     return (ours is None or _clipboard_sequence() == ours) and _clipboard_get_windows() == text
 
 
+def _restore_clipboard(previous: str, text: str, ours) -> tuple[bool, bool]:
+    """Put *previous* back if the clipboard is as Aura left it, with the check
+    and the write under one OpenClipboard: a copy made during the check
+    (even of the same words) stays (Sol mac r13). Returns (untouched,
+    restored)."""
+    with _clipboard_held() as held:
+        if not held or not _clipboard_untouched(text, ours):
+            return False, False
+        return True, _clipboard_set_windows(previous, transient=True, restoring=True)
+
+
 def inject_text_paste_windows(text: str, cancelled=None) -> None:
     """Inject *text* via clipboard + Ctrl+V, restoring the prior clipboard.
 
@@ -632,8 +706,8 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
             # ... or during the clipboard writes or the settle (Sol mac r12):
             # no Ctrl+V; the user's clipboard back now, unless they copied
             # something meanwhile.
-            if previous is not None and _clipboard_untouched(text, ours):
-                _clipboard_set_windows(previous, transient=True)
+            if previous is not None:
+                _restore_clipboard(previous, text, ours)
             raise
         diag.mark("ctrl_v")
         # Put the old clipboard back later, on a timer (the Mac's
@@ -646,10 +720,9 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
             def restore(previous=previous, text=text, diag=diag, ours=ours):
                 # Untouched since Aura wrote it: same change counter (a "Copy"
                 # of the same words bumps it) and still our text.
-                untouched = _clipboard_untouched(text, ours)
+                untouched, restored = _restore_clipboard(previous, text, ours)
                 diag.at_restore(untouched)
-                if untouched:
-                    _clipboard_set_windows(previous, transient=True)
+                if restored:
                     diag.mark("restored")
 
             _pending_restore.schedule(restore)
