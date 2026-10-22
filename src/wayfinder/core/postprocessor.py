@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from wayfinder.core.transcriber import RequestAbandoned, _dictation_cancelled, _retired_dictation
-from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
+from wayfinder.utils.child_supervisor import HelperNotStarted, HelpersClosed, run_tracked
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.platform import (
     get_user_llm_models_dir,
@@ -2575,12 +2575,16 @@ class LlamaCppCliBackend(PostProcessorBackend):
         cand = self.llama_binary.replace("llama-simple", "llama-simple-cpu")
         return cand if cand != self.llama_binary and Path(cand).exists() else None
 
-    def _probe_gpu_ok(self, ngl: int, budget: Optional[float] = None) -> bool:
+    def _probe_gpu_ok(self, ngl: int, budget: Optional[float] = None) -> Optional[bool]:
         """One tiny GPU generation. False if Vulkan crashes (rc != 0) or degrades to
         ~1 tok/s (times out) — the 60s-hang case the Flatpak used to dodge by staying
         CPU-only. Isolated in a subprocess so a Vulkan-init crash can't take us down.
         budget clamps the probe's subprocess timeout to the caller's remaining
-        cleanup budget so a first-ever probe cannot blow the dictation's ceiling."""
+        cleanup budget so a first-ever probe cannot blow the dictation's ceiling.
+
+        None means no verdict: the deadline passed before the probe helper was
+        even spawned (HelperNotStarted), so nothing about the GPU was learned
+        (Sol mac r20)."""
         if not self.model_path or not Path(self.model_path).exists():
             return False
         import time as _t
@@ -2598,6 +2602,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
             )
         except HelpersClosed:
             raise   # Quit, not the GPU: _subprocess_target caches no verdict
+        except HelperNotStarted:
+            return None   # nothing ran: no verdict either way (Sol mac r20)
         except Exception:
             return False
         return r.returncode == 0 and (_t.time() - t0) < _GPU_PROBE_MAX_SECONDS
@@ -2639,6 +2645,13 @@ class LlamaCppCliBackend(PostProcessorBackend):
             ok = self._probe_gpu_ok(requested, budget=budget)
             # A retirement during the probe may have stopped it: no verdict.
             _check_dictation()
+            if ok is None:
+                # The deadline passed before the probe helper was ever
+                # spawned (HelperNotStarted): no verdict, not a GPU failure.
+                # CPU for THIS call only — nothing cached, and not counted
+                # as a clamped probe, so an unhurried call still probes
+                # fresh (Sol mac r20).
+                return (self._cpu_sibling() or self.llama_binary), 0
             if not ok and budget is not None and budget < _GPU_PROBE_TIMEOUT:
                 # A budget-clamped failure may be the clamp, not the GPU.
                 # Don't poison the cache — but remember the burn, so this key

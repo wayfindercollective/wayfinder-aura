@@ -702,6 +702,17 @@ class LlamaServerManager:
                     raise LlamaServerSuperseded("shut down while starting")
                 # Nor does a retired request's failure disable the server.
                 _unwanted()
+                if deadline is not None and _left() <= 0:
+                    # The ladder ran out of the CALLER's time, not its own: a
+                    # rung's readiness wait — the CPU-only or final fallback
+                    # rung included — can have been cut short by this deadline
+                    # while the model was still loading. That is a budget
+                    # exit, not proof the binary is broken, so it must not
+                    # disable the server for a later call with time to spare
+                    # (Sol mac r20).
+                    raise LlamaServerError(
+                        "every llama-server start attempt ran out of time: "
+                        + " | ".join(errors))
                 cls._disabled = True
                 cls._disabled_switch = configured
                 raise LlamaServerError("every llama-server start attempt failed: "

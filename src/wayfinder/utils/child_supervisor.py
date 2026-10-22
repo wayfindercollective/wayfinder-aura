@@ -499,9 +499,17 @@ def _run_spawn_checks() -> None:
         check()
 
 
+class HelperNotStarted(subprocess.TimeoutExpired):
+    """Raised instead of a plain TimeoutExpired when the deadline passed
+    before the helper was ever spawned: nothing ran, so nothing a caller
+    caches, disables or counts as a broken binary may be based on it (Sol
+    mac r20/r21). A subclass of TimeoutExpired, so an existing
+    ``except subprocess.TimeoutExpired`` still catches it unchanged."""
+
+
 def _refuse_past(command, deadline) -> None:
     if deadline is not None and time.monotonic() >= deadline:
-        raise subprocess.TimeoutExpired(list(command), 0.0)
+        raise HelperNotStarted(list(command), 0.0)
 
 
 def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
@@ -518,7 +526,7 @@ def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
     if deadline is None:
         _tracked_lock.acquire()
     elif not _tracked_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-        raise subprocess.TimeoutExpired(list(command), 0.0)
+        raise HelperNotStarted(list(command), 0.0)
     try:
         if _tracked_closed:
             raise HelpersClosed("shutting down: no new helper process")
@@ -597,6 +605,8 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
         kwargs["stdin"] = subprocess.PIPE
     try:
         proc = spawn_tracked(command, deadline=deadline, **kwargs)
+    except HelperNotStarted:
+        raise HelperNotStarted(command, timeout) from None
     except subprocess.TimeoutExpired:
         raise subprocess.TimeoutExpired(command, timeout) from None
     try:

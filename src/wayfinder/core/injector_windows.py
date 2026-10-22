@@ -799,11 +799,27 @@ def _wanted_unless_cancelled():
 
 
 RESTORE_DELAY_S = 0.8   # as macos_paste.RESTORE_DELAY_S
+# Further timer-driven tries after the first, when the job reports the
+# clipboard is still ours but not yet restored (Sol mac r21) — bounded, never
+# an unbounded timer loop, and spaced out rather than the fast in-call retries
+# _restore_with_retry already does.
+RESTORE_DEFERRED_RETRIES = 2
+RESTORE_DEFERRED_RETRY_S = 3.0
 
 
 class _DeferredRestore:
     """One pending clipboard restore, run on a timer or flushed early
-    (Windows twin of macos_paste.DeferredRestore)."""
+    (Windows twin of macos_paste.DeferredRestore).
+
+    *restore* must return True once it is done — restored, or no longer
+    ours to restore (the user copied or cleared it) — or False to mean the
+    clipboard is still ours but the write did not land, so it is worth
+    trying again (Sol mac r21: a restore whose text writes were refused
+    throughout used to be dropped here, silently, the moment the mark
+    write alone happened to succeed). schedule()'s signature is unchanged
+    from before r21 — existing callers/tests replace it wholesale with a
+    single-arg fake — so the bounded retry count lives in here, not in a
+    parameter."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -813,12 +829,14 @@ class _DeferredRestore:
         self._run = threading.Lock()
         self._timer: threading.Timer | None = None
         self._job = None
+        self._retries_left = 0
 
     def schedule(self, restore, delay: float = RESTORE_DELAY_S) -> None:
         self.flush()
         try:
             with self._lock:
                 self._job = restore
+                self._retries_left = RESTORE_DEFERRED_RETRIES
                 self._timer = threading.Timer(delay, self._fire)
                 self._timer.daemon = True
                 self._timer.start()
@@ -827,6 +845,7 @@ class _DeferredRestore:
             # so the user's clipboard is not left holding the dictation.
             with self._lock:
                 self._timer = self._job = None
+                self._retries_left = 0
             try:
                 restore()
             except Exception:
@@ -834,29 +853,54 @@ class _DeferredRestore:
 
     def flush(self) -> None:
         """Run the pending restore now (before a new paste snapshots the
-        clipboard), or wait for one the timer is already running."""
+        clipboard), or wait for one the timer is already running. No
+        further retries after this one: a new paste is about to own the
+        clipboard either way, so a restore still owed at this point is
+        logged instead of kept pending behind it (Sol mac r21)."""
         with self._run:
             with self._lock:
                 timer, job = self._timer, self._job
                 self._timer = self._job = None
+                self._retries_left = 0
             if timer is not None:
                 timer.cancel()
             if job is not None:
-                try:
-                    job()
-                except Exception:
-                    pass
+                self._run_job(job, final=True)
 
     def _fire(self) -> None:
         with self._run:
             with self._lock:
                 job = self._job
-                self._timer = self._job = None
-            if job is not None:
-                try:
-                    job()
-                except Exception:
-                    pass
+                retries = self._retries_left
+            if job is None:
+                return
+            if self._run_job(job, final=retries <= 0):
+                with self._lock:
+                    self._job = None
+                return
+            if retries <= 0:
+                with self._lock:
+                    self._job = None
+                return
+            with self._lock:
+                self._retries_left = retries - 1
+                self._timer = threading.Timer(RESTORE_DEFERRED_RETRY_S, self._fire)
+                self._timer.daemon = True
+                self._timer.start()
+
+    @staticmethod
+    def _run_job(job, *, final: bool) -> bool:
+        try:
+            done = bool(job())
+        except Exception:
+            return True   # a job that raised is as done as one that ran
+        if not done and final:
+            # Still ours, still unrestored, and this was the last try
+            # (timer retries exhausted, or a flush() cut it short): say so
+            # once, rather than discarding the saved text with no sign it
+            # ever happened (Sol mac r21).
+            _log_restore_exhausted()
+        return done
 
 
 _pending_restore = _DeferredRestore()
@@ -931,6 +975,22 @@ def _log_restore_alloc_failed() -> None:
         return
     try:
         reporter("🔎 Paste ⚠ could not prepare the clipboard restore — left the dictation as is")
+    except Exception:
+        pass
+
+
+def _log_restore_exhausted() -> None:
+    """One line, no clipboard content (Sol mac r21): the clipboard stayed
+    ours (mark intact) through every immediate AND deferred retry, but the
+    text write was refused every time, so the user's previous clipboard was
+    never put back. The old code reached this state silently — the mark
+    alone landing was enough for the next attempt's ownership check to pass,
+    but nothing told the user the restore never actually happened."""
+    reporter = _paste_reporter
+    if reporter is None:
+        return
+    try:
+        reporter("🔎 Paste ⚠ could not restore the previous clipboard after repeated attempts")
     except Exception:
         pass
 
@@ -1020,6 +1080,21 @@ def _restore_with_retry(previous: str, text: str, mark: bytes) -> tuple[bool, bo
         time.sleep(RESTORE_RETRY_S)
         untouched, restored = _restore_clipboard(previous, text, mark)
     return untouched, restored
+
+
+def _restore_job(previous: str, text: str, mark: bytes, diag):
+    """A _pending_restore job: True once done (restored, or no longer ours),
+    False to mean try again later — still ours, but the write did not land
+    (Sol mac r21). Reusable across every deferred attempt; _restore_with_retry
+    inside it re-reads the clipboard fresh each time."""
+    def restore() -> bool:
+        untouched, restored = _restore_with_retry(previous, text, mark)
+        diag.at_restore(untouched)
+        if restored:
+            diag.mark("restored")
+            return True
+        return not untouched   # done (no longer ours) iff NOT still owed
+    return restore
 
 
 def _restore_clipboard(previous: str, text: str, mark: bytes) -> tuple[bool, bool]:
@@ -1192,7 +1267,13 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
             # no Ctrl+V; the user's clipboard back now, unless they copied
             # something meanwhile.
             if previous is not None:
-                _restore_with_retry(previous, text, mark)
+                untouched, restored = _restore_with_retry(previous, text, mark)
+                if untouched and not restored:
+                    # Every write was refused, the mark alone landing each
+                    # time: still ours, so the restore stays owed instead of
+                    # being dropped here (Sol mac r21 — same gap the Ctrl+V
+                    # path below closes with a deferred retry).
+                    _pending_restore.schedule(_restore_job(previous, text, mark, diag))
             raise
         diag.mark("ctrl_v")
         # Put the old clipboard back later, on a timer (the Mac's
@@ -1202,15 +1283,7 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
         # the clipboard still holds our text: the user may have copied
         # something new in the meantime.
         if previous is not None:
-            def restore(previous=previous, text=text, diag=diag, mark=mark):
-                # Untouched since Aura wrote it: still our mark (a "Copy" of
-                # the same words takes it away) and still our text.
-                untouched, restored = _restore_with_retry(previous, text, mark)
-                diag.at_restore(untouched)
-                if restored:
-                    diag.mark("restored")
-
-            _pending_restore.schedule(restore)
+            _pending_restore.schedule(_restore_job(previous, text, mark, diag))
     except Exception as exc:
         diag.failed(exc)
         raise

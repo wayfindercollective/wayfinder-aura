@@ -1241,6 +1241,37 @@ class TestLlamaGpuCpuFallback:
             b.warm_up()
         probe.assert_called_once()  # first dictation lands on the right binary
 
+    # Sol mac r20/r21 (Finding 1): a pre-spawn deadline expiry (HelperNotStarted)
+    # during the probe is no verdict, not a GPU failure — _probe_gpu_ok(None) must
+    # not get cached or counted as a clamp, and a later, unhurried call must still
+    # probe for real.
+
+    def test_probe_returns_none_on_helper_not_started(self, tmp_path):
+        from wayfinder.utils.child_supervisor import HelperNotStarted
+        b = self._backend(tmp_path)
+        with patch("wayfinder.core.postprocessor.run_tracked",
+                   side_effect=HelperNotStarted(["x"], 8.0)):
+            assert b._probe_gpu_ok(99) is None
+
+    def test_subprocess_target_caches_nothing_on_helper_not_started(self, tmp_path):
+        import time
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        b = self._backend(tmp_path, ngl=-1, cpu_sibling=True)
+        key = (b.llama_binary, b.model_path, 99)
+        with patch.object(b, "_probe_gpu_ok", return_value=None) as probe:
+            binary, ngl = b._subprocess_target(deadline=time.monotonic() + 5)
+        # CPU for this call only (no verdict to act on), nothing cached either way.
+        assert ngl == 0 and binary.endswith("llama-simple-cpu")
+        probe.assert_called_once()
+        assert key not in LlamaCppCliBackend._gpu_probe
+        assert key not in LlamaCppCliBackend._gpu_probe_clamped
+        # An unhurried later call still probes fresh instead of staying condemned.
+        with patch.object(b, "_probe_gpu_ok", return_value=True) as probe2:
+            binary, ngl = b._subprocess_target()
+        probe2.assert_called_once()
+        assert ngl == 99 and binary == b.llama_binary
+        assert LlamaCppCliBackend._gpu_probe[key] is True
+
 
 # =============================================================================
 # GGUF stem tier detection (quirk keys are ollama-style; configs carry stems)

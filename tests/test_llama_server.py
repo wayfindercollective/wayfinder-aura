@@ -837,6 +837,53 @@ class TestStartupDeadline:
                 LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
         assert seen[0] > _t.monotonic() + 60, "background warm-up should be unbounded"
 
+    def test_running_out_of_the_callers_time_on_the_final_rung_does_not_disable(self, tmp_path):
+        """Finding 2 (Sol mac r21): the final rung's readiness wait can be cut
+        short by the CALLER's deadline while the model is still loading. That
+        is a budget exit, not proof the binary is broken, so it must not set
+        _disabled — a later call with time to spare must still be free to try
+        and succeed."""
+        import time as _t
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        calls = []
+
+        def slow_wait_ready(proc, port, dl, epoch=None):
+            calls.append(1)
+            if len(calls) > 1:          # the final (CPU fallback) rung
+                _t.sleep(0.15)          # still loading when the deadline hits
+            return False
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", side_effect=slow_wait_ready), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            with pytest.raises(LlamaServerError, match="ran out of time"):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99,
+                                          deadline=_t.monotonic() + 0.1)
+        assert len(calls) == 2, "both rungs must have been tried"
+        assert LlamaServerManager._disabled is False
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=True), \
+             patch.object(LlamaServerManager, "_serving_model", return_value=True), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            port = LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert port == 8179
+
+    def test_every_rung_genuinely_failing_within_its_own_time_still_disables(self, tmp_path):
+        """The companion case: no caller deadline at all, so a rung that
+        returns not-ready has nothing but its own result to blame -- this
+        must still disable, or a truly broken binary would be retried on
+        every single dictation."""
+        binary, model = tmp_path / "llama-server", tmp_path / "m.gguf"
+        binary.touch(); model.touch()
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(LlamaServerManager, "_wait_ready", return_value=False), \
+             patch("subprocess.Popen", return_value=_FakeProc()):
+            with pytest.raises(LlamaServerError, match="every llama-server start attempt failed"):
+                LlamaServerManager.ensure(str(binary), str(model), 2048, 4, 99)
+        assert LlamaServerManager._disabled is True
+
 
 class TestRepeatedFailurePolicy:
     def test_a_persistently_failing_server_is_eventually_restarted(self):

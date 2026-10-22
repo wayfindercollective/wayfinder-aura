@@ -675,6 +675,37 @@ class TestWhisperServerBackend:
         assert str(binary) not in _T._CPU_FALLBACK_ACTIVE, \
             "a deadline-clamped timeout must NOT memoize CPU fallback"
 
+    def test_a_pre_spawn_expiry_does_not_poison_gpu_health_either(self, tmp_path):
+        """Sol mac r21 (Finding 1 caller audit): HelperNotStarted — the deadline
+        passing before this attempt's helper was ever spawned — is the same
+        budget-vs-failure gap as the deadline-clamped TimeoutExpired case right
+        above, just one layer earlier. It must bail the same way, never reach
+        _activate_fallback's memoized CPU fallback."""
+        import time
+        from wayfinder.core import transcriber as _T
+        from wayfinder.core.transcriber import WhisperCppBackend, TranscriptionError
+        from wayfinder.utils.child_supervisor import HelperNotStarted
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        cpu = tmp_path / "whisper-cli-cpu"; cpu.write_text("#!/bin/sh\n"); cpu.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        _T._CPU_FALLBACK_ACTIVE.pop(str(binary), None)
+        backend = WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                    use_gpu=True, timeout=30)
+
+        def fake_run_tracked(cmd, **kw):
+            if "--help" in cmd:
+                m = MagicMock(); m.returncode = 0; m.stdout = ""; m.stderr = ""
+                return m
+            raise HelperNotStarted(cmd, kw.get("timeout"))   # nothing ran
+
+        with patch("wayfinder.core.transcriber.run_tracked", side_effect=fake_run_tracked):
+            with pytest.raises(TranscriptionError):
+                backend.transcribe(str(audio), deadline=time.monotonic() + 2)
+        assert str(binary) not in _T._CPU_FALLBACK_ACTIVE, \
+            "a pre-spawn expiry must NOT memoize CPU fallback either"
+
     def test_start_server_lock_acquire_bounded_by_deadline(self, tmp_path):
         """Round-4 Finding-1: a competing holder of _server_lock must not make a
         deadline-bounded startup block past its budget — it raises instead of hanging."""
@@ -1825,6 +1856,28 @@ class TestGpuRecoveryProbe:
 
         state = transcriber._gpu_retry_state[backend.whisper_binary]
         assert state["failures"] == 2
+        assert backend.whisper_binary in transcriber._CPU_FALLBACK_ACTIVE
+
+    def test_probe_succeeds_returns_none_on_a_pre_spawn_expiry(self, tmp_path):
+        """Sol mac r21: HelperNotStarted during the probe itself is no verdict,
+        the same as _probe_gpu_ok's None on the llama side."""
+        from wayfinder.utils.child_supervisor import HelperNotStarted
+        backend, _audio = self._backend(tmp_path, "echo gpu-text")
+        with patch("wayfinder.core.transcriber.run_tracked",
+                   side_effect=HelperNotStarted(["x"], 60.0)):
+            assert backend._gpu_probe_succeeds() is None
+
+    def test_recovery_probe_is_a_no_op_on_a_pre_spawn_expiry(self, tmp_path):
+        """Neither a recovery nor a backoff on no-verdict: the next scheduled
+        retry gets an unspent try instead of this one counting as a failure
+        it never ran (Sol mac r21)."""
+        from wayfinder.core import transcriber
+        backend, audio = self._backend(tmp_path, "kill -SEGV $$")
+        backend.transcribe(audio)   # failures = 1, CPU fallback active
+        before = dict(transcriber._gpu_retry_state[backend.whisper_binary])
+        with patch.object(backend, "_gpu_probe_succeeds", return_value=None):
+            backend._probe_gpu_recovery()
+        assert transcriber._gpu_retry_state[backend.whisper_binary] == before
         assert backend.whisper_binary in transcriber._CPU_FALLBACK_ACTIVE
 
     def test_transcribe_spawns_probe_after_window(self, tmp_path):

@@ -24,7 +24,7 @@ from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import (
-    HelpersClosed, bind_to_app_lifetime, refuse_spawns_when, run_tracked,
+    HelperNotStarted, HelpersClosed, bind_to_app_lifetime, refuse_spawns_when, run_tracked,
     signal_supervised, spawn_supervised, wait_supervised,
 )
 from wayfinder.utils.platform import subprocess_no_window_kwargs
@@ -730,6 +730,13 @@ class WhisperCppBackend(TranscriptionBackend):
                     env=bundle_binary_env(whisper_metal_env(cmd)),
                     **_NO_WINDOW,
                 )
+            except HelperNotStarted:
+                # The deadline passed before this attempt's helper was ever
+                # spawned: nothing ran, so this is not a GPU hang either —
+                # same bail as the deadline-clamped branch just below, never
+                # _activate_fallback's memoized CPU fallback (Sol mac r21).
+                raise TranscriptionError(
+                    f"whisper-cli attempt {attempt_idx + 1} never started within its budget")
             except subprocess.TimeoutExpired:
                 # A deadline-CLAMPED timeout means the caller's salvage budget ran
                 # out, NOT that the GPU hung — so it must NOT memoize CPU fallback
@@ -829,6 +836,13 @@ class WhisperCppBackend(TranscriptionBackend):
         try:
             with dictation_requests(token):
                 ok = self._gpu_probe_succeeds()
+                if ok is None:
+                    # The deadline passed before the probe helper was ever
+                    # spawned (HelperNotStarted): no verdict, so neither a
+                    # recovery nor a backoff — the next scheduled retry gets
+                    # an unspent try instead of this one counting as a
+                    # failure it never ran (Sol mac r21).
+                    return
                 if ok:
                     with _gpu_state_lock:
                         # Retired meanwhile, this lock's wait included: no
@@ -853,8 +867,10 @@ class WhisperCppBackend(TranscriptionBackend):
         finally:
             _gpu_probe_inflight = False
 
-    def _gpu_probe_succeeds(self) -> bool:
-        """Run the GPU binary over 0.1s of silence; True iff it exits cleanly."""
+    def _gpu_probe_succeeds(self) -> Optional[bool]:
+        """Run the GPU binary over 0.1s of silence; True iff it exits cleanly,
+        None if the deadline passed before it was ever spawned (HelperNotStarted
+        — no verdict either way, Sol mac r21)."""
         probe_wav = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -875,6 +891,8 @@ class WhisperCppBackend(TranscriptionBackend):
             return result.returncode == 0
         except HelpersClosed:
             raise   # Quit, not the GPU: _probe_gpu_recovery leaves its state alone
+        except HelperNotStarted:
+            return None
         except Exception:
             return False
         finally:

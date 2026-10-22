@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
 
-from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
+from wayfinder.utils.child_supervisor import HelperNotStarted, HelpersClosed, run_tracked
 
 
 @dataclass
@@ -598,6 +598,11 @@ def benchmark_gpu_devices(
                 
                 if result.returncode == 0:
                     results[device_idx_str] = round(elapsed, 3)
+            except HelperNotStarted:
+                # The deadline passed before this device's probe was ever
+                # spawned: no measurement, not a slow one — skip it rather
+                # than cache a timing nothing ran to produce (Sol mac r21).
+                pass
             except subprocess.TimeoutExpired:
                 results[device_idx_str] = float(timeout)  # Timed out = slow
             except HelpersClosed:

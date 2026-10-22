@@ -312,6 +312,63 @@ def test_a_tracked_run_already_past_its_deadline_starts_nothing(monkeypatch):
     assert spawned == []
 
 
+# Sol mac r21 (Finding 1): a pre-spawn expiry is HelperNotStarted, a distinct
+# subclass of TimeoutExpired — nothing ran, so a caller must be able to tell
+# this apart from a helper that actually hung, instead of caching or counting
+# it as a failure. The three sites above (already past deadline, the lock
+# wait, and the watcher never getting ready) all raise it; Popen is never
+# called in any of them.
+
+@posix
+def test_a_tracked_run_already_past_its_deadline_raises_helper_not_started(monkeypatch):
+    spawned = _record_spawns(monkeypatch)
+    with pytest.raises(child_supervisor.HelperNotStarted) as caught:
+        child_supervisor.run_tracked(["true"], timeout=0)
+    assert isinstance(caught.value, subprocess.TimeoutExpired)   # existing catchers unaffected
+    assert spawned == []
+
+
+@posix
+def test_spawn_tracked_already_past_its_deadline_raises_helper_not_started(monkeypatch):
+    spawned = _record_spawns(monkeypatch)
+    with pytest.raises(child_supervisor.HelperNotStarted):
+        child_supervisor.spawn_tracked(["true"], deadline=time.monotonic() - 1,
+                                       env=dict(os.environ))
+    assert spawned == []
+
+
+@posix
+def test_a_tracked_run_out_of_time_for_the_lock_raises_helper_not_started(tmp_path):
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with child_supervisor._tracked_lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    held.wait(5)
+    try:
+        with pytest.raises(child_supervisor.HelperNotStarted):
+            child_supervisor.run_tracked(["touch", str(tmp_path / "ran")], timeout=0.2)
+    finally:
+        release.set()
+        holder.join(5)
+    assert not child_supervisor._tracked
+
+
+@posix
+def test_a_tracked_run_whose_watcher_never_gets_ready_raises_helper_not_started(monkeypatch, tmp_path):
+    _record_spawns(monkeypatch)
+    monkeypatch.setattr(child_supervisor, "_watcher_command",
+                        lambda: [sys.executable, "-c", "import time; time.sleep(30)"])
+    with pytest.raises(child_supervisor.HelperNotStarted):
+        child_supervisor.run_tracked(["touch", str(tmp_path / "ran")], timeout=0.3,
+                                     env=dict(os.environ), popen=child_supervisor._darwin_spawn)
+    assert not child_supervisor._tracked
+
+
 @posix
 def test_an_early_group_sigterm_cannot_end_a_slow_watcher(monkeypatch, tmp_path):
     # Sol mac r17: a watcher still starting up (here 1 s) did not yet ignore

@@ -1820,6 +1820,92 @@ def test_quitting_flushes_a_pending_clipboard_restore(monkeypatch):
     assert quit_src.index("_flush_windows_clipboard_restore()") < quit_src.index("os._exit(0)")
 
 
+# Sol mac r21 (Finding 3): a restore whose mark write lands but whose TEXT
+# write keeps being refused used to be silently dropped the moment the mark
+# alone made the next ownership check pass. It must instead stay pending
+# through a bounded number of deferred retries, recover if writes start
+# landing again, and log once -- never nothing -- if they never do.
+
+def test_a_restore_whose_writes_keep_failing_stays_pending_and_logs_once(monkeypatch):
+    fake, iw = _real_timer_rig(monkeypatch, "theirs")
+    monkeypatch.setattr(iw, "RESTORE_DEFERRED_RETRY_S", 0.02)
+    lines = []
+    monkeypatch.setattr(iw, "_paste_reporter", lines.append)
+    text_writes = [0]
+
+    def on_set(fmt, _handle):
+        if fmt == iw._CF_UNICODETEXT:
+            text_writes[0] += 1
+            return text_writes[0] > 1   # the initial dictation write lands; every restore write after is refused
+        return False   # the mark always lands
+
+    fake.on_set = on_set
+    previous, mark = iw._paste_write_windows("dictation")
+    assert previous == "theirs"
+    iw._pending_restore.schedule(
+        iw._restore_job(previous, "dictation", mark, iw._NullDiagnostics()), delay=0.02)
+
+    deadline = time.monotonic() + 5
+    while not lines and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert len(lines) == 1
+    assert "repeated attempts" in lines[0] and "theirs" not in lines[0]
+    # Still never restored -- the mark-only state the old code mistook for
+    # "done" -- and nothing keeps running after the one log line.
+    assert fake.clipboard != "theirs"
+    assert iw._clipboard_mark() == mark
+    time.sleep(0.1)
+    assert len(lines) == 1   # bounded: no further retries past the log
+
+
+def test_a_pending_restore_recovers_once_writes_succeed_again(monkeypatch):
+    fake, iw = _real_timer_rig(monkeypatch, "theirs")
+    monkeypatch.setattr(iw, "RESTORE_DEFERRED_RETRY_S", 0.02)
+    lines = []
+    monkeypatch.setattr(iw, "_paste_reporter", lines.append)
+    refuse = [False]
+
+    def on_set(fmt, _handle):
+        return fmt == iw._CF_UNICODETEXT and refuse[0]
+
+    fake.on_set = on_set
+    previous, mark = iw._paste_write_windows("dictation")
+    refuse[0] = True   # only the restore's own writes are refused, from here on
+    job = iw._restore_job(previous, "dictation", mark, iw._NullDiagnostics())
+    iw._pending_restore.schedule(job, delay=0.02)
+
+    time.sleep(0.08)                 # at least one failed, deferred attempt
+    assert fake.clipboard != "theirs" and lines == []   # owed, not yet exhausted
+    refuse[0] = False                # writes start landing again
+    iw._pending_restore.flush()
+    assert fake.clipboard == "theirs"
+    assert lines == []               # recovered: nothing to report
+
+
+def test_a_copy_between_deferred_retries_drops_the_pending_restore(monkeypatch):
+    fake, iw = _real_timer_rig(monkeypatch, "theirs")
+    monkeypatch.setattr(iw, "RESTORE_DEFERRED_RETRY_S", 0.02)
+    lines = []
+    monkeypatch.setattr(iw, "_paste_reporter", lines.append)
+    text_writes = [0]
+
+    def on_set(fmt, _handle):
+        if fmt == iw._CF_UNICODETEXT:
+            text_writes[0] += 1
+            return text_writes[0] > 1   # the initial dictation write lands; every restore write after is refused
+        return False
+
+    fake.on_set = on_set
+    previous, mark = iw._paste_write_windows("dictation")
+    job = iw._restore_job(previous, "dictation", mark, iw._NullDiagnostics())
+    iw._pending_restore.schedule(job, delay=0.02)
+    time.sleep(0.08)                              # at least one failed attempt first
+    assert fake.copy("something the user just copied")
+    iw._pending_restore.flush()
+    assert fake.clipboard == "something the user just copied"   # kept, not overwritten
+    assert lines == []                             # no longer ours: quietly dropped, not logged
+
+
 def test_clipboard_read_watcher_is_off_unless_asked_for(monkeypatch):
     """It polls every 0.5 ms for 1.5 s per paste (CLAUDE.md rule 1): the
     paste_diagnostics_watch setting turns it on while chasing a report."""
