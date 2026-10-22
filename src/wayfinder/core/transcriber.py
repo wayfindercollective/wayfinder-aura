@@ -3092,18 +3092,60 @@ def _collapse_whisper_repetitions(text: str) -> str:
     return " ".join(words)
 
 
-def _collapse_repeated_sentences_for_phrase_match(text: str) -> str:
-    """Return one sentence for exact repeats, only for hallucination matching."""
+# Sentence end for the noise-check repeat comparison ONLY (Sol pr67 r4):
+# normal cleanup keeps splitting on bare "(?<=[.!?])\s+" below, unchanged
+# from 2dad2af.
+_SENTENCE_END_NOISE_CHECK = r'[.!?][\'"’”)\]]*'
+
+
+def _split_sentences_for_noise_check(text: str) -> list:
+    """Sentence split for the noise-check repeat comparison only (Sol pr67
+    r4). A sentence end is [.!?], optionally followed by a closing quote or
+    bracket, then whitespace, end of text, or any non-ASCII character
+    (a script written without spaces)."""
     import re
 
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
+    text = text.strip()
+    sentences = []
+    start = 0
+    for m in re.finditer(_SENTENCE_END_NOISE_CHECK, text):
+        end = m.end()
+        if end == len(text) or text[end].isspace() or ord(text[end]) > 127:
+            sentence = text[start:end].strip()
+            if sentence:
+                sentences.append(sentence)
+            start = end
+    tail = text[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
+
+
+def _collapse_repeated_sentences_for_phrase_match(text: str, *, noise_check: bool = False) -> str:
+    """Return one sentence for exact repeats, only for hallucination matching.
+
+    *noise_check* (Sol pr67 r4): the noise path's own repeat check uses the
+    quote/bracket- and non-ASCII-aware split above and a key that keeps any
+    script's letters and digits, so "Thank you." "Thank you." and
+    "Thank you。Thank you。" both collapse. Normal cleanup (noise_check=False)
+    keeps 2dad2af's exact ASCII-only split and key so its output never
+    changes.
+    """
+    import re
+
+    if noise_check:
+        sentences = _split_sentences_for_noise_check(text)
+    else:
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
     if len(sentences) < 2:
         return text
 
     def key(sentence: str) -> str:
-        # Any script's letters and digits count: ASCII-only keys made
-        # "Thank you." and "Thank you, 李明。" the same sentence (Sol pr67 r3).
-        return re.sub(r'[\W_]+', ' ', sentence.lower()).strip()
+        if noise_check:
+            # Any script's letters and digits count (Sol pr67 r3, noise
+            # path only as of Sol pr67 r4).
+            return re.sub(r'[\W_]+', ' ', sentence.lower()).strip()
+        return re.sub(r'[^a-z0-9]+', ' ', sentence.lower()).strip()
 
     first = key(sentences[0])
     if first and all(key(s) == first for s in sentences[1:]):
@@ -3136,7 +3178,9 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
 # the safety copy's check (Sol pr67 r3).
 _HALLUCINATION_PUNCTUATION_FOLD = str.maketrans({
     "…": ".", "‘": "'", "’": "'", "“": '"', "”": '"',
-    "。": ".", "，": ",", "！": "!", "？": "?", "：": ":", "；": ";",
+    # A full-width stop takes no space after it: one is added, so the
+    # repeat check sees two sentences ("Thank you。Thank you。").
+    "。": ". ", "，": ",", "！": "! ", "？": "? ", "：": ":", "；": ";",
 })
 
 
@@ -3144,15 +3188,28 @@ def _fold_hallucination_punctuation(text: str) -> str:
     return text.translate(_HALLUCINATION_PUNCTUATION_FOLD)
 
 
-def _is_whisper_phrase_hallucination(text: str) -> bool:
+def _is_whisper_phrase_hallucination(text: str, *, noise_check: bool = False) -> bool:
     """Whether *text* is, in full, one of Whisper's known silence/noise
     catch-phrases — matched the same way :func:`clean_whisper_artifacts`
     matches it at the end of its cleanup (repeated sentences collapsed,
-    trailing punctuation stripped, punctuation variants folded to ASCII —
-    Sol pr67 r3). Never a mid-sentence substring match.
+    trailing punctuation stripped). Never a mid-sentence substring match.
+
+    *noise_check* (Sol pr67 r4): the noise path's own check folds
+    punctuation variants to ASCII first ("Thank you for watching…", a
+    curly-quoted phrase, "谢谢观看。") and strips a leading mark too (a
+    quoted phrase has one). A repeat counts only when the repeated
+    sentence is one of the catch-phrases: "Turn it down. Turn it down." over
+    a fan is speech. Normal cleanup (noise_check=False) keeps 2dad2af's
+    exact behaviour: no fold, trailing punctuation only.
     """
-    candidate = _collapse_repeated_sentences_for_phrase_match((text or "").strip())
-    candidate = _fold_hallucination_punctuation(candidate)
+    stripped = (text or "").strip()
+    if not noise_check:
+        candidate = _collapse_repeated_sentences_for_phrase_match(stripped)
+        key = candidate.lower().rstrip('.!?,;: ').strip()
+        return key in _WHISPER_PHRASE_HALLUCINATIONS
+
+    folded = _fold_hallucination_punctuation(stripped)
+    candidate = _collapse_repeated_sentences_for_phrase_match(folded, noise_check=True)
     # Both ends: a quoted phrase has a leading mark too.
     key = candidate.lower().strip('.!?,;:\'" ')
     return key in _WHISPER_PHRASE_HALLUCINATIONS
@@ -3182,6 +3239,26 @@ _NOISE_JOINER = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
 _NOISE_MARKER = r'\s*' + _NOISE_WORD + r'(?:' + _NOISE_JOINER + r'\s+' + _NOISE_WORD + r'){0,2}\s*'
 
 
+def _strip_descriptive_noise_span(match) -> str:
+    """Finding 2 (Sol pr67 r4): strict-asterisk re.sub callback. A
+    descriptive annotation ("*loud noise*", "*door slams*") still describes
+    non-speech audio even though not every word in it is noise vocabulary.
+    Strip the whole span when its content is plain words (any script's
+    letters, spaces, hyphens, apostrophes -- no digits, no nested "*") AND
+    it contains a noise word as a whole word. Code/Markdown ("*args and
+    **kwargs", "**bold**") keep their words: those contents either fail the
+    plain-words test or, like "*important*", never contain a noise word.
+    """
+    import re
+
+    content = match.group(1)
+    if not re.fullmatch(r"(?:[^\W\d_]|[ \-'])+", content):
+        return match.group(0)
+    if not re.search(r'\b' + _NOISE_WORD + r'\b', content, re.IGNORECASE):
+        return match.group(0)
+    return ' '
+
+
 def _strip_non_speech_markers(text: str, *, strict_asterisks: bool = False) -> str:
     """Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
     [Music], (background noise), ♪, special-token leaks like <|endoftext|>
@@ -3193,13 +3270,16 @@ def _strip_non_speech_markers(text: str, *, strict_asterisks: bool = False) -> s
 
     *strict_asterisks* (the safety copy): only *noise words* go, so
     "*args and **kwargs" keeps its words instead of losing everything up
-    to the last asterisk (Sol pr67 r3). Normal cleanup keeps the broad
-    pattern, so its output does not change.
+    to the last asterisk (Sol pr67 r3), plus a descriptive annotation built
+    from a noise word and plain filler words, like "*loud noise*" (Sol
+    pr67 r4, finding 2). Normal cleanup keeps the broad pattern, so its
+    output does not change.
     """
     import re
 
     if strict_asterisks:
         text = re.sub(r'\*' + _NOISE_MARKER + r'\*', ' ', text, flags=re.IGNORECASE)
+        text = re.sub(r'\*([^*]{1,40})\*', _strip_descriptive_noise_span, text)
     else:
         text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
     text = re.sub(r'\*+', '', text)
@@ -3860,7 +3940,7 @@ def transcribe_with_config(
         # returned below, including to Raw Transcript, is still the raw text.
         from wayfinder.core.recorder import noise_transcript_has_speech
         safety_text = _noise_check_safety_copy(text)
-        if (_is_whisper_phrase_hallucination(safety_text)
+        if (_is_whisper_phrase_hallucination(safety_text, noise_check=True)
                 or not noise_transcript_has_speech(safety_text)):
             # Say the recording was rejected, never what was heard.
             return ""
