@@ -82,6 +82,34 @@ class TestTheRegistry:
         thread.join(10)
         assert outcome == {"stopped": True}
 
+    # The first two bytes of a three-byte UTF-8 character, then a hang.
+    CUT_OFF = [sys.executable, "-c",
+               "import os, time; os.write(1, b'\\xe2\\x82'); time.sleep(30)"]
+
+    def test_a_stopped_run_cut_off_mid_character_is_still_stopped(self):
+        # communicate() fails to decode what the stop cut off: still Quit's doing.
+        outcome = {}
+
+        def run():
+            try:
+                child_supervisor.run_tracked(self.CUT_OFF, capture_output=True, text=True, timeout=60)
+            except Exception as exc:
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        assert _wait_for(lambda: child_supervisor._tracked)
+        time.sleep(0.3)   # the partial character is in the pipe
+        child_supervisor.close_tracked()
+        thread.join(10)
+        assert isinstance(outcome.get("error"), child_supervisor.HelperStopped)
+        assert isinstance(outcome["error"].__cause__, UnicodeDecodeError)
+
+    def test_a_bad_decode_nobody_stopped_keeps_its_own_error(self):
+        script = [sys.executable, "-c", "import os; os.write(1, b'\\xe2\\x82')"]
+        with pytest.raises(UnicodeDecodeError):
+            child_supervisor.run_tracked(script, capture_output=True, text=True, timeout=30)
+
     def test_no_helper_starts_after_a_terminal_shutdown(self):
         child_supervisor.close_tracked()
         with patch("subprocess.Popen") as popen:
@@ -219,9 +247,10 @@ class TestAFallbackRacingQuitIsStopped:
     terminal shutdown stops it rather than leaving it to outlive the app."""
 
     @staticmethod
-    def _hanging_helper(tmp_path, name):
+    def _hanging_helper(tmp_path, name, output=""):
         helper = tmp_path / name
-        helper.write_text("#!/bin/sh\nexec sleep 30\n")   # one process, like the real binary
+        # One process, like the real binary; *output* (printf escapes) first.
+        helper.write_text(f"#!/bin/sh\nprintf '{output}'\nexec sleep 30\n")
         helper.chmod(0o755)
         (tmp_path / "m.bin").touch()
         return str(helper), str(tmp_path / "m.bin")
@@ -386,7 +415,9 @@ class TestProbesAndDetectionAtQuit:
         audio = TestNoCliAfterQuit._audio(tmp_path)
         child_supervisor.close_tracked()
         with patch("subprocess.Popen") as popen:
-            assert measure_transcription([binary, "-m", model], audio, audio).ok is False
+            # Refused, and no measurement either: raised, not "ok=False".
+            with pytest.raises(child_supervisor.HelpersClosed):
+                measure_transcription([binary, "-m", model], audio, audio)
             check_whisper_cpp({"whisper_binary": binary})
         popen.assert_not_called()
 
@@ -412,6 +443,10 @@ class TestAnInterpreterExit:
         env = {**os.environ, "PYTHONPATH": f"{ROOT / 'src'}{os.pathsep}{ROOT}"}
         subprocess.run([sys.executable, "-c", app], env=env, timeout=60, check=True)
         assert _wait_for(lambda: _gone(int(pid_file.read_text())))
+
+
+# printf escapes for the first two bytes of a three-byte UTF-8 character.
+CUT_OFF_OUTPUT = "\\342\\202"
 
 
 class TestACutShortRunIsNeverAResult:
@@ -455,10 +490,11 @@ class TestACutShortRunIsNeverAResult:
         assert child_supervisor.run_tracked([sys.executable, "-c", "pass"]).returncode == 0
 
     @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    @pytest.mark.parametrize("output", ["", CUT_OFF_OUTPUT])
     @pytest.mark.parametrize("probe", ["_supported_flags", "supports_gpu"])
-    def test_a_probe_resuming_after_a_reopen_caches_nothing(self, tmp_path, monkeypatch, probe):
+    def test_a_probe_resuming_after_a_reopen_caches_nothing(self, tmp_path, monkeypatch, probe, output):
         import wayfinder.core.transcriber as transcriber
-        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli", output)
         backend = transcriber.WhisperCppBackend(whisper_binary=binary, model_path=model, use_gpu=False)
         self._long(transcriber, monkeypatch)
         TestAFallbackRacingQuitIsStopped._quit_while_running(
@@ -500,9 +536,10 @@ class TestACutShortRunIsNeverAResult:
         assert transcriber._CPU_FALLBACK_ACTIVE == on_cpu and transcriber._gpu_retry_state == state
 
     @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
-    def test_a_stopped_llama_gpu_probe_caches_no_verdict(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("output", ["", CUT_OFF_OUTPUT])
+    def test_a_stopped_llama_gpu_probe_caches_no_verdict(self, tmp_path, monkeypatch, output):
         import wayfinder.core.postprocessor as postprocessor
-        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "llama-simple")
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "llama-simple", output)
         backend = postprocessor.LlamaCppCliBackend(llama_binary=binary, model_path=model,
                                                    n_gpu_layers=-1, residency="auto")
         monkeypatch.setattr(postprocessor.LlamaCppCliBackend, "_gpu_probe", {})
@@ -581,3 +618,140 @@ class TestACutShortRunIsNeverAResult:
         workers[0]()
         assert app._gpu_setup_done.is_set() and app._gpu_setup_failed is False
         assert not any("GPU setup failed" in line for line in logs)
+
+
+class TestABenchmarkQuitCutShortIsNeverSaved:
+    """Sol PR 2 r10: the CPU vs GPU benchmark read a measurement that Quit
+    stopped as a failed one, and after a reopen saved the partial run: GPU
+    "fastest", status "CPU failed". The cleanup timings swallow errors, so the
+    run also checks the registry's shutdown token before it reports."""
+
+    @pytest.mark.parametrize("phase", ["warmup", "measured run"])
+    def test_a_measurement_quit_stopped_raises(self, monkeypatch, phase):
+        from wayfinder.core import whisper_timings
+        calls = []
+
+        def run(argv, **_kw):
+            calls.append(argv)
+            if (phase == "warmup") == (len(calls) == 1):
+                raise child_supervisor.HelperStopped("stopped by a terminal shutdown")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        monkeypatch.setattr(whisper_timings, "run_tracked", run)
+        with pytest.raises(child_supervisor.HelperStopped):
+            whisper_timings.measure_transcription(["whisper-cli"], "clip.wav", "warm.wav", timeout=5)
+
+    @staticmethod
+    def _run_benchmark(tmp_path, monkeypatch, *, cpu=None, cleanup=None):
+        """The inline benchmark end to end on a fake app: worker, then the
+        timer tick that hands its payload to on_complete."""
+        from unittest.mock import Mock
+        import wayfinder_main
+        from wayfinder.core import whisper_timings
+        workers, ticks, saves, logs = [], [], [], []
+
+        class DeferredThread:
+            def __init__(self, target, **_kwargs):
+                workers.append(target)
+
+            def start(self):
+                pass
+
+        def after(ms, fn=None, *args):
+            if fn is not None:
+                (fn(*args) if ms == 0 else ticks.append(fn))
+            return "tick"
+
+        measured = SimpleNamespace(ok=True, seconds=1.0, load_seconds=0.5, wall_seconds=1.5,
+                                   returncode=0, stderr_tail="", timing_source="steady",
+                                   warmed_ok=True)
+        runs = []
+
+        def measure(argv, *a, **kw):
+            runs.append(argv)
+            if len(runs) == 2 and cpu:
+                return cpu()
+            return measured
+
+        model = tmp_path / "ggml-base.en.bin"
+        model.write_bytes(b"model")
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)   # no Linux device probe
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(wayfinder_main.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(wayfinder_main, "save_config", lambda config: saves.append(dict(config)))
+        monkeypatch.setattr(wayfinder_main, "_resolve_whisper_model", lambda name: model)
+        monkeypatch.setattr(wayfinder_main.BenchmarkRunner, "_find_whisper_binary", lambda self: "/b/whisper-cli")
+        monkeypatch.setattr(wayfinder_main.BenchmarkRunner, "_find_whisper_cpu_binary", lambda self: None)
+        monkeypatch.setattr(wayfinder_main.BenchmarkRunner, "run_postprocessing_benchmarks",
+                            lambda self, config, progress_phase=None: (cleanup or dict)())
+        monkeypatch.setattr(whisper_timings, "measure_transcription", measure)
+        monkeypatch.setattr("wayfinder.utils.platform.get_cache_dir", lambda: tmp_path)
+        app = SimpleNamespace(
+            config={"model_path": str(model), "use_gpu": True, "benchmark_results": {},
+                    "benchmark_fastest_processor": "cpu"},
+            feature_gate=SimpleNamespace(has_feature=lambda name: True),
+            log=logs.append, after=after, after_cancel=lambda tick: None,
+            benchmark_test_btn=Mock(), benchmark_status_label=Mock(), benchmark_progress=Mock(),
+            _tick_benchmark_bar=lambda: None, _update_benchmark_results_display=Mock(),
+            _refresh_benchmark_tooltips=Mock(),
+        )
+        wayfinder_main.WayfinderApp._run_inline_benchmark(app)
+        workers[0]()
+        child_supervisor.reopen_tracked()   # the failed restart's reopen, before the tick
+        while ticks:
+            ticks.pop(0)()
+        status = [c.kwargs.get("text") for c in app.benchmark_status_label.configure.call_args_list]
+        app.logs = logs
+        return app, saves, status
+
+    def test_the_harness_saves_a_finished_run(self, tmp_path, monkeypatch):
+        app, saves, status = self._run_benchmark(tmp_path, monkeypatch)
+        assert saves and app.config["benchmark_results"]["base.en"]["cpu_10s"] == 1.0
+
+    def test_a_cpu_run_quit_stopped_saves_nothing(self, tmp_path, monkeypatch):
+        def stopped():
+            child_supervisor.close_tracked()
+            raise child_supervisor.HelperStopped("stopped by a terminal shutdown")
+
+        app, saves, status = self._run_benchmark(tmp_path, monkeypatch, cpu=stopped)
+        assert saves == [] and app.config["benchmark_results"] == {}
+        assert app.config["benchmark_fastest_processor"] == "cpu"
+        assert status[-1] == "Benchmark stopped; earlier results kept"
+        assert not any("Error" in line for line in app.logs)   # Quit is not an error
+
+    def test_a_cleanup_timing_whose_error_was_swallowed_saves_nothing(self, tmp_path, monkeypatch):
+        # process_with_config() hands back the text on any error, so a cleanup
+        # model Quit stopped would time as instant; only the token tells.
+        def swallowed():
+            child_supervisor.close_tracked()
+            return {"gemma": {"model_name": "Gemma", "avg_time": 0.0, "timestamp": 1}}
+
+        app, saves, status = self._run_benchmark(tmp_path, monkeypatch, cleanup=swallowed)
+        assert saves == [] and app.config["benchmark_results"] == {}
+        assert "postprocessing_benchmark_results" not in app.config
+
+    def test_automatic_gpu_detection_quit_stopped_raises_nothing(self, monkeypatch):
+        import wayfinder_main
+        workers, raised = [], []
+
+        class DeferredThread:
+            def __init__(self, target, args=(), kwargs=None, **_kwargs):
+                workers.append(lambda: target(*args, **(kwargs or {})))
+
+            def start(self):
+                pass
+
+        def cut_short(config):
+            raise child_supervisor.HelperStopped("stopped by a terminal shutdown")
+
+        monkeypatch.setattr(wayfinder_main.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(wayfinder_main, "save_config", lambda config: None)
+        monkeypatch.setattr("wayfinder.utils.gpu_simple.setup_gpu_environment", cut_short)
+        monkeypatch.setattr("wayfinder.core.transcriber.WhisperServerBackend.shutdown", lambda **_: None)
+        app = SimpleNamespace(config={}, _gpu_device_map={"Automatic": "auto"}, log=lambda *a: None)
+        wayfinder_main.WayfinderApp._on_gpu_device_changed(app, "Automatic")
+        try:
+            workers[0]()
+        except Exception as exc:   # threading.excepthook in the app
+            raised.append(exc)
+        assert raised == []

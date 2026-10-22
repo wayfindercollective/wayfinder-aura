@@ -100,6 +100,9 @@ def _terminate_child(proc: subprocess.Popen, timeout: float = 3.0) -> None:
 _tracked_lock = threading.Lock()
 _tracked: dict = {}   # Popen -> its stop function
 _tracked_closed = False
+# Terminal shutdowns so far; a reopen never lowers it, so work that spans one
+# can tell, however late it finishes (see shutdown_generation()).
+_shutdowns = 0
 _exit_hook_registered = False
 
 
@@ -137,6 +140,19 @@ def forget_tracked(proc: subprocess.Popen) -> None:
         _tracked.pop(proc, None)
 
 
+def cut_short(proc: subprocess.Popen) -> bool:
+    """Whether a terminal shutdown stopped this tracked child: its exit says
+    nothing about the machine, before or after a reopen."""
+    return getattr(proc, "_aura_cut_short", False)
+
+
+def shutdown_generation() -> int:
+    """A token for work made of several helpers: a different value at its end
+    means a terminal shutdown ran meanwhile, so the work is no result, even if
+    the errors it met were swallowed on the way."""
+    return _shutdowns
+
+
 def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = None,
                 check: bool = False, **kwargs) -> subprocess.CompletedProcess:
     """subprocess.run() through spawn_tracked(): the same arguments and errors."""
@@ -152,15 +168,19 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                if getattr(proc, "_aura_cut_short", False):
+                if cut_short(proc):
                     raise HelperStopped("stopped by a terminal shutdown") from None
                 raise
-            except BaseException:
+            except BaseException as exc:
                 proc.kill()
+                if isinstance(exc, Exception) and cut_short(proc):
+                    # Output cut off mid-character, a closed pipe: the stop's
+                    # doing, not the helper's answer.
+                    raise HelperStopped("stopped by a terminal shutdown") from exc
                 raise
     finally:
         forget_tracked(proc)
-    if getattr(proc, "_aura_cut_short", False):
+    if cut_short(proc):
         raise HelperStopped("stopped by a terminal shutdown")
     if check and proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, stdout, stderr)
@@ -170,9 +190,10 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
 def close_tracked(timeout: float = 6.0) -> None:
     """Terminal shutdown: refuse new helpers and stop every tracked one, in
     parallel so Quit waits for the slowest, not the sum."""
-    global _tracked_closed
+    global _tracked_closed, _shutdowns
     with _tracked_lock:
         _tracked_closed = True
+        _shutdowns += 1
         running = list(_tracked.items())
         for proc, _stop in running:
             # Marked on the child itself, so it holds after a reopen too.

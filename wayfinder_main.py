@@ -10070,6 +10070,11 @@ class WayfinderApp(ctk.CTk):
             asr_failures: list[str] = []
             pp_results: dict = {}
             pipeline: dict = {}
+            from wayfinder.utils.child_supervisor import HelpersClosed, shutdown_generation
+            # A Quit during the run stops or refuses its helpers; the cleanup
+            # timings swallow that error, so the token is what tells.
+            started_under = shutdown_generation()
+            stopped = False
             
             try:
                 # Find whisper-cli
@@ -10260,12 +10265,20 @@ class WayfinderApp(ctk.CTk):
                         f"   📦 Pipeline total (current setup): {t:.2f}s"
                     ))
                         
+            except HelpersClosed:
+                stopped = True
             except Exception as e:
                 error = str(e)
                 import traceback
                 debug_log(f"Exception: {e}\n{traceback.format_exc()}")
                 self.after(0, lambda: self.log(f"   ❌ Error: {error}"))
             
+            if stopped or shutdown_generation() != started_under:
+                # Partial timings (GPU measured, CPU stopped) would be saved as
+                # the result and vote GPU fastest: keep the earlier results.
+                debug_log("Benchmark stopped by a terminal shutdown; nothing saved")
+                result_queue.put({"stopped": True})
+                return
             debug_log(
                 f"Benchmark complete: GPU={gpu_time}, CPU={cpu_time}, "
                 f"pp={len(pp_results)}, error={error}"
@@ -10289,6 +10302,13 @@ class WayfinderApp(ctk.CTk):
             """Handle benchmark completion on main thread."""
             # Clear the busy flag first so the bar's next tick stops + hides it.
             self._benchmark_running = False
+            if isinstance(payload, dict) and payload.get("stopped"):
+                stop_timer()
+                self.benchmark_test_btn.configure(
+                    state="normal", text="Compare CPU vs GPU", fg_color=COLORS["accent"])
+                self.benchmark_status_label.configure(text="Benchmark stopped; earlier results kept")
+                self.log("   ⏹ Benchmark stopped while Aura was shutting down; nothing saved")
+                return
             gpu_time = payload.get("gpu_time") if isinstance(payload, dict) else None
             cpu_time = payload.get("cpu_time") if isinstance(payload, dict) else None
             gpu_load = payload.get("gpu_load") if isinstance(payload, dict) else None
@@ -13762,10 +13782,16 @@ class WayfinderApp(ctk.CTk):
         if value == "auto":
             os.environ.pop("GGML_VK_VISIBLE_DEVICES", None)
             try:
+                from wayfinder.utils.child_supervisor import HelpersClosed
                 from wayfinder.utils.gpu_simple import setup_gpu_environment
 
-                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
-                                 daemon=True).start()
+                def detect(config=dict(self.config)):
+                    try:
+                        setup_gpu_environment(config)
+                    except HelpersClosed:
+                        pass   # Quit stopped the probe: nothing learned, nothing to report
+
+                threading.Thread(target=detect, daemon=True).start()
             except Exception:
                 pass
         else:
