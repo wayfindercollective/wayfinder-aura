@@ -215,6 +215,14 @@ def test_xdotool_missing_binary_is_proven_pre_delivery(monkeypatch):
         pytest.fail("expected an InjectionError")
 
 
+def test_xdotool_that_cannot_start_is_proven_pre_delivery(monkeypatch):
+    monkeypatch.setattr(gc.subprocess, "run",
+                        lambda argv, **k: (_ for _ in ()).throw(PermissionError(argv[0])))
+    with pytest.raises(Exception) as caught:
+        gc._xdotool("type", "--", "words")
+    assert getattr(caught.value, "proven_pre_delivery", False) is True
+    assert "words" not in str(caught.value)
+
 def test_xdotool_timeout_is_not_proven_pre_delivery(monkeypatch):
     import subprocess
 

@@ -2438,6 +2438,15 @@ def test_no_owner_window_refuses_the_paste(monkeypatch):
     assert "window" not in rig.fake.events                 # never even tried to open one
 
 
+def test_no_owner_window_refuses_a_plain_copy(monkeypatch):
+    # Finding 5: a copy on its own (copy-only mode) never opens an ownerless
+    # hold either; it reports the write failed and leaves the clipboard be.
+    rig, w = _windows_send_rig(monkeypatch)
+    rig.fake.no_windows = True
+    before = list(rig.fake.events)
+    assert w._clipboard_set_windows("dictation") is False
+    assert rig.fake.events == before and rig.clipboard == "theirs"
+
 def test_no_owner_window_at_restore_leaves_an_ownerless_copy_alone(monkeypatch):
     # Finding 5: no window at restore time must never fall back to an
     # ownerless hold — the restore does not even try to open the clipboard,

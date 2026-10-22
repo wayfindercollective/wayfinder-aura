@@ -1722,6 +1722,25 @@ class TestFirstPieceProvenPreDelivery:
     delivery (the tool never started, or a recognised pre-typing refusal)
     may still let the documented fallback run."""
 
+    # -- the wrapper itself: only a failure to start is proven -------------
+
+    def test_an_unknown_error_on_piece_zero_is_uncertain(self):
+        from wayfinder.core.injector import _piece_of_a_typing
+        with pytest.raises(InjectionError) as caught:
+            with _piece_of_a_typing(0):
+                raise RuntimeError("typed: secret words")
+        assert getattr(caught.value, "uncertain_delivery", False) is True
+        assert not getattr(caught.value, "proven_pre_delivery", False)
+        assert "secret" not in str(caught.value)
+
+    def test_a_tool_that_cannot_start_on_piece_zero_is_proven(self):
+        from wayfinder.core.injector import _piece_of_a_typing
+        with pytest.raises(InjectionError) as caught:
+            with _piece_of_a_typing(0):
+                raise PermissionError("xdotool")
+        assert getattr(caught.value, "proven_pre_delivery", False) is True
+        assert not getattr(caught.value, "uncertain_delivery", False)
+
     # -- timeouts: always uncertain, even on piece zero, every backend -----
 
     def test_xdotool_first_piece_timeout_is_uncertain(self):
