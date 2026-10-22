@@ -3210,8 +3210,8 @@ def _is_whisper_phrase_hallucination(text: str, *, noise_check: bool = False) ->
 
     folded = _fold_hallucination_punctuation(stripped)
     candidate = _collapse_repeated_sentences_for_phrase_match(folded, noise_check=True)
-    # Both ends: a quoted phrase has a leading mark too.
-    key = candidate.lower().strip('.!?,;:\'" ')
+    # Both ends: a quoted or bracketed phrase has a leading mark too.
+    key = candidate.lower().strip('.!?,;:\'"()[] ')
     return key in _WHISPER_PHRASE_HALLUCINATIONS
 
 
@@ -3239,24 +3239,27 @@ _NOISE_JOINER = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
 _NOISE_MARKER = r'\s*' + _NOISE_WORD + r'(?:' + _NOISE_JOINER + r'\s+' + _NOISE_WORD + r'){0,2}\s*'
 
 
-def _strip_descriptive_noise_span(match) -> str:
-    """Finding 2 (Sol pr67 r4): strict-asterisk re.sub callback. A
-    descriptive annotation ("*loud noise*", "*door slams*") still describes
-    non-speech audio even though not every word in it is noise vocabulary.
-    Strip the whole span when its content is plain words (any script's
-    letters, spaces, hyphens, apostrophes -- no digits, no nested "*") AND
-    it contains a noise word as a whole word. Code/Markdown ("*args and
-    **kwargs", "**bold**") keep their words: those contents either fail the
-    plain-words test or, like "*important*", never contain a noise word.
-    """
-    import re
-
-    content = match.group(1)
-    if not re.fullmatch(r"(?:[^\W\d_]|[ \-'])+", content):
-        return match.group(0)
-    if not re.search(r'\b' + _NOISE_WORD + r'\b', content, re.IGNORECASE):
-        return match.group(0)
-    return ' '
+# A sound description, for the noise check's safety copy only (Sol pr67 r5):
+# up to two describing words before each noise word, noise words joined as
+# in brackets, at most one action word and a closing mark. "*loud noise.*",
+# "(soft music)", "*door slams*" go; "*the door*" or "*door and **kwargs"
+# is someone's emphasis or code, not an annotation, and stays.
+_SOUND_MODIFIER = (
+    r'(?:loud|soft|quiet|faint|distant|gentle|heavy|low|muffled|upbeat|'
+    r'dramatic|ambient|eerie|tense|suspenseful|calm|sad|cheerful|light|slow|'
+    r'fast|deep|steady|piano|guitar|electronic|classical|jazz|instrumental|'
+    r'orchestral)'
+)
+_SOUND_ACTION = (
+    r'(?:slams?|closes?|opens?|creaks?|rings?|buzz(?:es)?|barks?|beeps?|'
+    r'plays?|playing|continues|fades?|stops?|starts?|swells?)'
+)
+_DESCRIBED_NOISE = r'(?:' + _SOUND_MODIFIER + r'\s+){0,2}' + _NOISE_WORD
+_SOUND_ANNOTATION = (
+    r'\s*' + _DESCRIBED_NOISE
+    + r'(?:' + _NOISE_JOINER + r'\s+' + _DESCRIBED_NOISE + r'){0,2}'
+    + r'(?:\s+' + _SOUND_ACTION + r')?\s*[.!?…]*\s*'
+)
 
 
 def _strip_non_speech_markers(text: str, *, strict_asterisks: bool = False) -> str:
@@ -3268,18 +3271,17 @@ def _strip_non_speech_markers(text: str, *, strict_asterisks: bool = False) -> s
     which must never read one of Whisper's own annotations, or a leaked
     special token like <|endoftext|>, as a transcribed word (Sol pr67 r3).
 
-    *strict_asterisks* (the safety copy): only *noise words* go, so
-    "*args and **kwargs" keeps its words instead of losing everything up
-    to the last asterisk (Sol pr67 r3), plus a descriptive annotation built
-    from a noise word and plain filler words, like "*loud noise*" (Sol
-    pr67 r4, finding 2). Normal cleanup keeps the broad pattern, so its
-    output does not change.
+    *strict_asterisks* (the safety copy): only a sound annotation goes
+    (_SOUND_ANNOTATION, in asterisks or brackets), so "*args and **kwargs"
+    keeps its words instead of losing everything up to the last asterisk
+    (Sol pr67 r3) and "Close *the door*" keeps its emphasis (Sol pr67 r5).
+    Normal cleanup keeps the broad pattern, so its output does not change.
     """
     import re
 
     if strict_asterisks:
-        text = re.sub(r'\*' + _NOISE_MARKER + r'\*', ' ', text, flags=re.IGNORECASE)
-        text = re.sub(r'\*([^*]{1,40})\*', _strip_descriptive_noise_span, text)
+        for opening, closing in (r'\*', r'\*'), (r'\[', r'\]'), (r'\(', r'\)'):
+            text = re.sub(opening + _SOUND_ANNOTATION + closing, ' ', text, flags=re.IGNORECASE)
     else:
         text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
     text = re.sub(r'\*+', '', text)

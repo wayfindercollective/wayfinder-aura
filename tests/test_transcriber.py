@@ -3508,6 +3508,11 @@ class TestUnpromptedTranscription:
         # audio even though those filler words aren't noise vocabulary.
         "*loud noise* Okay.",
         "*soft music* So,",
+        # Sol pr67 r5: a closing mark inside, and the bracketed shapes.
+        "*loud noise.* Okay.",
+        "*loud noise!* Okay.",
+        "(loud music) Okay.",
+        "[soft music] So,",
     ])
     def test_unprompted_noise_rejects_descriptive_sound_annotations(
         self, prompts, monkeypatch, heard, raw
@@ -3519,6 +3524,26 @@ class TestUnpromptedTranscription:
         self.config["raw_transcription"] = raw
         text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
         assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r5: emphasis around a noise word is someone's words,
+        # and so is code that starts like an annotation.
+        "Close *the door*",
+        "Use *the phone*",
+        "Drink *the water*",
+        "*door and **kwargs",
+    ])
+    def test_unprompted_noise_keeps_emphasis_and_code_around_noise_words(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text.strip()
 
     @pytest.mark.parametrize("raw", [False, True])
     def test_unprompted_noise_keeps_code_with_asterisks(self, prompts, monkeypatch, raw):
@@ -3542,6 +3567,10 @@ class TestUnpromptedTranscription:
         "Thank you for watching… Thank you for watching…",
         '"Thank you." "Thank you."',
         "Thank you for watching。Thank you for watching。",
+        # Sol pr67 r5: bracketed repeats, mixed wrappers too.
+        "(Thank you.) (Thank you.)",
+        "[Thank you.] [Thank you.]",
+        "(Thank you.) [Thank you.]",
     ])
     def test_unprompted_noise_rejects_repeats_across_punctuation_variants(
         self, prompts, monkeypatch, heard, raw
