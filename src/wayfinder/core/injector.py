@@ -2144,10 +2144,15 @@ def _inject_text(text, typing_speed, target_window, game_mode, paste_fallback, c
         try:
             inject_text_paste_windows(text, cancelled)
             return
-        except InjectionError:
+        except InjectionError as e:
             # Not for a retired dictation, whether the paste refused it or
             # failed meanwhile (Sol mac r11).
             _refuse_if_cancelled(cancelled)
+            if getattr(e, "uncertain_delivery", False):
+                # A partial Ctrl+V SendInput may have already landed (Finding
+                # 3 / Sol mac r16): typing now could duplicate it, so surface
+                # the error instead of falling back.
+                raise
             inject_text_windows(text, typing_speed)
             return
     if not sys.platform.startswith("linux"):

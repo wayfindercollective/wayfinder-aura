@@ -166,7 +166,7 @@ def _char_inputs(ch: str) -> list[_INPUT]:
     return inputs
 
 
-def _send(inputs: list[_INPUT]) -> None:
+def _send(inputs: list[_INPUT], *, retry_releases: bool = True) -> None:
     """Send INPUT events through SendInput in bounded chunks. Raises on failure.
 
     None with a key press for a retired dictation, whatever waited before it
@@ -190,11 +190,40 @@ def _send(inputs: list[_INPUT]) -> None:
         sent = _user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
         if sent != n:
             err = ctypes.get_last_error()
-            raise InjectionError(
+            # Finding 3 (Sol mac r16): a partial SendInput left whatever it
+            # did accept DOWN (e.g. Ctrl and V of a batched Ctrl+V) and the
+            # caller fell back to typing although the paste may have already
+            # landed. Release what the accepted events left down, plus any
+            # of THIS call's own unsent key-ups for a key pressed in an
+            # earlier, separate _send call (hold_keys sends presses and
+            # releases as two calls, so a failed release batch must retry
+            # its own unsent releases) — never a key this same call's press
+            # never actually reached.
+            accepted = inputs[:start] + chunk[:sent]
+            pressed_here = {
+                (inp.u.ki.wVk, inp.u.ki.wScan, inp.u.ki.dwFlags & ~KEYEVENTF_KEYUP)
+                for inp in inputs
+                if not (inp.u.ki.dwFlags & KEYEVENTF_KEYUP)
+            }
+            stray_releases = [
+                inp for inp in inputs[start + sent:]
+                if (inp.u.ki.dwFlags & KEYEVENTF_KEYUP)
+                and (inp.u.ki.wVk, inp.u.ki.wScan, inp.u.ki.dwFlags & ~KEYEVENTF_KEYUP)
+                not in pressed_here
+            ]
+            if retry_releases:
+                # Once: the retry itself goes through _send_quietly, which
+                # never retries again, so a SendInput that keeps refusing
+                # cannot recurse (Sol mac r16).
+                _send_quietly(_releases_for(accepted) + stray_releases)
+            injection_err = InjectionError(
                 f"SendInput injected {sent}/{n} events (WinError {err}). "
                 "The foreground app may block synthetic input (e.g. an elevated "
                 "window while Aura runs unelevated)."
             )
+            if any(not (inp.u.ki.dwFlags & KEYEVENTF_KEYUP) for inp in accepted):
+                injection_err.uncertain_delivery = True
+            raise injection_err
 
 
 def _releases_for(sent: list[_INPUT]) -> list[_INPUT]:
@@ -216,7 +245,7 @@ def _send_quietly(inputs: list[_INPUT]) -> None:
     # Releases only, so never refused; a failure must not replace why the
     # send stopped.
     try:
-        _send(inputs)
+        _send(inputs, retry_releases=False)
     except Exception:
         pass
 
@@ -434,6 +463,8 @@ if _user32 is not None:
     _kernel32.GlobalLock.restype = ctypes.c_void_p
     _kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
     _kernel32.GlobalUnlock.restype = wintypes.BOOL
+    _kernel32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+    _kernel32.GlobalFree.restype = wintypes.HGLOBAL
     _user32.RegisterClipboardFormatW.argtypes = (wintypes.LPCWSTR,)
     _user32.RegisterClipboardFormatW.restype = wintypes.UINT
     _user32.CreateWindowExW.argtypes = (
@@ -471,6 +502,28 @@ def _global_copy(raw: bytes):
         ctypes.memmove(ptr, raw, len(raw))
     _kernel32.GlobalUnlock(h_global)
     return h_global
+
+
+def _global_text(text: str):
+    """A GMEM_MOVEABLE block holding *text* as NUL-terminated UTF-16 — the
+    same CF_UNICODETEXT layout _write_open_clipboard builds — or None
+    (Finding 2 / Sol mac r16): lets a paste's write prepare its text block
+    the same way _write_open_clipboard does, without emptying the clipboard
+    first."""
+    buffer = ctypes.create_unicode_buffer(text)
+    raw = ctypes.string_at(ctypes.addressof(buffer), ctypes.sizeof(buffer))
+    return _global_copy(raw)
+
+
+def _free_global(handle) -> None:
+    """GlobalFree *handle* if it is one (Finding 2): frees a prepared block
+    the system never took ownership of, so a write that did not need it, or
+    one that failed before SetClipboardData, never leaks it."""
+    if handle:
+        try:
+            _kernel32.GlobalFree(handle)
+        except Exception:
+            pass
 
 
 def _mark_transient() -> None:
@@ -709,20 +762,6 @@ _OWNER_MARK_FORMAT = "WayfinderAuraDictationMark"
 _OWNER_MARK_BYTES = 16
 
 
-def _mark_open_clipboard() -> bytes | None:
-    """Put a fresh mark beside Aura's text (clipboard already open); the mark,
-    or None if it could not be written."""
-    try:
-        fmt = _user32.RegisterClipboardFormatW(_OWNER_MARK_FORMAT)
-        mark = os.urandom(_OWNER_MARK_BYTES)
-        handle = _global_copy(mark) if fmt else None
-        if handle and _user32.SetClipboardData(fmt, handle):
-            return mark
-    except Exception:
-        pass
-    return None
-
-
 def _clipboard_mark() -> bytes | None:
     """The mark on the clipboard now, or None."""
     with _clipboard_held() as held:
@@ -760,6 +799,20 @@ def _log_no_owner_at_restore() -> None:
         pass
 
 
+def _log_rollback_failed() -> None:
+    """One line, no clipboard content (Finding 2 / Sol mac r16): a failed
+    write's in-place rollback could not put the clipboard back either, so
+    the dictation is what is left on it rather than the user's previous
+    clipboard."""
+    reporter = _paste_reporter
+    if reporter is None:
+        return
+    try:
+        reporter("🔎 Paste ⚠ could not put the clipboard back after a failed write")
+    except Exception:
+        pass
+
+
 def _restore_clipboard(previous: str, text: str, mark: bytes) -> tuple[bool, bool]:
     """Put *previous* back if the clipboard is as Aura left it, with the check
     and the write under one OpenClipboard: a copy made during the check
@@ -775,6 +828,92 @@ def _restore_clipboard(previous: str, text: str, mark: bytes) -> tuple[bool, boo
         if not _clipboard_untouched(text, mark):
             return False, False
         return True, _clipboard_set_windows(previous, transient=True, restoring=True)
+
+
+def _paste_write_windows(text: str) -> tuple[str | None, bytes]:
+    """Snapshot the clipboard and replace it with *text*, marked as Aura's
+    own dictation, all under one OpenClipboard (Finding 1 / Sol mac r16): the
+    old code read the snapshot in its own open, closed, and only then opened
+    again to write — a copy landing in that gap was invisible to the
+    snapshot and lost when the restore later put the stale snapshot back
+    over it. Reading while already open removes the gap.
+
+    Every global memory block the write or a possible rollback could need —
+    the text, a fresh owner mark, and (when there was a previous text) a
+    rollback copy of it — is allocated before anything destructive, so a
+    failed allocation never touches the clipboard (Finding 2). A failed
+    SetClipboardData for the text or the mark rolls back without emptying
+    again: replacing the text format in place, never leaving the clipboard
+    empty just because the rollback's own write failed too. Raises
+    InjectionError on any failure; returns (the previous text or None, the
+    fresh owner mark) on success."""
+    with _clipboard_held(require_owner=True) as held:
+        if not held:
+            # Never under an ownerless hold (Finding 5): without an owner
+            # window, another ownerless opener is not excluded, so the write
+            # is refused through the same path as any other write failure.
+            raise InjectionError("Could not write to the Windows clipboard for paste.")
+        previous = _read_open_clipboard()
+
+        text_block = _global_text(text)
+        mark = os.urandom(_OWNER_MARK_BYTES)
+        mark_block = _global_copy(mark)
+        previous_block = _global_text(previous) if previous is not None else None
+        if not text_block or not mark_block or (previous is not None and not previous_block):
+            _free_global(text_block)
+            _free_global(mark_block)
+            _free_global(previous_block)
+            raise InjectionError("Could not write to the Windows clipboard for paste.")
+
+        # Retired dictation refused right before the destructive write (Sol
+        # mac r13, see _clipboard_set_windows) — now that every block the
+        # write or its rollback could need is ready, nothing is allocated
+        # after this point.
+        try:
+            _refuse_if_cancelled()
+        except BaseException:
+            _free_global(text_block)
+            _free_global(mark_block)
+            _free_global(previous_block)
+            raise
+
+        if not _user32.EmptyClipboard():
+            _free_global(text_block)
+            _free_global(mark_block)
+            _free_global(previous_block)
+            raise InjectionError("Could not write to the Windows clipboard for paste.")
+
+        text_ok = bool(_user32.SetClipboardData(_CF_UNICODETEXT, text_block))
+        if not text_ok:
+            _free_global(text_block)   # the system never took it
+
+        mark_ok = False
+        if text_ok:
+            _mark_transient()
+            mark_fmt = _user32.RegisterClipboardFormatW(_OWNER_MARK_FORMAT)
+            mark_ok = bool(mark_fmt) and bool(_user32.SetClipboardData(mark_fmt, mark_block))
+        if not mark_ok:
+            _free_global(mark_block)   # never offered, or the system refused it
+
+        if text_ok and mark_ok:
+            _free_global(previous_block)   # the rollback net was not needed
+            return previous, mark
+
+        # Finding 2: without a mark nothing proves later that the clipboard
+        # is still ours once closed — even a same-words copy right after
+        # would look like it (Finding 6) — so a failed text or mark write
+        # rolls back instead of pasting unmarked or half-written. Replace
+        # the text format in place rather than EmptyClipboard again, which
+        # could leave the clipboard empty if that second step failed too.
+        if previous is None:
+            rolled_back = bool(_user32.EmptyClipboard())
+        else:
+            rolled_back = bool(_user32.SetClipboardData(_CF_UNICODETEXT, previous_block))
+            if not rolled_back:
+                _free_global(previous_block)
+        if not rolled_back:
+            _log_rollback_failed()
+        raise InjectionError("Could not write to the Windows clipboard for paste.")
 
 
 def inject_text_paste_windows(text: str, cancelled=None) -> None:
@@ -806,24 +945,10 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
         # (Sol mac r11).
         _refuse_if_cancelled(cancelled)
 
-        previous = _clipboard_get_windows()
+        # The snapshot and the write happen under one open (Finding 1): see
+        # _paste_write_windows.
+        previous, mark = _paste_write_windows(text)
         diag.previous(previous)
-        # Never under an ownerless hold (Finding 5): without an owner window,
-        # another ownerless opener is not excluded, so the write is refused
-        # through the same path as any other clipboard-write failure.
-        with _clipboard_held(require_owner=True) as held:
-            if not held or not _clipboard_set_windows(text, transient=True):
-                raise InjectionError("Could not write to the Windows clipboard for paste.")
-            mark = _mark_open_clipboard()
-            if mark is None:
-                # Without a mark nothing proves later that the clipboard is
-                # still ours once closed — even a same-words copy right after
-                # would look like it (Finding 6). Put the user's clipboard
-                # back now, inside this same hold, and refuse instead of
-                # pasting unmarked.
-                if previous is not None:
-                    _clipboard_set_windows(previous, transient=True, restoring=True)
-                raise InjectionError("Could not write to the Windows clipboard for paste.")
         diag.mark("set")
         time.sleep(0.03)
         diag.start_watch()
