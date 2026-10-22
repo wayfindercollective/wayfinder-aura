@@ -1530,61 +1530,57 @@ class TestLinuxTypingInPieces:
         assert caught.value.uncertain_delivery is True and len(runs) == 2
 
 
-def _model_xdotool_seconds(argv):
-    """Independent re-derivation of a real xdotool command's schedule,
-    written separately from xdotool_scheduled_seconds (parses the same argv
-    by the same documented xdotool semantics, but is its own code) so a bug
-    reintroduced in the estimator can't hide behind a test that merely calls
-    the estimator on itself (Codex review finding 4b)."""
-    DEFAULT_MS = 12
-    KEY_CMDS = ("key", "keyup", "keydown")
-    CMDS = ("sleep", "type") + KEY_CMDS
+def _xdotool_commands(argv):
+    """Split a real xdotool argv (everything after the leading "xdotool")
+    into (command_word, following_tokens) pairs, cut at each sleep/type/
+    key/keyup/keydown boundary found by scanning the whole list up front.
+    A structurally different first step than xdotool_scheduled_seconds's
+    own single running index, so the oracle built on it below cannot
+    retrace that loop and inherit the same mistake (Codex review finding
+    4b: the previous "independent" model was a byte-for-byte copy of the
+    estimator's parser)."""
+    words = argv[1:]
+    starts = [i for i, w in enumerate(words)
+              if w in ("sleep", "type", "key", "keyup", "keydown")]
+    ends = starts[1:] + [len(words)]
+    return [(words[s], words[s + 1:e]) for s, e in zip(starts, ends)]
+
+
+_INDEPENDENT_XDOTOOL_DEFAULT_MS = 12  # xdotool's own default, read from
+                                      # cmd_key.c / cmd_type.c, kept as a
+                                      # separate name from the estimator's
+                                      # private constant on purpose.
+
+
+def _independent_xdotool_seconds(argv) -> float:
+    """A second reading of xdotool's documented defaults — (--delay or the
+    12ms default) + 1ms per key or character; ``sleep`` costs its literal
+    argument — derived without reusing xdotool_scheduled_seconds's parsing
+    loop: commands are cut out first (_xdotool_commands) and each is costed
+    by indexing/slicing the already-isolated token list, not by an
+    incrementing index walked branch-by-branch like the estimator's."""
     total = 0.0
-    i, n = 1, len(argv)
-    while i < n:
-        word = argv[i]
-        if word == "sleep":
-            total += float(argv[i + 1])
-            i += 2
-        elif word in KEY_CMDS:
-            i += 1
-            delay = DEFAULT_MS
-            keys = []
-            while i < n and argv[i] not in CMDS:
-                if argv[i] == "--delay":
-                    delay = int(argv[i + 1])
-                    i += 2
-                elif argv[i].startswith("--"):
-                    i += 1
-                else:
-                    keys.append(argv[i])
-                    i += 1
-            total += sum(len(k.split("+")) for k in keys) * (delay + 1) / 1000
-        elif word == "type":
-            i += 1
-            delay = DEFAULT_MS
-            text = None
-            while i < n and text is None:
-                tok = argv[i]
-                if tok == "--delay":
-                    delay = int(argv[i + 1])
-                    i += 2
-                elif tok == "--args":
-                    i += 2
-                elif tok == "--":
-                    text = argv[i + 1]
-                    i += 2
-                elif tok.startswith("--"):
-                    i += 1
-                elif tok in CMDS:
-                    break
-                else:
-                    text = tok
-                    i += 1
-            if text is not None:
-                total += len(text) * (delay + 1) / 1000
-        else:
-            i += 1
+    for command, rest in _xdotool_commands(argv):
+        if command == "sleep":
+            total += float(rest[0])
+        elif command == "type":
+            # The typed text is always the command's LAST token — either
+            # the bare argument, or whatever follows a "--" terminator —
+            # since nothing xdotool accepts for `type` can follow it.
+            text = rest[-1]
+            delay = (int(rest[rest.index("--delay") + 1]) if "--delay" in rest
+                      else _INDEPENDENT_XDOTOOL_DEFAULT_MS)
+            total += len(text) * (delay + 1) / 1000
+        else:  # key / keyup / keydown
+            delay = (int(rest[rest.index("--delay") + 1]) if "--delay" in rest
+                      else _INDEPENDENT_XDOTOOL_DEFAULT_MS)
+            # Every token that is neither a "--flag" nor the value sitting
+            # right after "--delay" is a key (a "+"-joined chord counts
+            # every member it names).
+            keys = [tok for pos, tok in enumerate(rest)
+                    if not tok.startswith("--")
+                    and not (pos and rest[pos - 1] == "--delay")]
+            total += sum(tok.count("+") + 1 for tok in keys) * (delay + 1) / 1000
     return total
 
 
@@ -1635,11 +1631,82 @@ class TestXdotoolScheduledSecondsKeyCommands:
 
 class TestXdotoolPieceBudgetIndependentModel:
     """Codex review finding 4b: a piece built by typing_chunks using the real
-    estimator must also respect the budget under an INDEPENDENT model (not
-    xdotool_scheduled_seconds itself) — otherwise a shared bug in the
-    estimator and its own test would both agree and hide the regression
-    (e.g. 'aA' * 300 at the XWayland 4ms floor with warm-up was estimated at
-    0.485s while its key delays alone really cost 0.740s)."""
+    estimator must also respect the budget under an INDEPENDENTLY DERIVED
+    model — not a second copy of xdotool_scheduled_seconds's own parsing
+    loop — otherwise a shared mistake in the estimator and its "independent"
+    check would agree with each other and hide the regression (e.g. 'aA' *
+    300 at the XWayland 4ms floor with warm-up was once estimated at 0.485s
+    while its key delays alone really cost 0.740s). The first few tests
+    below hand-compute the expected schedule straight from xdotool's own
+    documented defaults for a handful of representative pieces; the rest
+    cost every piece with _independent_xdotool_seconds, which reads argv
+    differently from the estimator (see its docstring above)."""
+
+    # -- representative pieces, hand-computed against xdotool's own
+    # documented defaults (cmd_key.c / cmd_type.c: (--delay or 12ms) + 1ms
+    # per key or character; cmd_sleep: the literal argument) --------------
+
+    def test_plain_lowercase_no_warmup_no_shift(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("hello", 12)
+        # one plain `type` run: 5 chars x (12+1)ms
+        expected = 5 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_alternating_case_without_warmup(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("aA", 10)
+        # "a" (plain, 1 char x (10+1)ms) + settle gap before "A"; "A"
+        # (shift, 1 char x (10+1)ms) + settle gap; the Shift-release sweep
+        # after it (2 keys x xdotool's own 12ms default — this run's
+        # --delay 10 only ever reaches the `type` commands):
+        expected = 0.011 + 0.012 + 0.011 + 0.012 + 0.026
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_word_with_a_shift_sweep(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("Hi there", 12)
+        # "H" (shift, 1 char x 13ms) + its release sweep (2 keys x 13ms) +
+        # settle gap; "i there" (plain, 7 chars x 13ms) + its own leading
+        # settle gap:
+        expected = 0.013 + 0.012 + 0.026 + 0.012 + 7 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_warmup_adds_its_own_key_and_sweep_before_the_text(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("hi", 4, warmup=True)
+        # warm-up key (1 key x 13ms) + its settle gap (20ms) + its own
+        # release sweep (2 keys x 13ms); "hi" typed plain at --delay 4:
+        # 2 chars x (4+1)ms
+        expected = 0.013 + 0.020 + 0.026 + 2 * 0.005
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_explicit_delay_overrides_the_default(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("abc", 50)
+        # one plain run, --delay 50: 3 chars x (50+1)ms
+        expected = 3 * 0.051
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_key_command_with_a_chorded_sequence(self):
+        # build_xdotool_type_command never emits a "+"-joined chord itself
+        # (its warm-up/release keys are always single), but
+        # xdotool_scheduled_seconds must still cost one correctly, so this
+        # is a hand-built argv rather than one from the app's own builder.
+        import wayfinder.core.injector as injector
+        argv = ["xdotool", "key", "--delay", "20", "shift+a", "b"]
+        # chord "shift+a" (2 keys) + "b" (1 key) = 3 keys x (20+1)ms
+        expected = 3 * 0.021
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    # -- every piece typing_chunks actually produces, costed again by the
+    # independent oracle rather than the estimator being tested ----------
 
     @pytest.mark.parametrize("text", [
         "aA" * 300,                                       # worst case: a Shift transition every character
@@ -1659,14 +1726,14 @@ class TestXdotoolPieceBudgetIndependentModel:
         pieces = injector.typing_chunks(text, seconds)
         assert "".join(pieces) == text
         for piece in pieces:
-            real = _model_xdotool_seconds(
+            real = _independent_xdotool_seconds(
                 injector.build_xdotool_type_command(piece, delay, warmup=warmup))
             assert real <= injector.TYPING_CHUNK_S
 
     def test_the_xwayland_floor_case_from_the_review(self):
         """'aA' * 300 at the XWayland 4ms floor, with warm-up: the review's
         own numbers (0.485s estimated, 0.740s real) came from exactly this
-        combination."""
+        combination, and the first piece must stay within TYPING_CHUNK_S."""
         import wayfinder.core.injector as injector
         text = "aA" * 300
         delay = XWAYLAND_MIN_KEY_DELAY_MS
@@ -1677,8 +1744,11 @@ class TestXdotoolPieceBudgetIndependentModel:
 
         pieces = injector.typing_chunks(text, seconds)
         assert "".join(pieces) == text
+        first_piece_cost = _independent_xdotool_seconds(
+            injector.build_xdotool_type_command(pieces[0], delay, warmup=True))
+        assert first_piece_cost <= injector.TYPING_CHUNK_S
         for piece in pieces:
-            real = _model_xdotool_seconds(
+            real = _independent_xdotool_seconds(
                 injector.build_xdotool_type_command(piece, delay, warmup=True))
             assert real <= injector.TYPING_CHUNK_S
 
