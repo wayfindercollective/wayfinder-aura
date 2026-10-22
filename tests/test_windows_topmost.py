@@ -211,6 +211,46 @@ def test_contention_resets_when_the_foreground_changes(monkeypatch, wt):
     assert fake.restored[-1] == (PILL, wt._HWND_TOPMOST)
 
 
+def test_second_window_of_the_same_app_does_not_inherit_the_first_ones_back_off(monkeypatch, wt):
+    """Round 2: contention was keyed by executable basename, so switching
+    from one VS Code window to ANOTHER Code window (same exe, different
+    HWND) inherited the first window's pause — even after the first window
+    closed, since a bare exe name can't tell them apart. Keying by HWND
+    instead must give the second window (or whatever's foreground once the
+    first is gone — closing a window means its HWND can never be reported
+    as the foreground window again) an immediate, fresh try."""
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)], sticky=True)
+    clock, reports = Clock(), []
+    hwnds = iter([201, 202])  # 201: the Code window that trips the back-off; 202: a second one
+    keeper = wt.TopmostKeeper(lambda: PILL, reports.append, clock=clock,
+                              front=lambda: "Code.exe", front_hwnd=lambda: next(hwnds))
+    assert keeper.check() == 1                 # window 201 demotes it; sticky means it never holds
+    assert clock.t < keeper._paused_until      # ...so it's paused for BACKOFF_S against hwnd 201
+    assert len(fake.restored) == 1
+    clock.t += 1.0
+    assert keeper.check() == 1                 # window 202 (same exe!) still inside the pause window
+    assert len(fake.restored) == 2             # must get its own attempt, not inherit 201's pause
+
+
+def test_prolonged_contention_saturates_the_backoff_level_without_raising(monkeypatch, wt):
+    """Round 2: BACKOFF_S * (2 ** level) computed the cap AFTER
+    exponentiating, with level growing unboundedly. At level 1024 (about
+    5.7 days of continuous contention) float(2 ** level) raises
+    OverflowError; check()'s blanket except swallowed it, so
+    self._paused_until was never set and repairs then ran every second
+    forever. The level must be clamped before it's used as an exponent."""
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
+    clock, reports = Clock(), []
+    keeper = keeper_for(wt, reports, clock)   # front="Code.exe" the whole time
+    keeper._contend_key = "Code.exe"
+    keeper._contend_since = clock.t - 100.0   # well past CONTENTION_AFTER_S
+    keeper._contend_level = 1024              # forced very high: simulates days of contention
+    assert keeper.check() == 1                # must not raise (and not get swallowed by except)
+    assert keeper._paused_until == clock.t + wt.MAX_BACKOFF_S
+    assert reports and reports[-1]["held"] is True
+    assert keeper._contend_level <= wt._MAX_CONTEND_LEVEL   # stays saturated, doesn't keep climbing
+
+
 def test_keeper_leaves_a_hidden_pill_alone(monkeypatch, wt):
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
     keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
@@ -223,6 +263,75 @@ def test_keeper_never_raises(monkeypatch, wt):
         raise RuntimeError("winId gone")
     keeper = wt.TopmostKeeper(boom, lambda info: None)
     assert keeper.check() == 0
+
+
+def test_check_does_nothing_while_suspended_even_if_demoted(monkeypatch, wt):
+    """overlay.py's "hide" handler suspends the keeper alongside stopping
+    its timer, but a foreground-change callback already queued (e.g. Qt's
+    singleShot, scheduled before suspend() ran) can still fire afterwards —
+    it must do nothing, not just skip being scheduled in the first place."""
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
+    reports = []
+    keeper = keeper_for(wt, reports)
+    keeper.suspend()
+    assert keeper.check() == 0
+    assert fake.restored == []
+    assert reports == []
+
+
+def test_suspend_then_resume_hide_then_show(monkeypatch, wt):
+    """hide -> show: suspend() must uninstall the hook, resume() must
+    reinstall it — each exactly once."""
+    keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
+    calls = []
+    monkeypatch.setattr(keeper, "uninstall", lambda: calls.append("uninstall"))
+    monkeypatch.setattr(keeper, "install_foreground_hook",
+                         lambda: calls.append("install") or True)
+    keeper.suspend()   # hide
+    assert calls == ["uninstall"]
+    assert keeper._suspended is True
+    keeper.resume()    # show
+    assert calls == ["uninstall", "install"]
+    assert keeper._suspended is False
+
+
+def test_hide_show_hide_cycles_suspend_and_resume_exactly_once_each(monkeypatch, wt):
+    """hide -> show -> hide must not leave two hooks (or skip suspending
+    again): each transition calls exactly one of uninstall()/install."""
+    keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
+    calls = []
+    monkeypatch.setattr(keeper, "uninstall", lambda: calls.append("uninstall"))
+    monkeypatch.setattr(keeper, "install_foreground_hook",
+                         lambda: calls.append("install") or True)
+    keeper.suspend()   # hide
+    keeper.resume()    # show
+    keeper.suspend()   # hide again
+    assert calls == ["uninstall", "install", "uninstall"]
+    assert keeper._suspended is True
+
+
+def test_show_twice_does_not_install_the_hook_twice(monkeypatch, wt):
+    """Two "show"s in a row (or a "show" with no prior "hide" — e.g. right
+    after the keeper is constructed, when the real hook is already
+    installed up front) must not install a second hook."""
+    keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
+    calls = []
+    monkeypatch.setattr(keeper, "install_foreground_hook",
+                         lambda: calls.append("install") or True)
+    keeper.resume()
+    keeper.resume()
+    assert calls == []   # never suspended: resume() is a no-op both times
+
+
+def test_suspend_twice_only_uninstalls_once(monkeypatch, wt):
+    """Two "hide"s in a row must not try to uninstall an already-uninstalled
+    hook a second time (an overlay restart re-sending "hide" must not either)."""
+    keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
+    calls = []
+    monkeypatch.setattr(keeper, "uninstall", lambda: calls.append("uninstall"))
+    keeper.suspend()
+    keeper.suspend()
+    assert calls == ["uninstall"]
 
 
 def test_restore_flags_never_activate_move_or_resize(wt):
@@ -258,6 +367,32 @@ def test_overlay_wires_the_keeper_on_windows_only():
     assert "TopmostKeeper(" in block
     assert "install_foreground_hook()" in block
     assert "_topmost_timer.start(1000)" in block
+
+
+def test_overlay_hide_show_suspend_and_resume_the_keeper_alongside_the_timer():
+    """overlay.py's hide handler must suspend the keeper's hook along with
+    stopping its timer (round 2: the hook stayed installed, so every
+    foreground change still scheduled a check while hidden), and show must
+    resume it — or a hidden pill's foreground changes keep costing checks.
+    _topmost_keeper must also be initialised unconditionally (None), like
+    _topmost_timer already is, so an overlay restart on a path that never
+    builds the real keeper (non-Windows, or tray_only) can't NameError."""
+    src = (ROOT / "src" / "wayfinder" / "ui" / "overlay.py").read_text(encoding="utf-8")
+
+    init_block = src.split("def run_overlay():", 1)[1].split(
+        'if sys.platform == "win32" and not tray_only:', 1)[0]
+    assert "_topmost_timer = None" in init_block
+    assert "_topmost_keeper = None" in init_block
+
+    show_block = src.split('if command == "show":', 1)[1].split(
+        'elif command == "ping":', 1)[0]
+    assert "_topmost_keeper.resume()" in show_block
+    assert "_topmost_timer.start(1000)" in show_block
+
+    hide_block = src.split('elif command == "hide":', 1)[1].split(
+        'elif command == "level":', 1)[0]
+    assert "_topmost_keeper.suspend()" in hide_block
+    assert "_topmost_timer.stop()" in hide_block
 
 
 def test_main_logs_the_restore():

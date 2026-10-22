@@ -40,6 +40,14 @@ BACKOFF_S = 60.0
 # settle well under this. Back off exponentially once it's been this long.
 CONTENTION_AFTER_S = 10.0
 MAX_BACKOFF_S = 8 * BACKOFF_S
+# The delay is min(BACKOFF_S * 2**level, MAX_BACKOFF_S), so any level past the
+# one that first reaches MAX_BACKOFF_S is equivalent — but the exponent itself
+# must still be bounded, or float(BACKOFF_S * 2**level) eventually raises
+# OverflowError (20 Oct: level 1024 after ~5.7 days of continuous contention
+# did; check()'s blanket except swallowed it, so self._paused_until was never
+# set and repairs then ran every second forever). 16 is already far past the
+# saturation point and leaves headroom even if BACKOFF_S/MAX_BACKOFF_S change.
+_MAX_CONTEND_LEVEL = 16
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -161,6 +169,20 @@ def foreground_exe() -> str:
         return ""
 
 
+def foreground_hwnd() -> Optional[int]:
+    """The foreground window's HWND, or None if unknown.
+
+    Used to key contention per-window rather than per-executable: two
+    windows of the same app (e.g. two VS Code windows) must not share one
+    offender's back-off, and a closed offender's HWND can never recur as
+    the foreground window, so it can't keep a pause going by coincidence.
+    """
+    try:
+        return _user32.GetForegroundWindow() or None
+    except Exception:
+        return None
+
+
 def restore_topmost(hwnd: int) -> bool:
     """Put *hwnd* back at the top of the topmost band, without activating it
     — but just below another app's own legitimate topmost window, if one is
@@ -184,50 +206,73 @@ class TopmostKeeper:
     def __init__(self, hwnd: Callable[[], Optional[int]], report: Callable[[dict], None],
                  *, schedule: Callable[[Callable[[], None]], None] = lambda fn: fn(),
                  clock: Callable[[], float] = time.monotonic,
-                 front: Callable[[], str] = lambda: foreground_exe()) -> None:
+                 front: Callable[[], str] = lambda: foreground_exe(),
+                 front_hwnd: Callable[[], Optional[int]] = foreground_hwnd) -> None:
         self._hwnd = hwnd
         self._report = report
         self._schedule = schedule
         self._clock = clock
-        self._front = front
+        self._front = front          # executable name: logging/reporting only
+        self._front_hwnd = front_hwnd  # HWND: contention identity
         self._pending: Optional[dict] = None
         self._last_report = float("-inf")
         self._paused_until = float("-inf")
         # Which foreground window the current run of demotions is against, and
         # how long it's been going: a restore that holds right after check()
         # verifies it can still be undone before the next tick, by the same
-        # window, over and over (see CONTENTION_AFTER_S above).
-        self._contend_front: Optional[str] = None
+        # window, over and over (see CONTENTION_AFTER_S above). Keyed by HWND
+        # (falling back to the executable name only when no HWND source is
+        # available, e.g. off Windows) so a second window of the same app
+        # doesn't inherit another window's back-off.
+        self._contend_key: Optional[object] = None
         self._contend_since = float("-inf")
         self._contend_level = 0
         self._hook = None
         self._proc = None  # keep the ctypes callback alive while hooked
+        self._suspended = False  # set by suspend(); guards queued callbacks too
 
     def check(self) -> int:
         """Restore the pill if demoted; how many windows were above it."""
         try:
+            if self._suspended:
+                return 0  # hidden: also makes an already-queued callback a no-op
             now = self._clock()
             self._flush(now)
-            front = None
+            # The exe name is resolved at most once per tick (it's only used
+            # as the contention key's fallback, and for the report), same as
+            # the HWND-based key itself.
+            exe_cache: list = []
+
+            def key_now() -> object:
+                hwnd_val = self._front_hwnd()
+                if hwnd_val is not None:
+                    return hwnd_val
+                if not exe_cache:
+                    exe_cache.append(self._front())
+                return exe_cache[0]
+
+            key = None
             if now < self._paused_until:
-                front = self._front()
-                if front == self._contend_front:
+                key = key_now()
+                if key == self._contend_key:
                     return 0
-                # A different app is in front now: the back-off was against
-                # the old offender, not this one — give it an immediate,
-                # fresh try rather than inheriting the old pause.
+                # A different window is in front now (or the offender that
+                # set this pause is gone — closing a window always changes
+                # what the foreground HWND is, so a closed offender can't
+                # keep the pause going): give it an immediate, fresh try
+                # rather than inheriting the old pause.
                 self._paused_until = float("-inf")
             hwnd = self._hwnd()
             if not hwnd:
                 return 0
             above = normal_windows_above(hwnd)
             if not above:
-                self._contend_front = None  # held on its own: contention is over
+                self._contend_key = None  # held on its own: contention is over
                 return 0
-            if front is None:
-                front = self._front()
-            if front != self._contend_front:
-                self._contend_front, self._contend_since, self._contend_level = front, now, 0
+            if key is None:
+                key = key_now()
+            if key != self._contend_key:
+                self._contend_key, self._contend_since, self._contend_level = key, now, 0
             restore_topmost(hwnd)
             held = normal_windows_above(hwnd) == 0
             if not held:
@@ -235,10 +280,15 @@ class TopmostKeeper:
             elif now - self._contend_since >= CONTENTION_AFTER_S:
                 # held right now, but front has been re-demoting it on every
                 # turn for a while — back off with a growing pause instead of
-                # fighting it forever.
-                self._paused_until = now + min(BACKOFF_S * (2 ** self._contend_level), MAX_BACKOFF_S)
-                self._contend_level += 1
-            self._note(now, above, held, front)
+                # fighting it forever. The exponent is clamped at the point
+                # of use (not just on increment below) so even a level that
+                # somehow got very large can't make the float conversion
+                # raise — min() already saturates the delay past a small
+                # level anyway.
+                level = min(self._contend_level, _MAX_CONTEND_LEVEL)
+                self._paused_until = now + min(BACKOFF_S * (2 ** level), MAX_BACKOFF_S)
+                self._contend_level = min(self._contend_level + 1, _MAX_CONTEND_LEVEL)
+            self._note(now, above, held, exe_cache[0] if exe_cache else self._front())
             return above
         except Exception:
             return 0  # never let this break the overlay
@@ -280,3 +330,23 @@ class TopmostKeeper:
             _user32.UnhookWinEvent(self._hook)
         self._hook = None
         self._proc = None
+
+    def suspend(self) -> None:
+        """Stop reacting to foreground changes until resume(): uninstalls
+        the hook so no new check gets scheduled, and sets a flag so a
+        callback already queued before this call (e.g. Qt's singleShot,
+        fired from a foreground change that beat the uninstall) is a no-op
+        when it runs. Safe to call repeatedly — only the first call (per
+        resume()) does anything, so hide -> hide can't leave two hooks."""
+        if self._suspended:
+            return
+        self._suspended = True
+        self.uninstall()
+
+    def resume(self) -> None:
+        """Undo suspend(): reinstalls the hook. Safe to call repeatedly or
+        when never suspended — show -> show can't install the hook twice."""
+        if not self._suspended:
+            return
+        self._suspended = False
+        self.install_foreground_hook()

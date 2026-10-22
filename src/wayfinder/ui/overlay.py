@@ -3081,8 +3081,14 @@ def run_overlay():
                 else:
                     overlay.set_state(state)
                     _update_tray(state)
-                    # Resume the topmost keeper suspended by "hide" below —
-                    # the pill is back, so it's worth keeping on top again.
+                    # Resume the keeper's foreground hook and timer,
+                    # suspended/stopped by "hide" below — the pill is back,
+                    # so it's worth keeping on top again. Both resume() and
+                    # start() are idempotent, so two "show"s in a row (or a
+                    # "show" with no prior "hide") can't double-install the
+                    # hook or leave two timers running.
+                    if _topmost_keeper is not None:
+                        _topmost_keeper.resume()
                     if _topmost_timer is not None and not _topmost_timer.isActive():
                         _topmost_timer.start(1000)
                 _emit_cmd_ack(cmd, ok=True, state_name=state_name)
@@ -3110,9 +3116,13 @@ def run_overlay():
                 _update_tray(OverlayState.READY)
                 # Explicit user hiding: _pill_hwnd_for() already keeps the
                 # keeper from restoring a parked-offscreen pill, but there's
-                # no point even polling for it while hidden.
+                # no point even polling for it while hidden — suspend the
+                # keeper's foreground hook along with the timer, or every
+                # foreground change while hidden still schedules a check.
                 if _topmost_timer is not None:
                     _topmost_timer.stop()
+                if _topmost_keeper is not None:
+                    _topmost_keeper.suspend()
         
         elif command == "level":
             if tray_only:
@@ -3242,8 +3252,9 @@ def run_overlay():
     cmd_timer.start(50)  # Check every 50ms (20Hz - responsive enough for state changes)
 
     # None on macOS/Linux and in tray_only mode (the block below never runs
-    # there); handle_command()'s hide/show branches check this before use.
+    # there); handle_command()'s hide/show branches check these before use.
     _topmost_timer = None
+    _topmost_keeper = None
 
     if sys.platform == "win32" and not tray_only:
         # Pill diagnostics: report display changes (added/removed/resized/DPI)
