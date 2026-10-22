@@ -121,42 +121,112 @@ def typing_chunks(text: str, seconds) -> list:
     return chunks
 
 
+# xdotool's own default when a key/keyup/keydown/type command gets no explicit
+# --delay (cmd_key.c / cmd_type.c): 12ms per key event. The estimator below
+# must charge this even for commands build_xdotool_type_command never passes
+# --delay to itself (the warm-up `key` tap, the Shift-release `keyup` sweeps):
+# those were previously free, undercounting the real xdotool run (Codex
+# review finding 4).
+_XDOTOOL_DEFAULT_DELAY_MS = 12
+_XDOTOOL_KEY_COMMANDS = ("key", "keyup", "keydown")
+_XDOTOOL_COMMAND_WORDS = frozenset(("sleep", "type") + _XDOTOOL_KEY_COMMANDS)
+
+
 def xdotool_scheduled_seconds(argv) -> float:
     """What an xdotool command from build_xdotool_type_command is scheduled to
-    take: its sleeps, and every typed character at its delay plus a
-    millisecond for the key itself."""
-    total, delay, i = 0.0, 0, 1
-    while i < len(argv):
+    take: every ``sleep``; every ``type`` character at THAT command's own
+    ``--delay`` (xdotool's 12ms default when none is given) plus a
+    millisecond for the key itself; and every key pressed by a
+    ``key``/``keyup``/``keydown`` command at THAT command's own ``--delay``
+    (again 12ms by default) plus a millisecond each — a chorded key-sequence
+    argument such as ``"shift+a"`` counts every key in it. Each command's
+    ``--delay`` applies only to that one command; nothing carries across
+    commands (Codex review finding 4: key/keyup/keydown were not counted at
+    all, so the warm-up tap and the Shift-release sweeps were free)."""
+    total = 0.0
+    i, n = 1, len(argv)   # argv[0] is "xdotool"
+    while i < n:
         word = argv[i]
         if word == "sleep":
             total += float(argv[i + 1])
-        elif word == "--delay":
-            delay = int(argv[i + 1])
-        elif word == "--":
-            total += len(argv[i + 1]) * (delay + 1) / 1000
+            i += 2
+        elif word in _XDOTOOL_KEY_COMMANDS:
+            i += 1
+            delay = _XDOTOOL_DEFAULT_DELAY_MS
+            keys = []
+            while i < n and argv[i] not in _XDOTOOL_COMMAND_WORDS:
+                if argv[i] == "--delay":
+                    delay = int(argv[i + 1])
+                    i += 2
+                elif argv[i].startswith("--"):
+                    i += 1
+                else:
+                    keys.append(argv[i])
+                    i += 1
+            total += sum(len(k.split("+")) for k in keys) * (delay + 1) / 1000
+        elif word == "type":
+            i += 1
+            delay = _XDOTOOL_DEFAULT_DELAY_MS
+            text = None
+            while i < n and text is None:
+                tok = argv[i]
+                if tok == "--delay":
+                    delay = int(argv[i + 1])
+                    i += 2
+                elif tok == "--args":
+                    i += 2   # its value (e.g. "1"), never the typed text
+                elif tok == "--":
+                    text = argv[i + 1]
+                    i += 2
+                elif tok.startswith("--"):
+                    i += 1
+                elif tok in _XDOTOOL_COMMAND_WORDS:
+                    break
+                else:
+                    text = tok
+                    i += 1
+            if text is not None:
+                total += len(text) * (delay + 1) / 1000
         else:
             i += 1
-            continue
-        i += 2
     return total
 
 
 @contextlib.contextmanager
 def _piece_of_a_typing(index: int):
-    """A piece after the first failing, however it fails, means part of the
-    text landed: no fallback may type it all again (Sol mac r14)."""
+    """Every piece is uncertain once its tool run may already have typed
+    something — piece zero included: no fallback may then type or paste the
+    whole transcript again, since that would double whatever landed (Codex
+    review finding 3; before this fix piece zero was always treated as safe,
+    however it failed, which let a timeout or an unknown error after a
+    partial type double the text).
+
+    The only failures left certain (no ``uncertain_delivery``, so a caller's
+    fallback chain may still run) are piece zero's, and then only when the
+    failure is proven to have happened BEFORE any key could have reached the
+    target. A call site proves that itself by setting
+    ``err.proven_pre_delivery = True`` before raising — the tool could not
+    be started (FileNotFoundError / other OSError from the spawn), or a
+    non-zero exit whose message is a recognised pre-typing refusal (no
+    virtual-keyboard protocol, no display/compositor connection, no
+    ydotoold socket; see ``_is_pre_typing_refusal``). A timeout and an
+    unrecognised non-zero exit are always uncertain, piece zero included,
+    and any piece after the first is unconditionally uncertain regardless
+    of how it failed (something already landed)."""
     try:
         yield
     except InjectionError as err:
-        if index:
+        if index or not getattr(err, "proven_pre_delivery", False):
             err.uncertain_delivery = True
         raise
     except Exception as exc:
-        if not index:
-            raise
-        # The type only: a command's own message carries the dictated text.
+        # The type only: a command's own message carries the dictated text
+        # (a TimeoutExpired's str embeds the argv, which holds the piece).
         err = InjectionError(f"typing stopped part way: {type(exc).__name__}")
-        err.uncertain_delivery = True
+        if index or not isinstance(exc, OSError):
+            err.uncertain_delivery = True
+        else:
+            err.proven_pre_delivery = True
         raise err from exc
 
 
@@ -177,6 +247,30 @@ def _note_wtype_failure(detail: str) -> None:
     global _WTYPE_UNSUPPORTED
     if "virtual keyboard protocol" in detail.lower():
         _WTYPE_UNSUPPORTED = True
+
+
+def _is_pre_typing_refusal(detail: str) -> bool:
+    """True when a non-zero exit's own message is a refusal already known to
+    happen before any key could reach the target: wtype's missing
+    virtual-keyboard protocol (GNOME/Mutter always refuses it; some KWin
+    setups deny it), no display/compositor connection at all (xdotool or
+    wtype with no live session), or ydotool's socket connection to a dead
+    ydotoold. Piece zero of a typing run may still fall back to another tool
+    for these (Codex review finding 3); anything else — a timeout, or an
+    unrecognised non-zero exit — might mean the tool already started typing,
+    so it stays uncertain instead."""
+    low = (detail or "").lower()
+    return (
+        "virtual keyboard protocol" in low
+        or "wayland connection failed" in low
+        or "failed to connect socket" in low
+        or "failed to connect to display" in low
+        or "failed to connect to compositor" in low
+        or "can't open display" in low
+        or "cannot open display" in low
+        or "no protocol specified" in low
+        or "connection refused" in low
+    )
 
 
 def _path_is_under(path: str, root: str) -> bool:
@@ -418,7 +512,10 @@ def _check_ydotool_result(result, action: str) -> None:
     stdout = _to_text(result.stdout).strip()
     if result.returncode != 0:
         detail = stderr or stdout or "(no output)"
-        raise InjectionError(f"ydotool {action} failed (exit {result.returncode}): {detail}")
+        err = InjectionError(f"ydotool {action} failed (exit {result.returncode}): {detail}")
+        if _is_pre_typing_refusal(detail):
+            err.proven_pre_delivery = True
+        raise err
     if "backend unavailable" in stderr.lower():
         err = InjectionError(
             f"ydotool {action}: ydotoold unreachable (client/daemon mismatch or dead "
@@ -1390,11 +1487,20 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
                 )
                 if result.returncode != 0:
                     error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-                    raise InjectionError(f"xdotool failed (exit {result.returncode}): {error_detail}")
+                    err = InjectionError(f"xdotool failed (exit {result.returncode}): {error_detail}")
+                    if _is_pre_typing_refusal(error_detail):
+                        err.proven_pre_delivery = True
+                    raise err
             except subprocess.TimeoutExpired:
                 raise InjectionError("xdotool timed out after 120s")
             except FileNotFoundError:
-                raise InjectionError("xdotool not found in PATH")
+                err = InjectionError("xdotool not found in PATH")
+                err.proven_pre_delivery = True
+                raise err
+            except OSError as exc:
+                err = InjectionError(f"xdotool could not be started: {type(exc).__name__}")
+                err.proven_pre_delivery = True
+                raise err from exc
 
 
 # Belt-and-suspenders for the very first wtype injection after launch: even with the
@@ -1429,11 +1535,20 @@ def _inject_text_wtype(text: str) -> None:
                 )
                 if result.returncode != 0:
                     error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-                    raise InjectionError(f"wtype failed (exit {result.returncode}): {error_detail}")
+                    err = InjectionError(f"wtype failed (exit {result.returncode}): {error_detail}")
+                    if _is_pre_typing_refusal(error_detail):
+                        err.proven_pre_delivery = True
+                    raise err
             except subprocess.TimeoutExpired:
                 raise InjectionError("wtype timed out after 120s")
             except FileNotFoundError:
-                raise InjectionError("wtype not found in PATH")
+                err = InjectionError("wtype not found in PATH")
+                err.proven_pre_delivery = True
+                raise err
+            except OSError as exc:
+                err = InjectionError(f"wtype could not be started: {type(exc).__name__}")
+                err.proven_pre_delivery = True
+                raise err from exc
 
 
 def prime_wayland_injection() -> "tuple[bool, str]":
@@ -1947,6 +2062,16 @@ def _inject_text_type_linux(
                     )
                 except subprocess.TimeoutExpired:
                     raise InjectionError("ydotool timed out after 120s")
+                except FileNotFoundError:
+                    from wayfinder.core.setup import _get_install_hint
+                    err = InjectionError(
+                        f"ydotool not found. Install with: {_get_install_hint('ydotool')}")
+                    err.proven_pre_delivery = True
+                    raise err
+                except OSError as exc:
+                    err = InjectionError(f"ydotool could not be started: {type(exc).__name__}")
+                    err.proven_pre_delivery = True
+                    raise err from exc
                 _check_ydotool_result(result, "type")
     except subprocess.TimeoutExpired:
         raise InjectionError("ydotool timed out after 120s")

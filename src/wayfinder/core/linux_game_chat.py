@@ -360,7 +360,7 @@ def _xdotool(*args: str, timeout: float = 10) -> None:
     typing for a retired dictation (do_inject's cancellable scope); a release
     always goes out (Sol mac r12)."""
     from ..utils.hostexec import host_env
-    from .injector import InjectionError, _refuse_if_cancelled
+    from .injector import InjectionError, _is_pre_typing_refusal, _refuse_if_cancelled
 
     if args[:1] != ("keyup",):
         _refuse_if_cancelled()
@@ -369,13 +369,23 @@ def _xdotool(*args: str, timeout: float = 10) -> None:
         result = subprocess.run(["xdotool", *args], capture_output=True, text=True,
                                 timeout=timeout, env=host_env())
     except FileNotFoundError:
-        raise InjectionError(
+        err = InjectionError(
             "xdotool not found: install xdotool, or let Aura type through the desktop "
-            "(Settings → Advanced → System → Type into every app)") from None
+            "(Settings → Advanced → System → Type into every app)")
+        err.proven_pre_delivery = True
+        raise err from None
     except subprocess.TimeoutExpired:
         raise InjectionError(f"xdotool {args[0]} timed out after {timeout:.0f}s") from None
+    except OSError as exc:
+        err = InjectionError(f"xdotool could not be started: {type(exc).__name__}")
+        err.proven_pre_delivery = True
+        raise err from None
     if result.returncode != 0:
-        raise InjectionError(f"xdotool {' '.join(args[:2])} failed: {result.stderr.strip()}")
+        detail = result.stderr.strip()
+        err = InjectionError(f"xdotool {' '.join(args[:2])} failed: {detail}")
+        if _is_pre_typing_refusal(detail):
+            err.proven_pre_delivery = True
+        raise err
 
 
 def press_held(keys: str, hold_s: float = KEY_HOLD_S, guard=None) -> None:

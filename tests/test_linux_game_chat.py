@@ -198,6 +198,66 @@ def test_xdotool_failures_never_carry_the_dictated_text(monkeypatch):
     assert "secret" not in str(exc.value)
 
 
+# -- Codex review finding 3: _xdotool's own refusals, piece zero included --
+# (type_text's per-piece use of _piece_of_a_typing is covered end-to-end in
+# test_injector.py's TestFirstPieceProvenPreDelivery; these test _xdotool's
+# OWN classification of a failure as proven-pre-delivery or not, straight
+# from the MagicMock result it got.)
+
+def test_xdotool_missing_binary_is_proven_pre_delivery(monkeypatch):
+    monkeypatch.setattr(gc.subprocess, "run",
+                        lambda argv, **k: (_ for _ in ()).throw(FileNotFoundError(argv[0])))
+    try:
+        gc._xdotool("type", "--", "words")
+    except Exception as exc:
+        assert getattr(exc, "proven_pre_delivery", False) is True
+    else:
+        pytest.fail("expected an InjectionError")
+
+
+def test_xdotool_timeout_is_not_proven_pre_delivery(monkeypatch):
+    import subprocess
+
+    def slow(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(gc.subprocess, "run", slow)
+    try:
+        gc._xdotool("type", "--", "words")
+    except Exception as exc:
+        assert getattr(exc, "proven_pre_delivery", False) is False
+    else:
+        pytest.fail("expected an InjectionError")
+
+
+@pytest.mark.parametrize("detail", [
+    "X connection refused",
+    "Error: Can't open display: (null)",
+])
+def test_xdotool_display_refusal_is_proven_pre_delivery(monkeypatch, detail):
+    from types import SimpleNamespace
+    failed = SimpleNamespace(returncode=1, stdout="", stderr=detail)
+    monkeypatch.setattr(gc.subprocess, "run", lambda argv, **k: failed)
+    try:
+        gc._xdotool("type", "--", "words")
+    except Exception as exc:
+        assert getattr(exc, "proven_pre_delivery", False) is True
+    else:
+        pytest.fail("expected an InjectionError")
+
+
+def test_xdotool_unrecognised_exit_is_not_proven_pre_delivery(monkeypatch):
+    from types import SimpleNamespace
+    failed = SimpleNamespace(returncode=1, stdout="", stderr="BadWindow")
+    monkeypatch.setattr(gc.subprocess, "run", lambda argv, **k: failed)
+    try:
+        gc._xdotool("type", "--", "words")
+    except Exception as exc:
+        assert getattr(exc, "proven_pre_delivery", False) is False
+    else:
+        pytest.fail("expected an InjectionError")
+
+
 def test_xdotool_runs_with_the_host_environment(monkeypatch):
     from wayfinder.utils import hostexec
 
