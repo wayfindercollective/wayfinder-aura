@@ -187,6 +187,7 @@ def test_an_early_group_sigterm_cannot_end_a_slow_watcher(monkeypatch, tmp_path)
     watcher.wait(timeout=5)
 
 
+@posix
 def test_the_watcher_reports_ready_only_once_it_ignores_sigterm(monkeypatch):
     ready_read, ready_write = os.pipe()
     seen_before_ignore = []
