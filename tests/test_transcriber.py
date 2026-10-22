@@ -2,6 +2,7 @@
 Tests for the transcription module.
 """
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -3060,6 +3061,7 @@ class TestARetiredDictationsActions:
             assert state["failures"] == 3
         assert transcriber._gpu_probe_inflight is False
 
+    @pytest.mark.skipif(os.name == "nt", reason="the whisper-cli stand-ins are shell scripts")
     @pytest.mark.parametrize("retire", [True, False])
     def test_a_cpu_fallback_retired_at_the_state_lock_memoizes_nothing(self, tmp_path, monkeypatch,
                                                                        cls, retire):

@@ -367,7 +367,13 @@ def _press_keys(vks: list[int]) -> None:
 
 
 def press_enter_windows(cancelled=None) -> None:
-    """Synthesize a single Enter keypress (Auto-press-Enter setting)."""
+    """Synthesize a single Enter keypress (Auto-press-Enter setting).
+    *cancelled* is asked at the send, as a scope (Sol mac r12)."""
+    with cancellable(cancelled):
+        _press_enter_windows()
+
+
+def _press_enter_windows() -> None:
     _require_foreground_window()
     # A held Shift would send Shift+Enter — a newline instead of submit.
     require_modifier_release_windows()

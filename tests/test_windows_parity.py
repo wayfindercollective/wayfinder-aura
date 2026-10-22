@@ -1958,38 +1958,32 @@ def test_pill_line_no_false_alarms_for_glow_offset_startup_or_resends():
     assert len(lines) == 3
 
 
-@windows_only
 @pytest.mark.parametrize("at", ["modifier-wait", "clipboard-write"])
 def test_paste_retired_during_its_waits_pastes_nothing(monkeypatch, at):
     # Sol mac r11 (the Mac finding, on Windows too): a reset while the paste
-    # waited for the hotkey's modifiers still pasted the retired text.
+    # waited for the hotkey's modifiers still pasted the retired text. Over a
+    # fake SendInput: the check sits in _send (Sol mac r12).
     from wayfinder.core import injector
-    from wayfinder.core import injector_windows as w
-
-    retired, sets, keys = [False], [], []
-    clipboard = {"text": "user's own clipboard"}
+    rig, w = _windows_send_rig(monkeypatch)
+    sets = []
+    set_clipboard = w._clipboard_set_windows
 
     def wait():
-        retired[0] = at == "modifier-wait"
+        rig.retired = at == "modifier-wait"
 
     def fake_set(text, transient=False):
         sets.append(text)
-        clipboard["text"] = text
-        retired[0] = True
+        set_clipboard(text, transient)
+        rig.retired = True
         return True
 
-    monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
     monkeypatch.setattr(w, "require_modifier_release_windows", wait)
-    monkeypatch.setattr(w, "_press_keys", lambda vks: keys.append(vks))
-    monkeypatch.setattr(w.time, "sleep", lambda s: None)
-    monkeypatch.setattr(w, "_clipboard_get_windows", lambda: clipboard["text"])
-    monkeypatch.setattr(w, "_clipboard_sequence", lambda: None)
     monkeypatch.setattr(w, "_clipboard_set_windows", fake_set)
     with pytest.raises(injector.InjectionCancelled):
-        w.inject_text_paste_windows("retired words", lambda: retired[0])
-    assert keys == []
-    assert clipboard["text"] == "user's own clipboard"
-    assert sets == ([] if at == "modifier-wait" else ["retired words", "user's own clipboard"])
+        w.inject_text_paste_windows("retired words", lambda: rig.retired)
+    assert rig.sent == []
+    assert rig.clipboard == "theirs"
+    assert sets == ([] if at == "modifier-wait" else ["retired words", "theirs"])
 
 
 @pytest.mark.parametrize("paste_error", ["cancelled", "failed"])
@@ -2014,18 +2008,22 @@ def test_a_retired_windows_paste_types_nothing_instead(monkeypatch, paste_error)
     assert typed == []
 
 
-@windows_only
-def test_auto_enter_retired_during_its_wait_sends_nothing(monkeypatch):
+@pytest.mark.parametrize("retire", [True, False])
+def test_auto_enter_retired_during_its_wait_sends_nothing(monkeypatch, retire):
+    # A direct call's *cancelled* is asked at the send, after the modifier
+    # wait, over a fake SendInput (Sol mac r12).
     from wayfinder.core import injector
-    from wayfinder.core import injector_windows as w
-    sent = []
-    monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
-    monkeypatch.setattr(w, "require_modifier_release_windows", lambda: None)
-    monkeypatch.setattr(w, "_press_keys", lambda vks: sent.append(vks))
-    monkeypatch.setattr(w, "_send", lambda inputs: sent.append(inputs))
-    with pytest.raises(injector.InjectionCancelled):
-        w.press_enter_windows(lambda: True)
-    assert sent == []
+    rig, w = _windows_send_rig(monkeypatch)
+    monkeypatch.setattr(w, "_held_seconds", lambda: 0)
+    monkeypatch.setattr(w, "require_modifier_release_windows",
+                        lambda: setattr(rig, "retired", retire))
+    if retire:
+        with pytest.raises(injector.InjectionCancelled):
+            w.press_enter_windows(lambda: rig.retired)
+        assert rig.sent == []
+    else:
+        w.press_enter_windows(lambda: rig.retired)
+        assert [vk for vk, _scan, _up in rig.sent] == [w.VK_RETURN, w.VK_RETURN]
 
 
 def test_the_clipboard_paste_hands_windows_its_cancellation(monkeypatch):
