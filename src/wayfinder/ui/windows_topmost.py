@@ -43,11 +43,18 @@ MAX_BACKOFF_S = 8 * BACKOFF_S
 # The delay is min(BACKOFF_S * 2**level, MAX_BACKOFF_S), so any level past the
 # one that first reaches MAX_BACKOFF_S is equivalent — but the exponent itself
 # must still be bounded, or float(BACKOFF_S * 2**level) eventually raises
-# OverflowError (20 Oct: level 1024 after ~5.7 days of continuous contention
+# OverflowError (Sol pill r2: level 1024, after ~5.7 days of continuous contention,
 # did; check()'s blanket except swallowed it, so self._paused_until was never
 # set and repairs then ran every second forever). 16 is already far past the
 # saturation point and leaves headroom even if BACKOFF_S/MAX_BACKOFF_S change.
 _MAX_CONTEND_LEVEL = 16
+# A pause is set against the window found above the pill (the "blocker"),
+# not the foreground window — two different things (see check()'s paused
+# branch). When that walk can't settle on a single blocker (two z-order
+# walks a moment apart, during real churn, can disagree), cap the pause
+# short rather than give an un-attributed demotion the same long pause as a
+# confirmed, persistent one.
+UNKNOWN_BLOCKER_BACKOFF_S = 30.0
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -59,7 +66,10 @@ if sys.platform == "win32":
     _user32.GetWindow.restype = wintypes.HWND
     _user32.GetWindow.argtypes = (wintypes.HWND, wintypes.UINT)
     _user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+    _user32.IsWindow.argtypes = (wintypes.HWND,)
     _user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+    _user32.SetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_long)
+    _user32.SetWindowLongW.restype = ctypes.c_long
     _user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.c_int, wintypes.UINT)
     _user32.GetForegroundWindow.restype = wintypes.HWND
@@ -149,6 +159,31 @@ def topmost_above(hwnd: int) -> Optional[int]:
     return None
 
 
+def nearest_blocker_above(hwnd: int) -> Optional[int]:
+    """The nearest ordinary (non-topmost, visible, uncloaked) window directly
+    above *hwnd* — the likeliest window actually demoting it — or None if
+    none is found (including if *hwnd* itself isn't found).
+
+    Tracked separately from the foreground window: whatever's fighting for
+    the topmost spot doesn't have to be what has focus — a background
+    utility can demote the pill and exit while the foreground window never
+    changes (see TopmostKeeper.check()'s paused branch).
+    """
+    last = None
+    h = _user32.GetTopWindow(None)
+    for _ in range(_MAX_WALK):
+        if not h:
+            return None
+        if h == hwnd:
+            return last
+        if (_user32.IsWindowVisible(h)
+                and not _user32.GetWindowLongW(h, _GWL_EXSTYLE) & _WS_EX_TOPMOST
+                and not _cloaked(h)):
+            last = h
+        h = _user32.GetWindow(h, _GW_HWNDNEXT)
+    return None
+
+
 def foreground_exe() -> str:
     """The front window's program name (e.g. Code.exe), or "" if unknown."""
     try:
@@ -227,6 +262,13 @@ class TopmostKeeper:
         self._contend_key: Optional[object] = None
         self._contend_since = float("-inf")
         self._contend_level = 0
+        # The window found directly above the pill when a pause was set —
+        # the actual contender, as opposed to _contend_key's foreground
+        # identity (used for logging/backoff grouping, not for who's really
+        # fighting for topmost order). Checked on every paused tick so a
+        # pause outlives neither a closed offender nor one that's no longer
+        # visible (see check()).
+        self._blocker_hwnd: Optional[int] = None
         self._hook = None
         self._proc = None  # keep the ctypes callback alive while hooked
         self._suspended = False  # set by suspend(); guards queued callbacks too
@@ -254,13 +296,19 @@ class TopmostKeeper:
             key = None
             if now < self._paused_until:
                 key = key_now()
-                if key == self._contend_key:
+                # A pause holds only while BOTH of its reasons still apply:
+                # the same foreground window (closing a window always
+                # changes what the foreground HWND is, so a closed offender
+                # can't keep the pause going by coincidence) AND the window
+                # actually found above the pill when the pause was set. The
+                # foreground window is only who had focus, not necessarily
+                # what's fighting for topmost order — a background utility
+                # can demote the pill and exit while the foreground window
+                # never changes; without the second check the pause would
+                # outlive it (Sol pill r3 reproduced 479 s of zero repair attempts against a
+                # blocker that had already exited).
+                if key == self._contend_key and not self._blocker_gone():
                     return 0
-                # A different window is in front now (or the offender that
-                # set this pause is gone — closing a window always changes
-                # what the foreground HWND is, so a closed offender can't
-                # keep the pause going): give it an immediate, fresh try
-                # rather than inheriting the old pause.
                 self._paused_until = float("-inf")
             hwnd = self._hwnd()
             if not hwnd:
@@ -268,15 +316,28 @@ class TopmostKeeper:
             above = normal_windows_above(hwnd)
             if not above:
                 self._contend_key = None  # held on its own: contention is over
+                self._blocker_hwnd = None
                 return 0
             if key is None:
                 key = key_now()
             if key != self._contend_key:
                 self._contend_key, self._contend_since, self._contend_level = key, now, 0
+            # The window directly above the pill right now — tracked so a
+            # later pause can be lifted once THIS one is gone, even if the
+            # foreground never changes (see the paused branch above). None
+            # only if this walk and normal_windows_above's just above it
+            # disagree about there being anything above hwnd at all — real
+            # churn, not the common case — in which case the pause below is
+            # capped short instead of trusting an attribution we don't have.
+            blocker = nearest_blocker_above(hwnd)
+            self._blocker_hwnd = blocker
             restore_topmost(hwnd)
             held = normal_windows_above(hwnd) == 0
             if not held:
-                self._paused_until = now + BACKOFF_S
+                delay = BACKOFF_S
+                if blocker is None:
+                    delay = min(delay, UNKNOWN_BLOCKER_BACKOFF_S)
+                self._paused_until = now + delay
             elif now - self._contend_since >= CONTENTION_AFTER_S:
                 # held right now, but front has been re-demoting it on every
                 # turn for a while — back off with a growing pause instead of
@@ -286,12 +347,47 @@ class TopmostKeeper:
                 # raise — min() already saturates the delay past a small
                 # level anyway.
                 level = min(self._contend_level, _MAX_CONTEND_LEVEL)
-                self._paused_until = now + min(BACKOFF_S * (2 ** level), MAX_BACKOFF_S)
+                delay = min(BACKOFF_S * (2 ** level), MAX_BACKOFF_S)
+                if blocker is None:
+                    delay = min(delay, UNKNOWN_BLOCKER_BACKOFF_S)
+                self._paused_until = now + delay
                 self._contend_level = min(self._contend_level + 1, _MAX_CONTEND_LEVEL)
             self._note(now, above, held, exe_cache[0] if exe_cache else self._front())
             return above
         except Exception:
             return 0  # never let this break the overlay
+
+    def _blocker_gone(self) -> bool:
+        """Cheap check used only while paused: has the window remembered as
+        the blocker closed, or gone invisible, since the pause was set? Never
+        a full z-order walk — fighting for the topmost spot is exactly what a
+        pause exists to avoid; this only looks at the one window already on
+        file. Returns False (keep the pause) when no specific window was
+        identified — that case is handled by capping the pause itself, not
+        by trying to detect its end early.
+        """
+        hwnd = self._blocker_hwnd
+        if hwnd is None:
+            return False
+        try:
+            return not _user32.IsWindow(hwnd) or not _user32.IsWindowVisible(hwnd)
+        except Exception:
+            return False
+
+    def note_recording_started(self) -> None:
+        """Call when a new dictation begins (overlay -> LISTENING, i.e. the
+        "show" command with state="listening"): the pill is about to matter
+        again, so it shouldn't have to sit out a pause set against whatever
+        was contending before. Clears any pause/contention tracking and
+        makes one immediate attempt — a no-op (via check()'s own suspended
+        guard) if the overlay is still hidden when this fires.
+        """
+        self._paused_until = float("-inf")
+        self._contend_key = None
+        self._contend_since = float("-inf")
+        self._contend_level = 0
+        self._blocker_hwnd = None
+        self.check()
 
     def _note(self, now: float, above: int, held: bool, front: str) -> None:
         p = self._pending or {"restores": 0, "above": 0, "fronts": [], "held": True}

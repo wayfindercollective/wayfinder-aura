@@ -417,7 +417,7 @@ def _try_kde_always_on_top(window_title: str) -> bool:
     return True
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import (
     QAbstractAnimation,
@@ -1192,6 +1192,15 @@ class GlassmorphicOverlay(QWidget):
         
         # State
         self._state = OverlayState.HIDDEN
+        # Fires exactly when self._state actually crosses into/out of HIDDEN
+        # (set_state() below is the one place that happens, regardless of
+        # which command or automatic transition — show/hide, a transient
+        # overlay's READY->HIDDEN remap, the idle watchdog, error
+        # auto-return — triggered it). run_overlay() wires this to the
+        # Windows topmost keeper so suspend/resume always matches where the
+        # pill actually ends up, not just whichever handler ran. None off
+        # Windows / in tray_only mode, where nothing wires it.
+        self._on_hidden_changed: Optional[Callable[[bool], None]] = None
         self._target_width = 200
         self._current_width = 200.0
         
@@ -1924,7 +1933,21 @@ class GlassmorphicOverlay(QWidget):
         
         old_state = self._state
         self._state = state
-        
+
+        # Tell the Windows topmost keeper exactly when the pill actually
+        # becomes invisible or visible again — from the one place self._state
+        # really changes, not from whichever command handler happened to
+        # trigger this call. Round 2 left this split across "show"/"hide"
+        # command handlers, so a transient overlay's "show ready" (remapped
+        # to HIDDEN just above) kept resuming the keeper anyway, and an
+        # automatic hide (idle watchdog, or an error auto-return landing on
+        # HIDDEN the same way) never suspended it at all.
+        if self._on_hidden_changed is not None:
+            if state == OverlayState.HIDDEN and old_state != OverlayState.HIDDEN:
+                self._on_hidden_changed(True)
+            elif old_state == OverlayState.HIDDEN and state != OverlayState.HIDDEN:
+                self._on_hidden_changed(False)
+
         # Track when we entered PROCESSING state
         if state == OverlayState.PROCESSING:
             import time
@@ -3079,18 +3102,17 @@ def run_overlay():
                     # Drive tray icon/tooltip only — never map the floating pill.
                     _update_tray(state)
                 else:
+                    # set_state() itself resumes the topmost keeper's hook and
+                    # timer, exactly when the pill actually leaves HIDDEN — a
+                    # transient overlay's "show ready" can remap straight back
+                    # to HIDDEN (see set_state()) and must NOT resume them.
                     overlay.set_state(state)
                     _update_tray(state)
-                    # Resume the keeper's foreground hook and timer,
-                    # suspended/stopped by "hide" below — the pill is back,
-                    # so it's worth keeping on top again. Both resume() and
-                    # start() are idempotent, so two "show"s in a row (or a
-                    # "show" with no prior "hide") can't double-install the
-                    # hook or leave two timers running.
-                    if _topmost_keeper is not None:
-                        _topmost_keeper.resume()
-                    if _topmost_timer is not None and not _topmost_timer.isActive():
-                        _topmost_timer.start(1000)
+                    # A new dictation starting is worth an immediate attempt,
+                    # not whatever's left of a pause from earlier contention
+                    # (ui/windows_topmost.py note_recording_started()).
+                    if _topmost_keeper is not None and state == OverlayState.LISTENING:
+                        _topmost_keeper.note_recording_started()
                 _emit_cmd_ack(cmd, ok=True, state_name=state_name)
             except Exception as e:
                 _debug_log(f"SHOW failed: {e}")
@@ -3112,17 +3134,13 @@ def run_overlay():
             if tray_only:
                 _update_tray(OverlayState.READY)
             else:
+                # set_state() itself suspends the topmost keeper's hook and
+                # stops its timer, exactly when the pill actually becomes
+                # HIDDEN — _pill_hwnd_for() already keeps the keeper from
+                # restoring a parked-offscreen pill, but there's no point
+                # even polling for one while hidden.
                 overlay.set_state(OverlayState.HIDDEN)
                 _update_tray(OverlayState.READY)
-                # Explicit user hiding: _pill_hwnd_for() already keeps the
-                # keeper from restoring a parked-offscreen pill, but there's
-                # no point even polling for it while hidden — suspend the
-                # keeper's foreground hook along with the timer, or every
-                # foreground change while hidden still schedules a check.
-                if _topmost_timer is not None:
-                    _topmost_timer.stop()
-                if _topmost_keeper is not None:
-                    _topmost_keeper.suspend()
         
         elif command == "level":
             if tray_only:
@@ -3306,10 +3324,36 @@ def run_overlay():
                 # reordering; check on a later Qt turn.
                 schedule=lambda fn: QTimer.singleShot(50, fn),
             )
-            _topmost_keeper.install_foreground_hook()
             _topmost_timer = QTimer()
             _topmost_timer.timeout.connect(_topmost_keeper.check)
-            _topmost_timer.start(1000)
+
+            def _sync_topmost_with_hidden_state(hidden: bool) -> None:
+                # Wired to overlay._on_hidden_changed below: the single place
+                # set_state() calls this is exactly when self._state actually
+                # crosses into/out of HIDDEN, covering "show"/"hide", a
+                # transient overlay's READY->HIDDEN remap, the idle watchdog
+                # and an error auto-return alike — not just the two command
+                # handlers that used to duplicate this (and could fall out
+                # of sync with where the state actually landed).
+                if hidden:
+                    _topmost_timer.stop()
+                    _topmost_keeper.suspend()
+                else:
+                    _topmost_keeper.resume()
+                    if not _topmost_timer.isActive():
+                        _topmost_timer.start(1000)
+
+            overlay._on_hidden_changed = _sync_topmost_with_hidden_state
+            # Match whatever overlay._state already is at construction time —
+            # "transient" mode starts HIDDEN (mapped offscreen, no set_state()
+            # call yet; see run_overlay() above), so the keeper must start
+            # suspended too rather than polling a pill nobody can see until
+            # the first "show".
+            if overlay._state == OverlayState.HIDDEN:
+                _topmost_keeper.suspend()
+            else:
+                _topmost_keeper.install_foreground_hook()
+                _topmost_timer.start(1000)
         except Exception as e:
             _debug_log(f"topmost keeper setup failed: {e}")
 
