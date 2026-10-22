@@ -714,18 +714,27 @@ def _compare_with_probes(config: dict, backend, cli: str, source_model: str, twi
 
 
 def cancel_preparation(config: dict) -> None:
-    """A switch to *config* (CPU mode) stops the comparison in flight.
+    """A switch to *config* (CPU mode, another model) stops the job in flight.
 
     schedule_preparation() is never called in CPU mode, so without this a
     GPU-mode comparison started before the switch would finish and hot-swap a
     Core ML server in. The parked worker wakes, sees CPU, and parks again.
+
+    Synchronous: once this returns, the old job cannot publish. Its
+    cancellation is true from here on, and a publish that passed its check
+    first holds _transition_lock until it is done. So a server the caller
+    starts next (a model change's warm-up) is never replaced by the old
+    job's (Sol mac r2).
     """
     global _latest_config, _latest_epoch
     from wayfinder.core.transcriber import WhisperServerBackend
     with _worker_lock:
-        if _worker is not None and _worker.is_alive():
-            _latest_config, _latest_epoch = dict(config), WhisperServerBackend._epoch
-            _preparation_requested.set()
+        if _worker is None or not _worker.is_alive():
+            return
+        _latest_config, _latest_epoch = dict(config), WhisperServerBackend._epoch
+        _preparation_requested.set()
+    with _transition_lock:   # short: publish stops the old server outside it
+        pass
 
 
 def schedule_preparation(config: dict, backend) -> None:

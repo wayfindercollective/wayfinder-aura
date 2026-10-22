@@ -17983,6 +17983,7 @@ class WayfinderApp(ctk.CTk):
             if value.startswith(home):
                 value = "~" + value[len(home):]
             self.config["model_path"] = value
+            WayfinderApp._retire_coreml_preparation(self)
         self.config["setup_completed"] = True
         save_config(self.config)
         self._hide_setup_cue()
@@ -21096,6 +21097,19 @@ class WayfinderApp(ctk.CTk):
 
     # === Auto-activate a model the user just downloaded ===
 
+    def _retire_coreml_preparation(self) -> None:
+        """A model change retires the Core ML job for the old model before
+        anything loads the new one: once this returns, that job cannot hand
+        its server over the new model's (Sol mac r2). Its failure memory
+        stays; only turning GPU acceleration on resets that."""
+        if not IS_MACOS:
+            return
+        try:
+            from wayfinder.utils.macos_coreml import cancel_preparation
+            cancel_preparation(dict(self.config))
+        except Exception:
+            pass
+
     def _set_active_whisper_model(self, path: str) -> None:
         """Persist + apply a speech model: the Save & Apply path.
 
@@ -21108,6 +21122,7 @@ class WayfinderApp(ctk.CTk):
         if store.startswith(home):
             store = "~" + store[len(home):]
         self.config["model_path"] = store
+        WayfinderApp._retire_coreml_preparation(self)
         save_config(self.config)
         if hasattr(self, "model_btn"):
             try:
@@ -21778,6 +21793,7 @@ class WayfinderApp(ctk.CTk):
                 else:
                     self.config["model_path"] = ""
                     self.log("⚙ Active model was removed — no other models installed")
+                WayfinderApp._retire_coreml_preparation(self)
                 save_config(self.config)
                 if hasattr(self, "model_btn"):
                     try:
@@ -22114,6 +22130,7 @@ class WayfinderApp(ctk.CTk):
             path_str = str(model_path)
             relative_path = "~" + path_str[len(home):] if path_str.startswith(home) else path_str
             self.config["model_path"] = relative_path
+            WayfinderApp._retire_coreml_preparation(self)
             save_config(self.config)
             if IS_MACOS:
                 self._warm_up_transcription(startup=False)

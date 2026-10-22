@@ -1009,3 +1009,203 @@ def test_a_deferred_conversion_is_not_a_failure(comparison_rig, monkeypatch):
     for _ in range(3):
         assert macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False) is False
     assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0
+
+
+# Sol mac r2: a model change retires the old model's job before anything
+# loads the new one; a Core ML server is used only while it is loaded.
+
+def _worker_rig(tmp_path, monkeypatch):
+    import contextlib
+    import threading
+    import wayfinder.core.transcriber as transcriber
+    from wayfinder.utils import macos_activity
+    model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+    model.write_bytes(b"test model")
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(macos_coreml, "_worker", None)
+    monkeypatch.setattr(macos_coreml, "_preparation_requested", threading.Event())
+    monkeypatch.setattr(macos_coreml, "_job_running", threading.Event())
+    monkeypatch.setattr(macos_coreml, "_binary_twin", lambda cli: True)
+    monkeypatch.setattr(transcriber, "_resolve_whisper_cli_binary", lambda path: "/bin/whisper-cli")
+    monkeypatch.setattr(transcriber, "get_backend", lambda cfg: SimpleNamespace(use_gpu=cfg["use_gpu"]))
+    monkeypatch.setattr(macos_activity, "held", lambda *a: contextlib.nullcontext())
+    return model
+
+
+def test_choosing_another_model_retires_the_old_job_before_its_warm_up(tmp_path, monkeypatch):
+    # A Turbo A probe could publish between B's warm-up and B's own request,
+    # stopping B's fresh Metal server; the switch changed no epoch.
+    import threading
+    import wayfinder_main
+    model_a = _worker_rig(tmp_path, monkeypatch)
+    model_b = tmp_path / "ggml-large-v3-turbo-q8_0.bin"
+    model_b.write_bytes(b"other variant")
+    loading, jobs = threading.Event(), []
+
+    def load(snapshot, backend, *, cancelled):
+        if snapshot["model_path"] != str(model_a):
+            return False   # the new model's own job: not under test here
+        jobs.append(cancelled)
+        loading.set()
+        for _ in range(500):
+            if cancelled():
+                return False
+            threading.Event().wait(0.01)
+        return True
+
+    monkeypatch.setattr(macos_coreml, "prepare_comparison", load)
+    monkeypatch.setattr(macos_coreml, "reset_comparison_failures",
+                        lambda: pytest.fail("a model change reset the failure memory"))
+    config = {"model_path": str(model_a), "use_gpu": True, "whisper_coreml_encoder": True}
+    macos_coreml.schedule_preparation(dict(config), SimpleNamespace(use_gpu=True))
+    assert loading.wait(5), "the old model's job never started"
+
+    seen = []
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: None)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    app = SimpleNamespace(
+        config=config, log=lambda *a: None, get_model_display=lambda: "Turbo B",
+        feature_gate=SimpleNamespace(has_feature=lambda feature: True),
+        _warm_up_transcription=lambda *a, **k: seen.append(jobs[0]()),
+    )
+    wayfinder_main.WayfinderApp._set_active_whisper_model(app, str(model_b))
+    assert seen == [True], "the warm-up ran while the old model's job could still publish"
+
+
+def test_retiring_a_job_waits_out_a_publish_in_flight(monkeypatch):
+    # The publish that passed its check first holds _transition_lock; once
+    # cancel_preparation returns, nothing of the old job can replace the
+    # server the caller starts next.
+    import threading
+    monkeypatch.setattr(macos_coreml, "_worker", SimpleNamespace(is_alive=lambda: True))
+    monkeypatch.setattr(macos_coreml, "_preparation_requested", threading.Event())
+    in_publish, release, returned = threading.Event(), threading.Event(), threading.Event()
+
+    def publishing():
+        with macos_coreml._transition_lock:
+            in_publish.set()
+            release.wait(5)
+
+    threading.Thread(target=publishing, daemon=True).start()
+    assert in_publish.wait(2)
+    threading.Thread(target=lambda: (macos_coreml.cancel_preparation({"use_gpu": True}),
+                                     returned.set()), daemon=True).start()
+    assert not returned.wait(0.3), "returned while a publish of the old job was in flight"
+    release.set()
+    assert returned.wait(2)
+
+
+def _body(marker):
+    import wayfinder_main
+    src = Path(wayfinder_main.__file__).read_text()
+    indent = len(marker) - len(marker.lstrip(" "))
+    return src.split(marker, 1)[1].split("\n" + " " * indent + "def ", 1)[0]
+
+
+@pytest.mark.parametrize("marker", [
+    "    def _apply_model_from_tray(self, model_name: str):",
+    "    def _on_whisper_model_ready(self, path: str | Path | None = None) -> bool:",
+    "            def _clear_model_path_if_deleted(model_id: str) -> None:",
+])
+def test_every_model_change_retires_the_old_job_first(marker):
+    # The tray pick, a first-run download and a deleted active model: the
+    # same retirement, after the new path is set and before anything loads.
+    body = _body(marker)
+    retire = body.index("WayfinderApp._retire_coreml_preparation(self)")
+    assert body.rindex('self.config["model_path"] =', 0, retire) < retire
+    assert retire < body.index("save_config(self.config)")
+    if "_warm_up_transcription" in body:
+        assert retire < body.index("_warm_up_transcription")
+
+
+def test_a_resident_core_ml_backend_carries_its_metal_twin(monkeypatch):
+    from wayfinder.core.transcriber import WhisperServerBackend
+    backend, config, _scheduled = _darwin_selection(monkeypatch, resident=True)
+    twin = backend._ready_only_fallback
+    assert isinstance(twin, WhisperServerBackend)
+    assert twin.whisper_server_binary == "/native/bin/whisper-server"
+    assert twin.model_path == "/models/ggml-base.en.bin" and twin.startup_timeout == 30.0
+    assert twin._load_epoch == backend._load_epoch and twin.use_gpu
+    assert backend._ready_only_config is config
+    metal, _config, _scheduled = _darwin_selection(monkeypatch, resident=False)
+    assert metal._ready_only_fallback is None
+
+
+def _resident_core_ml(monkeypatch, tmp_path, alive):
+    import wave
+    from wayfinder.core import transcriber
+    backend, config, scheduled = _darwin_selection(monkeypatch, resident=True)
+    cls = transcriber.WhisperServerBackend
+    proc = SimpleNamespace(poll=lambda: None if alive else 1)
+    for name, value in {"_server_process": proc, "_server_ready": proc, "_server_port": 8178,
+                        "_server_model_path": backend.model_path,
+                        "_server_binary": backend.whisper_server_binary,
+                        "_server_use_gpu": True, "_server_threads": backend.threads,
+                        "_server_disabled": False, "_closed": False}.items():
+        monkeypatch.setattr(cls, name, value)
+    monkeypatch.setattr(transcriber.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("a Core ML server was spawned under a dictation"))
+    served = []
+    twin = backend._ready_only_fallback
+    twin.transcribe = lambda audio, context="": served.append(audio) or "metal words"
+    twin.warm_up = lambda: served.append("warm-up") or True
+    audio = tmp_path / "speech.wav"
+    with wave.open(str(audio), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x00\x01" * 1600)
+    return SimpleNamespace(backend=backend, twin=twin, config=config, scheduled=scheduled,
+                           served=served, audio=str(audio))
+
+
+def test_core_ml_that_died_after_selection_is_not_reloaded_under_the_dictation(monkeypatch, tmp_path):
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=False)
+    assert rig.backend.transcribe(rig.audio) == "metal words"
+    assert rig.served == [rig.audio]
+    assert rig.scheduled == [(rig.config, rig.twin)], "Core ML was not brought back by the hand-over"
+
+
+def test_a_failed_core_ml_request_recovers_on_metal(monkeypatch, tmp_path):
+    # Recovery used to force a cold Core ML restart (~11 s) under the dictation.
+    from wayfinder.core import transcriber
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=True)
+    stops = []
+    monkeypatch.setattr(transcriber.WhisperServerBackend, "_stop_server_internal",
+                        classmethod(lambda cls, deadline=None: stops.append(deadline)))
+
+    def reset(*_args, **_kwargs):
+        raise ConnectionResetError("connection reset")
+
+    monkeypatch.setattr(transcriber, "urlopen_loopback", reset)
+    assert rig.backend.transcribe(rig.audio) == "metal words"
+    assert rig.served == [rig.audio] and stops == []
+    assert rig.scheduled == [(rig.config, rig.twin)]
+
+
+def test_a_core_ml_warm_up_after_its_server_died_warms_metal(monkeypatch, tmp_path):
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=False)
+    assert rig.backend.warm_up() is True
+    assert rig.served == ["warm-up"]
+    assert rig.scheduled == [(rig.config, rig.twin)]
+
+
+def test_a_resident_core_ml_backend_still_serves_while_loaded(monkeypatch, tmp_path):
+    # Control: the ready-only rule changes nothing while Core ML is loaded.
+    import json as _json
+    from wayfinder.core import transcriber
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=True)
+
+    class Response:
+        def read(self):
+            return _json.dumps({"text": "core ml words"}).encode()
+
+    monkeypatch.setattr(transcriber, "urlopen_loopback", lambda *a, **k: Response())
+    assert rig.backend.transcribe(rig.audio) == "core ml words"
+    assert rig.served == [] and rig.scheduled == []
+
+
+def test_a_core_ml_backend_salvages_through_metal_cli(monkeypatch):
+    backend, _config, _scheduled = _darwin_selection(monkeypatch, resident=True)
+    assert backend._cli_fallback() is backend._ready_only_fallback._cli_fallback()

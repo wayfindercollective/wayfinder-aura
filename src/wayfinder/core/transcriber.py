@@ -96,6 +96,10 @@ class ServerStartSuperseded(TranscriptionError):
     """A whisper-server startup was cancelled by a later shutdown or switch."""
 
 
+class CoreMLNotLoaded(TranscriptionError):
+    """A Core ML server serves only once it is loaded; see _ready_only_fallback."""
+
+
 def _expand_path(value: object) -> str:
     """Expand a config path without letting None/blank masquerade as cwd."""
     if value is None:
@@ -855,6 +859,12 @@ class WhisperServerBackend(TranscriptionBackend):
         # The switch this backend's configuration was read under. A server
         # start under a later one would load a mode the user has left.
         self._load_epoch = WhisperServerBackend._epoch
+        # macOS Core ML: its server takes ~11 s to load on an M1, Metal's under
+        # 1 s. A backend get_backend() chose because Core ML was resident uses
+        # it only while it still is; otherwise this Metal twin serves and the
+        # hand-over brings Core ML back once it is loaded (Sol mac r2).
+        self._ready_only_fallback: Optional["WhisperServerBackend"] = None
+        self._ready_only_config: Optional[dict] = None
 
         # Lazy-init the class-level lock
         if WhisperServerBackend._server_lock is None:
@@ -1149,6 +1159,11 @@ class WhisperServerBackend(TranscriptionBackend):
                 WhisperServerBackend._server_epoch = max(
                     WhisperServerBackend._server_epoch, epoch)
                 return
+            if self._ready_only_fallback is not None:
+                # Core ML is not resident (it died, or a recovery would replace
+                # it): never load it under a dictation. Decided under the lock,
+                # so no start, restart or recovery spawns it here.
+                raise CoreMLNotLoaded("Core ML server not loaded")
 
             # Kill any existing server (different config, or force-replace a wedge).
             self._stop_server_internal(deadline=deadline)
@@ -1421,6 +1436,12 @@ class WhisperServerBackend(TranscriptionBackend):
         try:
             self._start_server()
             return True
+        except CoreMLNotLoaded:
+            fallback = self._ready_only_fallback
+            try:
+                return fallback.warm_up()
+            finally:
+                self._schedule_coreml_hand_over()
         except Exception as e:
             print(f"[Whisper Server] Warm-up skipped: {e}")
             return False
@@ -1467,6 +1488,9 @@ class WhisperServerBackend(TranscriptionBackend):
         degradation ladder is: server(GPU) -> server(CPU) -> cli(GPU) -> cli(CPU)
         — slower per dictation but always working.
         """
+        if self._ready_only_fallback is not None:
+            # Per-call Core ML loads its encoder each time: Metal's CLI.
+            return self._ready_only_fallback._cli_fallback()
         if getattr(self, "_cli_backend", None) is None:
             self._cli_backend = WhisperCppBackend(
                 whisper_binary=self._resolve_cli_binary(),
@@ -1485,6 +1509,20 @@ class WhisperServerBackend(TranscriptionBackend):
             )
         return self._cli_backend
 
+    def _schedule_coreml_hand_over(self) -> None:
+        try:
+            from wayfinder.utils.macos_coreml import schedule_preparation
+            schedule_preparation(self._ready_only_config, self._ready_only_fallback)
+        except Exception as exc:
+            print(f"[Whisper] Core ML hand-over not scheduled ({type(exc).__name__})")
+
+    def _serve_on_metal(self, audio_path: str, context: str) -> str:
+        print("[Whisper] Core ML is not loaded; this dictation runs on Metal")
+        try:
+            return self._ready_only_fallback.transcribe(audio_path, context)
+        finally:
+            self._schedule_coreml_hand_over()
+
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """Transcribe audio via the whisper-server HTTP API."""
         if not Path(audio_path).exists():
@@ -1497,6 +1535,8 @@ class WhisperServerBackend(TranscriptionBackend):
         # Ensure server is running
         try:
             self._start_server()
+        except CoreMLNotLoaded:
+            return self._serve_on_metal(audio_path, context)
         except ServerStartSuperseded:
             if WhisperServerBackend._closed:
                 # Quit or restart: nothing starts after a terminal shutdown,
@@ -1629,6 +1669,11 @@ class WhisperServerBackend(TranscriptionBackend):
                 # second, producing a false "No speech detected" after valid audio.
                 recovery_deadline = time.monotonic() + float(self.timeout)
                 print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
+                if self._ready_only_fallback is not None:
+                    # Restarting Core ML is a cold load: Metal serves the retry
+                    # (replacing the failed server) and Core ML comes back by
+                    # the hand-over.
+                    return self._serve_on_metal(audio_path, context)
                 try:
                     # force=True replaces a wedged-but-listening server (which would
                     # otherwise look "already running"); _start_server bounds every
@@ -2623,6 +2668,7 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 # while Core ML loads beside it and takes over when idle.
                 coreml_binary = None
                 coreml_pending = True
+            metal_cli_binary = cli_binary
             if coreml_binary:
                 cli_binary = coreml_binary
                 selected_model_path = str(converted_model_path(config.get("model_path", "")))
@@ -2630,28 +2676,40 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 print("[Whisper] macOS encoder: Core ML (automatic)")
         _wc_beam, _wc_best_of = whisper_decoding(config)
         if config.get("whisper_server_mode", True):
+            def _server_backend(binary: str, model: str, startup_timeout: float):
+                backend = WhisperServerBackend(
+                    whisper_server_binary=binary,
+                    model_path=model,
+                    port=config.get("whisper_server_port", 8178),
+                    threads=config.get("threads", 4),
+                    # Short, dedicated timeout (see config: whisper_server_timeout) so a
+                    # wedged inference worker is caught fast → restart + retry can salvage
+                    # the dictation before the 120s PROCESSING watchdog abandons it.
+                    timeout=config.get("whisper_server_timeout", 30),
+                    startup_timeout=startup_timeout,
+                    use_gpu=use_gpu_effective,
+                    beam_size=_wc_beam,
+                    best_of=_wc_best_of,
+                    language=config.get("language", "en"),
+                    entropy_threshold=config.get("entropy_threshold", 2.6),
+                    no_speech_threshold=config.get("no_speech_threshold", 0.5),
+                    suppress_nst=config.get("suppress_nst", False),
+                    prompt=_effective_prompt,
+                    custom_vocabulary=_effective_custom_vocabulary,
+                )
+                backend.bind_to_epoch(load_epoch)
+                return backend
+
             server_binary = _derive_whisper_server_binary(cli_binary)
-            server_backend = WhisperServerBackend(
-                whisper_server_binary=server_binary,
-                model_path=selected_model_path,
-                port=config.get("whisper_server_port", 8178),
-                threads=config.get("threads", 4),
-                # Short, dedicated timeout (see config: whisper_server_timeout) so a
-                # wedged inference worker is caught fast → restart + retry can salvage
-                # the dictation before the 120s PROCESSING watchdog abandons it.
-                timeout=config.get("whisper_server_timeout", 30),
-                startup_timeout=120.0 if coreml_selected else 30.0,
-                use_gpu=use_gpu_effective,
-                beam_size=_wc_beam,
-                best_of=_wc_best_of,
-                language=config.get("language", "en"),
-                entropy_threshold=config.get("entropy_threshold", 2.6),
-                no_speech_threshold=config.get("no_speech_threshold", 0.5),
-                suppress_nst=config.get("suppress_nst", False),
-                prompt=_effective_prompt,
-                custom_vocabulary=_effective_custom_vocabulary,
-            )
-            server_backend.bind_to_epoch(load_epoch)
+            server_backend = _server_backend(
+                server_binary, selected_model_path, 120.0 if coreml_selected else 30.0)
+            if coreml_selected:
+                # Resident now, but it can die before this dictation reaches
+                # it: then Metal serves rather than an ~11 s Core ML load.
+                server_backend._ready_only_fallback = _server_backend(
+                    _derive_whisper_server_binary(metal_cli_binary),
+                    config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"), 30.0)
+                server_backend._ready_only_config = requested_config
             if server_backend.is_available():
                 if coreml_pending:
                     from wayfinder.utils.macos_coreml import schedule_preparation
