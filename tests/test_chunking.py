@@ -545,6 +545,81 @@ def test_a_quoted_list_with_no_periods_survives_full_default_cleanup():
     assert collapse_phrase_window_loops(collapse_sentence_loops(text)) == text
 
 
+# --- Sol loop r5: lone closers end list items, never possessives ---------
+
+@pytest.mark.parametrize(
+    "item, last",
+    [
+        # finding 1: _loop_norm strips backticks, so the boundaries must too
+        ("`we need to update the database before lunch.`,",
+         "`we need to update the database before lunch tomorrow.`"),
+        ("`we need to update the database before lunch`,",
+         "`we need to update the database before lunch tomorrow`"),
+        # a possessive inside a quoted item must not end the item early
+        ("'the players' equipment is ready before lunch',",
+         "'the players' equipment is ready before lunch today'"),
+    ],
+)
+def test_quoted_lists_of_four_survive_full_default_cleanup(item, last):
+    from wayfinder.core.chunking import (
+        chunk_text_looks_looped,
+        collapse_phrase_window_loops,
+        collapse_sentence_loops,
+    )
+
+    text = " ".join([item] * 4 + [last])
+    assert not chunk_text_looks_looped(text)
+    assert collapse_phrase_window_loops(collapse_sentence_loops(text)) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # a lead-in before the first item
+        "Items: " + " ".join(['"we need to go home",'] * 4 + ['"we need to go home before dinner"']),
+        # items joined by a word or two, not just punctuation
+        " ".join(['"we need to go home",'] + ['or "we need to go home",'] * 3
+                 + ['or "we need to go home before dinner"']),
+        " ".join(['"we need to go home",'] + ['and then "we need to go home",'] * 3
+                 + ['and then "we need to go home before dinner"']),
+    ],
+)
+def test_quoted_lists_with_words_between_items_survive_full_default_cleanup(text):
+    from wayfinder.core.chunking import (
+        chunk_text_looks_looped,
+        collapse_phrase_window_loops,
+        collapse_sentence_loops,
+    )
+
+    assert not chunk_text_looks_looped(text)
+    assert collapse_phrase_window_loops(collapse_sentence_loops(text)) == text
+
+
+@pytest.mark.parametrize(
+    "copy",
+    [
+        # finding 2: a possessive apostrophe used to end every span
+        "we changed the players' equipment before lunch",
+        "we changed the players’ equipment before lunch",
+        "we fixed the players', coaches' gear today",
+        # interior quoted terms, wherever they sit in the copy
+        'we turned on the "fast" mode before lunch',
+        '"Fast" mode is on before lunch',
+        'we turned on the "fast", then the slow mode',
+    ],
+)
+def test_five_copies_with_apostrophes_or_interior_quotes_still_collapse(copy):
+    from wayfinder.core.chunking import (
+        chunk_text_looks_looped,
+        collapse_phrase_window_loops,
+        collapse_sentence_loops,
+    )
+
+    text = " ".join([copy] * 5) + "."
+    assert chunk_text_looks_looped(text)
+    assert collapse_phrase_window_loops(collapse_sentence_loops(text)) == copy
+
+
 # --- Sol loop r4, finding 4: loop normalisation keeps numeric meaning ------
 
 def test_alternating_decimal_and_whole_number_sentences_all_survive():

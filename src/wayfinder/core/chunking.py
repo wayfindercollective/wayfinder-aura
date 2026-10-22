@@ -133,16 +133,56 @@ def _is_truncated_loop_repeat(anchor_words: list[str], candidate_words: list[str
 # forward with finditer and splits on the whitespace group instead, keeping
 # the separators themselves as parts so joining with "" reproduces the
 # original text exactly.
-_CLOSERS = r'["\'”’)\]]'
+_CLOSERS = r'["\'`“”‘’)\]]'  # every quote _loop_norm strips, plus brackets
 _SENTENCE_END = re.compile(rf'[.!?]{_CLOSERS}*[,;:]?(\s+)')
 
 # collapse_phrase_window_loops' own span boundary: everything _SENTENCE_END
-# splits on, plus a closing quote/bracket alone (no [.!?] before it) followed
-# by the same optional list punctuation and whitespace — a quoted list item
-# with no terminal period ("we need to go home", said next) still ends a
-# span, so a word-window scan can never match across it (Sol loop r4,
-# finding 3).
-_PHRASE_SPAN_END = re.compile(rf'(?:[.!?]{_CLOSERS}*|{_CLOSERS})[,;:]?(\s+)')
+# splits on, plus a closing quote/bracket alone (no [.!?] before it) that
+# ends a quoted list item with no terminal period ("we need to go home",
+# said next), so a word-window scan can never match across it (Sol loop r4,
+# finding 3). _CLOSERS must cover every quote _loop_norm strips: a backtick
+# it stripped but no boundary recognised let windows run across `quoted`
+# items (Sol loop r5, finding 1). A closer alone is ambiguous, though — the
+# apostrophe in "the players' equipment", or the quote after an interior
+# "fast" term, ends nothing, and splitting there hid real loops (Sol loop
+# r5, finding 2). So _split_phrase_spans only takes a lone closer when
+# another quoted item opens right after it ("we need to go home", "we ...),
+# or when list punctuation (,;:) follows it, a quote/bracket opened a word
+# earlier in the same span, and the next item opens within two words
+# ("we need to go home", or "we need to go home", and then "we ...).
+_OPENERS = "\"'`“‘„‚(["
+_WORD_START_OPENER = re.compile(r'(?<!\S)["\'`“‘„‚(\[]')
+_NEXT_ITEM_SOON = re.compile(r'(?:\S+\s+){1,2}["\'`“‘„‚(\[]')
+_PHRASE_SPAN_CANDIDATE = re.compile(rf'([.!?]{_CLOSERS}*|{_CLOSERS})([,;:]?)(\s+)')
+
+
+def _lone_closer_ends_item(text: str, m: re.Match, item_opened: bool) -> bool:
+    """Whether a _PHRASE_SPAN_CANDIDATE match with no [.!?] ends a quoted
+    list item (see above); ``item_opened``: a quote opened earlier in the span."""
+    if m.end() < len(text) and text[m.end()] in _OPENERS:
+        return True
+    return bool(m.group(2)) and item_opened and bool(_NEXT_ITEM_SOON.match(text, m.end()))
+
+
+def _split_phrase_spans(text: str) -> list[str]:
+    """``[span, sep, span, sep, ..., span]`` at phrase-span boundaries (see
+    _PHRASE_SPAN_CANDIDATE above); ``"".join(...) == text``."""
+    parts = []
+    start = 0
+    opener_at = -1  # first word-start opener at/after start (len(text): none)
+    for m in _PHRASE_SPAN_CANDIDATE.finditer(text):
+        if m.group(1)[0] not in ".!?":
+            if opener_at < start:  # stale: search on from this span only
+                found = _WORD_START_OPENER.search(text, start)
+                opener_at = found.start() if found else len(text)
+            if not _lone_closer_ends_item(text, m, opener_at < m.start(1)):
+                continue
+        sep_start, sep_end = m.span(3)
+        parts.append(text[start:sep_start])
+        parts.append(text[sep_start:sep_end])
+        start = sep_end
+    parts.append(text[start:])
+    return parts
 
 
 def _split_on(text: str, pattern: re.Pattern) -> list[str]:
@@ -219,7 +259,7 @@ def collapse_sentence_loops(text: str) -> str:
 
 def _window_scan_one_span(text: str) -> str:
     """The window scan itself, run over one span (between the boundaries
-    _PHRASE_SPAN_END finds, or the whole text when it finds none) by
+    _split_phrase_spans finds, or the whole text when it finds none) by
     collapse_phrase_window_loops below.
 
     Tries the SMALLEST window first and keeps trying larger ones after a
@@ -286,7 +326,7 @@ def collapse_phrase_window_loops(text: str) -> str:
     windows instead of sentences — the only way to see a loop stuck inside a
     single sentence, or in speech with no sentence punctuation at all.
 
-    Each span between _PHRASE_SPAN_END boundaries is scanned on its own:
+    Each span between _split_phrase_spans boundaries is scanned on its own:
     across sentences a window matched "we need to go home" over "We need to
     go home. We need to go home. We need to go home before dinner." and
     deleted "before dinner" (Sol loop r2); a quoted list item with no
@@ -295,7 +335,7 @@ def collapse_phrase_window_loops(text: str) -> str:
     with no boundary at all is scanned whole. Text with no run comes back as
     the same object.
     """
-    parts = _split_on(text, _PHRASE_SPAN_END)  # [span, sep, span, sep, ...]
+    parts = _split_phrase_spans(text)  # [span, sep, span, sep, ...]
     changed_any = False
     for i in range(0, len(parts), 2):
         collapsed = _window_scan_one_span(parts[i])
