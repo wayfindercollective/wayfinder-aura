@@ -449,3 +449,28 @@ def test_orphaned_helpers_are_only_launchd_parented_aura_binaries():
 
 def test_reaping_is_macos_only():
     assert child_supervisor.reap_orphaned_helpers(platform_name="linux") == []
+
+
+@posix
+def test_llama_servers_stop_ends_what_its_helper_forked(tmp_path, monkeypatch):
+    # Sol mac r13: llama-server's own stop waited on the leader alone, so a
+    # worker it forked that ignores SIGTERM outlived it.
+    from wayfinder.core.llama_server import LlamaServerManager
+    worker_file = tmp_path / "worker.pid"
+    proc = _helper(tmp_path,
+                   "if os.fork() == 0:\n"
+                   "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                   f"    open({str(worker_file)!r}, 'w').write(str(os.getpid()))\n"
+                   "    time.sleep(60)\n"
+                   "    os._exit(0)\n")
+    worker = int(_wait_for(worker_file, "the worker")[0])
+    monkeypatch.setattr(child_supervisor.sys, "platform", "darwin")
+    try:
+        LlamaServerManager._kill(proc)
+        assert proc.returncode == -signal.SIGTERM
+        assert _gone(worker, within=2)
+    finally:
+        try:
+            os.kill(worker, signal.SIGKILL)
+        except OSError:
+            pass

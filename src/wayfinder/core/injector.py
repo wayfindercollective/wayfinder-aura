@@ -120,8 +120,6 @@ def _piece_of_a_typing(index: int):
     fallback may type it all again."""
     try:
         yield
-    except InjectionCancelled:
-        raise
     except InjectionError as err:
         if index:
             err.uncertain_delivery = True

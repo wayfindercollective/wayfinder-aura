@@ -935,3 +935,21 @@ def test_a_mac_enter_retired_during_the_permission_query_sends_nothing(monkeypat
     with pytest.raises(injector.InjectionCancelled):
         injector.press_enter(cancelled=lambda: retired[0])
     assert sent == []
+
+
+def test_a_quartz_press_refused_for_a_retired_dictation_tries_no_pyautogui(monkeypatch):
+    # A press refused for a retired dictation is not a Quartz failure: no
+    # fallback loads PyAutoGUI to send it another way.
+    import sys as _sys
+    rig, macos_paste = _mac_paste_rig(monkeypatch)
+
+    def refused():
+        rig.retired = True
+        raise injector.InjectionCancelled("the dictation was retired: nothing injected")
+
+    monkeypatch.setattr(macos_paste, "post_command_v", refused)
+    monkeypatch.setitem(_sys.modules, "pyautogui", None)     # importing it fails
+    monkeypatch.setattr(macos_paste.pending_restore, "schedule", lambda restore: None)
+    with pytest.raises(injector.InjectionCancelled):
+        injector.inject_text("retired words", cancelled=lambda: rig.retired)
+    assert rig.restored == [["old"]]
