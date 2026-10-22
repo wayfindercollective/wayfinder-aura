@@ -1688,6 +1688,47 @@ class TestARetiredStart:
         popen.assert_not_called()
         assert LlamaServerManager._disabled is False
 
+    def test_a_retirement_during_the_watchers_readiness_starts_no_rung(self, tmp_path):
+        # Sol mac r18: macOS waits for the crash watcher before each rung.
+        from wayfinder.core import llama_server
+        binary, model = self._files(tmp_path)
+        retired, started = [], []
+
+        def spawn(cmd, before_helper=None, ready_within=None, **kwargs):
+            retired.append(True)           # while the watcher got ready
+            before_helper()
+            started.append(cmd)
+            return _FakeProc()
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(llama_server, "spawn_supervised", side_effect=spawn), \
+             pytest.raises(LlamaServerSuperseded):
+            LlamaServerManager.ensure(binary, model, 2048, 4, 99, retired=lambda: bool(retired))
+        assert started == []
+        assert LlamaServerManager._disabled is False
+
+    def test_a_deadline_passed_during_the_watchers_readiness_starts_no_rung(self, tmp_path):
+        from wayfinder.core import llama_server
+        binary, model = self._files(tmp_path)
+        waits, started = [], []
+
+        def spawn(cmd, before_helper=None, ready_within=None, **kwargs):
+            waits.append(ready_within)
+            time.sleep(ready_within + 0.05)   # the watcher took all the time left
+            before_helper()
+            started.append(cmd)
+            return _FakeProc()
+
+        with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
+             patch.object(llama_server, "spawn_supervised", side_effect=spawn), \
+             pytest.raises(LlamaServerError, match="deadline"):
+            # CPU only: one rung, so a swallowed refusal would end the
+            # ladder as a machine that cannot run the server.
+            LlamaServerManager.ensure(binary, model, 2048, 4, 0,
+                                      deadline=time.monotonic() + 0.3)
+        assert started == [] and len(waits) == 1 and 0 < waits[0] <= 0.3
+        assert LlamaServerManager._disabled is False
+
     def test_a_retirement_during_a_failed_load_runs_no_next_rung_and_disables_nothing(self, tmp_path):
         binary, model = self._files(tmp_path)
         retired = []

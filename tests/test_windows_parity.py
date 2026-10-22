@@ -2649,6 +2649,145 @@ def test_a_rollback_that_loses_the_mark_stops_retrying(monkeypatch):
     assert sleeps == [1]
 
 
+def test_a_restore_where_both_writes_fail_then_the_next_attempt_restores(monkeypatch):
+    # Sol mac r18: previous refused, then the dictation refused, left the
+    # clipboard empty and the mark gone. Both go again within the same open,
+    # with the same blocks (a refused write takes none).
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    rig.fake.freed.clear()   # drop the initial paste's own unused-rollback free
+    calls = {"text": 0}
+
+    def on_set(fmt, _handle):
+        if fmt == w._CF_UNICODETEXT:
+            calls["text"] += 1
+            return calls["text"] <= 2   # previous, then the dictation fallback, both fail once
+        return False
+
+    rig.fake.on_set = on_set
+    restore()
+    assert rig.clipboard == "theirs"
+    assert rig.fake.writes == ["dictation", "theirs"]   # the paste, then the recovered previous
+    assert rig.fake.events.count("empty") == 1           # one open; no outer retry was needed
+    assert calls["text"] == 3   # previous, dictation (both failed), previous again (succeeded)
+    assert len(rig.fake.freed) == 2   # the unused dictation and mark fallback blocks
+
+
+def _refuse_text_writes(rig, w, refused):
+    def on_set(fmt, _handle):
+        if fmt == w._CF_UNICODETEXT and refused[0] > 0:
+            refused[0] -= 1
+            return True
+        return False
+
+    rig.fake.on_set = on_set
+
+
+def test_a_restore_left_empty_is_still_owed_on_the_next_try(monkeypatch):
+    # Sol mac r18: every write of one try refused leaves the clipboard empty
+    # and without the mark; nobody wrote since, so the next try restores.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    rig.fake.freed.clear()
+    _refuse_text_writes(rig, w, [2 * w.WRITE_ATTEMPTS])   # all of the first try
+    restore()
+    assert rig.clipboard == "theirs"
+    assert rig.fake.events.count("empty") == 2
+    assert len(rig.fake.freed) == 3 + 2   # try 1: all three blocks; try 2: the unused fallbacks
+
+
+def test_a_restore_that_is_always_refused_is_bounded_and_leaks_nothing(monkeypatch):
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    rig.fake.freed.clear()
+    lines, sleeps = [], []
+    monkeypatch.setattr(w, "_paste_reporter", lines.append)
+    rig.on_sleep = lambda: sleeps.append(1)
+    _refuse_text_writes(rig, w, [10 ** 6])
+    restore()
+    tries = 1 + w.RESTORE_RETRIES
+    assert rig.clipboard is None                  # nothing could be written at all
+    assert rig.fake.writes == ["dictation"]       # only the original paste write
+    assert rig.fake.events.count("empty") == tries
+    assert len(sleeps) == tries * (w.WRITE_ATTEMPTS - 1) + w.RESTORE_RETRIES
+    assert len(rig.fake.freed) == 3 * tries
+    assert len(lines) == tries and all("theirs" not in line for line in lines)
+
+
+@pytest.mark.parametrize("meanwhile", ["copied", "cleared"])
+def test_a_clipboard_changed_after_a_restore_left_it_empty_is_left_alone(monkeypatch, meanwhile):
+    # Only an empty clipboard nobody wrote since is still Aura's: a copy, or
+    # the user clearing it, between the tries stays.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    _refuse_text_writes(rig, w, [2 * w.WRITE_ATTEMPTS])
+
+    def change():
+        if meanwhile == "copied":
+            rig.fake.copy("new copy")
+        else:
+            rig.fake.OpenClipboard(None)
+            rig.fake.EmptyClipboard()
+            rig.fake.CloseClipboard()
+
+    slept = []
+
+    def on_sleep():
+        slept.append(1)
+        if len(slept) == w.WRITE_ATTEMPTS:   # the outer wait after the first try
+            change()
+
+    rig.on_sleep = on_sleep
+    restore()
+    assert rig.clipboard == ("new copy" if meanwhile == "copied" else None)
+    assert rig.fake.events.count("empty") == 1 + (meanwhile == "cleared")
+
+
+def test_the_own_window_write_restores_the_previous_clipboard_in_place(monkeypatch):
+    # Sol mac r18: a refused own-window write left the clipboard empty
+    # rather than as Aura found it.
+    rig, w = _windows_send_rig(monkeypatch)
+    calls = [0]
+
+    def on_set(fmt, _handle):
+        if fmt == w._CF_UNICODETEXT:
+            calls[0] += 1
+            return calls[0] == 1   # only the new write fails; the rollback succeeds
+        return False
+
+    rig.fake.on_set = on_set
+    assert w._clipboard_set_windows("dictation", transient=True) is False
+    assert rig.clipboard == "theirs"              # put back in place, not left empty
+    assert rig.fake.events.count("empty") == 1    # no second EmptyClipboard for the rollback
+
+
+def test_a_failed_transient_hint_frees_its_block(monkeypatch):
+    # Sol mac r18: Windows takes a block only when SetClipboardData
+    # succeeds; a refused history-exclusion hint leaked its block.
+    rig, w = _windows_send_rig(monkeypatch)
+    hint_fmt = rig.fake.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
+    rig.fake.on_set = lambda fmt, _handle: fmt == hint_fmt   # just this one hint fails
+    with w._clipboard_held(require_owner=True) as held:
+        assert held
+        before = len(rig.fake.freed)
+        w._mark_transient()
+    assert len(rig.fake.freed) == before + 1
+
+
+def test_a_transient_hint_that_raises_also_frees_its_block(monkeypatch):
+    # A raised ctypes error takes no block either; still best effort.
+    rig, w = _windows_send_rig(monkeypatch)
+    hint_fmt = rig.fake.RegisterClipboardFormatW("CanUploadToCloudClipboard")
+
+    def on_set(fmt, _handle):
+        if fmt == hint_fmt:
+            raise OSError("fake ctypes failure")
+        return False
+
+    rig.fake.on_set = on_set
+    with w._clipboard_held(require_owner=True) as held:
+        assert held
+        before = len(rig.fake.freed)
+        w._mark_transient()   # must not raise
+    assert len(rig.fake.freed) == before + 1
+
+
 def test_the_windows_restore_keeps_a_same_words_copy_made_while_it_waited(monkeypatch):
     # Sol mac r13: the counter was read before the clipboard opened; the user
     # copying the same words while it waited looked untouched, and the restore

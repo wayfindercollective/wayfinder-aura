@@ -548,18 +548,23 @@ def _free_global(handle) -> None:
 
 
 def _mark_transient() -> None:
-    """Add the clipboard-history exclusion formats (clipboard already open)."""
+    """Add the clipboard-history exclusion formats (clipboard already open).
+    Windows takes a block only when SetClipboardData succeeds, so a refused
+    one is freed (Sol mac r18)."""
     for name, dword in _TRANSIENT_FORMATS:
+        h_global = None
         try:
             fmt = _user32.RegisterClipboardFormatW(name)
             if not fmt:
                 continue
             raw = b"\x00" if dword is None else int(dword).to_bytes(4, "little")
             h_global = _global_copy(raw)
-            if h_global:
-                _user32.SetClipboardData(fmt, h_global)
+            if not h_global:
+                continue
+            if not _user32.SetClipboardData(fmt, h_global):
+                _free_global(h_global)
         except Exception:
-            pass  # best effort: the paste itself must not fail over a hint
+            _free_global(h_global)  # best effort: the paste must not fail over a hint
 
 
 def _open_clipboard(retries: int = 5, owner=None) -> bool:
@@ -718,20 +723,53 @@ def _write_open_clipboard(text: str, transient: bool) -> bool:
     """Replace the open clipboard's text with *text*. Allocates the block
     before EmptyClipboard (Finding 3), not after: other callers of this
     (the own-window write) must not find the clipboard already emptied by
-    the time a failed GlobalAlloc/GlobalLock turns up."""
+    the time a failed GlobalAlloc/GlobalLock turns up. The text it replaces
+    is prepared too, so a refused write puts it back rather than leave the
+    clipboard empty (Sol mac r18); an unreadable one counts as none, this
+    path (the own-window copy) being best effort."""
     h_global = _global_text(text)
     if not h_global:
         return False
-    if not _user32.EmptyClipboard():
-        _free_global(h_global)   # the system never took it
-        return False
-    # Ownership of h_global passes to the system on success.
-    if not _user32.SetClipboardData(_CF_UNICODETEXT, h_global):
+    previous = _read_open_clipboard()
+    previous_block = _global_text(previous) if previous is not None else None
+    if previous is not None and not previous_block:
         _free_global(h_global)
         return False
-    if transient:
-        _mark_transient()
-    return True
+    if not _user32.EmptyClipboard():
+        _free_global(h_global)   # the system never took it
+        _free_global(previous_block)
+        return False
+    landed = _set_text_first_that_lands([h_global, previous_block])
+    if landed == 0:
+        _free_global(previous_block)   # the rollback net was not needed
+        if transient:
+            _mark_transient()
+        return True
+    _free_global(h_global)   # the system never took it
+    if landed is None:
+        _free_global(previous_block)
+        if previous_block is not None:
+            _log_rollback_failed()
+    return False
+
+
+WRITE_ATTEMPTS = 3       # rounds of writes inside one open (Sol mac r18)
+WRITE_RETRY_S = 0.02
+
+
+def _set_text_first_that_lands(blocks) -> int | None:
+    """SetClipboardData(CF_UNICODETEXT) each of *blocks* in turn, up to
+    WRITE_ATTEMPTS rounds, on the open, emptied clipboard: the index of the
+    one that landed, or None. A refused block stays the caller's, so the same
+    ones go again, with no new allocation and no second EmptyClipboard
+    (Sol mac r18)."""
+    for attempt in range(WRITE_ATTEMPTS):
+        if attempt:
+            time.sleep(WRITE_RETRY_S)
+        for index, block in enumerate(blocks):
+            if block and _user32.SetClipboardData(_CF_UNICODETEXT, block):
+                return index
+    return None
 
 
 RESTORE_DELAY_S = 0.8   # as macos_paste.RESTORE_DELAY_S
@@ -882,7 +920,9 @@ def _restore_open_clipboard(previous: str, text: str, mark: bytes) -> bool:
     and the dictation *text* plus its *mark* to put back if that write
     fails. A failed allocation touches nothing; a failed write puts the
     dictation back exactly as it was, mark included, so the clipboard stays
-    recognisably Aura's and _restore_with_retry can try again."""
+    recognisably Aura's and _restore_with_retry can try again. Both writes
+    go again a bounded number of times within this open (Sol mac r18): one
+    refused write each left the clipboard empty and the mark gone."""
     previous_block = _global_text(previous)
     text_block = _global_text(text)
     mark_block = _global_copy(mark)
@@ -899,17 +939,17 @@ def _restore_open_clipboard(previous: str, text: str, mark: bytes) -> bool:
         _free_global(mark_block)
         return False
 
-    if _user32.SetClipboardData(_CF_UNICODETEXT, previous_block):
+    landed = _set_text_first_that_lands([previous_block, text_block])
+    if landed == 0:
         _free_global(text_block)   # the fallback net was not needed
         _free_global(mark_block)
         _mark_transient()
         return True
+    text_ok = landed == 1
 
-    # SetClipboardData(previous) failed after EmptyClipboard: put the
-    # dictation back, text then mark, as _paste_write_windows wrote it,
-    # rather than leave the clipboard empty.
+    # previous never landed: the dictation is back, text then mark, as
+    # _paste_write_windows wrote it, rather than an empty clipboard.
     _free_global(previous_block)   # the system never took it
-    text_ok = bool(_user32.SetClipboardData(_CF_UNICODETEXT, text_block))
     if not text_ok:
         _free_global(text_block)
     mark_ok = False
@@ -933,31 +973,56 @@ def _restore_with_retry(previous: str, text: str, mark: bytes) -> tuple[bool, bo
     clipboard is still Aura's but the write failed (Finding 3: keep the
     snapshot for a bounded recovery instead of dropping it on the first
     failure). Stops as soon as the clipboard is no longer Aura's: the user
-    copied something, or a rollback could not put the mark back."""
-    untouched, restored = _restore_clipboard(previous, text, mark)
+    copied something, or a rollback could not put the mark back. A try whose
+    every write was refused left it empty; that empty clipboard is still
+    Aura's while nobody has written since, so the user's text is still owed
+    (Sol mac r18)."""
+    emptied: list = []
+    untouched, restored = _restore_clipboard(previous, text, mark, emptied)
     for _ in range(RESTORE_RETRIES):
         if restored or not untouched:
             break
         time.sleep(RESTORE_RETRY_S)
-        untouched, restored = _restore_clipboard(previous, text, mark)
+        untouched, restored = _restore_clipboard(previous, text, mark, emptied)
     return untouched, restored
 
 
-def _restore_clipboard(previous: str, text: str, mark: bytes) -> tuple[bool, bool]:
+def _restore_clipboard(previous: str, text: str, mark: bytes,
+                       emptied: list | None = None) -> tuple[bool, bool]:
     """Put *previous* back if the clipboard is as Aura left it, with the check
     and the write under one OpenClipboard: a copy made during the check
     (even of the same words) stays (Sol mac r13). Requires Aura's own owner
     window (Finding 5): an ownerless hold would not exclude another ownerless
     opener's copy landing between the check and the write, so without one
     this does not restore at all — the clipboard, dictated text included, is
-    left exactly as it is. Returns (untouched, restored)."""
+    left exactly as it is. *emptied* carries, from one try to the next, the
+    sequence number of a clipboard a try left empty (Sol mac r18). Returns
+    (untouched, restored)."""
+    left_empty = False
     with _clipboard_held(require_owner=True) as held:
         if not held:
             _log_no_owner_at_restore()
             return False, False
-        if not _clipboard_untouched(text, mark):
+        if not (_clipboard_untouched(text, mark) or _left_empty_by_us(emptied)):
             return False, False
-        return True, _restore_open_clipboard(previous, text, mark)
+        restored = _restore_open_clipboard(previous, text, mark)
+        left_empty = not restored and _clipboard_empty()
+    if emptied is not None:
+        emptied.clear()
+        if left_empty:
+            emptied.append(_user32.GetClipboardSequenceNumber())
+    return True, restored
+
+
+def _clipboard_empty() -> bool:
+    """No text and no mark on the open clipboard."""
+    return _read_open_clipboard() is None and _clipboard_mark() is None
+
+
+def _left_empty_by_us(emptied: list | None) -> bool:
+    """The open clipboard is as a try left it, empty: nobody wrote since."""
+    return (bool(emptied) and _user32.GetClipboardSequenceNumber() == emptied[0]
+            and _clipboard_empty())
 
 
 def _paste_write_windows(text: str) -> tuple[str | None, bytes]:

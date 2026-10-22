@@ -1359,11 +1359,22 @@ class WhisperServerBackend(TranscriptionBackend):
                 # scan, Linux's adoption probe): a retired dictation spawns
                 # nothing (Sol mac r7/r8).
                 self._check_not_abandoned(abandoned_at)
+
+                def _still_wanted() -> None:
+                    # The same again after macOS's crash-watcher wait, right
+                    # before the server starts (Sol mac r18).
+                    if deadline is not None and _left() <= 0:
+                        raise TranscriptionError(
+                            "whisper-server startup exceeded the recovery deadline (before spawn)")
+                    _abandon_if_superseded()
+                    self._check_not_abandoned(abandoned_at)
                 proc = spawn_supervised(
                     cmd,
                     env=spawn_env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
+                    before_helper=_still_wanted,
+                    ready_within=_left(),
                     **_NO_WINDOW,
                 )
                 # Windows: the server dies with the app even on a crash (job
