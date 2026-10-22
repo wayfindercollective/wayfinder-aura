@@ -2043,3 +2043,107 @@ def test_the_clipboard_paste_hands_windows_its_cancellation(monkeypatch):
         return False
     injector.inject_text_clipboard_paste("live words", cancelled=retired)
     assert given == [retired]
+
+
+
+def _windows_send_rig(monkeypatch):
+    """injector_windows over a fake SendInput and clipboard; returns rig."""
+    import time as _time
+    from types import SimpleNamespace
+    from wayfinder.core import injector_windows as w
+
+    rig = SimpleNamespace(sent=[], clipboard="theirs", seq=1, retired=False, on_sleep=None,
+                          own_window=False)
+
+    class User32:
+        @staticmethod
+        def SendInput(n, arr, _size):
+            rig.sent.extend((arr[i].u.ki.wVk, arr[i].u.ki.wScan,
+                             bool(arr[i].u.ki.dwFlags & w.KEYEVENTF_KEYUP)) for i in range(n))
+            return n
+
+    def set_clipboard(text, transient=False):
+        rig.clipboard = text
+        rig.seq += 1
+        return True
+
+    def sleep(seconds):
+        if rig.on_sleep is not None:
+            rig.on_sleep()
+
+    monkeypatch.setattr(w, "_user32", User32())
+    monkeypatch.setattr(w, "time", SimpleNamespace(sleep=sleep, monotonic=_time.monotonic,
+                                                   time=_time.time, perf_counter=_time.perf_counter))
+    monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(w, "_foreground_is_own_process", lambda: rig.own_window)
+    monkeypatch.setattr(w, "require_modifier_release_windows", lambda: None)
+    monkeypatch.setattr(w, "_clipboard_get_windows", lambda: rig.clipboard)
+    monkeypatch.setattr(w, "_clipboard_set_windows", set_clipboard)
+    monkeypatch.setattr(w, "_clipboard_sequence", lambda: rig.seq)
+    monkeypatch.setattr(w._pending_restore, "schedule", lambda restore: None)
+    return rig, w
+
+
+def test_a_retired_dictations_key_press_never_reaches_send_input(monkeypatch):
+    # Sol mac r12: the check sits in _send itself, so no wait above it (a
+    # modifier wait, a typing pace, a clipboard settle) can let a key through.
+    # A release always goes out: a key left down repeats in the target app.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    with injector.cancellable(lambda: True):
+        with pytest.raises(injector.InjectionCancelled):
+            w._send(w._vkey_inputs(w.VK_RETURN))
+        assert rig.sent == []
+        w._send([w._keyboard_input(wVk=w.VK_RETURN, flags=w.KEYEVENTF_KEYUP)])
+    assert rig.sent == [(w.VK_RETURN, 0, True)]
+
+
+def test_paced_windows_typing_stops_at_a_retirement(monkeypatch):
+    # Sol mac r12: the typing fallback's paced sends went on across sleeps.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    rig.on_sleep = lambda: setattr(rig, "retired", True)   # Escape after "a"
+    with injector.cancellable(lambda: rig.retired):
+        with pytest.raises(injector.InjectionCancelled):
+            w.inject_text_windows("abc", "normal")
+    downs = [event for event in rig.sent if not event[2]]
+    assert len(downs) == 1                                  # "a" only
+
+
+@pytest.mark.parametrize("scope", ["explicit", "scoped"])
+@pytest.mark.parametrize("user_copied", [False, True])
+def test_a_windows_paste_retired_during_its_settle(monkeypatch, scope, user_copied):
+    # Sol mac r12: the settle check asked only an explicit cancellation (a
+    # game chat's paste passes it through the scope), and its restore wrote
+    # the old clipboard over whatever the user had copied meanwhile.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+
+    def settle():
+        if user_copied:
+            rig.clipboard, rig.seq = "mine", rig.seq + 1   # the user's Ctrl+C
+        rig.retired = True
+
+    rig.on_sleep = settle
+    cancelled = lambda: rig.retired   # noqa: E731
+    with injector.cancellable(cancelled if scope == "scoped" else None):
+        with pytest.raises(injector.InjectionCancelled):
+            w.inject_text_paste_windows("retired words",
+                                        cancelled if scope == "explicit" else None)
+    assert rig.sent == []                                   # no Ctrl+V
+    assert rig.clipboard == ("mine" if user_copied else "theirs")
+
+
+def test_aura_frontmost_leaves_no_retired_text_on_the_windows_clipboard(monkeypatch):
+    # Sol mac r12: the own-window refusal wrote the transcript to the
+    # clipboard for a manual paste, a retired dictation's included.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    rig.own_window = True
+    with injector.cancellable(lambda: True):
+        with pytest.raises(injector.InjectionCancelled):
+            w.inject_text_windows("retired words")
+    assert rig.clipboard == "theirs" and rig.sent == []
+    with pytest.raises(injector.InjectionError, match="on the clipboard"):
+        w.inject_text_windows("live words")
+    assert rig.clipboard == "live words"

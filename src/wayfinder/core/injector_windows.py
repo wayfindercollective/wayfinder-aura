@@ -29,7 +29,7 @@ import time
 from contextlib import contextmanager
 from ctypes import wintypes
 
-from .injector import InjectionError, _refuse_if_cancelled
+from .injector import InjectionCancelled, InjectionError, _refuse_if_cancelled, cancellable
 
 # ---------------------------------------------------------------------------
 # Win32 SendInput plumbing
@@ -167,9 +167,15 @@ def _char_inputs(ch: str) -> list[_INPUT]:
 
 
 def _send(inputs: list[_INPUT]) -> None:
-    """Send INPUT events through SendInput in bounded chunks. Raises on failure."""
+    """Send INPUT events through SendInput in bounded chunks. Raises on failure.
+
+    None with a key press for a retired dictation, whatever waited before it
+    (a modifier wait, a typing pace, a clipboard settle: Sol mac r12). Key
+    releases always go out: a key left down repeats in the target app."""
     if not inputs:
         return
+    if any(not (inp.u.ki.dwFlags & KEYEVENTF_KEYUP) for inp in inputs):
+        _refuse_if_cancelled()
     for start in range(0, len(inputs), _SEND_CHUNK):
         chunk = inputs[start : start + _SEND_CHUNK]
         n = len(chunk)
@@ -253,6 +259,7 @@ def _refuse_own_window(text: str) -> None:
     the intended app. Keep the text on the clipboard and say so instead."""
     if not _foreground_is_own_process():
         return
+    _refuse_if_cancelled()   # not a retired dictation's text (Sol mac r12)
     copied = _clipboard_set_windows(text)
     where = ("on the clipboard — click a text field in another app and press Ctrl+V"
              if copied else "in Aura History")
@@ -364,7 +371,6 @@ def press_enter_windows(cancelled=None) -> None:
     _require_foreground_window()
     # A held Shift would send Shift+Enter — a newline instead of submit.
     require_modifier_release_windows()
-    _refuse_if_cancelled(cancelled)   # retired while a modifier was held
     if _held_seconds() > 0:
         _press_keys([VK_RETURN])
         return
@@ -569,12 +575,24 @@ _pending_restore = _DeferredRestore()
 atexit.register(_pending_restore.flush)
 
 
+def _clipboard_untouched(text: str, ours) -> bool:
+    """Whether the clipboard is as Aura left it: the same change counter (a
+    "Copy" of the same words bumps it) and still our text."""
+    return (ours is None or _clipboard_sequence() == ours) and _clipboard_get_windows() == text
+
+
 def inject_text_paste_windows(text: str, cancelled=None) -> None:
     """Inject *text* via clipboard + Ctrl+V, restoring the prior clipboard.
 
     Used for the Game Mode type-failure fallback and the explicit
     clipboard-paste entry point (apps that reject synthetic per-character input).
+    *cancelled* is asked at every send too, as a scope (Sol mac r12).
     """
+    with cancellable(cancelled):
+        _inject_text_paste_windows(text, cancelled)
+
+
+def _inject_text_paste_windows(text: str, cancelled=None) -> None:
     if not text:
         return
     # A restore still pending from the last paste runs first (before even the
@@ -599,16 +617,18 @@ def inject_text_paste_windows(text: str, cancelled=None) -> None:
         ours = _clipboard_sequence()
         diag.mark("set")
         time.sleep(0.03)
-        if cancelled is not None and cancelled():
-            # ... or during the clipboard writes: no Ctrl+V, the user's
-            # clipboard back now.
-            if previous is not None:
-                _clipboard_set_windows(previous, transient=True)
-            _refuse_if_cancelled(cancelled)
         diag.start_watch()
         # A failed paste raises here and leaves the dictation on the clipboard:
         # the error tells the user to press Ctrl+V themselves (as on macOS).
-        _press_keys([VK_CONTROL, VK_V])
+        try:
+            _press_keys([VK_CONTROL, VK_V])
+        except InjectionCancelled:
+            # ... or during the clipboard writes or the settle (Sol mac r12):
+            # no Ctrl+V; the user's clipboard back now, unless they copied
+            # something meanwhile.
+            if previous is not None and _clipboard_untouched(text, ours):
+                _clipboard_set_windows(previous, transient=True)
+            raise
         diag.mark("ctrl_v")
         # Put the old clipboard back later, on a timer (the Mac's
         # DeferredRestore): VS Code and other Electron apps read the clipboard
@@ -620,10 +640,7 @@ def inject_text_paste_windows(text: str, cancelled=None) -> None:
             def restore(previous=previous, text=text, diag=diag, ours=ours):
                 # Untouched since Aura wrote it: same change counter (a "Copy"
                 # of the same words bumps it) and still our text.
-                untouched = (
-                    (ours is None or _clipboard_sequence() == ours)
-                    and _clipboard_get_windows() == text
-                )
+                untouched = _clipboard_untouched(text, ours)
                 diag.at_restore(untouched)
                 if untouched:
                     _clipboard_set_windows(previous, transient=True)

@@ -1266,3 +1266,50 @@ class TestARetiredClipboardPaste:
         if retire_at == "before":
             assert writes == []                    # not even for a moment
         assert getattr(injector._injection, "cancelled", None) is None
+
+
+class TestEveryLinuxKeyToolAsks:
+    """Sol mac r12: the check sits right before each key command, so a
+    fallback's own waits (wtype failing, ydotool's readiness) let none through."""
+
+    def test_a_key_tool_for_a_retired_dictation_never_runs(self):
+        import wayfinder.core.injector as injector
+        with patch("wayfinder.core.injector.subprocess.run") as run:
+            with injector.cancellable(lambda: True):
+                with pytest.raises(injector.InjectionCancelled):
+                    injector._run_key_tool(["xdotool", "key", "Return"])
+            run.assert_not_called()
+            injector._run_key_tool(["xdotool", "key", "Return"])
+            run.assert_called_once()
+
+    @pytest.mark.parametrize("retire", [True, False])
+    def test_an_enter_fallback_retired_during_its_readiness_sends_nothing(self, retire):
+        import wayfinder.core.injector as injector
+        state = {"retired": False}
+        failed = MagicMock(returncode=1, stdout="", stderr="unsupported")
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def ready():
+            state["retired"] = retire   # Escape while ydotool's readiness is checked
+            return True, ""
+
+        def run(argv, **_k):
+            return failed if argv[0] == "wtype" else ok
+
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._note_wtype_failure"), \
+             patch("wayfinder.core.injector.check_ydotool_ready", side_effect=ready), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._check_ydotool_result"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run) as runs:
+            if retire:
+                with pytest.raises(injector.InjectionCancelled):
+                    injector.press_enter(cancelled=lambda: state["retired"])
+            else:
+                injector.press_enter(cancelled=lambda: state["retired"])
+        tools = [call.args[0][0] for call in runs.call_args_list]
+        assert tools == (["wtype"] if retire else ["wtype", "ydotool"])

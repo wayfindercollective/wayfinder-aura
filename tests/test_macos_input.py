@@ -684,6 +684,7 @@ def test_macos_paste_asks_the_threads_cancellable(monkeypatch):
     # through the scope.
     import wayfinder.core.macos_paste as macos_paste
     posted = []
+    monkeypatch.setattr(injector.sys, "platform", "darwin")
     monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
     monkeypatch.setattr(macos_paste, "frontmost_window_id", lambda: "1:1")
     monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", lambda: True)
@@ -694,3 +695,101 @@ def test_macos_paste_asks_the_threads_cancellable(monkeypatch):
         with pytest.raises(injector.InjectionCancelled):
             injector.inject_text("retired words")
     assert posted == []
+
+
+def _mac_paste_rig(monkeypatch):
+    """The Mac paste with a fake pasteboard; *rig.retired* is the dictation's."""
+    import os
+    from types import SimpleNamespace
+    import wayfinder.core.macos_paste as macos_paste
+
+    class Pasteboard:
+        @staticmethod
+        def changeCount():
+            return 7
+
+    rig = SimpleNamespace(retired=False, written=[], restored=[], posted=[], hotkeys=[],
+                          trusted=True, front="1:1", own=f"{os.getpid()}:1")
+    monkeypatch.setattr(injector.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: rig.trusted)
+    monkeypatch.setattr(macos_paste, "frontmost_window_id", lambda: rig.front)
+    monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", lambda: True)
+    monkeypatch.setattr(injector, "_snapshot_macos_pasteboard", lambda: (Pasteboard(), ["old"]))
+    monkeypatch.setattr(injector, "_write_macos_pasteboard_text",
+                        lambda _pb, text: rig.written.append(text) or 7)
+    monkeypatch.setattr(injector, "_restore_macos_pasteboard",
+                        lambda _pb, items: rig.restored.append(items))
+    monkeypatch.setattr(macos_paste, "post_command_v", lambda: rig.posted.append(True))
+    return rig, macos_paste
+
+
+@pytest.mark.parametrize("retire", [True, False])
+@pytest.mark.parametrize("refusal", ["accessibility-off", "aura-frontmost"])
+def test_a_refused_mac_paste_leaves_no_retired_text_on_the_clipboard(monkeypatch, refusal, retire):
+    # Sol mac r12: a refused paste leaves the transcript on the clipboard for
+    # a manual paste; a retired dictation's too, during the permission or the
+    # focus query.
+    rig, macos_paste = _mac_paste_rig(monkeypatch)
+    if refusal == "accessibility-off":
+        def trusted():
+            rig.retired = retire
+            return False
+        monkeypatch.setattr(macos_paste, "accessibility_trusted", trusted)
+    else:
+        def front():
+            rig.retired = retire
+            return rig.own
+        monkeypatch.setattr(macos_paste, "frontmost_window_id", front)
+    if retire:
+        with pytest.raises(injector.InjectionCancelled):
+            injector.inject_text("retired words", cancelled=lambda: rig.retired)
+        assert rig.written == []
+    else:
+        with pytest.raises(injector.InjectionError, match="on the clipboard"):
+            injector.inject_text("live words", cancelled=lambda: rig.retired)
+        assert rig.written == ["live words"]
+    assert rig.posted == []
+
+
+@pytest.mark.parametrize("retire", [True, False])
+def test_a_mac_paste_retired_while_quartz_failed_sends_no_fallback(monkeypatch, retire):
+    # Sol mac r12: when Quartz fails, PyAutoGUI's Cmd+V is the fallback; a
+    # retirement during the failure or its import still pasted.
+    import sys as _sys
+    rig, macos_paste = _mac_paste_rig(monkeypatch)
+
+    def quartz_fails():
+        rig.retired = retire
+        raise RuntimeError("CGEventPost failed")
+
+    fake = ModuleType("pyautogui")
+    fake.hotkey = lambda *keys: rig.hotkeys.append(keys)
+    monkeypatch.setitem(_sys.modules, "pyautogui", fake)
+    monkeypatch.setattr(macos_paste, "post_command_v", quartz_fails)
+    monkeypatch.setattr(macos_paste.pending_restore, "schedule", lambda restore: None)
+    if retire:
+        with pytest.raises(injector.InjectionCancelled):
+            injector.inject_text("retired words", cancelled=lambda: rig.retired)
+        assert rig.hotkeys == [] and rig.restored == [["old"]]   # put back now
+    else:
+        injector.inject_text("live words", cancelled=lambda: rig.retired)
+        assert rig.hotkeys == [("command", "v")]
+
+
+def test_a_mac_enter_retired_during_the_permission_query_sends_nothing(monkeypatch):
+    # Sol mac r12: the check sat before the Accessibility query, not right
+    # before the key.
+    import wayfinder.core.macos_paste as macos_paste
+    retired, sent = [False], []
+
+    def trusted():
+        retired[0] = True
+        return True
+
+    monkeypatch.setattr(injector.sys, "platform", "darwin")
+    monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", lambda: True)
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", trusted)
+    monkeypatch.setattr(macos_paste, "post_return", lambda: sent.append(True))
+    with pytest.raises(injector.InjectionCancelled):
+        injector.press_enter(cancelled=lambda: retired[0])
+    assert sent == []

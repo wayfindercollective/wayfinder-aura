@@ -376,3 +376,22 @@ def test_the_front_window_refreshes_the_steam_tag(monkeypatch, next_window):
     disp.windows[6] = _XWindow(disp, 6, parent=disp.root, **next_window)
     wid, cls, _title = gc.frontmost_app()
     assert wid == 6 and not gc.is_steam_game(wid, cls)
+
+
+
+def test_game_chat_xdotool_presses_nothing_for_a_retired_dictation(monkeypatch):
+    # Sol mac r12: under do_inject's scope, no key down and no typing for a
+    # retired dictation; a release always goes out.
+    from types import SimpleNamespace
+    from wayfinder.core import injector
+    runs = []
+    monkeypatch.setattr(gc.subprocess, "run",
+                        lambda argv, **k: runs.append(argv) or SimpleNamespace(
+                            returncode=0, stdout="", stderr=""))
+    with injector.cancellable(lambda: True):
+        for args in (("keydown", "Return"), ("type", "--", "gg")):
+            with pytest.raises(injector.InjectionCancelled):
+                gc._xdotool(*args)
+        assert runs == []
+        gc._xdotool("keyup", "Return")
+    assert runs == [["xdotool", "keyup", "Return"]]

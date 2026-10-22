@@ -357,6 +357,11 @@ def check_before_keys(check: Callable[[], None]) -> None:
         _before_keys.append(check)
 
 
+def _check_before_keys() -> None:
+    for check in _before_keys:
+        check()
+
+
 class PortalKeyboard:
     """One keyboard-only RemoteDesktop session, kept open while the app runs."""
 
@@ -733,10 +738,9 @@ class PortalKeyboard:
         """
         delay = max(0.0, key_delay_ms) / 1000.0
         with self._type_lock:
-            for check in _before_keys:
-                check()
             if layout is None or not layout.available:
                 for typed, ch in enumerate(text):
+                    _check_before_keys()   # each character: its delay can span a reset
                     try:
                         self._tap(self._keysym, keysym_for_char(ch))
                     except PortalKeyboardError as e:
@@ -749,6 +753,7 @@ class PortalKeyboard:
             shift_down = False
             try:
                 for typed, ch in enumerate(text):
+                    _check_before_keys()   # before its Shift too; the finally releases
                     try:
                         key = layout.key_for(keysym_for_char(ch))
                         if key is None:
@@ -782,8 +787,7 @@ class PortalKeyboard:
             if all(key is not None for key in keys):
                 send, values = self._key, [key[0] for key in keys]
         with self._type_lock:
-            for check in _before_keys:
-                check()
+            _check_before_keys()
             pressed: list = []
             try:
                 for value in values:

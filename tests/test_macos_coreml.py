@@ -811,6 +811,52 @@ def test_a_compile_quit_cut_short_is_not_a_core_ml_failure(tmp_path, monkeypatch
 
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the compiler stand-in is a shell script")
+@pytest.mark.parametrize("failure", ["exited", "timed-out"])
+def test_a_compile_superseded_in_its_accounting_counts_nothing(tmp_path, monkeypatch, failure):
+    # Sol mac r12: the compile's failure counts asked no cancellation under
+    # the accounting lock; a switch while they waited there still counted.
+    import time
+    from wayfinder.utils import child_supervisor, macos_coreml_convert
+    cli = tmp_path / "bin" / "whisper-cli"
+    cli.parent.mkdir()
+    cli.write_bytes(b"cli")
+    compiler = cli.with_name("coreml-compile")
+    compiler.write_text("#!/bin/sh\nexit 3\n" if failure == "exited" else "#!/bin/sh\nexec sleep 30\n")
+    compiler.chmod(0o700)
+    model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+    model.write_bytes(b"model")
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(macos_coreml, "_conversion_root", lambda: tmp_path / "derived")
+    monkeypatch.setattr(macos_coreml, "_failure_path", lambda: tmp_path / "coreml-failures.json")
+    monkeypatch.setattr(macos_coreml, "_hardware_identity", lambda: {"hardware": "MacBookAir10,1"})
+    monkeypatch.setattr(macos_coreml, "_binary_twin", lambda c: cli)
+    monkeypatch.setattr(macos_coreml, "prepared_twin", lambda c, m: None)
+    monkeypatch.setattr(macos_coreml_convert, "template_path", lambda: None)
+    monkeypatch.setattr(macos_coreml_convert, "load_bindings", lambda path: {"weights_size": 1})
+    monkeypatch.setattr(macos_coreml_convert, "populate_package", lambda m, p, cancelled: {"format": 2})
+    if failure == "timed-out":
+        real, calls = time.monotonic, [0]
+
+        def monotonic():   # the 180 s deadline passes after the first look
+            calls[0] += 1
+            return real() + (0 if calls[0] == 1 else 1000)
+
+        monkeypatch.setattr(time, "monotonic", monotonic)
+    flag = [False]
+    read_failures = macos_coreml._read_failures
+
+    def read():
+        flag[0] = flag[0] or bool(child_supervisor._tracked)   # during the compile's count
+        return read_failures()
+
+    monkeypatch.setattr(macos_coreml, "_read_failures", read)
+    assert macos_coreml.prepare_encoder(str(cli), str(model), cancelled=lambda: flag[0]) is False
+    assert flag[0], "the compile's failure was never counted"
+    monkeypatch.setattr(macos_coreml, "_read_failures", read_failures)
+    assert macos_coreml.comparison_failures(str(cli), str(model)) == 0
+
+
 def _helper_stopped(pid, within=5.0):
     import time
     deadline = time.monotonic() + within
@@ -2017,12 +2063,13 @@ def _seed_a_streak(tmp_path, key):
 
 
 @pytest.mark.parametrize("retired", [True, False])
-@pytest.mark.parametrize("at", ["lock-wait", "key"])
+@pytest.mark.parametrize("at", ["lock-wait", "key", "read"])
 @pytest.mark.parametrize("outcome", ["failure", "success"])
 def test_core_ml_accounting_asks_the_retirement_under_its_lock(monkeypatch, tmp_path, outcome, at, retired):
     # Sol mac r11: a retirement while the accounting waited for its lock
     # still wrote the failure (Core ML blocked for the session) or cleared
-    # the streak. *at*: the lock wait, or the key's computation under it.
+    # the streak. *at*: the lock wait, the key's computation, or the read of
+    # the failure file under the lock (Sol mac r12).
     import threading
     key = _failure_rig(monkeypatch, tmp_path)
     if outcome == "success":
@@ -2038,6 +2085,14 @@ def test_core_ml_accounting_asks_the_retirement_under_its_lock(monkeypatch, tmp_
             return failure_key(*args)
 
         monkeypatch.setattr(macos_coreml, "_failure_key", computed)
+    if at == "read":
+        read_failures = macos_coreml._read_failures
+
+        def read():
+            flag[0] = retired
+            return read_failures()
+
+        monkeypatch.setattr(macos_coreml, "_read_failures", read)
     if outcome == "failure":
         def record():
             macos_coreml.record_runtime_failure(key, "request failed", cancelled=lambda: flag[0])
@@ -2052,11 +2107,11 @@ def test_core_ml_accounting_asks_the_retirement_under_its_lock(monkeypatch, tmp_
         if at == "lock-wait":
             flag[0] = retired
     worker.join(5)
+    flag[0] = False
     rows = macos_coreml._read_failures()
     if outcome == "failure":
         assert (rows == {} and macos_coreml._session_failures == set()) is retired
-        if at == "lock-wait":
-            assert (key in macos_coreml._runtime_proven) is retired
+        assert (key in macos_coreml._runtime_proven) is retired
     else:
         assert (len(rows) == 1 and macos_coreml._runtime_proven == set()) is retired
 
@@ -2082,3 +2137,64 @@ def test_a_retired_dictations_core_ml_outcome_is_not_counted(monkeypatch, tmp_pa
         else:
             backend._record_coreml_success()
     assert len(macos_coreml._read_failures()) == (0 if outcome == "failure" else 1)
+
+
+@pytest.mark.parametrize("change", ["mode-switch", "quit"])
+@pytest.mark.parametrize("outcome", ["failure", "success"])
+def test_a_superseded_servers_core_ml_outcome_is_not_counted(monkeypatch, tmp_path, outcome, change):
+    # Sol mac r12: the backend asked the epoch only before the accounting; a
+    # mode switch or Quit during its read still counted. The whole predicate
+    # is now asked under the lock, after the read.
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    key = _failure_rig(monkeypatch, tmp_path)
+    if outcome == "success":
+        _seed_a_streak(tmp_path, key)
+    monkeypatch.setattr(macos_coreml, "runtime_key", lambda config: key)
+    monkeypatch.setattr(cls, "_closed", False)
+    monkeypatch.setattr(cls, "_epoch", cls._epoch)
+    backend = cls(use_gpu=False, timeout=5)
+    backend._ready_only_config = {}
+    backend._load_epoch = cls._epoch
+    read_failures = macos_coreml._read_failures
+
+    def read():
+        if change == "quit":
+            cls._closed = True
+        else:
+            cls._epoch += 1
+        return read_failures()
+
+    monkeypatch.setattr(macos_coreml, "_read_failures", read)
+    if outcome == "failure":
+        backend._record_coreml_failure("request failed")
+    else:
+        backend._record_coreml_success()
+    assert len(read_failures()) == (0 if outcome == "failure" else 1)
+    assert macos_coreml._session_failures == set()
+
+
+def test_a_preparation_superseded_in_its_accounting_counts_nothing(comparison_rig, monkeypatch):
+    # Sol mac r12: the preparation asked its cancellation before counting a
+    # failure, not under the accounting lock: a switch while it waited there
+    # still counted one.
+    rig = comparison_rig
+    flag = [False]
+
+    failed = [False]
+
+    def probes(*_a):
+        failed[0] = True
+        raise TimeoutError("Encoder device preparation timed out")
+
+    read_failures = macos_coreml._read_failures
+
+    def read():
+        flag[0] = failed[0]   # superseded while the accounting read the file
+        return read_failures()
+
+    monkeypatch.setattr(macos_coreml, "_compare_with_probes", probes)
+    monkeypatch.setattr(macos_coreml, "_read_failures", read)
+    with pytest.raises(TimeoutError):
+        macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: flag[0])
+    assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0

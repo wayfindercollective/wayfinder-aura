@@ -1705,17 +1705,28 @@ class WhisperServerBackend(TranscriptionBackend):
         except Exception as exc:
             print(f"[Whisper] Core ML hand-over not scheduled ({type(exc).__name__})")
 
-    def _record_coreml_failure(self, reason: str) -> None:
-        """Count a failure of the loaded Core ML server, never one Quit or a
-        mode or model change caused (both supersede the epoch; Sol mac r3)."""
+    def _coreml_outcome_void(self):
+        """Whether this server's outcome stopped counting: Quit, a mode or
+        model change (both supersede the epoch; Sol mac r3) or the dictation's
+        retirement. Asked under the accounting lock, after its reads (Sol mac
+        r11, r12)."""
         cls = WhisperServerBackend
-        if cls._closed or cls._epoch != self._load_epoch:
+        epoch = self._load_epoch
+        retired = _dictation_cancelled()
+        return lambda: cls._closed or cls._epoch != epoch or retired()
+
+    def _record_coreml_failure(self, reason: str) -> None:
+        """Count a failure of the loaded Core ML server, never one Quit, a mode
+        or model change or a retirement caused (see _coreml_outcome_void)."""
+        void = self._coreml_outcome_void()
+        if void():
             return
         try:
             from wayfinder.utils.macos_coreml import record_runtime_failure, runtime_key
-            # Asked again under the accounting lock (Sol mac r11).
             count = record_runtime_failure(runtime_key(self._ready_only_config), reason,
-                                           cancelled=_retired_dictation)
+                                           cancelled=void)
+            if not count:
+                return
             print(f"[Whisper] Core ML failed ({reason}, failure {count}); "
                   "Metal serves for the rest of this session")
         except Exception as exc:
@@ -1725,7 +1736,7 @@ class WhisperServerBackend(TranscriptionBackend):
         try:
             from wayfinder.utils.macos_coreml import record_runtime_success, runtime_key
             record_runtime_success(runtime_key(self._ready_only_config),
-                                   cancelled=_retired_dictation)
+                                   cancelled=self._coreml_outcome_void())
         except Exception as exc:
             print(f"[Whisper] Core ML success not recorded ({type(exc).__name__})")
 

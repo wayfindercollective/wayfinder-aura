@@ -3008,6 +3008,101 @@ class TestARetiredDictationsActions:
         assert transcriber._CPU_FALLBACK_ACTIVE == {backend.whisper_binary: True}
         assert transcriber._gpu_probe_inflight is False
 
+    @staticmethod
+    def _gated_state_lock(monkeypatch):
+        """_gpu_state_lock, held by the test until it releases gate.lock;
+        gate.waiting says a thread now waits for it."""
+        import threading
+        from wayfinder.core import transcriber
+
+        class Gate:
+            lock = threading.Lock()
+            waiting = threading.Event()
+
+            def __enter__(self):
+                self.waiting.set()
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, *_a):
+                self.lock.release()
+
+        gate = Gate()
+        monkeypatch.setattr(transcriber, "_gpu_state_lock", gate)
+        gate.lock.acquire()
+        return gate
+
+    @pytest.mark.parametrize("retire", [True, False])
+    @pytest.mark.parametrize("found", [True, False])
+    def test_a_gpu_recovery_verdict_asks_under_the_state_lock(self, tmp_path, monkeypatch, cls,
+                                                              found, retire):
+        # Sol mac r12: the probe left its dictation's scope before the state
+        # lock; a retirement while it waited there still set its verdict.
+        from wayfinder.core import transcriber
+        backend = self._gpu_backend(tmp_path, monkeypatch)
+        backend._gpu_probe_succeeds = lambda: found
+        gate = self._gated_state_lock(monkeypatch)
+        with transcriber.dictation_requests(cls.request_token()):
+            backend._maybe_probe_gpu_recovery()
+        assert gate.waiting.wait(5)
+        if retire:
+            cls.abandon_requests()
+        gate.lock.release()
+        for thread in threading_enumerate("wayfinder-gpu-probe"):
+            thread.join(5)
+        state = transcriber._gpu_retry_state[backend.whisper_binary]
+        if retire:
+            assert state == {"next_retry": 0.0, "failures": 2}
+            assert transcriber._CPU_FALLBACK_ACTIVE == {backend.whisper_binary: True}
+        elif found:
+            assert state["failures"] == 1 and transcriber._CPU_FALLBACK_ACTIVE == {}
+        else:
+            assert state["failures"] == 3
+        assert transcriber._gpu_probe_inflight is False
+
+    @pytest.mark.parametrize("retire", [True, False])
+    def test_a_cpu_fallback_retired_at_the_state_lock_memoizes_nothing(self, tmp_path, monkeypatch,
+                                                                       cls, retire):
+        # Sol mac r12, the CLI's twin of the probe: a crashed GPU run memoized
+        # the CPU fallback and counted a failure for a dictation retired while
+        # it waited for the state lock.
+        import threading
+        from wayfinder.core import transcriber
+        gpu = tmp_path / "whisper-cli"
+        gpu.write_text("#!/bin/sh\nkill -SEGV $$\n"); gpu.chmod(0o755)
+        cpu = tmp_path / "whisper-cli-cpu"
+        cpu.write_text('#!/bin/sh\necho "cpu words"\n'); cpu.chmod(0o755)
+        model = tmp_path / "model.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "audio.wav"; audio.write_bytes(b"\x00")
+        backend = transcriber.WhisperCppBackend(whisper_binary=str(gpu), model_path=str(model),
+                                                timeout=10, use_gpu=True)
+        monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+        monkeypatch.setattr(transcriber, "_gpu_retry_state", {})
+        gate = self._gated_state_lock(monkeypatch)
+        result = {}
+
+        def run():
+            try:
+                with transcriber.dictation_requests(cls.request_token()):
+                    result["text"] = backend.transcribe(str(audio))
+            except Exception as e:   # the test inspects it
+                result["err"] = e
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        assert gate.waiting.wait(10)
+        if retire:
+            cls.abandon_requests()
+        gate.lock.release()
+        worker.join(10)
+        if retire:
+            assert isinstance(result.get("err"), transcriber.RequestAbandoned)
+            assert transcriber._CPU_FALLBACK_ACTIVE == {} and transcriber._gpu_retry_state == {}
+        else:
+            assert result.get("text") == "cpu words"
+            assert transcriber._CPU_FALLBACK_ACTIVE[str(gpu)].endswith("-cpu")
+            assert transcriber._gpu_retry_state[str(gpu)]["failures"] == 1
+
 
 def threading_enumerate(name):
     import threading

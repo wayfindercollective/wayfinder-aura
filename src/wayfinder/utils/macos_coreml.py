@@ -173,13 +173,15 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
                 if cancelled():
                     return False
                 if time.monotonic() >= deadline:
-                    record_comparison_failure(cli_binary, model_path, "coreml-compile timed out")
+                    record_comparison_failure(cli_binary, model_path, "coreml-compile timed out",
+                                              cancelled)
                     return False
                 time.sleep(0.2)
             if cancelled() or cut_short(proc):
                 return False   # stopped by a switch or Quit: not this Mac's failure
             if proc.returncode:
-                record_comparison_failure(cli_binary, model_path, f"coreml-compile exited {proc.returncode}")
+                record_comparison_failure(cli_binary, model_path,
+                                          f"coreml-compile exited {proc.returncode}", cancelled)
                 return False
         finally:
             stop_supervised(proc)
@@ -300,9 +302,11 @@ def clear_comparison_failures(cli_binary: str, model_path: str, cancelled=None) 
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     with _failure_lock:
-        if key in _session_failures or (cancelled is not None and cancelled()):
+        if key in _session_failures:
             return False
         rows = _read_failures()
+        if cancelled is not None and cancelled():   # after the read (Sol mac r12)
+            return False
         if rows.pop(key, None) is not None:
             _write_failures(rows)
         return True
@@ -335,15 +339,13 @@ def record_runtime_failure(key: tuple[str, str], reason: str, cancelled=None) ->
     after every dictation. Metal serves the rest of the session; the next
     launch tries once more, then the backoff applies (Sol mac r3).
 
-    *cancelled* (the dictation's retirement) is asked under the lock, right
-    before each change: a dictation the app retired while this waited for
-    the lock counts nothing (Sol mac r11)."""
+    *cancelled* (whether this outcome still counts: the dictation's
+    retirement, a switch, Quit) is asked under the lock, after every read and
+    right before the changes: one that stopped counting while this waited
+    counts nothing (Sol mac r11, r12)."""
     cli, model = key
-    with _failure_lock:
-        if cancelled is not None and cancelled():
-            return 0
-        _runtime_proven.discard(key)
-        return record_comparison_failure(cli, model, f"Core ML runtime: {reason}", cancelled)
+    return record_comparison_failure(cli, model, f"Core ML runtime: {reason}", cancelled,
+                                     also=lambda: _runtime_proven.discard(key))
 
 
 def record_runtime_success(key: tuple[str, str], cancelled=None) -> None:
@@ -355,20 +357,25 @@ def record_runtime_success(key: tuple[str, str], cancelled=None) -> None:
 
 
 def record_comparison_failure(cli_binary: str, model_path: str, reason: str,
-                              cancelled=None) -> int:
+                              cancelled=None, also=None) -> int:
     """Count a failed conversion, comparison or Core ML server; returns the
     count. One launch counts once, whatever failed: two chunks failing on one
     incident, a death after a failed request, or a preparation admitted
     before a runtime failure was recorded (Sol mac r4/r5). *cancelled* as
-    for record_runtime_failure."""
+    for record_runtime_failure; *also*, a change of the caller's made in the
+    same step."""
     try:
         key = _failure_key(cli_binary, model_path)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return 0
+        key = None
     with _failure_lock:
-        if cancelled is not None and cancelled():
+        rows = _read_failures() if key is not None else {}
+        if cancelled is not None and cancelled():   # after the read (Sol mac r12)
             return 0
-        rows = _read_failures()
+        if also is not None:
+            also()
+        if key is None:
+            return 0
         previous = rows.get(key)
         count = int(previous.get("count", 0)) if isinstance(previous, dict) else 0
         if key in _session_failures:
@@ -759,7 +766,8 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
         if cancelled():
             # Stopped by a switch or Quit, not a failure of this Mac.
             raise InterruptedError("Encoder preparation superseded") from exc
-        count = record_comparison_failure(cli, source_model, f"{type(exc).__name__}: {exc}")
+        count = record_comparison_failure(cli, source_model, f"{type(exc).__name__}: {exc}",
+                                          cancelled)
         print(f"[Whisper] Core ML preparation failed ({type(exc).__name__}, failure {count}); "
               "keeping Metal")
         raise

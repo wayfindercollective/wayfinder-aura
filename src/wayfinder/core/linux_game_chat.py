@@ -356,10 +356,14 @@ def _portal():
 
 def _xdotool(*args: str, timeout: float = 10) -> None:
     """Run the host's xdotool. Every failure is an InjectionError whose message
-    never carries the argv (it can hold the dictated text)."""
+    never carries the argv (it can hold the dictated text). No key press or
+    typing for a retired dictation (do_inject's cancellable scope); a release
+    always goes out (Sol mac r12)."""
     from ..utils.hostexec import host_env
-    from .injector import InjectionError
+    from .injector import InjectionError, _refuse_if_cancelled
 
+    if args[:1] != ("keyup",):
+        _refuse_if_cancelled()
     try:
         # A host binary: never hand it the bundle's library path.
         result = subprocess.run(["xdotool", *args], capture_output=True, text=True,

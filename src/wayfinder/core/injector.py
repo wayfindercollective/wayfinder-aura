@@ -68,6 +68,14 @@ from . import portal_keyboard as _portal_keyboard  # noqa: E402  (stdlib only)
 _portal_keyboard.check_before_keys(_refuse_if_cancelled)
 
 
+def _run_key_tool(argv, **kwargs):
+    """subprocess.run for a command that sends keys or moves the focus
+    (xdotool, wtype, ydotool): none for a retired dictation, whatever waited
+    before it, a fallback's own readiness checks included (Sol mac r12)."""
+    _refuse_if_cancelled()
+    return subprocess.run(argv, **kwargs)
+
+
 # Set once a wtype attempt reveals the compositor refuses the virtual-keyboard
 # protocol (GNOME/Mutter always does; some KWin setups deny it). Selection
 # happens before any attempt, so this session cache lets later injections skip
@@ -640,6 +648,22 @@ def _wait_for_macos_modifier_release(timeout: float = 2.0) -> bool:
         time.sleep(0.1)
 
 
+def _leave_on_macos_clipboard(text: str, cancelled=None) -> bool:
+    """A refused paste leaves the transcript on the clipboard for a manual
+    one; returns whether it did. Not a retired dictation's: that raises
+    InjectionCancelled instead (Sol mac r12)."""
+    try:
+        pasteboard, _snapshot = _snapshot_macos_pasteboard()
+    except Exception:
+        return False
+    _refuse_if_cancelled(cancelled)
+    try:
+        _write_macos_pasteboard_text(pasteboard, text)
+        return True
+    except Exception:
+        return False
+
+
 def _inject_text_pyautogui(text: str, typing_speed: str = "instant", cancelled=None) -> None:
     """Inject text on macOS using clipboard paste (Cmd+V).
 
@@ -659,11 +683,7 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant", cancelled=N
         # macOS silently drops synthetic keys without Accessibility. Leave the
         # dictation on the clipboard for a manual paste instead of "typing"
         # nothing and then restoring the old clipboard over it.
-        try:
-            pasteboard, _snapshot = _snapshot_macos_pasteboard()
-            _write_macos_pasteboard_text(pasteboard, text)
-        except Exception:
-            pass
+        _leave_on_macos_clipboard(text, cancelled)
         raise InjectionError(
             "macOS blocked the paste: Accessibility is off for Wayfinder Aura. "
             "Your text is on the clipboard — press ⌘V. To paste automatically, "
@@ -679,13 +699,7 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant", cancelled=N
     except Exception:
         focused = None
     if focused and focused.partition(":")[0] == str(os.getpid()):
-        copied = False
-        try:
-            pasteboard, _snapshot = _snapshot_macos_pasteboard()
-            _write_macos_pasteboard_text(pasteboard, text)
-            copied = True
-        except Exception:
-            pass
+        copied = _leave_on_macos_clipboard(text, cancelled)
         where = ("on the clipboard — click a text field in another app and press ⌘V"
                  if copied else "in Aura History")
         raise InjectionError(
@@ -714,6 +728,8 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant", cancelled=N
         except Exception:
             import pyautogui
 
+            # Retired while Quartz failed or PyAutoGUI loaded (Sol mac r12).
+            _refuse_if_cancelled(cancelled)
             pyautogui.hotkey("command", "v")
         paste_succeeded = True
     except InjectionCancelled:
@@ -1155,7 +1171,7 @@ def _wait_for_modifier_release(timeout: float = 2.0, poll: float = 0.1) -> bool:
         probe.close()
 
 
-def _require_modifier_release(cancelled=None) -> None:
+def _require_modifier_release() -> None:
     """Fail closed when a physical modifier is still held after the wait.
 
     xdotool's ``--clearmodifiers`` only clears the X server's synthetic state.
@@ -1171,7 +1187,6 @@ def _require_modifier_release(cancelled=None) -> None:
             "A Shift, Ctrl, Alt, or Super key is still held. "
             "Release it, then dictate again; the transcript was not typed."
         )
-    _refuse_if_cancelled(cancelled)
 
 
 def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window: "str | None" = None) -> None:
@@ -1212,7 +1227,7 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
             already_focused = False
         if not already_focused:
             try:
-                subprocess.run(
+                _run_key_tool(
                     ["xdotool", "windowactivate", "--sync", str(target_window)],
                     capture_output=True, text=True, timeout=5, env=_env,
                 )
@@ -1235,7 +1250,7 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     text = fold_typography_for_typing(text)
     cmd = build_xdotool_type_command(text, key_delay, warmup=xwayland)
     try:
-        result = subprocess.run(
+        result = _run_key_tool(
             cmd,
             capture_output=True,
             text=True,
@@ -1274,7 +1289,7 @@ def _inject_text_wtype(text: str) -> None:
     # same way it corrupts XTEST typing.
     _require_modifier_release()
     try:
-        result = subprocess.run(
+        result = _run_key_tool(
             ["wtype", text],
             capture_output=True, text=True, timeout=120,
         )
@@ -1406,6 +1421,7 @@ def _portal_paste(text: str) -> None:
             previous = _PORTAL_CLIPBOARD_READ()
         except Exception:
             previous = None
+    _refuse_if_cancelled()   # retired during the read: the clipboard untouched
     if _PORTAL_CLIPBOARD_WRITE is None or not _PORTAL_CLIPBOARD_WRITE(text):
         raise InjectionError("Could not set the clipboard for the paste")
     time.sleep(_PORTAL_PASTE_SETTLE_S)
@@ -1518,7 +1534,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
         _portal_press("ctrl+v")
         return
     if tool == "xdotool":
-        result = subprocess.run(
+        result = _run_key_tool(
             ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
             capture_output=True,
             text=True,
@@ -1529,7 +1545,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
             raise InjectionError(f"xdotool ctrl+v failed: {detail}")
         return
     if tool == "wtype":
-        result = subprocess.run(
+        result = _run_key_tool(
             ["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
             capture_output=True,
             text=True,
@@ -1547,7 +1563,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
         )
     env = _get_ydotool_env()
     # KEY_LEFTCTRL = 29, KEY_V = 47; 1=press, 0=release
-    result = subprocess.run(
+    result = _run_key_tool(
         [ydotool_bin, "key", "29:1", "47:1", "47:0", "29:0"],
         capture_output=True,
         text=True,
@@ -1576,10 +1592,11 @@ def _press_enter(cancelled=None) -> None:
             raise InjectionError(
                 "Command, Option, Control, or Shift is still held; Enter was not pressed."
             )
-        _refuse_if_cancelled(cancelled)   # retired while a modifier was held
         from .macos_paste import accessibility_trusted, post_return
         if accessibility_trusted() is False:
             raise InjectionError("macOS blocked the key press: Accessibility is off.")
+        # Retired while a modifier was held or the permission was asked.
+        _refuse_if_cancelled(cancelled)
         # Quartz, not PyAutoGUI: no ~0.2s import, no 0.1s built-in pause, and
         # no corner fail-safe that aborts when the pointer rests in a corner.
         post_return()
@@ -1596,7 +1613,7 @@ def _press_enter(cancelled=None) -> None:
     from wayfinder.utils.platform import get_text_injector
     # Held Shift would send Shift+Return — newline instead of submit in most
     # chat inputs, silently breaking the auto-Enter promise.
-    _require_modifier_release(cancelled)
+    _require_modifier_release()
     tool = get_text_injector()
     if tool == "portal":
         try:
@@ -1605,7 +1622,7 @@ def _press_enter(cancelled=None) -> None:
         except InjectionError as e:
             tool = _fallback_after_portal_error(e)
     if tool == "xdotool":
-        result = subprocess.run(
+        result = _run_key_tool(
             ["xdotool", "key", "--clearmodifiers", "Return"],
             capture_output=True, text=True, timeout=10,
         )
@@ -1614,7 +1631,7 @@ def _press_enter(cancelled=None) -> None:
             raise InjectionError(f"xdotool Return failed: {detail}")
         return
     if tool == "wtype" and not _WTYPE_UNSUPPORTED:
-        result = subprocess.run(
+        result = _run_key_tool(
             ["wtype", "-k", "Return"],
             capture_output=True, text=True, timeout=10,
         )
@@ -1633,7 +1650,7 @@ def _press_enter(cancelled=None) -> None:
             "No host ydotool client found — install ydotool, or rely on wtype/xdotool"
         )
     env = _get_ydotool_env()
-    result = subprocess.run(
+    result = _run_key_tool(
         [ydotool_bin, "key", "28:1", "28:0"],
         capture_output=True, text=True, timeout=10, env=env,
     )
@@ -1679,8 +1696,8 @@ def _inject_text_clipboard_paste(text: str, cancelled=None) -> None:
             "No text injection tool available for clipboard paste on Linux."
         )
 
-    _refuse_if_cancelled(cancelled)   # the clipboard is not touched for it
     old_clipboard = _clipboard_read_linux()
+    _refuse_if_cancelled(cancelled)   # the clipboard is not touched for it
     _clipboard_write_linux(text)
     time.sleep(0.05)
     try:
@@ -1774,7 +1791,7 @@ def _inject_text_type_linux(
         # uinput-level typing merges with physically-held modifiers in the
         # compositor exactly like the other backends.
         _require_modifier_release()
-        result = subprocess.run(
+        result = _run_key_tool(
             cmd,
             capture_output=True,
             text=True,

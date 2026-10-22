@@ -1520,7 +1520,9 @@ class TestARetiredDictationAtTheTypeLock:
         monkeypatch.setattr(pk, "X11Layout", lambda: _Layout(set()))
         monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
         monkeypatch.setattr("wayfinder.utils.platform.get_text_injector", lambda: "portal")
-        monkeypatch.setattr(injector, "_portal_fallback_tool", lambda: "xdotool")
+        kb.fallbacks = []   # another tool asked for: none for a retired dictation
+        monkeypatch.setattr(injector, "_portal_fallback_tool",
+                            lambda: kb.fallbacks.append(True) or "xdotool")
         monkeypatch.setattr(injector, "_PORTAL_PASTE_SETTLE_S", 0)
         monkeypatch.setattr(injector, "_PORTAL_RESTORE_AFTER_S", 0)
         if clipboard is None:
@@ -1570,6 +1572,7 @@ class TestARetiredDictationAtTheTypeLock:
         if retire:
             assert isinstance(result.get("err"), injector.InjectionCancelled)
             assert sent == [] and runs == []      # no key, and no other tool
+            assert kb.fallbacks == []
         else:
             assert result.get("ok") and sent and runs == []
         assert getattr(injector._injection, "cancelled", None) is None
@@ -1583,7 +1586,7 @@ class TestARetiredDictationAtTheTypeLock:
         result = self._held_at_the_lock(
             kb, lambda cancelled: injector.inject_text("café", cancelled=cancelled), True)
         assert isinstance(result.get("err"), injector.InjectionCancelled)
-        assert sent == [] and runs == []
+        assert sent == [] and runs == [] and kb.fallbacks == []
         assert clipboard["now"] == "theirs"
 
     def test_any_caller_under_the_scope_is_asked(self, tmp_path, monkeypatch):
@@ -1599,3 +1602,58 @@ class TestARetiredDictationAtTheTypeLock:
         assert sent == []
         kb.press_keys("Return")
         assert sent
+
+
+class TestPortalKeysStopBetweenCharacters:
+    """Sol mac r12: the delay between characters can span a reset; each one
+    asks, and a Shift held for a capital is still released."""
+
+    @pytest.mark.parametrize("layout", [None, "keys"])
+    def test_typing_stops_at_a_retirement(self, tmp_path, monkeypatch, layout):
+        import wayfinder.core.injector as injector
+        kb = pk.PortalKeyboard(state_path=tmp_path / "state.json")
+        retired = [False]
+        events = []
+
+        def send(value, down):
+            events.append((value, down))
+            if not down and value != pk.KEY_LEFTSHIFT:
+                retired[0] = True   # Escape after the first character
+
+        monkeypatch.setattr(kb, "_keysym", send)
+        monkeypatch.setattr(kb, "_key", send)
+        class Shifting:   # a capital needs Shift
+            available = True
+
+            @staticmethod
+            def key_for(keysym):
+                return {0x41: (30, True), 0x62: (48, False),
+                        0xFFE1: (pk.KEY_LEFTSHIFT, False)}.get(keysym)
+
+        lay = Shifting() if layout else None
+        with injector.cancellable(lambda: retired[0]):
+            with pytest.raises(injector.InjectionCancelled):
+                kb.type_text("Ab", 0.0, lay)
+        downs = [value for value, down in events if down]
+        assert len([v for v in downs if v != pk.KEY_LEFTSHIFT]) == 1   # "A" only
+        if layout:
+            assert events[0] == (pk.KEY_LEFTSHIFT, True)
+            assert events[-1] == (pk.KEY_LEFTSHIFT, False)   # Shift released
+
+    def test_a_portal_paste_retired_during_the_clipboard_read_writes_nothing(self, tmp_path,
+                                                                             monkeypatch):
+        import wayfinder.core.injector as injector
+        retired, writes = [False], []
+
+        def read():
+            retired[0] = True
+            return "theirs"
+
+        monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", read)
+        monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", lambda text: writes.append(text) or True)
+        monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_RESTORE", None)
+        monkeypatch.setattr(injector, "_portal_press", lambda *a: pytest.fail("pasted"))
+        with injector.cancellable(lambda: retired[0]):
+            with pytest.raises(injector.InjectionCancelled):
+                injector._portal_paste("café")
+        assert writes == []
