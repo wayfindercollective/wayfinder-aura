@@ -492,6 +492,33 @@ class TestSilenceDetection:
 
         assert noise_transcript_has_speech(text) is kept
 
+    @pytest.mark.parametrize("text, kept", [
+        # Sol pr67 r2 (MAJOR): the old check required EVERY letter in the
+        # transcript to be from a no-space script, so a digit, a Latin word
+        # or trailing CJK punctuation mixed into a real no-space sentence
+        # fell through to whitespace word-counting, which sees the whole
+        # no-space run as one giant "word" and drops it as noise.
+        ("今日は10時に会議を始めます。", True),       # Japanese + Latin digits
+        ("GitHubの問題を修正してください。", True),   # Japanese + a Latin word
+        # Thai combining marks (U+0E31, U+0E34-U+0E3A, U+0E47-U+0E4E) sit in
+        # the same Unicode block as their base consonants but are not \w
+        # (str.isalnum() is False for them) — they must not break the count.
+        ("วันนี้อากาศดีมาก", True),
+        # Numerals alone are not speech: no no-space-script letters, and a
+        # single whitespace-delimited digit run is exactly one "word".
+        ("12345", False),
+        ("3 4 5", True),               # three separate whitespace words
+        ("Room 42", True),             # a real two-word phrase with a digit
+        # Existing one-word rejections (finding 1 must not weaken these).
+        ("I'm.", False), ("O.K.", False), ("嗯", False), ("。", False),
+    ])
+    def test_noise_transcript_counts_no_space_script_letters_through_mixed_content(
+        self, text, kept
+    ):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is kept
+
     def test_recorders_report_the_same_verdict_as_the_bool_check(self):
         import numpy as np
         from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder

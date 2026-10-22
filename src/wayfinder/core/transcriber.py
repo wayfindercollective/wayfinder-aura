@@ -3140,6 +3140,66 @@ def _is_whisper_phrase_hallucination(text: str) -> bool:
     return key in _WHISPER_PHRASE_HALLUCINATIONS
 
 
+# Whisper's bracketed/parenthesized non-speech annotations ("[audience noise]",
+# "(sound of the rain)") built only from known noise vocabulary. Shared by
+# clean_whisper_artifacts and _strip_non_speech_markers below (Sol pr67 r2) so
+# the speech-guard's own safety copy strips exactly what normal cleanup does,
+# instead of a second, drifting copy of the same pattern.
+_NOISE_WORD = (
+    r'(?:audience|background|street|wind|static|noise|noises|sound|sounds|'
+    r'music|applause|laughter|laughing|laughs|coughing|coughs?|typing|'
+    r'keyboard|clicking|clicks|silence|silent|inaudible|unintelligible|'
+    r'indistinct|chatter|murmuring|breathing|sighs?|sighing|sniffs?|'
+    r'sniffing|beeping|buzzing|humming|rustling|footsteps|door|engine|'
+    r'clapping|claps|cheering|cheers|whistling|whistles|ringing|phone|'
+    r'camera|shutter|snapping|snaps|tapping|taps|knocking|knocks|'
+    r'banging|thud|thumping|crowd|birds?|chirping|barking|dog|rain|'
+    r'thunder|water|waves|crackling|scraping|shuffling|whispering|'
+    r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
+    r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
+)
+# Short joiners ("[sound of wind]", "(sound of the rain)") may sit between
+# noise words; the annotation must still start and end with one.
+_NOISE_JOINER = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
+_NOISE_MARKER = r'\s*' + _NOISE_WORD + r'(?:' + _NOISE_JOINER + r'\s+' + _NOISE_WORD + r'){0,2}\s*'
+
+
+def _strip_non_speech_markers(text: str) -> str:
+    """Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
+    [Music], (background noise), ♪ ... — the exact patterns
+    :func:`clean_whisper_artifacts` strips during normal cleanup, reused here
+    (Sol pr67 r2) to build a safety copy for the speech-guard's own checks,
+    which must never read one of Whisper's own annotations as a transcribed
+    word.
+    """
+    import re
+
+    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
+    text = re.sub(r'\*+', '', text)
+    text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[' + _NOISE_MARKER + r'\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\(' + _NOISE_MARKER + r'\)', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'♪+', ' ', text)
+    return text
+
+
+def _noise_check_safety_copy(text: str) -> str:
+    """A safety copy of *text* for the noise-verdict speech-guard's own two
+    checks ONLY (Sol pr67 r2) — never what Raw Transcript, or anything else
+    downstream, sees. Strips Whisper's own non-speech annotations and then
+    canonicalises whitespace the same way normal cleanup does right before
+    its own final hallucination check: an annotation like "[Music]" must not
+    read as a transcribed word, and repeated whitespace inside a known
+    hallucination phrase must not defeat the full-text match.
+    """
+    import re
+
+    return re.sub(r'\s+', ' ', _strip_non_speech_markers(text or "")).strip()
+
+
 # whisper.cpp refuses more than 8 decoders ("too many decoders requested"),
 # which made a hand-edited beam_size of 9+ fail every dictation.
 WHISPER_MAX_DECODERS = 8
@@ -3191,46 +3251,12 @@ def clean_whisper_artifacts(
     # Also handle "ll, "re, "ve (two-letter suffixes)
     text = re.sub(r'(\w)"(ll|re|ve)\b', r"\1'\2", text, flags=re.IGNORECASE)
 
-    # Remove asterisk-wrapped non-speech markers (Whisper uses *text* for sounds/music)
-    # e.g., *loud noise*, *bird music*, *laughing* → removed
-    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
-    # Clean orphaned/stray asterisks
-    text = re.sub(r'\*+', '', text)
-
-    # Remove [BLANK_AUDIO] and similar markers (case insensitive)
-    # Replace with space to preserve word boundaries (will be normalized later)
-    text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
-
-    # Generalized noise annotations. Whisper emits many bracketed/parenthesized
-    # variants beyond the exact markers above — "[audience noise]" was typed
+    # Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
+    # [Music], (background noise), ♪ ... — "[audience noise]" was typed
     # verbatim into a user's document when they dictated near-silence (launch
-    # feedback). Strip short annotations built ONLY from known noise vocabulary
-    # so legitimately dictated bracket text survives.
-    _noise_word = (
-        r'(?:audience|background|street|wind|static|noise|noises|sound|sounds|'
-        r'music|applause|laughter|laughing|laughs|coughing|coughs?|typing|'
-        r'keyboard|clicking|clicks|silence|silent|inaudible|unintelligible|'
-        r'indistinct|chatter|murmuring|breathing|sighs?|sighing|sniffs?|'
-        r'sniffing|beeping|buzzing|humming|rustling|footsteps|door|engine|'
-        r'clapping|claps|cheering|cheers|whistling|whistles|ringing|phone|'
-        r'camera|shutter|snapping|snaps|tapping|taps|knocking|knocks|'
-        r'banging|thud|thumping|crowd|birds?|chirping|barking|dog|rain|'
-        r'thunder|water|waves|crackling|scraping|shuffling|whispering|'
-        r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
-        r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
-    )
-    # Short joiners ("[sound of wind]", "(sound of the rain)") may sit between
-    # noise words; the annotation must still start and end with one.
-    _joiner = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
-    _noise_marker = r'\s*' + _noise_word + r'(?:' + _joiner + r'\s+' + _noise_word + r'){0,2}\s*'
-    text = re.sub(r'\[' + _noise_marker + r'\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\(' + _noise_marker + r'\)', ' ', text, flags=re.IGNORECASE)
-
-    # Remove music note symbols (replace with space to preserve word boundaries)
-    text = re.sub(r'♪+', ' ', text)
+    # feedback). Shared with the speech-guard's safety copy (Sol pr67 r2) so
+    # both strip exactly the same patterns.
+    text = _strip_non_speech_markers(text)
 
     # Remove Whisper special token leaks: <|...|> patterns (timestamps, end-of-text, etc.)
     text = re.sub(r'<\|[^|]*\|>', ' ', text)
@@ -3282,7 +3308,9 @@ def clean_whisper_artifacts(
     # phrase-hallucination (the stock YouTube-caption strings it emits on silence).
     # Only the ENTIRE output is checked — never a mid-sentence substring.
     if _is_whisper_phrase_hallucination(text):
-        print(f"[Transcription] Dropped Whisper phrase-hallucination: {text!r}")
+        # Say it was dropped, never what it said (Sol pr67 r2) — the speech-
+        # guard's own diagnostics must not leak recognized text either.
+        print("[Transcription] Dropped Whisper phrase-hallucination")
         return ""
 
     # Log if we cleaned something
@@ -3798,8 +3826,16 @@ def transcribe_with_config(
         # Whisper hallucination phrase is rejected here too — unlike the
         # two-word rule, a phrase like "Thank you for watching." has enough
         # words to pass it, so Raw Transcript must not let it through either.
+        # Both checks run on a SAFETY COPY only (Sol pr67 r2): stripped of
+        # Whisper's own non-speech annotations and whitespace-canonicalised,
+        # so "[Music] Okay." can't pass as two words and repeated whitespace
+        # inside a known hallucination phrase can't dodge the match. The text
+        # returned below, including to Raw Transcript, is still the raw text.
         from wayfinder.core.recorder import noise_transcript_has_speech
-        if _is_whisper_phrase_hallucination(text) or not noise_transcript_has_speech(text):
+        safety_text = _noise_check_safety_copy(text)
+        if (_is_whisper_phrase_hallucination(safety_text)
+                or not noise_transcript_has_speech(safety_text)):
+            # Say the recording was rejected, never what was heard.
             return ""
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep

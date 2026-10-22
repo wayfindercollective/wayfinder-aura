@@ -240,15 +240,21 @@ def noise_transcript_has_speech(text: str) -> bool:
     an internal apostrophe or dot ("I'm.", "Let's.", "O.K.") stays one word
     instead of splitting into two the way a bare ``\\w+`` scan would (that
     counted "I'm." as two words and let a single filler word through).
+
+    The no-space-script count and the whitespace word count are judged
+    separately, and either reaching its own bar is enough (Sol pr67 r2): a
+    sentence with no-space-script text used to also need EVERY letter in the
+    whole transcript to come from such a script, so one digit, Latin letter
+    or bit of punctuation mixed in ("10時に", "GitHubの...", a trailing "。")
+    fell through to whitespace-word-counting, which sees the whole no-space
+    run as a single giant "word" and drops a real sentence as noise. Counting
+    no-space-script letters on their own fixes that without weakening the
+    word-count side for scripts that DO use spaces.
     """
     text = text or ""
     no_space_letters = sum(1 for ch in text if _is_no_space_script_letter(ch))
-    alnum_chars = sum(1 for ch in text if _WORD_CHAR.match(ch))
-    if no_space_letters and no_space_letters == alnum_chars:
-        # Every letter in the transcript is from a script with no inter-word
-        # spaces: whitespace-splitting it would see one giant "word" and drop
-        # a long, real sentence as if it were a short noise fragment.
-        return no_space_letters >= NOISE_TRANSCRIPT_MIN_NO_SPACE_CHARS
+    if no_space_letters >= NOISE_TRANSCRIPT_MIN_NO_SPACE_CHARS:
+        return True
     words = [token for token in text.split() if _WORD_CHAR.search(token)]
     return len(words) >= NOISE_TRANSCRIPT_MIN_WORDS
 
