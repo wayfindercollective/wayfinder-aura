@@ -1038,9 +1038,9 @@ class TestSwitchCancellation:
 
         real_restart = LlamaServerManager.restart.__func__
 
-        def recording_restart(cls, failed):
+        def recording_restart(cls, failed, cancelled=None):
             stops.append(failed)
-            real_restart(cls, failed)
+            real_restart(cls, failed, cancelled)
 
         cancellations = LlamaServerManager.MAX_CONSECUTIVE_FAILURES + 1
         with patch.object(LlamaServerManager, "_find_port", return_value=8179), \
@@ -1838,3 +1838,73 @@ class TestARetiredStart:
                 backend._server_generate("prompt", 64)
         complete.assert_not_called()
         failure.assert_not_called()
+
+    @pytest.mark.parametrize("retired", [True, False])
+    @pytest.mark.parametrize("failure", ["timeout", "threshold"])
+    def test_a_restart_that_outlives_its_dictation_stops_nothing(self, tmp_path, failure, retired):
+        # Sol mac r11: the timeout and failure-threshold restarts waited for
+        # the lock, outlived their dictation, then stopped the same child
+        # serving a newer one.
+        import socket
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        backend = TestWedgedServerRecovery._backend(None, tmp_path)
+        child = _FakeProc()
+        LlamaServerManager._process = child
+        LlamaServerManager._failing_child = child
+        LlamaServerManager._consecutive_failures = LlamaServerManager.MAX_CONSECUTIVE_FAILURES - 1
+        error = socket.timeout("timed out") if failure == "timeout" else LlamaServerError("HTTP 500")
+        stops = []
+        with patch.object(cls, "_abandoned", cls._abandoned), \
+             patch.object(LlamaServerManager, "ensure", return_value=8179), \
+             patch.object(LlamaServerManager, "serving", return_value=child), \
+             patch.object(LlamaServerManager, "still_ours", return_value=True), \
+             patch.object(LlamaServerManager, "complete", side_effect=error), \
+             patch.object(LlamaServerManager, "_stop_locked",
+                          classmethod(lambda c: stops.append(c._process))):
+            with LlamaServerManager._lock:   # a start holds it
+                with transcriber.dictation_requests(cls.request_token()):
+                    assert backend._server_generate("prompt", 64) is None
+                restarts = [t for t in threading.enumerate()
+                            if t.name.startswith("llama-server-") and t.name.endswith("restart")]
+                assert len(restarts) == 1
+                if retired:
+                    cls.abandon_requests()
+            restarts[0].join(10)
+        assert stops == ([] if retired else [child])
+
+    def test_a_late_answer_for_a_retired_dictation_ends_no_failure_streak(self, tmp_path):
+        # Sol mac r11: a request that answered after its retirement reset the
+        # failure streak from two to zero.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        backend = TestWedgedServerRecovery._backend(None, tmp_path)
+        child = _FakeProc()
+        LlamaServerManager._process = child
+        LlamaServerManager._failing_child = child
+        LlamaServerManager._consecutive_failures = 2
+
+        def answer(**_kwargs):
+            cls.abandon_requests()
+            return {"content": "done"}
+
+        with patch.object(cls, "_abandoned", cls._abandoned), \
+             patch.object(LlamaServerManager, "ensure", return_value=8179), \
+             patch.object(LlamaServerManager, "serving", return_value=child), \
+             patch.object(LlamaServerManager, "still_ours", return_value=True), \
+             patch.object(LlamaServerManager, "complete", side_effect=answer), \
+             transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._server_generate("prompt", 64)
+        assert LlamaServerManager._consecutive_failures == 2
+        assert LlamaServerManager._failing_child is child
+
+    def test_a_success_ends_only_its_own_childs_failure_streak(self):
+        failing, other = _FakeProc(), _FakeProc()
+        LlamaServerManager._failing_child = failing
+        LlamaServerManager._consecutive_failures = 2
+        LlamaServerManager.note_success(other)   # a child already replaced
+        assert LlamaServerManager._consecutive_failures == 2
+        LlamaServerManager.note_success(failing)
+        assert LlamaServerManager._consecutive_failures == 0
+        assert LlamaServerManager._failing_child is None

@@ -836,6 +836,29 @@ class TestModifierReleaseGate:
                 _inject_text_xdotool("I'm ready.")
         run.assert_not_called()
 
+    def test_a_dictation_retired_during_the_modifier_wait_types_nothing(self):
+        # Sol mac r11, on Linux: every tool waits for the modifiers in
+        # _require_modifier_release(), which asks inject_text's cancellation.
+        import wayfinder.core.injector as injector
+        retired = [False]
+
+        def wait():
+            retired[0] = True   # Escape, while a modifier was held
+            return True
+
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", side_effect=wait), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector.subprocess.run", return_value=ok) as run:
+            with pytest.raises(injector.InjectionCancelled):
+                injector.inject_text("retired words", cancelled=lambda: retired[0])
+            assert not any("type" in call.args[0] for call in run.call_args_list)
+            with pytest.raises(injector.InjectionCancelled):
+                injector.press_enter(cancelled=lambda: retired[0])
+            assert not any("Return" in call.args[0] for call in run.call_args_list)
+        assert getattr(injector._injection, "cancelled", None) is None
+
     def test_wtype_aborts_instead_of_typing_shift_corrupted_text(self):
         with patch("wayfinder.core.injector._wait_for_modifier_release",
                    return_value=False), \

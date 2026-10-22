@@ -1956,3 +1956,73 @@ def test_pill_line_no_false_alarms_for_glow_offset_startup_or_resends():
     ctl._log_pill_diag(ack)
     ctl._log_pill_diag(ack)
     assert len(lines) == 3
+
+
+@windows_only
+@pytest.mark.parametrize("at", ["modifier-wait", "clipboard-write"])
+def test_paste_retired_during_its_waits_pastes_nothing(monkeypatch, at):
+    # Sol mac r11 (the Mac finding, on Windows too): a reset while the paste
+    # waited for the hotkey's modifiers still pasted the retired text.
+    from wayfinder.core import injector
+    from wayfinder.core import injector_windows as w
+
+    retired, sets, keys = [False], [], []
+    clipboard = {"text": "user's own clipboard"}
+
+    def wait():
+        retired[0] = at == "modifier-wait"
+
+    def fake_set(text, transient=False):
+        sets.append(text)
+        clipboard["text"] = text
+        retired[0] = True
+        return True
+
+    monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(w, "require_modifier_release_windows", wait)
+    monkeypatch.setattr(w, "_press_keys", lambda vks: keys.append(vks))
+    monkeypatch.setattr(w.time, "sleep", lambda s: None)
+    monkeypatch.setattr(w, "_clipboard_get_windows", lambda: clipboard["text"])
+    monkeypatch.setattr(w, "_clipboard_sequence", lambda: None)
+    monkeypatch.setattr(w, "_clipboard_set_windows", fake_set)
+    with pytest.raises(injector.InjectionCancelled):
+        w.inject_text_paste_windows("retired words", lambda: retired[0])
+    assert keys == []
+    assert clipboard["text"] == "user's own clipboard"
+    assert sets == ([] if at == "modifier-wait" else ["retired words", "user's own clipboard"])
+
+
+@pytest.mark.parametrize("paste_error", ["cancelled", "failed"])
+def test_a_retired_windows_paste_types_nothing_instead(monkeypatch, paste_error):
+    # The typing fallback is for a failed paste, not a retired dictation:
+    # neither one the paste refused nor one retired while it failed.
+    from wayfinder.core import injector
+    from wayfinder.core import injector_windows
+
+    typed = []
+
+    def paste(text, cancelled=None):
+        if paste_error == "cancelled":
+            raise injector.InjectionCancelled("the dictation was retired: nothing injected")
+        raise injector.InjectionError("Could not write to the Windows clipboard for paste.")
+
+    monkeypatch.setattr(injector.sys, "platform", "win32")
+    monkeypatch.setattr(injector_windows, "inject_text_paste_windows", paste)
+    monkeypatch.setattr(injector_windows, "inject_text_windows", lambda *a, **k: typed.append(a))
+    with pytest.raises(injector.InjectionCancelled):
+        injector.inject_text("retired words", cancelled=lambda: True)
+    assert typed == []
+
+
+@windows_only
+def test_auto_enter_retired_during_its_wait_sends_nothing(monkeypatch):
+    from wayfinder.core import injector
+    from wayfinder.core import injector_windows as w
+    sent = []
+    monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
+    monkeypatch.setattr(w, "require_modifier_release_windows", lambda: None)
+    monkeypatch.setattr(w, "_press_keys", lambda vks: sent.append(vks))
+    monkeypatch.setattr(w, "_send", lambda inputs: sent.append(inputs))
+    with pytest.raises(injector.InjectionCancelled):
+        w.press_enter_windows(lambda: True)
+    assert sent == []

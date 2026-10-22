@@ -2794,3 +2794,221 @@ class TestARetiredDictationsHelpers:
         worker.join(10)
         assert isinstance(outcome.get("error"), transcriber.RequestAbandoned), outcome
         assert spawned == []
+
+
+class TestARetiredDictationsActions:
+    """Sol mac r11: each action is refused at the point of action, after
+    every wait in front of it: the server POST, the CLI salvage, a cloud
+    request, a model load, a timed worker, the GPU recovery probe."""
+
+    @pytest.fixture
+    def cls(self, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        return cls
+
+    @staticmethod
+    def _serving(tmp_path, monkeypatch, cls):
+        """A backend whose server is up on 8178: no start, no spawn."""
+        monkeypatch.setattr(cls, "_server_port", 8178)
+        monkeypatch.setattr(cls, "_server_process", None)
+        monkeypatch.setattr(cls, "_disabled_now", staticmethod(lambda: False))
+        backend = cls(use_gpu=False, timeout=5)
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        return backend, str(audio)
+
+    @pytest.mark.parametrize("at", ["initial", "recovery"])
+    def test_no_server_request_after_a_retirement(self, tmp_path, monkeypatch, cls, at):
+        # The initial POST waited through the audio read after its check.
+        from wayfinder.core import transcriber
+        backend, audio = self._serving(tmp_path, monkeypatch, cls)
+        posts, starts = [], []
+
+        def post(req, timeout):
+            posts.append(req)
+            raise ConnectionResetError("connection reset")
+
+        def start(**_kwargs):
+            starts.append(_kwargs)
+            if at == "recovery" and len(starts) == 2:
+                cls.abandon_requests()   # retired during the restart
+
+        monkeypatch.setattr(transcriber, "urlopen_loopback", post)
+        backend._start_server = start
+        if at == "initial":
+            def prompt(context):
+                cls.abandon_requests()   # anything after the start's check
+                return ""
+            backend._build_prompt = prompt
+        backend._cli_fallback = lambda: pytest.fail("a retired dictation ran whisper-cli")
+        with pytest.raises(transcriber.RequestAbandoned):
+            backend.transcribe(audio)
+        assert len(posts) == (0 if at == "initial" else 1)
+
+    def test_a_salvage_refused_at_its_spawn_is_abandoned(self, tmp_path, monkeypatch, cls):
+        # It was wrapped in "whisper-cli salvage also failed".
+        from wayfinder.core import transcriber
+        backend, audio = self._serving(tmp_path, monkeypatch, cls)
+        starts = []
+
+        def start(**_kwargs):
+            starts.append(_kwargs)
+            if len(starts) == 2:
+                raise transcriber.TranscriptionError("still dead")
+
+        class Cli:
+            def transcribe(self, *_args, **_kwargs):
+                cls.abandon_requests()
+                raise transcriber.HelperRefused("the dictation was retired: no helper for it")
+
+        monkeypatch.setattr(transcriber, "urlopen_loopback",
+                            lambda *_a, **_k: (_ for _ in ()).throw(ConnectionResetError("reset")))
+        backend._start_server = start
+        backend._cli_fallback = Cli
+        with pytest.raises(transcriber.RequestAbandoned) as err:
+            backend.transcribe(audio)
+        assert "salvage" not in str(err.value)
+
+    @pytest.mark.parametrize("cloud", ["groq", "openai"])
+    def test_no_cloud_transcription_for_a_dictation_retired_during_its_setup(
+            self, tmp_path, cls, cloud):
+        from wayfinder.core import transcriber
+        backend = (transcriber.GroqWhisperBackend(api_key="gsk_test") if cloud == "groq"
+                   else transcriber.OpenAIWhisperBackend(api_key="sk-test"))
+        client = MagicMock()
+
+        def get_client():
+            cls.abandon_requests()   # retired while the client was built
+            return client
+
+        backend.is_available = lambda: True
+        backend._get_client = get_client
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        with transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend.transcribe(str(audio))
+        client.audio.transcriptions.create.assert_not_called()
+
+    @pytest.mark.parametrize("at", ["cuda-discovery", "failed-gpu-load"])
+    def test_no_faster_whisper_load_for_a_retired_dictation(self, monkeypatch, cls, at):
+        import sys
+        import types
+        from wayfinder.core import transcriber
+        loads = []
+
+        def model(size, device="cpu", **_kwargs):
+            loads.append(device)
+            if device == "cuda":
+                cls.abandon_requests()   # retired during the failed load
+                raise RuntimeError("CUDA out of memory")
+            return object()
+
+        monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=model))
+        monkeypatch.setattr(transcriber.FasterWhisperBackend, "_model_cache", {})
+        backend = transcriber.FasterWhisperBackend(model_size="tiny", use_gpu=True)
+
+        def supports_gpu():
+            if at == "cuda-discovery":
+                cls.abandon_requests()
+                return False
+            return True
+
+        backend.supports_gpu = supports_gpu
+        backend._cuda_device_index = lambda: 0
+        with transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._get_model()
+        assert loads == ([] if at == "cuda-discovery" else ["cuda"])
+        assert transcriber.FasterWhisperBackend._model_cache == {}
+
+    def test_a_timed_worker_runs_under_its_callers_dictation(self, cls):
+        from wayfinder.core import transcriber
+        from wayfinder.utils.timeout import run_with_timeout
+        token = cls.request_token()
+        seen = lambda: getattr(transcriber._dictation, "token", None)   # noqa: E731
+        with transcriber.dictation_requests(token):
+            assert run_with_timeout(seen, 5) == token
+        assert run_with_timeout(seen, 5) is None   # outside a dictation: none
+
+    @pytest.mark.parametrize("timeout", [5, 0])
+    def test_a_worker_that_starts_after_a_retirement_runs_nothing(self, monkeypatch, cls, timeout):
+        # The resident and in-process models and Faster-Whisper run on a
+        # run_with_timeout worker, after the caller's last check.
+        import threading
+        import types
+        from wayfinder.core import transcriber
+        from wayfinder.utils import timeout as timeout_module
+        ran = []
+
+        class LateThread(threading.Thread):
+            def start(self):
+                cls.abandon_requests()   # while the worker waits to run
+                super().start()
+
+        monkeypatch.setattr(timeout_module, "threading", types.SimpleNamespace(Thread=LateThread))
+        with transcriber.dictation_requests(cls.request_token()):
+            if not timeout:   # inline, on the caller's thread
+                cls.abandon_requests()
+            with pytest.raises(transcriber.RequestAbandoned):
+                timeout_module.run_with_timeout(lambda: ran.append(True), timeout)
+        assert ran == []
+        assert timeout_module.run_with_timeout(lambda: ran.append(True) or "ran", 5) == "ran"
+
+    @staticmethod
+    def _gpu_backend(tmp_path, monkeypatch):
+        from wayfinder.core import transcriber
+        backend = TestARetiredDictationsHelpers._backend(tmp_path)
+        monkeypatch.setattr(transcriber, "_gpu_retry_state",
+                            {backend.whisper_binary: {"next_retry": 0.0, "failures": 2}})
+        monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {backend.whisper_binary: True})
+        monkeypatch.setattr(transcriber, "_gpu_probe_inflight", False)
+        return backend
+
+    def test_no_gpu_recovery_probe_for_a_dictation_retired_at_its_lock(self, tmp_path, monkeypatch, cls):
+        import threading
+        from wayfinder.core import transcriber
+        backend = self._gpu_backend(tmp_path, monkeypatch)
+        probes = []
+        backend._probe_gpu_recovery = lambda *a: probes.append(a)
+        token = cls.request_token()
+
+        def dictation():
+            with transcriber.dictation_requests(token):
+                backend._maybe_probe_gpu_recovery()
+
+        with transcriber._gpu_probe_lock:   # another probe's admission
+            worker = threading.Thread(target=dictation, daemon=True)
+            worker.start()
+            worker.join(0.2)
+            assert worker.is_alive()
+            cls.abandon_requests()
+        worker.join(5)
+        assert probes == [] and transcriber._gpu_probe_inflight is False
+
+    @pytest.mark.parametrize("found", [True, False])
+    def test_a_gpu_recovery_probe_retired_meanwhile_sets_nothing(self, tmp_path, monkeypatch, cls, found):
+        from wayfinder.core import transcriber
+        backend = self._gpu_backend(tmp_path, monkeypatch)
+        seen = []
+
+        def probe():
+            seen.append(getattr(transcriber._dictation, "token", None))
+            cls.abandon_requests()
+            return found
+
+        backend._gpu_probe_succeeds = probe
+        token = cls.request_token()
+        with transcriber.dictation_requests(token):
+            backend._maybe_probe_gpu_recovery()
+        for thread in threading_enumerate("wayfinder-gpu-probe"):
+            thread.join(5)
+        assert seen == [token]   # the probe ran under the dictation's token
+        assert transcriber._gpu_retry_state[backend.whisper_binary] == {"next_retry": 0.0, "failures": 2}
+        assert transcriber._CPU_FALLBACK_ACTIVE == {backend.whisper_binary: True}
+        assert transcriber._gpu_probe_inflight is False
+
+
+def threading_enumerate(name):
+    import threading
+    return [t for t in threading.enumerate() if t.name == name]

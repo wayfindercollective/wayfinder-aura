@@ -1280,11 +1280,11 @@ class _Words:
 def _runtime_memory(monkeypatch):
     seen = SimpleNamespace(failures=[], successes=0)
 
-    def failed(key, reason):
+    def failed(key, reason, cancelled=None):
         seen.failures.append(reason)
         return len(seen.failures)
 
-    def succeeded(key):
+    def succeeded(key, cancelled=None):
         seen.successes += 1
 
     monkeypatch.setattr(macos_coreml, "record_runtime_failure", failed)
@@ -1996,3 +1996,89 @@ def test_a_core_ml_answer_after_a_reset_proves_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(transcriber, "urlopen_loopback", answer)
     rig.backend.transcribe(rig.audio)
     assert seen.successes == 0 and seen.failures == []
+
+
+def _failure_rig(monkeypatch, tmp_path):
+    """Real failure accounting over a scratch failure file; returns the
+    runtime key."""
+    cli = tmp_path / "whisper-cli"; cli.write_text("cli")
+    model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+    monkeypatch.setattr(macos_coreml, "_failure_path", lambda: tmp_path / "failures.json")
+    monkeypatch.setattr(macos_coreml, "_session_failures", set())
+    monkeypatch.setattr(macos_coreml, "_runtime_proven", set())
+    monkeypatch.setattr(macos_coreml, "_hardware_identity", lambda: {"chip": "test"})
+    return (str(cli), str(model))
+
+
+def _seed_a_streak(tmp_path, key):
+    import json
+    row = {macos_coreml._failure_key(*key): {"count": 1, "reason": "earlier", "at": 0}}
+    (tmp_path / "failures.json").write_text(json.dumps(row), encoding="utf-8")
+
+
+@pytest.mark.parametrize("retired", [True, False])
+@pytest.mark.parametrize("at", ["lock-wait", "key"])
+@pytest.mark.parametrize("outcome", ["failure", "success"])
+def test_core_ml_accounting_asks_the_retirement_under_its_lock(monkeypatch, tmp_path, outcome, at, retired):
+    # Sol mac r11: a retirement while the accounting waited for its lock
+    # still wrote the failure (Core ML blocked for the session) or cleared
+    # the streak. *at*: the lock wait, or the key's computation under it.
+    import threading
+    key = _failure_rig(monkeypatch, tmp_path)
+    if outcome == "success":
+        _seed_a_streak(tmp_path, key)
+    else:
+        macos_coreml._runtime_proven.add(key)
+    flag = [False]
+    if at == "key":
+        failure_key = macos_coreml._failure_key
+
+        def computed(*args):
+            flag[0] = retired
+            return failure_key(*args)
+
+        monkeypatch.setattr(macos_coreml, "_failure_key", computed)
+    if outcome == "failure":
+        def record():
+            macos_coreml.record_runtime_failure(key, "request failed", cancelled=lambda: flag[0])
+    else:
+        def record():
+            macos_coreml.record_runtime_success(key, cancelled=lambda: flag[0])
+    with macos_coreml._failure_lock:   # another record holds it
+        worker = threading.Thread(target=record, daemon=True)
+        worker.start()
+        worker.join(0.2)
+        assert worker.is_alive()
+        if at == "lock-wait":
+            flag[0] = retired
+    worker.join(5)
+    rows = macos_coreml._read_failures()
+    if outcome == "failure":
+        assert (rows == {} and macos_coreml._session_failures == set()) is retired
+        if at == "lock-wait":
+            assert (key in macos_coreml._runtime_proven) is retired
+    else:
+        assert (len(rows) == 1 and macos_coreml._runtime_proven == set()) is retired
+
+
+@pytest.mark.parametrize("outcome", ["failure", "success"])
+def test_a_retired_dictations_core_ml_outcome_is_not_counted(monkeypatch, tmp_path, outcome):
+    # Through the backend: its record passes the dictation's retirement on.
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    key = _failure_rig(monkeypatch, tmp_path)
+    if outcome == "success":
+        _seed_a_streak(tmp_path, key)
+    monkeypatch.setattr(macos_coreml, "runtime_key", lambda config: key)
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+    monkeypatch.setattr(cls, "_closed", False)
+    backend = cls(use_gpu=False, timeout=5)
+    backend._ready_only_config = {}
+    backend._load_epoch = cls._epoch
+    with transcriber.dictation_requests(cls.request_token()):
+        cls.abandon_requests()
+        if outcome == "failure":
+            backend._record_coreml_failure("request failed")
+        else:
+            backend._record_coreml_success()
+    assert len(macos_coreml._read_failures()) == (0 if outcome == "failure" else 1)

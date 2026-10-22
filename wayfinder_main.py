@@ -25514,6 +25514,13 @@ class WayfinderApp(ctk.CTk):
         # Don't inject for a superseded session (force_reset / a newer recording took over).
         if gen is not None and gen != self.session_generation:
             return
+        from wayfinder.core.injector import InjectionCancelled, cancellable
+
+        def retired():
+            # Asked again right before the paste or a key event, after the
+            # injector's own waits (a held modifier; Sol mac r11).
+            return gen is not None and gen != self.session_generation
+
         try:
             # Guard this boundary too, including callers that bypass the usual
             # transcription-done handoff. Raw preserves other whitespace.
@@ -25583,7 +25590,9 @@ class WayfinderApp(ctk.CTk):
             game_chat = getattr(self, "_inject_into_game_chat", None)
             if ((IS_MACOS or IS_WINDOWS or _IS_LINUX) and game_chat is not None
                     and self.config.get("gamer_mode", True)):
-                if game_chat(text, gen):
+                with cancellable(retired):   # its pastes and keys too
+                    sent = game_chat(text, gen)
+                if sent:
                     self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
                     return
 
@@ -25606,7 +25615,7 @@ class WayfinderApp(ctk.CTk):
                     "(opt-in; Wayland cannot retarget)"
                 )
                 from wayfinder.core.injector import inject_text_clipboard_paste
-                inject_text_clipboard_paste(text)
+                inject_text_clipboard_paste(text, cancelled=retired)
             else:
                 inject_text(
                     text,
@@ -25618,6 +25627,7 @@ class WayfinderApp(ctk.CTk):
                     paste_fallback=bool(
                         self.config.get("game_mode_paste_fallback", True)
                     ),
+                    cancelled=retired,
                 )
             # Opt-in auto-send ("Auto press Enter after dictation"). Injector
             # process exit only proves the events were handed to the OS; the
@@ -25652,14 +25662,20 @@ class WayfinderApp(ctk.CTk):
                             )
                         else:
                             from wayfinder.core.injector import press_enter
-                            press_enter()
+                            press_enter(cancelled=retired)
                             self.log(
                                 f"↵ Auto-Enter sent after "
                                 f"{int(_AUTO_ENTER_SETTLE_S * 1000)}ms settle"
                             )
+                except InjectionCancelled:
+                    return   # retired during the Enter's wait: nothing to report
                 except Exception as _enter_err:
                     self.log(f"⚠ Auto-Enter failed: {_enter_err}")
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
+        except InjectionCancelled:
+            # Retired during the injector's waits: nothing pasted, nothing to
+            # emit. The retirement owns the state and resets the UI itself.
+            return
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
 

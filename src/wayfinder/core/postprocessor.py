@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from wayfinder.core.transcriber import RequestAbandoned, _retired_dictation
+from wayfinder.core.transcriber import RequestAbandoned, _dictation_cancelled, _retired_dictation
 from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.platform import (
@@ -1918,7 +1918,9 @@ class LlamaCppBackend(PostProcessorBackend):
         
         try:
             from llama_cpp import Llama
-            
+            # Not for a dictation retired meanwhile, during the quarantine
+            # check above or the import included (Sol mac r11).
+            _check_dictation()
             self._model = Llama(
                 model_path=self.model_path,
                 n_ctx=self.n_ctx,
@@ -1930,6 +1932,8 @@ class LlamaCppBackend(PostProcessorBackend):
             LlamaCppBackend._model_cache[cache_key] = self._model
             return self._model
             
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"Failed to load llama.cpp model: {e}")
     
@@ -2902,7 +2906,10 @@ class LlamaCppCliBackend(PostProcessorBackend):
             # Label from what the server was ACTUALLY spawned with, so a GPU
             # request that degraded to a CPU rung does not report as GPU.
             out["_spawned_ngl"] = LlamaServerManager.spawned_gpu_layers()
-            LlamaServerManager.note_success()
+            # Retired during the request: its late answer ends no failure
+            # streak either (Sol mac r11).
+            _check_dictation()
+            LlamaServerManager.note_success(served)
             return out
         except LlamaServerSuperseded:
             # A switch or shutdown cancelled the start: not a failure, so it
@@ -2949,7 +2956,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 # deep inside the caller's budget. It stops only the child that
                 # timed out, never a replacement a switch started meanwhile.
                 threading.Thread(
-                    target=LlamaServerManager.restart, args=(served,), daemon=True,
+                    target=LlamaServerManager.restart,
+                    args=(served, _dictation_cancelled()), daemon=True,
                     name="llama-server-restart",
                 ).start()
             else:
@@ -2957,7 +2965,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 # passes the poll()+identity reuse check forever, so every later
                 # dictation would pay the failure before falling back. Bounded so
                 # a one-off blip does not thrash a multi-GB model reload either.
-                restarted = LlamaServerManager.note_failure(served)
+                restarted = LlamaServerManager.note_failure(served, _dictation_cancelled())
                 print(f"[Post-processing] llama-server unavailable "
                       f"({type(e).__name__}: {e}) - falling back to per-call CLI"
                       + (" (restarting it)" if restarted else ""))

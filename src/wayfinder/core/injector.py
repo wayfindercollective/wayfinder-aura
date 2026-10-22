@@ -11,12 +11,14 @@ Platform dispatch:
 - macOS: native pasteboard snapshot + Cmd-V
 """
 
+import contextlib
 import ctypes
 import os
 import string
 import subprocess
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +29,37 @@ class InjectionError(Exception):
     """Raised when text injection fails."""
 
     pass
+
+
+class InjectionCancelled(InjectionError):
+    """The app retired the dictation while its injection waited (a held
+    modifier, the pasteboard): nothing is pasted, typed or sent (Sol mac r11)."""
+
+
+# The cancellation of the injection running on this thread (see cancellable):
+# every check below falls back to it, so the paths that pass none on (Linux's
+# tools, a game chat's pastes and keys) are covered too.
+_injection = threading.local()
+
+
+@contextlib.contextmanager
+def cancellable(cancelled):
+    """Run this thread's injections under *cancelled*, asked after each wait
+    right before anything is pasted, typed or sent (Sol mac r11). An
+    enclosing one stays when *cancelled* is None."""
+    previous = getattr(_injection, "cancelled", None)
+    _injection.cancelled = cancelled if cancelled is not None else previous
+    try:
+        yield
+    finally:
+        _injection.cancelled = previous
+
+
+def _refuse_if_cancelled(cancelled=None) -> None:
+    if cancelled is None:
+        cancelled = getattr(_injection, "cancelled", None)
+    if cancelled is not None and cancelled():
+        raise InjectionCancelled("the dictation was retired: nothing injected")
 
 
 # Set once a wtype attempt reveals the compositor refuses the virtual-keyboard
@@ -601,7 +634,7 @@ def _wait_for_macos_modifier_release(timeout: float = 2.0) -> bool:
         time.sleep(0.1)
 
 
-def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
+def _inject_text_pyautogui(text: str, typing_speed: str = "instant", cancelled=None) -> None:
     """Inject text on macOS using clipboard paste (Cmd+V).
 
     pyautogui.typewrite() only handles ASCII and is slow. Instead, we copy
@@ -663,8 +696,13 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
             raise InjectionError(
                 "Command, Option, Control, or Shift is still held; release it and try again."
             )
+        # Retired while a modifier was held: the pasteboard stays untouched.
+        _refuse_if_cancelled(cancelled)
         pasteboard, snapshot = _snapshot_macos_pasteboard()
         injected_change = _write_macos_pasteboard_text(pasteboard, text)
+        # ... or during the pasteboard writes: no Cmd+V, and the finally puts
+        # the user's clipboard back now.
+        _refuse_if_cancelled(cancelled)
         try:
             macos_paste.post_command_v()
         except Exception:
@@ -672,6 +710,8 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
 
             pyautogui.hotkey("command", "v")
         paste_succeeded = True
+    except InjectionCancelled:
+        raise
     except Exception as exc:
         raise InjectionError(f"macOS text injection failed: {exc}") from exc
     finally:
@@ -1109,19 +1149,23 @@ def _wait_for_modifier_release(timeout: float = 2.0, poll: float = 0.1) -> bool:
         probe.close()
 
 
-def _require_modifier_release() -> None:
+def _require_modifier_release(cancelled=None) -> None:
     """Fail closed when a physical modifier is still held after the wait.
 
     xdotool's ``--clearmodifiers`` only clears the X server's synthetic state.
     Under XWayland the compositor immediately reasserts a physically-held key,
     so continuing after the bounded wait corrupts the transcript. The complete
     transcript remains available in Aura's Last Transcription UI on this error.
+
+    A dictation retired during the wait (*cancelled*, else this thread's
+    cancellable) types nothing (Sol mac r11).
     """
     if not _wait_for_modifier_release():
         raise InjectionError(
             "A Shift, Ctrl, Alt, or Super key is still held. "
             "Release it, then dictate again; the transcript was not typed."
         )
+    _refuse_if_cancelled(cancelled)
 
 
 def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window: "str | None" = None) -> None:
@@ -1495,7 +1539,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
     _check_ydotool_result(result, "ctrl+v")
 
 
-def press_enter() -> None:
+def press_enter(cancelled=None) -> None:
     """Synthesize a single Enter keypress with the active injection backend.
 
     Backs the opt-in "Auto press Enter after dictation" setting: dictate →
@@ -1507,6 +1551,7 @@ def press_enter() -> None:
             raise InjectionError(
                 "Command, Option, Control, or Shift is still held; Enter was not pressed."
             )
+        _refuse_if_cancelled(cancelled)   # retired while a modifier was held
         from .macos_paste import accessibility_trusted, post_return
         if accessibility_trusted() is False:
             raise InjectionError("macOS blocked the key press: Accessibility is off.")
@@ -1516,7 +1561,7 @@ def press_enter() -> None:
         return
     if sys.platform == "win32":
         from .injector_windows import press_enter_windows
-        press_enter_windows()
+        press_enter_windows(cancelled)
         return
     if not sys.platform.startswith("linux"):
         raise InjectionError(
@@ -1526,7 +1571,7 @@ def press_enter() -> None:
     from wayfinder.utils.platform import get_text_injector
     # Held Shift would send Shift+Return — newline instead of submit in most
     # chat inputs, silently breaking the auto-Enter promise.
-    _require_modifier_release()
+    _require_modifier_release(cancelled)
     tool = get_text_injector()
     if tool == "portal":
         try:
@@ -1570,7 +1615,7 @@ def press_enter() -> None:
     _check_ydotool_result(result, "Return")
 
 
-def inject_text_clipboard_paste(text: str) -> None:
+def inject_text_clipboard_paste(text: str, cancelled=None) -> None:
     """Inject *text* via clipboard write + Ctrl+V (Linux) or Cmd+V (macOS).
 
     Used as the Game Mode fallback when synthetic typing fails, and as the
@@ -1583,7 +1628,7 @@ def inject_text_clipboard_paste(text: str) -> None:
         return
 
     if sys.platform == "darwin":
-        _inject_text_pyautogui(text, "instant")
+        _inject_text_pyautogui(text, "instant", cancelled)
         return
     if sys.platform == "win32":
         from .injector_windows import inject_text_paste_windows
@@ -1720,6 +1765,7 @@ def inject_text(
     *,
     game_mode: bool = False,
     paste_fallback: bool = True,
+    cancelled=None,
 ) -> None:
     """
     Inject text into the active window.
@@ -1742,7 +1788,15 @@ def inject_text(
             transcription. xdotool backend only; ignored elsewhere.
         game_mode: Enable Game Mode type→paste fallback when the type path fails.
         paste_fallback: When game_mode is True, attempt clipboard paste after type failure.
+        cancelled: asked after each wait (a held modifier, the clipboard), right
+            before anything is pasted or typed: true for a dictation the app
+            retired meanwhile, which then gets InjectionCancelled.
     """
+    with cancellable(cancelled):
+        _inject_text(text, typing_speed, target_window, game_mode, paste_fallback, cancelled)
+
+
+def _inject_text(text, typing_speed, target_window, game_mode, paste_fallback, cancelled) -> None:
     if not text:
         return
 
@@ -1753,7 +1807,7 @@ def inject_text(
         return
 
     if sys.platform == "darwin":
-        _inject_text_pyautogui(text, typing_speed)
+        _inject_text_pyautogui(text, typing_speed, cancelled)
         return
     if sys.platform == "win32":
         # Clipboard paste (Ctrl+V) is the reliable cross-app primary on Windows:
@@ -1764,9 +1818,12 @@ def inject_text(
         # stays as the fallback for the rare control that ignores synthetic paste.
         from .injector_windows import inject_text_paste_windows, inject_text_windows
         try:
-            inject_text_paste_windows(text)
+            inject_text_paste_windows(text, cancelled)
             return
         except InjectionError:
+            # Not for a retired dictation, whether the paste refused it or
+            # failed meanwhile (Sol mac r11).
+            _refuse_if_cancelled(cancelled)
             inject_text_windows(text, typing_speed)
             return
     if not sys.platform.startswith("linux"):

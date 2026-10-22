@@ -784,19 +784,26 @@ class LlamaServerManager:
         cls._kill(starting)
 
     @classmethod
-    def note_success(cls) -> None:
+    def note_success(cls, child: Optional[subprocess.Popen] = None) -> None:
+        """A request *child* answered. It ends that child's failure streak, not
+        another's: a late answer from a child already replaced proves nothing
+        about the one failing now (Sol mac r11)."""
+        if child is not None and cls._failing_child not in (None, child):
+            return
         cls._consecutive_failures = 0
         cls._failing_child = None
 
     @classmethod
-    def note_failure(cls, failed: Optional[subprocess.Popen] = None) -> bool:
+    def note_failure(cls, failed: Optional[subprocess.Popen] = None,
+                     cancelled: Optional[Callable[[], bool]] = None) -> bool:
         """Record a non-timeout request failure. True when a restart was begun.
 
         failed: the child the request reached (serving()), None if it never
         reached one; the restart stops only that child (see restart()).
         The restart runs on its own daemon thread: stopping can wait ~5s for
         the lock plus ~10s terminating a wedged child, and note_failure() is
-        called from inside a dictation's cleanup budget."""
+        called from inside a dictation's cleanup budget; *cancelled* goes
+        with it (see restart())."""
         if failed is not cls._failing_child:
             cls._consecutive_failures = 0
             cls._failing_child = failed
@@ -805,7 +812,7 @@ class LlamaServerManager:
             cls._consecutive_failures = 0
             cls._failing_child = None
             threading.Thread(
-                target=cls.restart, args=(failed,), daemon=True,
+                target=cls.restart, args=(failed, cancelled), daemon=True,
                 name="llama-server-failure-restart",
             ).start()
             return True
@@ -826,7 +833,8 @@ class LlamaServerManager:
         return child is not None and cls._process is not child
 
     @classmethod
-    def restart(cls, failed: Optional[subprocess.Popen]) -> None:
+    def restart(cls, failed: Optional[subprocess.Popen],
+                cancelled: Optional[Callable[[], bool]] = None) -> None:
         """Stop `failed` if it is still the published server; the next request
         starts a fresh one.
 
@@ -835,11 +843,16 @@ class LlamaServerManager:
         not the server that failed. Leaves _switch_epoch alone, so pending
         configurations stay current. If the lock is held, a start owns the
         state and has already stopped or replaced this child itself.
+
+        *cancelled*, asked under the lock: the app retired the dictation the
+        restart is for while it waited, and the child may now serve a newer
+        one. Then nothing is stopped; a child still wedged fails that
+        dictation's request, which restarts it itself (Sol mac r11).
         """
         if failed is None or not cls._lock.acquire(timeout=5):
             return
         try:
-            if cls._process is failed:
+            if cls._process is failed and not (cancelled is not None and cancelled()):
                 cls._stop_locked()
         finally:
             cls._lock.release()

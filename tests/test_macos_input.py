@@ -621,3 +621,76 @@ def test_microphone_authorization_reads_tcc():
         _pytest.skip("macOS only")
     from wayfinder.utils.macos_permissions import microphone_authorization
     assert microphone_authorization() in (0, 1, 2, 3)
+
+
+@pytest.mark.parametrize("at", ["modifier-wait", "pasteboard-write"])
+def test_macos_injection_retired_during_its_waits_pastes_nothing(monkeypatch, at):
+    # Sol mac r11: a reset while the injector waited for the hotkey's
+    # modifiers still pasted the retired text.
+    import wayfinder.core.macos_paste as macos_paste
+
+    class Pasteboard:
+        @staticmethod
+        def changeCount():
+            return 7
+
+    retired = [False]
+    restored, written, posted = [], [], []
+
+    def wait():
+        retired[0] = at == "modifier-wait"
+        return True
+
+    def write(_pb, text):
+        written.append(text)
+        retired[0] = True
+        return 7
+
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
+    monkeypatch.setattr(macos_paste, "frontmost_window_id", lambda: "1:1")  # another app
+    monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", wait)
+    monkeypatch.setattr(injector, "_snapshot_macos_pasteboard", lambda: (Pasteboard(), ["old"]))
+    monkeypatch.setattr(injector, "_write_macos_pasteboard_text", write)
+    monkeypatch.setattr(injector, "_restore_macos_pasteboard", lambda _pb, items: restored.append(items))
+    monkeypatch.setattr(macos_paste, "post_command_v", lambda: posted.append(True))
+    with pytest.raises(injector.InjectionCancelled):
+        injector._inject_text_pyautogui("retired words", cancelled=lambda: retired[0])
+    assert posted == []
+    if at == "modifier-wait":
+        assert written == []                                   # the clipboard untouched
+    else:
+        assert written == ["retired words"] and restored == [["old"]]   # put back now
+
+
+def test_macos_auto_enter_retired_during_its_wait_sends_nothing(monkeypatch):
+    import wayfinder.core.macos_paste as macos_paste
+    retired, sent = [False], []
+
+    def wait():
+        retired[0] = True
+        return True
+
+    monkeypatch.setattr(injector.sys, "platform", "darwin")
+    monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", wait)
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
+    monkeypatch.setattr(macos_paste, "post_return", lambda: sent.append(True))
+    with pytest.raises(injector.InjectionCancelled):
+        injector.press_enter(cancelled=lambda: retired[0])
+    assert sent == []
+
+
+def test_macos_paste_asks_the_threads_cancellable(monkeypatch):
+    # A path that passes no cancellation on (a game chat's paste) is asked
+    # through the scope.
+    import wayfinder.core.macos_paste as macos_paste
+    posted = []
+    monkeypatch.setattr(macos_paste, "accessibility_trusted", lambda: True)
+    monkeypatch.setattr(macos_paste, "frontmost_window_id", lambda: "1:1")
+    monkeypatch.setattr(injector, "_wait_for_macos_modifier_release", lambda: True)
+    monkeypatch.setattr(injector, "_snapshot_macos_pasteboard",
+                        lambda: pytest.fail("the pasteboard was touched"))
+    monkeypatch.setattr(macos_paste, "post_command_v", lambda: posted.append(True))
+    with injector.cancellable(lambda: True):
+        with pytest.raises(injector.InjectionCancelled):
+            injector.inject_text("retired words")
+    assert posted == []

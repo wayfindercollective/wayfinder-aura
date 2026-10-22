@@ -29,7 +29,7 @@ import time
 from contextlib import contextmanager
 from ctypes import wintypes
 
-from .injector import InjectionError
+from .injector import InjectionError, _refuse_if_cancelled
 
 # ---------------------------------------------------------------------------
 # Win32 SendInput plumbing
@@ -359,11 +359,12 @@ def _press_keys(vks: list[int]) -> None:
     _send([_scan_input(vk, up=True) for vk in reversed(vks)])
 
 
-def press_enter_windows() -> None:
+def press_enter_windows(cancelled=None) -> None:
     """Synthesize a single Enter keypress (Auto-press-Enter setting)."""
     _require_foreground_window()
     # A held Shift would send Shift+Enter — a newline instead of submit.
     require_modifier_release_windows()
+    _refuse_if_cancelled(cancelled)   # retired while a modifier was held
     if _held_seconds() > 0:
         _press_keys([VK_RETURN])
         return
@@ -568,7 +569,7 @@ _pending_restore = _DeferredRestore()
 atexit.register(_pending_restore.flush)
 
 
-def inject_text_paste_windows(text: str) -> None:
+def inject_text_paste_windows(text: str, cancelled=None) -> None:
     """Inject *text* via clipboard + Ctrl+V, restoring the prior clipboard.
 
     Used for the Game Mode type-failure fallback and the explicit
@@ -587,6 +588,9 @@ def inject_text_paste_windows(text: str) -> None:
         diag.mark("mods")
         require_modifier_release_windows()
         diag.mark("mods_free")
+        # Retired while a modifier was held: the clipboard stays untouched
+        # (Sol mac r11).
+        _refuse_if_cancelled(cancelled)
 
         previous = _clipboard_get_windows()
         diag.previous(previous)
@@ -595,6 +599,12 @@ def inject_text_paste_windows(text: str) -> None:
         ours = _clipboard_sequence()
         diag.mark("set")
         time.sleep(0.03)
+        if cancelled is not None and cancelled():
+            # ... or during the clipboard writes: no Ctrl+V, the user's
+            # clipboard back now.
+            if previous is not None:
+                _clipboard_set_windows(previous, transient=True)
+            _refuse_if_cancelled(cancelled)
         diag.start_watch()
         # A failed paste raises here and leaves the dictation on the clipboard:
         # the error tells the user to press Ctrl+V themselves (as on macOS).

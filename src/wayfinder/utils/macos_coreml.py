@@ -288,18 +288,19 @@ def _write_failures(rows: dict) -> None:
             os.unlink(temp)
 
 
-def clear_comparison_failures(cli_binary: str, model_path: str) -> bool:
+def clear_comparison_failures(cli_binary: str, model_path: str, cancelled=None) -> bool:
     """A finished comparison or a successful Core ML dictation ends the
     failure streak; returns whether it did. Not once this launch recorded a
     failure: a request that started before it and succeeded late proves
     nothing about the failure, which holds until the next launch or the
-    user's retry, reset_comparison_failures (Sol mac r5)."""
+    user's retry, reset_comparison_failures (Sol mac r5). Nor when
+    *cancelled* says so under the lock: see record_runtime_failure."""
     try:
         key = _failure_key(cli_binary, model_path)
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     with _failure_lock:
-        if key in _session_failures:
+        if key in _session_failures or (cancelled is not None and cancelled()):
             return False
         rows = _read_failures()
         if rows.pop(key, None) is not None:
@@ -326,36 +327,47 @@ def runtime_key(config: dict) -> tuple[str, str]:
             str(config.get("model_path", "")))
 
 
-def record_runtime_failure(key: tuple[str, str], reason: str) -> int:
+def record_runtime_failure(key: tuple[str, str], reason: str, cancelled=None) -> int:
     """A loaded Core ML server failed a dictation or exited on its own.
 
     Counted like a failed preparation: a load proves nothing, so a server
     that loads but cannot transcribe would otherwise be handed over again
     after every dictation. Metal serves the rest of the session; the next
-    launch tries once more, then the backoff applies (Sol mac r3)."""
+    launch tries once more, then the backoff applies (Sol mac r3).
+
+    *cancelled* (the dictation's retirement) is asked under the lock, right
+    before each change: a dictation the app retired while this waited for
+    the lock counts nothing (Sol mac r11)."""
     cli, model = key
     with _failure_lock:
+        if cancelled is not None and cancelled():
+            return 0
         _runtime_proven.discard(key)
-        return record_comparison_failure(cli, model, f"Core ML runtime: {reason}")
+        return record_comparison_failure(cli, model, f"Core ML runtime: {reason}", cancelled)
 
 
-def record_runtime_success(key: tuple[str, str]) -> None:
-    """A Core ML dictation succeeded: that ends the failure streak (once a session)."""
+def record_runtime_success(key: tuple[str, str], cancelled=None) -> None:
+    """A Core ML dictation succeeded: that ends the failure streak (once a
+    session). *cancelled* as for record_runtime_failure."""
     with _failure_lock:
-        if key not in _runtime_proven and clear_comparison_failures(*key):
+        if key not in _runtime_proven and clear_comparison_failures(*key, cancelled):
             _runtime_proven.add(key)
 
 
-def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> int:
+def record_comparison_failure(cli_binary: str, model_path: str, reason: str,
+                              cancelled=None) -> int:
     """Count a failed conversion, comparison or Core ML server; returns the
     count. One launch counts once, whatever failed: two chunks failing on one
     incident, a death after a failed request, or a preparation admitted
-    before a runtime failure was recorded (Sol mac r4/r5)."""
+    before a runtime failure was recorded (Sol mac r4/r5). *cancelled* as
+    for record_runtime_failure."""
     try:
         key = _failure_key(cli_binary, model_path)
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
     with _failure_lock:
+        if cancelled is not None and cancelled():
+            return 0
         rows = _read_failures()
         previous = rows.get(key)
         count = int(previous.get("count", 0)) if isinstance(previous, dict) else 0

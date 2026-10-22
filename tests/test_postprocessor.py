@@ -1894,6 +1894,57 @@ class TestARetiredDictationsCleanup:
         server.assert_not_called()
         cli.assert_not_called()
 
+    def test_retired_during_the_in_process_quarantine_check_loads_nothing(
+            self, tmp_path, monkeypatch, retire):
+        # Sol mac r11: _get_model() loaded after a retirement during its
+        # quarantine check.
+        import sys
+        import types
+        from wayfinder.core import postprocessor
+        from wayfinder.core.postprocessor import LlamaCppBackend
+        from wayfinder.core.transcriber import RequestAbandoned
+        loads = []
+        monkeypatch.setitem(sys.modules, "llama_cpp",
+                            types.SimpleNamespace(Llama=lambda **kw: loads.append(kw)))
+        monkeypatch.setattr(LlamaCppBackend, "_model_cache", {})
+        model = tmp_path / "m.gguf"; model.write_bytes(b"\x00")
+        b = LlamaCppBackend(model_path=str(model))
+        monkeypatch.setattr(postprocessor, "_key_is_wedged_locked",
+                            lambda cache, key: retire() or False)
+        with pytest.raises(RequestAbandoned):   # not "Failed to load"
+            b._get_model()
+        assert loads == [] and LlamaCppBackend._model_cache == {}
+
+    def test_a_resident_inference_dispatched_after_a_retirement_runs_nothing(
+            self, tmp_path, monkeypatch, retire):
+        # Sol mac r11: the native call runs on a run_with_timeout worker; a
+        # retirement while it waited to run came after every caller's check.
+        import threading
+        import types
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        from wayfinder.core.transcriber import RequestAbandoned
+        from wayfinder.utils import timeout as timeout_module
+
+        class LateThread(threading.Thread):
+            def start(self):
+                retire()
+                super().start()
+
+        monkeypatch.setattr(timeout_module, "threading", types.SimpleNamespace(Thread=LateThread))
+        b = self._cli_backend(tmp_path)
+        model = self._resident(b)
+        try:
+            with patch.object(b, "_resident_model", return_value=model), \
+                 patch.object(b, "_server_generate", return_value=None) as server, \
+                 patch("wayfinder.core.postprocessor.run_tracked") as cli, \
+                 pytest.raises(RequestAbandoned):
+                b.process("this text was retired meanwhile", "")
+        finally:
+            LlamaCppCliBackend._resident_cache.pop(b._resident_cache_key(), None)
+        model.assert_not_called()
+        server.assert_not_called()
+        cli.assert_not_called()
+
     def test_retired_before_the_cleanup_loads_nothing(self, tmp_path, retire):
         from wayfinder.core.transcriber import RequestAbandoned
         b = self._cli_backend(tmp_path)

@@ -28,6 +28,7 @@ from wayfinder.utils.child_supervisor import (
     signal_supervised, spawn_supervised, wait_supervised,
 )
 from wayfinder.utils.platform import subprocess_no_window_kwargs
+from wayfinder.utils.timeout import carry_into_workers
 
 # subprocess kwargs that hide the child console window on Windows (empty on
 # POSIX). Every whisper-cli / whisper-server spawn below splats it so no stray
@@ -128,6 +129,12 @@ def _retired_dictation() -> bool:
     return token is not None and token != WhisperServerBackend._abandoned
 
 
+def _check_dictation() -> None:
+    """Right before a load, an inference or a request: none for a retired dictation."""
+    if _retired_dictation():
+        raise RequestAbandoned("the dictation was retired")
+
+
 class RequestAbandoned(TranscriptionError):
     """The app retired this dictation (see WhisperServerBackend.abandon_requests):
     nothing may start, stop, retry, salvage or count on its behalf."""
@@ -148,6 +155,31 @@ def _refuse_a_retired_helper() -> None:
 
 
 refuse_spawns_when(_refuse_a_retired_helper)
+
+
+def _carry_dictation(fn):
+    """*fn*, to run on another thread under this thread's dictation, with a
+    check first: a retirement while that thread waited to run stops it there,
+    and its own helpers and checks see the dictation (Sol mac r11)."""
+    token = getattr(_dictation, "token", None)
+    if token is None:
+        return fn
+
+    def carried(*args, **kwargs):
+        with dictation_requests(token):
+            _check_dictation()
+            return fn(*args, **kwargs)
+    return carried
+
+
+def _dictation_cancelled():
+    """For a step another thread runs later on this dictation's behalf (a
+    restart): whether the app has retired the dictation since."""
+    token = getattr(_dictation, "token", None)
+    return lambda: token is not None and token != WhisperServerBackend._abandoned
+
+
+carry_into_workers(_carry_dictation)
 
 
 def _expand_path(value: object) -> str:
@@ -762,18 +794,29 @@ class WhisperCppBackend(TranscriptionBackend):
             return
         global _gpu_probe_inflight
         with _gpu_probe_lock:
-            if _gpu_probe_inflight:
+            # Not for a dictation retired meanwhile, during the lock wait
+            # included (Sol mac r11).
+            if _gpu_probe_inflight or _retired_dictation():
                 return
             _gpu_probe_inflight = True
         threading.Thread(
-            target=self._probe_gpu_recovery, daemon=True, name="wayfinder-gpu-probe",
+            target=self._probe_gpu_recovery, args=(getattr(_dictation, "token", None),),
+            daemon=True, name="wayfinder-gpu-probe",
         ).start()
 
-    def _probe_gpu_recovery(self) -> None:
-        """Test the GPU binary on silence; restore it on success, back off on failure."""
+    def _probe_gpu_recovery(self, token: Optional[int] = None) -> None:
+        """Test the GPU binary on silence; restore it on success, back off on failure.
+
+        Under the dictation that started it (*token*): a retirement refuses
+        its helper, and whatever the probe found then sets nothing, neither a
+        recovery nor a backoff (Sol mac r11)."""
         global _gpu_probe_inflight
         try:
-            if self._gpu_probe_succeeds():
+            with dictation_requests(token):
+                ok = self._gpu_probe_succeeds()
+                if _retired_dictation():
+                    return
+            if ok:
                 with _gpu_state_lock:
                     _CPU_FALLBACK_ACTIVE.pop(self.whisper_binary, None)
                     # Keep (halved) failure history so a flapping GPU climbs the
@@ -1655,7 +1698,9 @@ class WhisperServerBackend(TranscriptionBackend):
             return
         try:
             from wayfinder.utils.macos_coreml import record_runtime_failure, runtime_key
-            count = record_runtime_failure(runtime_key(self._ready_only_config), reason)
+            # Asked again under the accounting lock (Sol mac r11).
+            count = record_runtime_failure(runtime_key(self._ready_only_config), reason,
+                                           cancelled=_retired_dictation)
             print(f"[Whisper] Core ML failed ({reason}, failure {count}); "
                   "Metal serves for the rest of this session")
         except Exception as exc:
@@ -1664,7 +1709,8 @@ class WhisperServerBackend(TranscriptionBackend):
     def _record_coreml_success(self) -> None:
         try:
             from wayfinder.utils.macos_coreml import record_runtime_success, runtime_key
-            record_runtime_success(runtime_key(self._ready_only_config))
+            record_runtime_success(runtime_key(self._ready_only_config),
+                                   cancelled=_retired_dictation)
         except Exception as exc:
             print(f"[Whisper] Core ML success not recorded ({type(exc).__name__})")
 
@@ -1801,6 +1847,9 @@ class WhisperServerBackend(TranscriptionBackend):
             body += f"--{boundary}--\r\n".encode()
 
             def _post(_port: int, _timeout: float) -> str:
+                # Not for a dictation retired meanwhile, during the audio read
+                # above or a recovery's start included (Sol mac r11).
+                self._check_not_abandoned(abandoned_at)
                 # Rebuilt per attempt: _start_server() may pick a DIFFERENT port on a
                 # restart, so the URL must follow the live _server_port, not a stale one.
                 req = urllib.request.Request(
@@ -1870,7 +1919,6 @@ class WhisperServerBackend(TranscriptionBackend):
                     remaining = recovery_deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError("recovery budget exhausted before retry")
-                    self._check_not_abandoned(abandoned_at)
                     return _post(WhisperServerBackend._server_port, remaining)
                 except Exception as retry_err:
                     self._check_not_abandoned(abandoned_at)
@@ -1889,6 +1937,8 @@ class WhisperServerBackend(TranscriptionBackend):
                         )
                         return self._cli_fallback().transcribe(
                             audio_path, context, deadline=cli_deadline)
+                    except RequestAbandoned:   # whisper-cli refused at its spawn
+                        raise
                     except Exception as cli_err:
                         raise TranscriptionError(
                             f"whisper-server failed after restart ({retry_err}); "
@@ -2065,6 +2115,9 @@ class FasterWhisperBackend(TranscriptionBackend):
         device = "cuda" if want_gpu else "cpu"
         compute_type = self.compute_type if device == "cuda" else "int8"
 
+        # Not for a dictation retired meanwhile, during the CUDA discovery
+        # above or the import included (Sol mac r11).
+        _check_dictation()
         try:
             self._model = WhisperModel(
                 self.model_size,
@@ -2083,6 +2136,7 @@ class FasterWhisperBackend(TranscriptionBackend):
                     f"(device_index={device_index}, compute_type={compute_type})",
                     flush=True,
                 )
+                _check_dictation()   # retired during the failed GPU load: no CPU one
                 try:
                     self._model = WhisperModel(
                         self.model_size,
@@ -2403,6 +2457,9 @@ class GroqWhisperBackend(TranscriptionBackend):
                 if self.language and self.language.lower() != "auto":
                     params["language"] = self.language
                 
+                # Not for a dictation retired meanwhile, during the client's
+                # setup or the file open included (Sol mac r11).
+                _check_dictation()
                 transcription = client.audio.transcriptions.create(**params)
             
             elapsed = time.time() - start_time
@@ -2411,6 +2468,8 @@ class GroqWhisperBackend(TranscriptionBackend):
             # Response is just text when response_format="text"
             return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
             
+        except RequestAbandoned:
+            raise
         except Exception as e:
             print(f"[Groq Whisper] ✗ Error: {e}")
             raise TranscriptionError(_friendly_cloud_error(e))
@@ -2545,6 +2604,9 @@ class OpenAIWhisperBackend(TranscriptionBackend):
                 if self.language and self.language.lower() != "auto":
                     params["language"] = self.language
                 
+                # Not for a dictation retired meanwhile, during the client's
+                # setup or the file open included (Sol mac r11).
+                _check_dictation()
                 transcription = client.audio.transcriptions.create(**params)
             
             print(f"[OpenAI Whisper] ✓ Transcription received")
@@ -2552,6 +2614,8 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             # Response is just text when response_format="text"
             return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
             
+        except RequestAbandoned:
+            raise
         except Exception as e:
             print(f"[OpenAI Whisper] ✗ Error: {e}")
             raise TranscriptionError(_friendly_cloud_error(e))

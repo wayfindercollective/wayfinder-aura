@@ -775,7 +775,7 @@ class TestHappyPath:
         )
         import wayfinder.core.injector as injector
         monkeypatch.setattr(injector, "get_active_window", lambda: "window-42")
-        monkeypatch.setattr(injector, "press_enter", lambda: events.append(("enter", None)))
+        monkeypatch.setattr(injector, "press_enter", lambda **_k: events.append(("enter", None)))
         monkeypatch.setattr(
             "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
         )
@@ -816,7 +816,7 @@ class TestHappyPath:
         monkeypatch.setattr(time_module, "sleep", lambda _seconds: None)
         import wayfinder.core.injector as injector
         monkeypatch.setattr(injector, "get_active_window", lambda: "window-42")
-        monkeypatch.setattr(injector, "press_enter", lambda: events.append("enter"))
+        monkeypatch.setattr(injector, "press_enter", lambda **_k: events.append("enter"))
         monkeypatch.setattr(
             "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
         )
@@ -843,7 +843,7 @@ class TestHappyPath:
         monkeypatch.setattr(time_module, "sleep", lambda _seconds: None)
         import wayfinder.core.injector as injector
         monkeypatch.setattr(injector, "get_active_window", lambda: next(windows))
-        monkeypatch.setattr(injector, "press_enter", lambda: entered.append(True))
+        monkeypatch.setattr(injector, "press_enter", lambda **_k: entered.append(True))
         monkeypatch.setattr(
             "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
         )
@@ -852,6 +852,80 @@ class TestHappyPath:
 
         assert entered == []
         assert any("focus changed" in message for message in app.logs)
+
+    @pytest.mark.parametrize("at", ["paste", "enter"])
+    def test_a_reset_during_the_injectors_wait_injects_and_emits_nothing(
+            self, app, monkeypatch, at):
+        # Sol mac r11: do_inject checked the generation before the injector,
+        # which then waited for the hotkey's modifiers and pasted anyway.
+        import queue
+        import time as time_module
+        import wayfinder.core.injector as injector
+        app.config["press_enter_after_dictation"] = True
+        pasted, entered = [], []
+
+        def reset():   # Escape, while the injector waits
+            app.session_generation += 1
+
+        def inject(text, cancelled=None, **_kwargs):
+            if at == "paste":
+                reset()
+            if cancelled():
+                raise injector.InjectionCancelled("the dictation was retired: nothing injected")
+            pasted.append(text)
+
+        def enter(cancelled=None):
+            reset()
+            if cancelled():
+                raise injector.InjectionCancelled("the dictation was retired: nothing injected")
+            entered.append(True)
+
+        monkeypatch.setattr(wayfinder_main, "inject_text", inject)
+        monkeypatch.setattr(time_module, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(injector, "get_active_window", lambda: "window-42")
+        monkeypatch.setattr(injector, "press_enter", enter)
+        monkeypatch.setattr("wayfinder.utils.platform.get_text_injector", lambda: "ydotool")
+        app.do_inject("retired words", app.session_generation)
+        emitted = []
+        while True:
+            try:
+                emitted.append(app.event_queue.get_nowait()[0])
+            except queue.Empty:
+                break
+        assert pasted == ([] if at == "paste" else ["retired words"])
+        assert entered == []
+        assert wayfinder_main.EventType.INJECTION_ERROR not in emitted
+        assert wayfinder_main.EventType.INJECTION_DONE not in emitted
+        assert not any("Auto-Enter failed" in message for message in app.logs)
+
+    def test_a_reset_during_a_game_chat_send_pastes_nothing(self, app, monkeypatch):
+        # Sol mac r11: a game chat opens the chat box, then pastes and sends;
+        # each of those asks the dictation's generation through the scope.
+        import queue
+        import wayfinder.core.injector as injector
+        app.config["gamer_mode"] = True
+        pasted = []
+
+        def game_chat(text, gen):
+            app.session_generation += 1     # Escape, while the chat box opened
+            injector._refuse_if_cancelled()  # the paste's own check
+            pasted.append(text)
+            return True
+
+        app._inject_into_game_chat = game_chat
+        monkeypatch.setattr(wayfinder_main, "inject_text", lambda *a, **k: pytest.fail("typed"))
+        monkeypatch.setattr("wayfinder.utils.platform.get_text_injector", lambda: "ydotool")
+        app.do_inject("retired words", app.session_generation)
+        emitted = []
+        while True:
+            try:
+                emitted.append(app.event_queue.get_nowait()[0])
+            except queue.Empty:
+                break
+        assert pasted == []
+        assert wayfinder_main.EventType.INJECTION_ERROR not in emitted
+        assert wayfinder_main.EventType.INJECTION_DONE not in emitted
+        assert getattr(injector._injection, "cancelled", None) is None
 
     def test_personal_tone_feeds_voice_learning(self, app, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "inject_text", lambda *a, **k: None)

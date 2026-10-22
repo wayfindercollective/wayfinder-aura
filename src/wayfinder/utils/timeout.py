@@ -15,6 +15,18 @@ class CallTimeout(Exception):
     """Raised when :func:`run_with_timeout` exceeds its deadline."""
 
 
+# Each takes the callable on the caller's thread and returns the one to run
+# in its place, on the worker. The transcriber registers one that carries the
+# caller's dictation into the worker and refuses a dictation the app retired
+# while the worker waited to run (Sol mac r11).
+_carriers: list = []
+
+
+def carry_into_workers(carrier) -> None:
+    if carrier not in _carriers:
+        _carriers.append(carrier)
+
+
 def run_with_timeout(fn, timeout, *args, **kwargs):
     """Run ``fn(*args, **kwargs)`` in a daemon thread, raising :class:`CallTimeout` past ``timeout``s.
 
@@ -22,6 +34,8 @@ def run_with_timeout(fn, timeout, *args, **kwargs):
     thread is a daemon, so a leaked (still-running) call will not block interpreter shutdown.
     The original exception from ``fn`` (if any) is re-raised in the caller.
     """
+    for carrier in _carriers:
+        fn = carrier(fn)
     if not timeout or timeout <= 0:
         return fn(*args, **kwargs)
 
