@@ -3129,6 +3129,17 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
 })
 
 
+def _is_whisper_phrase_hallucination(text: str) -> bool:
+    """Whether *text* is, in full, one of Whisper's known silence/noise
+    catch-phrases — matched the same way :func:`clean_whisper_artifacts`
+    matches it at the end of its cleanup (repeated sentences collapsed,
+    trailing punctuation stripped). Never a mid-sentence substring match.
+    """
+    candidate = _collapse_repeated_sentences_for_phrase_match((text or "").strip())
+    key = candidate.lower().rstrip('.!?,;: ').strip()
+    return key in _WHISPER_PHRASE_HALLUCINATIONS
+
+
 # whisper.cpp refuses more than 8 decoders ("too many decoders requested"),
 # which made a hand-edited beam_size of 9+ fail every dictation.
 WHISPER_MAX_DECODERS = 8
@@ -3270,9 +3281,7 @@ def clean_whisper_artifacts(
     # Drop the whole thing if the entire cleaned output is a known Whisper
     # phrase-hallucination (the stock YouTube-caption strings it emits on silence).
     # Only the ENTIRE output is checked — never a mid-sentence substring.
-    _phrase_candidate = _collapse_repeated_sentences_for_phrase_match(text)
-    _phrase_key = _phrase_candidate.lower().rstrip('.!?,;: ').strip()
-    if _phrase_key in _WHISPER_PHRASE_HALLUCINATIONS:
+    if _is_whisper_phrase_hallucination(text):
         print(f"[Transcription] Dropped Whisper phrase-hallucination: {text!r}")
         return ""
 
@@ -3737,7 +3746,10 @@ def transcribe_with_config(
         unprompted: Send Whisper no prompt, vocabulary or context. For audio the
             speech check calls steady noise: primed with the dictation prompt,
             large-v3-turbo turned 9 of 36 fan/hum/hiss recordings into invented
-            sentences; unprompted, 90 of 90 came back as "." or one word.
+            sentences; unprompted, 90 of 90 came back as "." or one word. The
+            recognizer's own output is then held to the two-word rule (and
+            checked for a known hallucination phrase) before anything else —
+            including Raw Transcript's early return — can touch it.
 
     Returns:
         Transcribed text string
@@ -3775,6 +3787,20 @@ def transcribe_with_config(
                     heard_by.custom_vocabulary = []
             context = ""
         text = backend.transcribe(audio_path, context=context)
+
+    if unprompted:
+        # Evaluate the RECOGNIZER's own words here, before vocabulary
+        # replacement or LLM cleanup get a chance to rewrite them: those ran
+        # AFTER the two-word rule below and could turn a one-word noise
+        # artifact into something that reads like two words ("Okay." ->
+        # "Sounds good.", wrongly kept) or collapse real two-word speech into
+        # one corrected term ("open ai" -> "OpenAI", wrongly dropped). A known
+        # Whisper hallucination phrase is rejected here too — unlike the
+        # two-word rule, a phrase like "Thank you for watching." has enough
+        # words to pass it, so Raw Transcript must not let it through either.
+        from wayfinder.core.recorder import noise_transcript_has_speech
+        if _is_whisper_phrase_hallucination(text) or not noise_transcript_has_speech(text):
+            return ""
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep
     # entitlement checks in get_backend(), but bypass every Aura text rewrite

@@ -1409,6 +1409,19 @@ def _steady_noise_wav(tmp_path):
     return path
 
 
+def _speech_like_wav(tmp_path):
+    """Alternating loud/quiet 20ms bursts: a high loud/floor ratio, like real
+    speech's pauses between words, so the speech check's verdict is "speech"."""
+    import numpy as np
+
+    path = tmp_path / "speech.wav"
+    rng = np.random.default_rng(11)
+    frame = 320  # 20ms at 16kHz
+    bursts = [rng.normal(0, 9000 if i % 2 == 0 else 50, frame) for i in range(50)]
+    _write_wav(path, np.clip(np.concatenate(bursts), -32768, 32767).astype(np.int16))
+    return path
+
+
 class TestSilentMicMessage:
     """Field report 2026-10-01: a muted USB headset recorded pure zeros and the
     banner said "try again, a bit closer to the mic", so the owner blamed paste.
@@ -1504,6 +1517,38 @@ class TestSilentMicMessage:
                 errors.append(payload)
         return [t for t in texts if t], errors
 
+    class _FakeRecognizer:
+        """Stands in for the whisper backend's own ``transcribe()`` only — the
+        rest of transcribe_with_config (prompt handling, the two-word rule,
+        vocabulary/LLM cleanup) is the real production code. Sol review of PR
+        #67 found the previous tests mocked transcribe_with_config itself, so
+        the old wrapper-level noise gate (since removed — it ran on
+        vocabulary/LLM-corrected text, never the recognizer's own words) was
+        the only thing exercised."""
+
+        def __init__(self, text):
+            self.prompt = "unused prompt"
+            self.custom_vocabulary = ["unused"]
+            self.contexts = []
+            self._text = text
+
+        def transcribe(self, audio_path, context=""):
+            self.contexts.append(context)
+            return self._text
+
+    def _real_transcription(self, monkeypatch, text):
+        """Undo the class-level transcribe_with_config mock and fake only the
+        recognizer, so chunked ("on"/"auto") and one-shot ("off") dictation
+        both run the real two-word/hallucination rejection in
+        transcribe_with_config."""
+        from wayfinder.core import transcriber
+
+        recognizer = self._FakeRecognizer(text)
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
+                            transcriber.transcribe_with_config)
+        monkeypatch.setattr(transcriber, "get_backend", lambda cfg: recognizer)
+        return recognizer
+
     @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
     def test_steady_noise_is_heard_unprompted_and_its_stray_word_dropped(
         self, app, tmp_path, monkeypatch, chunked
@@ -1511,13 +1556,14 @@ class TestSilentMicMessage:
         """Field report 2026-10-13: six real MacBook Air dictations got the noise
         verdict and were deleted unheard. Noise now reaches Whisper without a
         prompt (primed, it invents sentences), and its lone "So," is no speech."""
-        calls = []
-        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
-                            lambda path, cfg, **k: calls.append(k) or "So,")
+        recognizer = self._real_transcription(monkeypatch, "So,")
         self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked), chunked)
 
-        assert [k.get("unprompted") for k in calls] == [True]
+        assert recognizer.contexts == [""]  # unprompted: no prompt, vocabulary or context
         assert any(m.startswith("🔇 Speech check: noise (peak ") for m in app.logs)
+        # Field report 2026-10-13 rejected "Secret" into the activity log; the
+        # rejection must say only that it happened, never what was heard.
+        assert not any("So," in m for m in app.logs)
         texts, errors = self._outcome(app)
         assert texts == []
         assert errors == (["No speech detected"] if chunked else [])
@@ -1525,13 +1571,78 @@ class TestSilentMicMessage:
     @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
     def test_speech_the_check_calls_noise_is_kept(self, app, tmp_path, monkeypatch, chunked):
         spoken = "I need a technical manager who can run this"
-        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
-                            lambda path, cfg, **k: spoken)
+        self._real_transcription(monkeypatch, spoken)
         app.config["post_processing_enabled"] = False
         self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked), chunked)
 
         assert self._outcome(app) == ([spoken], [])
         assert self.banners == []
+
+    @staticmethod
+    def _license_vocabulary(monkeypatch):
+        """Custom Vocabulary (heard -> write corrections) is a licensed
+        feature; grant it so app.config["vocabulary_replacements"] takes
+        effect in these two tests."""
+        import wayfinder.license as lic
+
+        monkeypatch.setattr(lic, "get_feature_gate",
+                            lambda *a, **k: SimpleNamespace(has_feature=lambda f: True))
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
+    def test_noise_two_word_rule_runs_before_vocabulary_correction(
+        self, app, tmp_path, monkeypatch, chunked
+    ):
+        """Sol review (MAJOR): the removed wrapper-level check ran AFTER
+        vocabulary correction — a one-word noise artifact ("Okay.") corrected
+        up to two words ("Sounds good.") was wrongly kept. The rule now runs
+        inside transcribe_with_config, on the recognizer's own word."""
+        self._license_vocabulary(monkeypatch)
+        app.config["vocabulary_replacements"] = [["okay", "sounds good"]]
+        self._real_transcription(monkeypatch, "Okay.")
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked), chunked)
+
+        texts, errors = self._outcome(app)
+        assert texts == []
+        assert errors == (["No speech detected"] if chunked else [])
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
+    def test_noise_two_word_rule_survives_a_correction_that_collapses_real_speech(
+        self, app, tmp_path, monkeypatch, chunked
+    ):
+        """Sol review (MAJOR): real two-word speech ("open ai") corrected down
+        to one word ("OpenAI") was wrongly discarded, because the removed
+        wrapper-level check ran on the corrected text instead of what the
+        recognizer actually heard."""
+        self._license_vocabulary(monkeypatch)
+        app.config["vocabulary_replacements"] = [["open ai", "OpenAI"]]
+        app.config["post_processing_enabled"] = False
+        self._real_transcription(monkeypatch, "open ai")
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked), chunked)
+
+        texts, errors = self._outcome(app)
+        assert texts == ["OpenAI"]
+        assert errors == []
+
+    @pytest.mark.parametrize("trailing", ["noise", "silence"])
+    def test_speech_session_logs_a_trailing_non_speech_chunks_levels(
+        self, app, tmp_path, trailing
+    ):
+        """Sol review MINOR: a session can open with real speech and still end
+        on a noise-like or silent tail chunk (the mic kept running into a quiet
+        room, a fan kicking in). Every non-speech per-chunk verdict must now be
+        logged with its levels before branching — an accepted noise chunk used
+        to log nothing at all, and a silent one only the generic skip message,
+        neither carrying a single number."""
+        trailing_wav = (_steady_noise_wav(tmp_path) if trailing == "noise"
+                        else _all_zero_wav(tmp_path))
+        store = []
+        app._transcribe_chunk(str(_speech_like_wav(tmp_path)), 0, app.session_generation, store)
+        app._transcribe_chunk(str(trailing_wav), 1, app.session_generation, store)
+
+        verdict_logs = [m for m in app.logs if m.startswith("🔇 Speech check:")]
+        # Exactly one: the leading speech chunk never logs a verdict at all.
+        assert len(verdict_logs) == 1
+        assert verdict_logs[0].startswith(f"🔇 Speech check: {trailing} (peak ")
 
     def test_all_zero_recording_without_a_device_name(self, app, tmp_path):
         app.config["audio_device_name"] = None

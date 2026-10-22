@@ -190,7 +190,7 @@ from wayfinder.utils.platform import (
     get_whisper_model_search_dirs,
 )
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_duration_seconds, analyze_wav_speech_activity, noise_transcript_has_speech
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_duration_seconds, analyze_wav_speech_activity
 from wayfinder.core.transcriber import (
     RequestAbandoned, TranscriptionError, dictation_requests, transcribe_with_config,
 )
@@ -24964,6 +24964,12 @@ class WayfinderApp(ctk.CTk):
             # (see _speech_check).  Fail open when the WAV cannot be measured.
             activity = analyze_wav_speech_activity(chunk_path)
             noise = activity is not None and activity.verdict == "noise"
+            if activity is not None and activity.verdict != "speech":
+                # Log every non-speech verdict's levels before branching — an
+                # accepted noise chunk used to log nothing, and a silent one
+                # only the generic skip message below, leaving nothing in the
+                # activity log to tell which check fired or how close it was.
+                self.log(f"🔇 Speech check: {activity.verdict} ({activity.describe()})")
             if activity is not None and activity.verdict == "silence":
                 with self.chunk_transcription_lock:
                     while len(store) <= chunk_index:
@@ -25013,11 +25019,13 @@ class WayfinderApp(ctk.CTk):
                 request_token=request_token,
                 unprompted=noise,
             )
-            if noise and not noise_transcript_has_speech(text):
-                if text.strip():
-                    self.log(f"🔇 Chunk {chunk_index + 1}: dropped {text.strip()!r} from "
-                             f"noise-like audio ({activity.describe()})")
-                text = ""
+            if noise and not text.strip():
+                # transcribe_with_config already held the recognizer's own words to
+                # the two-word rule (and checked for a known hallucination phrase)
+                # before any vocabulary/LLM rewrite could see them. Log only that
+                # outcome here — never the words themselves, even on rejection.
+                self.log(f"🔇 Chunk {chunk_index + 1}: noise-like audio produced "
+                         f"0 usable words, dropped")
             raw_session = WayfinderApp._raw_session_enabled(self)
             if context and not raw_session:
                 # A prompt can make Whisper return a fragment for a whole chunk
@@ -25448,9 +25456,10 @@ class WayfinderApp(ctk.CTk):
                 request_token=WayfinderApp._dictation_request_token(self, gen),
                 unprompted=noise)
             trans_elapsed = time_module.perf_counter() - trans_start
+            # transcribe_with_config already held a noise-verdict recording's own
+            # recognizer words to the two-word rule before this point, so a rejected
+            # one comes back as "" here — never logged as recognized text.
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
-            if noise and not noise_transcript_has_speech(text):
-                text = ""  # Whisper's stray word for steady noise ("So,") — see _speech_check
             self.event_queue.put((EventType.TRANSCRIPTION_DONE, (text, gen)))
         except Exception as e:
             self.event_queue.put((EventType.TRANSCRIPTION_ERROR, (str(e), gen)))

@@ -3170,3 +3170,36 @@ class TestUnpromptedTranscription:
                                       unprompted=True)
         assert prompts == [""]
         assert text == "Hello there."
+
+    # -- Sol review of the PR #67 port: the two-word rule must run on the
+    # recognizer's OWN words, before vocabulary replacement or LLM cleanup can
+    # rewrite them, and a known hallucination phrase must be rejected even
+    # under Raw Transcript (whose early return used to skip that check). --
+
+    def test_unprompted_two_word_rule_precedes_vocabulary_correction(self, prompts, monkeypatch):
+        """A one-word noise artifact ("Okay.") must stay rejected even though a
+        configured correction would turn it into two words ("Sounds good."):
+        the rule has to see what the recognizer actually said."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: "Okay.")
+        self.config["vocabulary_replacements"] = [["okay", "sounds good"]]
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_unprompted_raw_transcription_still_rejects_a_hallucination_phrase(
+        self, prompts, monkeypatch
+    ):
+        """Raw Transcript's early return happens AFTER the noise checks now: a
+        known Whisper silence/noise catch-phrase has enough words to pass the
+        two-word rule, so it needs its own rejection — matching what normal
+        (non-raw) mode already does via clean_whisper_artifacts."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None: "Thank you for watching.")
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""

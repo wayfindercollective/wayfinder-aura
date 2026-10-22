@@ -466,8 +466,28 @@ class TestSilenceDetection:
     @pytest.mark.parametrize("text, kept", [
         ("", False), (".", False), ("So,", False), ("Okay.", False),
         ("Okay, sounds good.", True), ("It's crazy that Nico", True),
+        # Sol review (MAJOR): a bare \w+ scan split an apostrophe or a dotted
+        # abbreviation into separate "words" and let a single filler word
+        # through the two-word rule. Each of these is exactly one word.
+        ("I'm.", False), ("Let's.", False), ("O.K.", False),
+        # A real two-word case must still pass once words are counted properly.
+        ("Hey there.", True),
     ])
     def test_noise_transcript_needs_two_words(self, text, kept):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is kept
+
+    @pytest.mark.parametrize("text, kept", [
+        ("。", False),              # a single, bare punctuation character
+        ("嗯", False),              # one filler character — no real content
+        ("我需要一个技术经理来管理这个项目", True),  # a real sentence, no spaces at all
+    ])
+    def test_noise_transcript_counts_characters_for_scripts_without_spaces(self, text, kept):
+        """Sol review (MAJOR): a CJK transcript has no whitespace to split on,
+        so whitespace word-counting would see the WHOLE thing as one "word"
+        and silently drop a real, long dictation. Such scripts are counted by
+        character instead."""
         from wayfinder.core.recorder import noise_transcript_has_speech
 
         assert noise_transcript_has_speech(text) is kept

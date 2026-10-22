@@ -212,10 +212,45 @@ def audio_has_speech_activity(audio_data: np.ndarray, sample_rate: int = 16000) 
 # Air mic, but its transcript only counts as speech with at least this many words.
 NOISE_TRANSCRIPT_MIN_WORDS = 2
 
+# A script that doesn't separate words with spaces (Chinese, Japanese kana,
+# Korean Hangul, Thai, ...) would otherwise read as one long "word" and get
+# silently dropped no matter how much was said; such a transcript is counted
+# by character instead, at roughly a word's worth per character.
+NOISE_TRANSCRIPT_MIN_NO_SPACE_CHARS = 4
+_NO_SPACE_SCRIPT_RANGES = (
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
+    (0x3040, 0x30FF),   # Hiragana + Katakana
+    (0xAC00, 0xD7A3),   # Hangul syllables
+    (0x0E00, 0x0E7F),   # Thai
+)
+
+# Any Unicode letter or digit, excluding "_" (which \w matches but a word
+# doesn't consist of).
+_WORD_CHAR = re.compile(r"[^\W_]", re.UNICODE)
+
+
+def _is_no_space_script_letter(ch: str) -> bool:
+    return any(lo <= ord(ch) <= hi for lo, hi in _NO_SPACE_SCRIPT_RANGES)
+
 
 def noise_transcript_has_speech(text: str) -> bool:
-    """Whether Whisper's transcript of noise-verdict audio is real speech."""
-    return len(re.findall(r"\w+", text or "")) >= NOISE_TRANSCRIPT_MIN_WORDS
+    """Whether Whisper's transcript of noise-verdict audio is real speech.
+
+    Splits on whitespace and keeps a token if it has any letter or digit, so
+    an internal apostrophe or dot ("I'm.", "Let's.", "O.K.") stays one word
+    instead of splitting into two the way a bare ``\\w+`` scan would (that
+    counted "I'm." as two words and let a single filler word through).
+    """
+    text = text or ""
+    no_space_letters = sum(1 for ch in text if _is_no_space_script_letter(ch))
+    alnum_chars = sum(1 for ch in text if _WORD_CHAR.match(ch))
+    if no_space_letters and no_space_letters == alnum_chars:
+        # Every letter in the transcript is from a script with no inter-word
+        # spaces: whitespace-splitting it would see one giant "word" and drop
+        # a long, real sentence as if it were a short noise fragment.
+        return no_space_letters >= NOISE_TRANSCRIPT_MIN_NO_SPACE_CHARS
+    words = [token for token in text.split() if _WORD_CHAR.search(token)]
+    return len(words) >= NOISE_TRANSCRIPT_MIN_WORDS
 
 
 def audio_is_digital_silence(audio_data: np.ndarray) -> bool:
