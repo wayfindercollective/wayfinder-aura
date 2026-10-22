@@ -221,13 +221,6 @@ def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
     # _clipboard_set_windows lacked its restoring keyword (Sol mac r13), and
     # the deferred restore swallowed the TypeError.
     rig, w = _windows_send_rig(monkeypatch)
-    sets, write = [], w._write_open_clipboard
-
-    def spy(text, transient):
-        sets.append((text, transient))
-        return write(text, transient)
-
-    monkeypatch.setattr(w, "_write_open_clipboard", spy)
     pending = []
     monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
     w.inject_text_paste_windows("dictated words")
@@ -238,7 +231,14 @@ def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
     assert rig.fake.writes == ["dictated words"]
     assert len(rig.fake.formats) == 4   # 3 history-exclusion hints + the owner mark
     pending[0]()                         # the deferred restore, run now
-    assert sets == [("theirs", True)]    # only the restore still uses _write_open_clipboard
+    # The restore no longer goes through _write_open_clipboard either
+    # (Finding 3 Sol mac r17): it prepares its own previous-text AND
+    # dictation-fallback blocks directly, so it can put the dictation back
+    # if the previous-text write fails, something _write_open_clipboard's
+    # single-block contract can't express. It still marks its write
+    # transient — no owner mark this time, only the 3 history-exclusion hints.
+    assert rig.fake.writes == ["dictated words", "theirs"]
+    assert len(rig.fake.formats) == 3
     assert rig.clipboard == "theirs"
 
 
@@ -2036,6 +2036,7 @@ class _FakeWindows:
         self.opened = self._changed = False
         self.holder = None
         self.on_open = self.on_write = self.on_send = self.on_set = self.on_alloc = None
+        self.on_lock = None
         self.windows, self.formats, self._names = set(), {}, {}
         self.no_windows = False
         self._memory = {}
@@ -2128,6 +2129,12 @@ class _FakeWindows:
             return 0
         return self._keep(ctypes.create_unicode_buffer(self.clipboard))
 
+    def IsClipboardFormatAvailable(self, fmt):
+        assert self.opened
+        if fmt != 13:
+            return 1 if fmt in self.formats else 0
+        return 1 if self.clipboard is not None else 0
+
     def GetClipboardSequenceNumber(self):
         return self.seq
 
@@ -2159,6 +2166,8 @@ class _FakeWindows:
         return self._keep(ctypes.create_string_buffer(size))
 
     def GlobalLock(self, handle):
+        if self.on_lock is not None and self.on_lock(handle):
+            return 0
         return handle
 
     def GlobalUnlock(self, _handle):
@@ -2367,12 +2376,47 @@ def test_inject_text_surfaces_an_uncertain_paste_instead_of_typing(monkeypatch):
     assert typed == []
 
 
+def test_a_held_release_failure_is_uncertain_through_inject_text(monkeypatch):
+    # Finding 2 (Sol mac r17): hold_keys() sends the Ctrl+V press and the
+    # release as two separate _send calls. The press already lands fully —
+    # Ctrl+V has fired — before the release is even attempted, so a failed
+    # release must still stop inject_text's typing fallback from running,
+    # not just the isolated _press_keys case above: a real caller sees this
+    # through inject_text, where a "clean" failure would otherwise retype
+    # a paste that already landed.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    typed = []
+    monkeypatch.setattr(w, "inject_text_windows", lambda *a, **k: typed.append(a))
+    monkeypatch.setattr(injector.sys, "platform", "win32")
+    calls = [0]
+
+    def press_whole_then_split_release(n):
+        calls[0] += 1
+        return n if calls[0] == 1 else 1   # the press batch goes out whole
+
+    rig.fake.on_send = press_whole_then_split_release
+
+    with w.hold_keys(0.05):
+        with pytest.raises(injector.InjectionError) as excinfo:
+            injector.inject_text("dictation")
+    assert excinfo.value.uncertain_delivery is True
+    assert typed == []   # no typing fallback after an already-delivered press
+
+
 def test_a_partial_hold_keys_release_batch_retries_its_unsent_key_ups(monkeypatch):
     # Finding 3: hold_keys() sends presses and releases as two separate
     # _send calls. If the release batch itself only partially lands, the
     # unsent releases must still go out — _releases_for sees no press in
     # THIS call's own inputs, so without the extra retry a key stays down
     # in the game.
+    #
+    # Finding 2 (Sol mac r17): the press batch below goes out WHOLE first —
+    # Ctrl and V are already down in the target app, so the paste has
+    # already fired — before the release batch is even sent. A failed
+    # release after that is therefore never a clean "nothing happened": it
+    # must carry uncertain_delivery, same as Finding 3's own partial-press
+    # case, even though this call's own accepted events are releases only.
     from wayfinder.core import injector
     rig, w = _windows_send_rig(monkeypatch)
     calls = [0]
@@ -2386,7 +2430,7 @@ def test_a_partial_hold_keys_release_batch_retries_its_unsent_key_ups(monkeypatc
         with w.hold_keys(0.05):
             with pytest.raises(injector.InjectionError) as excinfo:
                 w._press_keys([w.VK_CONTROL, w.VK_V])
-    assert not getattr(excinfo.value, "uncertain_delivery", False)   # releases only, nothing pressed
+    assert excinfo.value.uncertain_delivery is True   # the press already landed
     assert rig.sent == [
         (0, w.VK_CONTROL, False), (0, w.VK_V, False),   # pressed, held
         (0, w.VK_V, True),                              # released: accepted
@@ -2496,6 +2540,115 @@ def test_the_windows_restore_checks_and_writes_under_one_open(monkeypatch):
                                "close", "destroy"]
 
 
+def test_a_restore_allocation_failure_touches_nothing_and_the_retry_restores(monkeypatch):
+    # Finding 3 (Sol mac r17): every block the restore could need is
+    # allocated before anything on the clipboard is touched, so a failed
+    # GlobalAlloc never empties the clipboard; the clipboard is still Aura's
+    # afterwards, so the bounded retry puts the user's text back.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    rig.fake.freed.clear()   # drop the initial paste's own unused-rollback free
+    lines = []
+    monkeypatch.setattr(w, "_paste_reporter", lines.append)
+    calls = [0]
+
+    def fail_first_alloc():
+        calls[0] += 1
+        return calls[0] == 1   # the first attempt's previous-text block only
+
+    rig.fake.on_alloc = fail_first_alloc
+    restore()
+    assert rig.clipboard == "theirs" and rig.fake.writes == ["dictation", "theirs"]
+    assert rig.fake.events.count("empty") == 1   # only the attempt that could write
+    # attempt 1 frees its dictation and mark blocks; attempt 2 its unused fallbacks
+    assert len(rig.fake.freed) == 4
+    assert len(lines) == 1 and "prepare the clipboard restore" in lines[0] and "theirs" not in lines[0]
+
+
+def test_a_restore_that_can_never_allocate_leaves_the_dictation_after_bounded_tries(monkeypatch):
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    lines, sleeps = [], []
+    monkeypatch.setattr(w, "_paste_reporter", lines.append)
+    rig.on_sleep = lambda: sleeps.append(1)
+    rig.fake.on_alloc = lambda: True
+    restore()
+    assert rig.clipboard == "dictation" and rig.fake.writes == ["dictation"]
+    assert "empty" not in rig.fake.events
+    assert len(lines) == 1 + w.RESTORE_RETRIES and len(sleeps) == w.RESTORE_RETRIES
+
+
+def test_a_restore_global_lock_failure_leaves_nothing_leaked(monkeypatch):
+    # Finding 3 + Finding 5 (Sol mac r17): GlobalAlloc can succeed while
+    # GlobalLock fails. _global_copy frees that one block itself (Finding
+    # 5); the restore's OTHER, successfully allocated blocks must not leak
+    # either once it gives up on preparing them all.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    rig.fake.freed.clear()   # drop the initial paste's own unused-rollback free
+    calls = [0]
+
+    def fail_first_lock(_handle):
+        calls[0] += 1
+        # Calls 1-2 are the pre-restore untouched check's own reads (the
+        # mark, then the dictated text) — both must succeed to reach the
+        # restore's own prepare step. Call 3 is the previous-text block's lock.
+        return calls[0] == 3
+
+    rig.fake.on_lock = fail_first_lock
+    restore()
+    assert rig.clipboard == "theirs"   # the retry
+    assert rig.fake.events.count("empty") == 1
+    # attempt 1: the failed-lock block plus the unused dictation and mark
+    # blocks; attempt 2: its unused dictation and mark fallbacks
+    assert len(rig.fake.freed) == 5
+
+
+def test_a_restore_set_clipboard_data_failure_puts_the_dictation_back_then_retries(monkeypatch):
+    # Finding 3 (Sol mac r17): if SetClipboardData(previous) fails after
+    # EmptyClipboard, the dictation and its mark prepared alongside go back
+    # in rather than leaving the clipboard empty, and the retry then
+    # restores the user's text.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    rig.fake.freed.clear()   # drop the initial paste's own unused-rollback free
+    calls = {"text": 0}
+
+    def on_set(fmt, _handle):
+        if fmt == w._CF_UNICODETEXT:
+            calls["text"] += 1
+            return calls["text"] == 1   # only the first previous-text write fails
+        return False
+
+    rig.fake.on_set = on_set
+    restore()
+    assert rig.clipboard == "theirs"
+    assert rig.fake.writes == ["dictation", "dictation", "theirs"]  # paste, rollback, retry
+    assert rig.fake.events.count("empty") == 2
+    # attempt 1: the refused previous block; attempt 2: its unused fallbacks
+    assert len(rig.fake.freed) == 3
+
+
+def test_a_rollback_that_loses_the_mark_stops_retrying(monkeypatch):
+    # Without the mark nothing proves the clipboard is still Aura's, so the
+    # retry must not write over what might now be the user's.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    mark_fmt = rig.fake.RegisterClipboardFormatW(w._OWNER_MARK_FORMAT)
+    calls = {"text": 0}
+
+    def on_set(fmt, _handle):
+        if fmt == w._CF_UNICODETEXT:
+            calls["text"] += 1
+            return calls["text"] == 1
+        return fmt == mark_fmt   # the mark cannot go back
+
+    rig.fake.on_set = on_set
+    sleeps = []
+    rig.on_sleep = lambda: sleeps.append(1)
+    restore()
+    assert rig.clipboard == "dictation"
+    assert rig.fake.writes == ["dictation", "dictation"]
+    assert rig.fake.events.count("empty") == 1   # no second attempt wrote
+    # one wait, then the next attempt's own check finds no mark and stops
+    assert sleeps == [1]
+
+
 def test_the_windows_restore_keeps_a_same_words_copy_made_while_it_waited(monkeypatch):
     # Sol mac r13: the counter was read before the clipboard opened; the user
     # copying the same words while it waited looked untouched, and the restore
@@ -2603,6 +2756,43 @@ def test_the_snapshot_and_the_write_share_one_open(monkeypatch):
     assert rig.fake.events == [
         "window", "open", "read", "empty", ("set", "dictation"), "close", "destroy",
     ]
+
+
+def test_an_unreadable_snapshot_raises_and_falls_back_to_typing(monkeypatch):
+    # Finding 4 (Sol mac r17): GlobalLock failing on the clipboard's OWN
+    # CF_UNICODETEXT handle used to read back through _read_open_clipboard as
+    # previous=None — indistinguishable from "nothing on the clipboard" — so
+    # the paste went ahead, emptied an unreadable clipboard, and scheduled no
+    # restore. A format that IS there (GetClipboardData returned a handle)
+    # but cannot be read must raise before anything destructive, so
+    # inject_text falls back to typing exactly as it does for any other
+    # refused paste.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    typed = []
+    monkeypatch.setattr(w, "inject_text_windows", lambda *a, **k: typed.append(a))
+    monkeypatch.setattr(injector.sys, "platform", "win32")
+    calls = [0]
+
+    def fail_first_lock(_handle):
+        calls[0] += 1
+        return calls[0] == 1   # only the snapshot's own lock fails
+
+    rig.fake.on_lock = fail_first_lock
+
+    injector.inject_text("dictation")
+    assert typed == [("dictation", "instant")]
+    assert "empty" not in rig.fake.events and rig.fake.writes == [] and rig.sent == []
+    assert rig.clipboard == "theirs"   # never touched
+
+
+def test_global_copy_frees_the_block_when_the_lock_fails(monkeypatch):
+    # Finding 5 (Sol mac r17): GlobalAlloc succeeding but GlobalLock failing
+    # used to leak the block — nothing ever freed it.
+    rig, w = _windows_send_rig(monkeypatch)
+    rig.fake.on_lock = lambda _handle: True
+    assert w._global_copy(b"hello") is None
+    assert len(rig.fake.freed) == 1
 
 
 def test_an_allocation_failure_refuses_before_anything_is_written(monkeypatch):
