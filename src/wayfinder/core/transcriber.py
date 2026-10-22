@@ -3239,30 +3239,7 @@ _NOISE_JOINER = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
 _NOISE_MARKER = r'\s*' + _NOISE_WORD + r'(?:' + _NOISE_JOINER + r'\s+' + _NOISE_WORD + r'){0,2}\s*'
 
 
-# A sound description, for the noise check's safety copy only (Sol pr67 r5):
-# up to two describing words before each noise word, noise words joined as
-# in brackets, at most one action word and a closing mark. "*loud noise.*",
-# "(soft music)", "*door slams*" go; "*the door*" or "*door and **kwargs"
-# is someone's emphasis or code, not an annotation, and stays.
-_SOUND_MODIFIER = (
-    r'(?:loud|soft|quiet|faint|distant|gentle|heavy|low|muffled|upbeat|'
-    r'dramatic|ambient|eerie|tense|suspenseful|calm|sad|cheerful|light|slow|'
-    r'fast|deep|steady|piano|guitar|electronic|classical|jazz|instrumental|'
-    r'orchestral)'
-)
-_SOUND_ACTION = (
-    r'(?:slams?|closes?|opens?|creaks?|rings?|buzz(?:es)?|barks?|beeps?|'
-    r'plays?|playing|continues|fades?|stops?|starts?|swells?)'
-)
-_DESCRIBED_NOISE = r'(?:' + _SOUND_MODIFIER + r'\s+){0,2}' + _NOISE_WORD
-_SOUND_ANNOTATION = (
-    r'\s*' + _DESCRIBED_NOISE
-    + r'(?:' + _NOISE_JOINER + r'\s+' + _DESCRIBED_NOISE + r'){0,2}'
-    + r'(?:\s+' + _SOUND_ACTION + r')?\s*[.!?…]*\s*'
-)
-
-
-def _strip_non_speech_markers(text: str, *, strict_asterisks: bool = False) -> str:
+def _strip_non_speech_markers(text: str) -> str:
     """Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
     [Music], (background noise), ♪, special-token leaks like <|endoftext|>
     or a <|0.00|> timestamp ... — the exact patterns
@@ -3270,20 +3247,10 @@ def _strip_non_speech_markers(text: str, *, strict_asterisks: bool = False) -> s
     (Sol pr67 r2) to build a safety copy for the speech-guard's own checks,
     which must never read one of Whisper's own annotations, or a leaked
     special token like <|endoftext|>, as a transcribed word (Sol pr67 r3).
-
-    *strict_asterisks* (the safety copy): only a sound annotation goes
-    (_SOUND_ANNOTATION, in asterisks or brackets), so "*args and **kwargs"
-    keeps its words instead of losing everything up to the last asterisk
-    (Sol pr67 r3) and "Close *the door*" keeps its emphasis (Sol pr67 r5).
-    Normal cleanup keeps the broad pattern, so its output does not change.
     """
     import re
 
-    if strict_asterisks:
-        for opening, closing in (r'\*', r'\*'), (r'\[', r'\]'), (r'\(', r'\)'):
-            text = re.sub(opening + _SOUND_ANNOTATION + closing, ' ', text, flags=re.IGNORECASE)
-    else:
-        text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
+    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
     text = re.sub(r'\*+', '', text)
     text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
@@ -3297,19 +3264,40 @@ def _strip_non_speech_markers(text: str, *, strict_asterisks: bool = False) -> s
     return text
 
 
+# Anything Whisper wrapped, whatever it says inside: [Music], (door opens),
+# *a loud noise*, **music**, ♪ la la ♪, <|endoftext|>. Innermost first, so
+# nested wrappers go too.
+_WRAPPED_SPAN = r'\[[^\[\]]*\]|\([^()]*\)|\*+[^*]*\*+|♪[^♪]*♪|<\|[^|]*\|>'
+
+
 def _noise_check_safety_copy(text: str) -> str:
     """A safety copy of *text* for the noise-verdict speech-guard's own two
     checks ONLY (Sol pr67 r2) — never what Raw Transcript, or anything else
-    downstream, sees. Strips Whisper's own non-speech annotations (only
-    noise words between asterisks, Sol pr67 r3) and then canonicalises
-    whitespace the same way normal cleanup does right before its own final
-    hallucination check: an annotation like "[Music]" must not read as a
-    transcribed word, and repeated whitespace inside a known hallucination
-    phrase must not defeat the full-text match.
+    downstream, sees: an accepted recording's text is returned unchanged.
+
+    Nothing Whisper wrapped counts as a spoken word here, whatever is
+    inside (Sol pr67 r6): brackets, parentheses, asterisks, music notes and
+    special tokens go whole, and an opener left unmatched runs to the end
+    (a closer, from the start). Telling a sound annotation from someone's
+    emphasis or code by its words kept failing both ways — "*a loud noise*
+    Okay." passing as speech, "Turn **music**" losing a word — so it is no
+    longer tried. Erring towards removal is safe on this path only: these
+    are recordings 1.3.0 dropped outright as having no speech activity, so
+    a wrongly rejected one is dropped exactly as it was before, while
+    annotation text wrongly counted as speech would type something that was
+    never said. Whitespace is then canonicalised the same way normal
+    cleanup does right before its own final hallucination check.
     """
     import re
 
-    return re.sub(r'\s+', ' ', _strip_non_speech_markers(text or "", strict_asterisks=True)).strip()
+    text = text or ""
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(_WRAPPED_SPAN, ' ', text)
+    text = re.sub(r'^.*[\])]', ' ', text, flags=re.DOTALL)
+    text = re.sub(r'[\[(*♪].*$', ' ', text, flags=re.DOTALL)
+    return re.sub(r'\s+', ' ', text).strip()
 
 
 # whisper.cpp refuses more than 8 decoders ("too many decoders requested"),

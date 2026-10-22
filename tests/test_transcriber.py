@@ -3414,25 +3414,22 @@ class TestUnpromptedTranscription:
 
     # -- Sol pr67 r3: six more findings against the safety copy itself. --
 
-    def test_unprompted_raw_transcription_keeps_code_with_asterisks(
+    def test_unprompted_raw_transcription_returns_accepted_text_untouched(
         self, prompts, monkeypatch
     ):
-        """Finding 2: the generic "*anything up to 40 chars*"
-        annotation pattern treated the span between TWO UNRELATED asterisk
-        pairs in "*args and **kwargs" as one non-speech annotation and
-        swallowed "args and", leaving only "kwargs" -- one word, wrongly
-        rejected. The safety copy's stricter rule must leave real code (or
-        Markdown emphasis) alone and keep this as real speech; normal
-        cleanup's own (separately tested) output is unaffected."""
+        """Finding 2, redone (Sol pr67 r6): wrapped text never counts towards
+        the two-word rule, but it only decides accept or reject. An accepted
+        recording comes back from Raw Transcript exactly as heard, wrappers
+        included."""
         from wayfinder.core import transcriber as T
 
+        heard = "*Really* we need **two** more chairs (for later)."
         monkeypatch.setattr(
             T.WhisperCppBackend, "transcribe",
-            lambda backend, audio_path, context="", deadline=None:
-                "*args and **kwargs")
+            lambda backend, audio_path, context="", deadline=None: heard)
         self.config["raw_transcription"] = True
         text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
-        assert text == "*args and **kwargs"
+        assert text == heard
 
     def test_unprompted_raw_transcription_keeps_mixed_script_sentences_distinct(
         self, prompts, monkeypatch
@@ -3527,14 +3524,26 @@ class TestUnpromptedTranscription:
 
     @pytest.mark.parametrize("raw", [False, True])
     @pytest.mark.parametrize("heard", [
-        # Sol pr67 r5: emphasis around a noise word is someone's words,
-        # and so is code that starts like an annotation.
+        # Sol pr67 r6: nothing Whisper wrapped counts as a spoken word on the
+        # noise path, whatever it says inside. Telling an annotation from
+        # emphasis or code by its words failed both ways ("*a loud noise*
+        # Okay." passed, "Turn **music**" lost a word). A wrong rejection
+        # drops the recording as 1.3.0 already did; a wrong acceptance types
+        # something never said.
+        "*a loud noise* Okay.",
+        "*loud crashing noise* Okay.",
         "Close *the door*",
-        "Use *the phone*",
-        "Drink *the water*",
+        "Turn **music**",
+        "`*phone rings*` twice",
+        "(door opens) Alice",
         "*door and **kwargs",
+        "*args and **kwargs",
+        # An opener left unmatched runs to the end, a closer from the start.
+        "Okay [Music",
+        "loud noise] Okay.",
+        "♪ la la la",
     ])
-    def test_unprompted_noise_keeps_emphasis_and_code_around_noise_words(
+    def test_unprompted_noise_never_counts_wrapped_words(
         self, prompts, monkeypatch, heard, raw
     ):
         from wayfinder.core import transcriber as T
@@ -3543,21 +3552,26 @@ class TestUnpromptedTranscription:
                             lambda backend, audio_path, context="", deadline=None: heard)
         self.config["raw_transcription"] = raw
         text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
-        assert text.strip()
+        assert text == ""
 
     @pytest.mark.parametrize("raw", [False, True])
-    def test_unprompted_noise_keeps_code_with_asterisks(self, prompts, monkeypatch, raw):
-        """Finding 2's stricter rule must still leave real code/Markdown
-        alone, with Raw Transcript either on or off."""
+    @pytest.mark.parametrize("heard", [
+        "Close *the door* behind you please.",
+        "(door opens) Alice, come in.",
+        "We need [two] more chairs.",
+    ])
+    def test_unprompted_noise_keeps_two_words_outside_any_wrapper(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        """Two spoken words outside every wrapper still pass, Raw Transcript
+        on or off; Raw returns them exactly as heard."""
         from wayfinder.core import transcriber as T
 
-        monkeypatch.setattr(
-            T.WhisperCppBackend, "transcribe",
-            lambda backend, audio_path, context="", deadline=None:
-                "*args and **kwargs")
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
         self.config["raw_transcription"] = raw
         text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
-        assert text != ""
+        assert text == heard if raw else text.strip()
 
     @pytest.mark.parametrize("raw", [False, True])
     @pytest.mark.parametrize("heard", [
