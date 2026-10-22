@@ -235,6 +235,16 @@ def spawn_tracked(command: Sequence[str], *, stop=None, **popen_kwargs) -> subpr
     return proc
 
 
+def track_existing(proc: subprocess.Popen, *, stop=None) -> bool:
+    """Track a child started elsewhere (a server being retired) so a terminal
+    shutdown stops it; False once one has begun, and the caller must stop it."""
+    with _tracked_lock:
+        if _tracked_closed:
+            return False
+        _tracked[proc] = stop or _terminate_child
+    return True
+
+
 def forget_tracked(proc: subprocess.Popen) -> None:
     with _tracked_lock:
         _tracked.pop(proc, None)

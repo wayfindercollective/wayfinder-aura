@@ -14106,6 +14106,14 @@ class WayfinderApp(ctk.CTk):
                 cancel_preparation(dict(self.config))
             except Exception:
                 pass
+        elif IS_MACOS:
+            # Turning GPU on is the user's retry: Core ML failures recorded
+            # earlier (a sleep, low memory) no longer hold it back.
+            try:
+                from wayfinder.utils.macos_coreml import reset_comparison_failures
+                reset_comparison_failures()
+            except Exception:
+                pass
         if (
             gpu_on and not IS_MACOS
             and self.config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"

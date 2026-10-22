@@ -86,7 +86,7 @@ def test_selection_is_opt_in_and_entitlement_bound(monkeypatch, platform, gpu, l
     monkeypatch.setattr(transcriber.WhisperServerBackend, "is_available", lambda self: True)
     monkeypatch.setattr(macos_coreml, "coreml_twin", lambda cli, model: calls.append((cli, model)) or "/native/bin/whisper-coreml/whisper-cli")
     monkeypatch.setattr(macos_coreml, "converted_model_path", lambda model: Path("/derived/ggml-base.en.bin"))
-    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda: True)   # already loaded
+    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda *a: True)   # already loaded
     backend = transcriber.get_backend({
         "transcription_backend": "whisper_cpp", "model_path": "/models/ggml-base.en.bin",
         "use_gpu": gpu, "whisper_coreml_encoder": opt_in,
@@ -316,7 +316,8 @@ def comparison_rig(tmp_path, monkeypatch):
     monkeypatch.setattr(macos_coreml, "_public_probe", lambda: clip)
     rig = SimpleNamespace(converted=[], probes=[], cli=cli, model=model,
                           config={"model_path": str(model)},
-                          backend=SimpleNamespace(use_gpu=True, whisper_server_binary=str(cli.with_name("whisper-server"))))
+                          backend=SimpleNamespace(use_gpu=True, threads=4,
+                                                  whisper_server_binary=str(cli.with_name("whisper-server"))))
 
     def prepare(c, m, *, cancelled):
         rig.converted.append(m)
@@ -337,8 +338,10 @@ def test_a_comparison_that_keeps_failing_is_not_retried_every_launch(comparison_
 
     monkeypatch.setattr(macos_coreml, "_compare_with_probes", probes)
     for _launch in range(macos_coreml.MAX_COMPARISON_FAILURES):
+        macos_coreml._session_failures.clear()   # a relaunch
         with pytest.raises(TimeoutError):
             macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False)
+    macos_coreml._session_failures.clear()
     assert macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False) is False
     assert len(rig.probes) == macos_coreml.MAX_COMPARISON_FAILURES
     assert len(rig.converted) == macos_coreml.MAX_COMPARISON_FAILURES
@@ -416,7 +419,7 @@ def _darwin_selection(monkeypatch, resident):
     monkeypatch.setattr(transcriber.WhisperServerBackend, "is_available", lambda self: True)
     monkeypatch.setattr(macos_coreml, "coreml_twin", lambda cli, model: "/native/bin/whisper-coreml/whisper-cli")
     monkeypatch.setattr(macos_coreml, "converted_model_path", lambda model: Path("/derived/ggml-base.en.bin"))
-    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda: resident)
+    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda *a: resident)
     monkeypatch.setattr(macos_coreml, "schedule_preparation",
                         lambda config, backend: scheduled.append((config, backend)))
     config = {"transcription_backend": "whisper_cpp", "model_path": "/models/ggml-base.en.bin",
@@ -440,19 +443,35 @@ def test_once_core_ml_serves_dictation_uses_it(monkeypatch):
     assert scheduled == []
 
 
-@pytest.mark.parametrize("binary,alive,resident", [
-    ("/app/bin/whisper-coreml/whisper-server", True, True),
-    ("/app/bin/whisper-server", True, False),            # Metal serves: still hand over
-    ("/app/bin/whisper-coreml/whisper-server", False, False),
-    (None, True, False)])
-def test_only_a_running_core_ml_server_counts_as_resident(monkeypatch, binary, alive, resident):
+CORE_ML_SERVER = "/app/bin/whisper-coreml/whisper-server"
+CONVERTED = "/derived/turbo-a.bin"
+
+
+@pytest.mark.parametrize("change,resident", [
+    ({}, True),
+    ({"_server_binary": "/app/bin/whisper-server"}, False),   # Metal serves: still hand over
+    ({"alive": False}, False),
+    ({"_server_binary": None}, False),
+    ({"_server_model_path": "/derived/turbo-b.bin"}, False),  # another model's Core ML
+    ({"ready": False}, False),                                # still loading
+    ({"_server_threads": 8}, False),
+    ({"_server_use_gpu": False}, False),
+])
+def test_only_this_loaded_core_ml_server_counts_as_resident(monkeypatch, change, resident):
+    # Sol mac r1: Core ML serving model A counted as resident for model B,
+    # so B's backend was chosen directly and the dictation waited out its load.
     from wayfinder.core.transcriber import WhisperServerBackend
+    alive = change.get("alive", True)
     proc = SimpleNamespace(poll=lambda: None if alive else 1)
-    monkeypatch.setattr(WhisperServerBackend, "_server_process", proc)
-    monkeypatch.setattr(WhisperServerBackend, "_server_binary", binary)
-    assert macos_coreml.coreml_resident() is resident
+    state = {"_server_process": proc, "_server_binary": CORE_ML_SERVER, "_server_model_path": CONVERTED,
+             "_server_threads": 4, "_server_use_gpu": True,
+             "_server_ready": proc if change.get("ready", True) else None}
+    state.update({k: v for k, v in change.items() if k.startswith("_")})
+    for name, value in state.items():
+        monkeypatch.setattr(WhisperServerBackend, name, value)
+    assert macos_coreml.coreml_resident(CORE_ML_SERVER, CONVERTED, 4) is resident
     monkeypatch.setattr(WhisperServerBackend, "_server_process", None)
-    assert macos_coreml.coreml_resident() is False
+    assert macos_coreml.coreml_resident(CORE_ML_SERVER, CONVERTED, 4) is False
 
 
 @pytest.mark.parametrize("preferred,resident,handed_off", [
@@ -463,7 +482,7 @@ def test_a_compared_model_hands_over_instead_of_comparing_again(
     row = {"preferred": preferred, "same_words": True, "metal_seconds": 2.0, "coreml_seconds": 0.7}
     monkeypatch.setattr(macos_coreml, "comparison", lambda c, m: row)
     monkeypatch.setattr(macos_coreml, "coreml_twin", lambda c, m: "twin" if preferred else None)
-    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda: resident)
+    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda *a: resident)
     calls = []
     monkeypatch.setattr(macos_coreml, "_hand_off", lambda *a: calls.append(a) or True)
     monkeypatch.setattr(macos_coreml, "_compare_with_probes",
@@ -503,7 +522,7 @@ def _hand_off_rig(monkeypatch, outcomes, alive=True):
 def test_the_hand_over_waits_out_a_dictation_without_reloading(monkeypatch):
     outcomes = [InterruptedError("dictation began"), True]
     loads = _hand_off_rig(monkeypatch, outcomes)
-    assert macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-coreml/whisper-cli",
+    assert macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-cli", "/b/whisper-coreml/whisper-cli",
                                   "/m.bin", lambda: False) is True
     assert outcomes == [] and len(loads) == 1   # one load, published at the next idle
     assert loads[0] == ("/b/whisper-coreml/whisper-server", "/derived/m.bin", True)
@@ -512,7 +531,7 @@ def test_the_hand_over_waits_out_a_dictation_without_reloading(monkeypatch):
 def test_a_switch_cancels_the_hand_over(monkeypatch):
     _hand_off_rig(monkeypatch, [InterruptedError("switched")])
     with pytest.raises(InterruptedError):
-        macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-coreml/whisper-cli",
+        macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-cli", "/b/whisper-coreml/whisper-cli",
                                "/m.bin", lambda: True)
 
 
@@ -521,13 +540,13 @@ def test_a_core_ml_server_that_dies_before_taking_over_is_a_failure(monkeypatch)
     # it always dies stops loading it after MAX_COMPARISON_FAILURES.
     _hand_off_rig(monkeypatch, [False], alive=False)
     with pytest.raises(RuntimeError):
-        macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-coreml/whisper-cli",
+        macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-cli", "/b/whisper-coreml/whisper-cli",
                                "/m.bin", lambda: False)
 
 
 def test_a_probe_from_before_a_switch_is_left_to_the_new_mode(monkeypatch):
     _hand_off_rig(monkeypatch, [False])
-    assert macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-coreml/whisper-cli",
+    assert macos_coreml._hand_off(SimpleNamespace(), "/b/whisper-cli", "/b/whisper-coreml/whisper-cli",
                                   "/m.bin", lambda: False) is False
 
 
@@ -609,10 +628,384 @@ def test_no_core_ml_preparation_starts_after_quit(monkeypatch):
     monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(transcriber, "_resolve_whisper_cli_binary", lambda path: "/b/whisper-cli")
     monkeypatch.setattr(FeatureGate, "has_feature", lambda self, feature: True)
-    monkeypatch.setattr(macos_coreml, "comparison_failures", lambda c, m: 0)
+    monkeypatch.setattr(macos_coreml, "comparison_blocked", lambda c, m: None)
     monkeypatch.setattr(macos_coreml, "prepare_encoder",
                         lambda *a, **kw: pytest.fail("a probe started after Quit"))
     monkeypatch.setattr(transcriber.WhisperServerBackend, "_closed", True)
     backend = SimpleNamespace(use_gpu=True, whisper_server_binary="/b/whisper-server")
     assert macos_coreml.prepare_comparison(
         {"model_path": "/m/ggml-large-v3-turbo-q5_0.bin"}, backend, cancelled=lambda: False) is False
+
+
+@pytest.fixture(autouse=True)
+def _a_fresh_session():
+    # Session failure guard: each test is its own launch.
+    macos_coreml._session_failures.clear()
+    yield
+    macos_coreml._session_failures.clear()
+
+
+# Sol mac r1: a restart or Quit during a Core ML load or compile.
+
+def _loading_probe_backend(ready_line="Core ML model loaded"):
+    import sys
+    return _probe_backend([sys.executable, "-u", "-c",
+                           f"import time; print({ready_line!r}); time.sleep(30)"])
+
+
+def _ready_once_listening(monkeypatch, binary):
+    """The probe's readiness checks, faked: a server under each tracked child
+    owns the port and answers /health."""
+    import contextlib
+    from wayfinder.utils import child_supervisor, loopback_http, macos_procinfo
+
+    rows = lambda *a, **kw: "\n".join(f"{os.getuid()} 1 {proc.pid} {binary} --port 1"
+                                      for proc in list(child_supervisor._tracked))
+    monkeypatch.setattr(macos_coreml.subprocess, "check_output", rows)
+    monkeypatch.setattr(macos_procinfo, "pid_listens_on_tcp", lambda pid, port: True)
+    monkeypatch.setattr(loopback_http, "urlopen_loopback",
+                        lambda *a, **kw: contextlib.nullcontext(SimpleNamespace(status=200)))
+
+
+@pytest.mark.parametrize("quit_call", ["terminal shutdown", "exit hook"])
+def test_quit_stops_a_loading_probe_before_it_returns(monkeypatch, quit_call):
+    # An overlay restart re-execs under the same pid: the probe's supervisor
+    # never notices, so the terminal shutdown itself must stop the probe.
+    import threading
+    from wayfinder.core.transcriber import WhisperServerBackend
+    from wayfinder.utils import child_supervisor
+    monkeypatch.setattr(macos_coreml.subprocess, "check_output", lambda *a, **kw: "")
+    outcome = {}
+
+    def load():
+        try:
+            with macos_coreml._probe_server(_loading_probe_backend(), "/b/whisper-server", "/m.bin",
+                                            coreml=True, cancelled=lambda: False):
+                outcome["served"] = True
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=load, daemon=True)
+    thread.start()
+    for _ in range(250):
+        if child_supervisor._tracked:
+            break
+        threading.Event().wait(0.02)
+    (proc,) = list(child_supervisor._tracked)
+    if quit_call == "terminal shutdown":
+        WhisperServerBackend.shutdown(terminal=True)
+    else:
+        child_supervisor.close_tracked()
+    assert proc.poll() is not None   # stopped before the shutdown returned
+    thread.join(10)
+    assert isinstance(outcome.get("error"), child_supervisor.HelperStopped)
+
+
+@pytest.mark.parametrize("quit_call", ["terminal shutdown", "exit hook"])
+def test_a_hand_over_quit_cut_short_is_not_a_core_ml_failure(comparison_rig, monkeypatch, quit_call):
+    # The exit hook stops helpers with no supersede, so the job still looks
+    # live: only the mark on the child tells its exit from a crash.
+    import threading
+    from wayfinder.core.transcriber import WhisperServerBackend
+    from wayfinder.utils import child_supervisor
+    rig = comparison_rig
+    twin = Path(macos_coreml.prepared_twin(str(rig.cli), str(rig.model)))
+    monkeypatch.setattr(macos_coreml, "comparison", lambda c, m: {"preferred": True})
+    monkeypatch.setattr(macos_coreml, "coreml_twin", lambda c, m: str(twin))
+    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda *a: False)
+    monkeypatch.setattr(macos_coreml, "converted_model_path", lambda m: Path("/derived/m.bin"))
+    monkeypatch.setattr(macos_coreml, "_wait_for_idle", lambda cancelled: None)
+    _ready_once_listening(monkeypatch, str(twin.with_name("whisper-server")))
+    loaded, quit_done = threading.Event(), threading.Event()
+
+    def publish(probe, cancelled, decide=None):
+        loaded.set()
+        assert quit_done.wait(10)
+        return False
+
+    monkeypatch.setattr(macos_coreml, "_publish_probe", publish)
+    backend = _loading_probe_backend()
+    for name, value in vars(rig.backend).items():
+        setattr(backend, name, value)
+    outcome = {}
+
+    def prepare():
+        try:
+            outcome["result"] = macos_coreml._prepare_comparison(rig.config, backend, cancelled=lambda: False)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=prepare, daemon=True)
+    thread.start()
+    assert loaded.wait(10), f"the Core ML probe never loaded: {outcome}"
+    if quit_call == "terminal shutdown":
+        WhisperServerBackend.shutdown(terminal=True)
+    else:
+        child_supervisor.close_tracked()
+    quit_done.set()
+    thread.join(10)
+    assert isinstance(outcome.get("error"), InterruptedError)
+    child_supervisor.reopen_tracked()
+    WhisperServerBackend._closed = False
+    assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0
+    assert macos_coreml.comparison_blocked(str(rig.cli), str(rig.model)) is None
+
+
+def test_a_compile_quit_cut_short_is_not_a_core_ml_failure(tmp_path, monkeypatch):
+    import threading
+    from wayfinder.utils import child_supervisor, macos_coreml_convert
+    cli = tmp_path / "bin" / "whisper-cli"
+    cli.parent.mkdir()
+    cli.write_bytes(b"cli")   # the failure key stamps it
+    compiler = cli.with_name("coreml-compile")
+    compiler.write_text("#!/bin/sh\nexec sleep 30\n")
+    compiler.chmod(0o700)
+    model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+    model.write_bytes(b"model")
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(macos_coreml, "_conversion_root", lambda: tmp_path / "derived")
+    monkeypatch.setattr(macos_coreml, "_failure_path", lambda: tmp_path / "coreml-failures.json")
+    monkeypatch.setattr(macos_coreml, "_hardware_identity", lambda: {"hardware": "MacBookAir10,1"})
+    monkeypatch.setattr(macos_coreml, "_binary_twin", lambda c: cli)
+    monkeypatch.setattr(macos_coreml, "prepared_twin", lambda c, m: None)
+    monkeypatch.setattr(macos_coreml_convert, "template_path", lambda: None)
+    monkeypatch.setattr(macos_coreml_convert, "load_bindings", lambda path: {"weights_size": 1})
+    monkeypatch.setattr(macos_coreml_convert, "populate_package", lambda m, p, cancelled: {"format": 2})
+    outcome = {}
+    def compile_():
+        try:
+            outcome["result"] = macos_coreml.prepare_encoder(str(cli), str(model), cancelled=lambda: False)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(daemon=True, target=compile_)
+    thread.start()
+    for _ in range(250):
+        if child_supervisor._tracked:
+            break
+        threading.Event().wait(0.02)
+    assert child_supervisor._tracked, "the compiler never started"
+    child_supervisor.close_tracked()   # the exit hook: no supersede first
+    thread.join(10)
+    assert outcome == {"result": False}
+    assert macos_coreml.comparison_failures(str(cli), str(model)) == 0
+    # The same compile failing on its own, after a reopen, is counted.
+    child_supervisor.reopen_tracked()
+    compiler.write_text("#!/bin/sh\nexit 3\n")
+    assert macos_coreml.prepare_encoder(str(cli), str(model), cancelled=lambda: False) is False
+    assert macos_coreml.comparison_failures(str(cli), str(model)) == 1
+
+
+def _published_server_rig(monkeypatch):
+    import threading
+    from unittest.mock import Mock
+    from wayfinder.core.transcriber import WhisperServerBackend
+    cls = WhisperServerBackend
+    for name in ("_server_process", "_server_port", "_server_model_path", "_server_binary", "_server_use_gpu",
+                 "_server_threads", "_server_log_tail", "_server_log_thread", "_server_disabled",
+                 "_server_epoch", "_server_ready"):
+        monkeypatch.setattr(cls, name, getattr(cls, name))
+    monkeypatch.setattr(cls, "_server_lock", threading.Lock())
+    monkeypatch.setattr(macos_coreml, "_idle", lambda: True)
+    old = Mock()
+    cls._server_process = old
+    proc = Mock()
+    proc.poll.return_value = None
+    probe = SimpleNamespace(proc=proc, port=9000, tail=[], reader=Mock(), adopted=False,
+                            backend=SimpleNamespace(model_path="converted.bin", threads=4,
+                                                    whisper_server_binary="coreml-server",
+                                                    _load_epoch=cls._epoch))
+    return cls, old, probe
+
+
+def test_the_retiring_server_is_tracked_until_it_is_gone(monkeypatch):
+    # Quit while the old server is still stopping: the shutdown must reach it.
+    from wayfinder.utils import child_supervisor
+    cls, old, probe = _published_server_rig(monkeypatch)
+    tracked_while_stopping = []
+    monkeypatch.setattr(macos_coreml, "_stop_probe",
+                        lambda proc: tracked_while_stopping.append(proc in child_supervisor._tracked))
+    assert macos_coreml._publish_probe(probe, lambda: False) is True
+    assert cls._server_process is probe.proc and tracked_while_stopping == [True]
+    assert old not in child_supervisor._tracked and probe.proc not in child_supervisor._tracked
+
+
+def test_no_hand_over_once_the_exit_hook_has_closed_helpers(monkeypatch):
+    # Published now, the old server would outlive the exit: leave both to it.
+    from wayfinder.utils import child_supervisor
+    cls, old, probe = _published_server_rig(monkeypatch)
+    stops = []
+    monkeypatch.setattr(macos_coreml, "_stop_probe", stops.append)
+    child_supervisor.close_tracked()
+    assert macos_coreml._publish_probe(probe, lambda: False) is False
+    assert cls._server_process is old and stops == [] and probe.adopted is False
+
+
+# Sol mac r1: a request read before a CPU switch.
+
+def test_a_request_read_before_a_cpu_switch_starts_nothing(tmp_path, monkeypatch):
+    import wayfinder.core.transcriber as transcriber
+    model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+    model.write_bytes(b"model")
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(transcriber, "_resolve_whisper_cli_binary", lambda path: "/b/whisper-cli")
+    monkeypatch.setattr(macos_coreml, "_binary_twin", lambda cli: Path("/b/whisper-coreml/whisper-cli"))
+    monkeypatch.setattr(macos_coreml, "_worker", SimpleNamespace(is_alive=lambda: True))
+    monkeypatch.setattr(macos_coreml, "_latest_config", None)
+    monkeypatch.setattr(macos_coreml, "_latest_epoch", None)
+    gpu = {"model_path": str(model), "use_gpu": True, "whisper_coreml_encoder": True}
+    read_under = transcriber.WhisperServerBackend._epoch
+    transcriber.WhisperServerBackend.supersede()   # the switch to CPU
+    cpu = dict(gpu, use_gpu=False)
+    macos_coreml.cancel_preparation(cpu)
+    macos_coreml._preparation_requested.clear()    # the worker woke and parked
+    try:
+        # The dictation that captured GPU settings before the switch, late.
+        macos_coreml.schedule_preparation(dict(gpu), SimpleNamespace(use_gpu=True, _load_epoch=read_under))
+        assert macos_coreml._latest_config == cpu
+        assert not macos_coreml._preparation_requested.is_set()
+    finally:
+        macos_coreml._preparation_requested.clear()
+
+
+def test_a_switch_cancels_the_running_job_through_its_epoch(tmp_path, monkeypatch):
+    # No new request at all (a CPU switch schedules none): the epoch alone
+    # must stop the job, or an unwanted GPU probe loads for ten minutes.
+    import contextlib
+    import threading
+    import wayfinder.core.transcriber as transcriber
+    from wayfinder.utils import macos_activity
+    model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+    model.write_bytes(b"test model")
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(macos_coreml, "_worker", None)
+    monkeypatch.setattr(macos_coreml, "_preparation_requested", threading.Event())
+    monkeypatch.setattr(macos_coreml, "_job_running", threading.Event())
+    monkeypatch.setattr(macos_coreml, "_binary_twin", lambda cli: True)
+    monkeypatch.setattr(transcriber, "_resolve_whisper_cli_binary", lambda path: "/bin/whisper-cli")
+    monkeypatch.setattr(transcriber, "get_backend", lambda cfg: SimpleNamespace(use_gpu=cfg["use_gpu"]))
+    monkeypatch.setattr(macos_activity, "held", lambda *a: contextlib.nullcontext())
+    loading, stopped = threading.Event(), threading.Event()
+
+    def load(snapshot, backend, *, cancelled):
+        loading.set()
+        for _ in range(500):
+            if cancelled():
+                stopped.set()
+                return False
+            threading.Event().wait(0.01)
+        return True
+
+    monkeypatch.setattr(macos_coreml, "prepare_comparison", load)
+    gpu = {"model_path": str(model), "use_gpu": True, "whisper_coreml_encoder": True}
+    macos_coreml.schedule_preparation(gpu, SimpleNamespace(use_gpu=True))
+    assert loading.wait(5), "the load never started"
+    transcriber.WhisperServerBackend.supersede()
+    assert stopped.wait(3), "the job ignored the switch"
+
+
+# Sol mac r1: failure memory that recovers.
+
+def _fail(rig, times):
+    for _ in range(times):
+        macos_coreml.record_comparison_failure(str(rig.cli), str(rig.model), "TimeoutError")
+    macos_coreml._session_failures.clear()   # later launches
+
+
+def test_two_failures_wait_a_day_then_try_again(comparison_rig, monkeypatch):
+    rig = comparison_rig
+    now = [1_000_000.0]
+    monkeypatch.setattr(macos_coreml.time, "time", lambda: now[0])
+    _fail(rig, macos_coreml.MAX_COMPARISON_FAILURES)
+    now[0] += 3600
+    assert "next try within 24 h" in macos_coreml.comparison_blocked(str(rig.cli), str(rig.model))
+    now[0] += 24 * 3600
+    assert macos_coreml.comparison_blocked(str(rig.cli), str(rig.model)) is None
+
+
+@pytest.mark.parametrize("failures,hours", [(3, 48), (4, 96), (12, 168)])
+def test_the_wait_doubles_up_to_a_week(comparison_rig, monkeypatch, failures, hours):
+    rig = comparison_rig
+    now = [1_000_000.0]
+    monkeypatch.setattr(macos_coreml.time, "time", lambda: now[0])
+    _fail(rig, failures)
+    now[0] += hours * 3600 - 60
+    assert macos_coreml.comparison_blocked(str(rig.cli), str(rig.model))
+    now[0] += 120
+    assert macos_coreml.comparison_blocked(str(rig.cli), str(rig.model)) is None
+
+
+def test_one_failure_holds_core_ml_back_for_this_launch_only(comparison_rig):
+    # The worker's automatic retries must not spend the whole allowance at once.
+    rig = comparison_rig
+    macos_coreml.record_comparison_failure(str(rig.cli), str(rig.model), "TimeoutError")
+    assert "earlier this session" in macos_coreml.comparison_blocked(str(rig.cli), str(rig.model))
+    macos_coreml._session_failures.clear()   # the next launch
+    assert macos_coreml.comparison_blocked(str(rig.cli), str(rig.model)) is None
+
+
+@pytest.mark.parametrize("success", ["comparison", "hand-over"])
+def test_a_success_ends_the_failure_streak(comparison_rig, monkeypatch, success):
+    rig = comparison_rig
+    monkeypatch.setattr(macos_coreml, "_cache_path", lambda: rig.cli.parent / "selection.json")
+    _fail(rig, macos_coreml.MAX_COMPARISON_FAILURES - 1)
+    if success == "comparison":
+        monkeypatch.setattr(macos_coreml, "_comparison_key", lambda c, m: "compared")
+        macos_coreml.record_comparison(str(rig.cli), str(rig.model), 1.0, 0.55, True)
+    else:
+        _hand_off_rig(monkeypatch, [True])
+        assert macos_coreml._hand_off(SimpleNamespace(), str(rig.cli), "/b/whisper-coreml/whisper-cli",
+                                      str(rig.model), lambda: False) is True
+    assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0
+
+
+def test_turning_gpu_on_gives_core_ml_a_fresh_try(comparison_rig, monkeypatch):
+    import wayfinder_main
+    rig = comparison_rig
+    _fail(rig, 5)
+    macos_coreml.record_comparison_failure(str(rig.cli), str(rig.model), "TimeoutError")
+
+    class DeferredThread:
+        def __init__(self, target, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+    monkeypatch.setattr(wayfinder_main.threading, "Thread", DeferredThread)
+    monkeypatch.setattr("wayfinder.core.transcriber.WhisperServerBackend.shutdown", lambda **_: None)
+    monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency", lambda **_: None)
+    app = SimpleNamespace(config={"use_gpu": True, "whisper_server_mode": True,
+                                  "transcription_backend": "whisper_cpp"}, log=lambda *a: None)
+    wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, True)
+    assert macos_coreml.comparison_blocked(str(rig.cli), str(rig.model)) is None
+
+
+# Sol mac r1: a conversion that always raises.
+
+def test_a_conversion_that_always_raises_is_not_retried_every_launch(comparison_rig, monkeypatch):
+    rig = comparison_rig
+
+    def unsupported(c, m, *, cancelled):
+        rig.converted.append(m)
+        raise ValueError("unsupported GGML tensor type")
+
+    monkeypatch.setattr(macos_coreml, "prepare_encoder", unsupported)
+    for _launch in range(macos_coreml.MAX_COMPARISON_FAILURES):
+        macos_coreml._session_failures.clear()
+        with pytest.raises(ValueError):
+            macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False)
+    macos_coreml._session_failures.clear()
+    assert macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False) is False
+    assert len(rig.converted) == macos_coreml.MAX_COMPARISON_FAILURES
+
+
+def test_a_deferred_conversion_is_not_a_failure(comparison_rig, monkeypatch):
+    # Not enough disk, or no compiler: deferred, not broken.
+    rig = comparison_rig
+    monkeypatch.setattr(macos_coreml, "prepare_encoder", lambda c, m, *, cancelled: False)
+    for _ in range(3):
+        assert macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False) is False
+    assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0

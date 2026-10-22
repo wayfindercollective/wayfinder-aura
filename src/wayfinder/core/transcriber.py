@@ -776,6 +776,9 @@ class WhisperServerBackend(TranscriptionBackend):
     # this — a single-write-site invariant nothing here guaranteed.
     _server_use_gpu: Optional[bool] = None
     _server_threads: Optional[int] = None  # -t at spawn (macOS/Windows reuse check)
+    # The published child once past its readiness check: a server still loading
+    # (Core ML takes ~11 s) would make the next dictation wait.
+    _server_ready: Optional[subprocess.Popen] = None
     _server_vk_devices: Optional[str] = None  # GGML_VK_VISIBLE_DEVICES at spawn
     # whisper-server is intentionally verbose (several KB per request). Its stdout
     # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
@@ -1256,6 +1259,7 @@ class WhisperServerBackend(TranscriptionBackend):
                         # A switch during the probe wins over a late "ready".
                         _abandon_if_superseded()
                         print(f"[Whisper Server] Ready on port {port} (took {time.monotonic() - started:.1f}s)")
+                        WhisperServerBackend._server_ready = proc
                         return
                     # A child stopped by a concurrent shutdown is not a failed start.
                     _abandon_if_superseded()
@@ -2610,7 +2614,10 @@ def get_backend(config: dict) -> TranscriptionBackend:
 
             coreml_binary = coreml_twin(cli_binary, config.get("model_path", ""))
             if (coreml_binary and config.get("whisper_server_mode", True)
-                    and not coreml_resident()):
+                    and not coreml_resident(
+                        _derive_whisper_server_binary(coreml_binary),
+                        str(converted_model_path(config.get("model_path", ""))),
+                        config.get("threads", 4))):
                 # Its server takes ~11 s to load on an M1, Metal's under 1 s: a
                 # dictation right after launch (or any reload) runs on Metal
                 # while Core ML loads beside it and takes over when idle.

@@ -27,7 +27,13 @@ _worker_lock = threading.Lock()
 _preparation_requested = threading.Event()
 _worker = None
 _latest_config = None
+# The whisper load epoch the latest request was read under; a job for an
+# older one is for a mode the user has left.
+_latest_epoch = None
 _job_running = threading.Event()
+# Failure keys counted this session: one failed attempt per launch, so the
+# automatic retries cannot spend the whole allowance at once.
+_session_failures = set()
 # The settings a preparation job is for; a request equal on all of them is
 # already being served by the running job.
 _PREPARATION_KEYS = ("model_path", "use_gpu", "whisper_coreml_encoder", "transcription_backend",
@@ -39,8 +45,12 @@ _PREPARATION_KEYS = ("model_path", "use_gpu", "whisper_coreml_encoder", "transcr
 COREML_FIRST_LOAD_DEADLINE_S = 600.0
 METAL_PROBE_DEADLINE_S = 120.0
 # A comparison that failed this often for the same model, app build and macOS
-# release is not retried: dictation stays on Metal.
+# release waits before its next try: a day, doubling up to a week. A crash
+# under memory pressure or a sleep then costs a day of Metal, not Core ML for
+# good, and a Mac where it always fails pays one try a week.
 MAX_COMPARISON_FAILURES = 2
+FAILURE_BACKOFF_S = 24 * 3600.0
+MAX_FAILURE_BACKOFF_S = 7 * 24 * 3600.0
 
 
 def set_dictation_active(active: bool) -> None:
@@ -137,7 +147,8 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
         print("[Whisper] Local encoder conversion deferred: insufficient temporary disk space; keeping Metal")
         return False
     from wayfinder.utils.child_supervisor import (
-        stop_supervised, supervised_popen_kwargs, wrap_macos_child_command,
+        cut_short, forget_tracked, spawn_tracked, stop_supervised, supervised_popen_kwargs,
+        wrap_macos_child_command,
     )
     from wayfinder.utils.hostexec import bundle_binary_env
     print("[Whisper] Converting downloaded model locally in the background (no additional model download)")
@@ -147,8 +158,10 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
         marker = populate_package(model, package, cancelled=cancelled)
         asset = stage / encoder_path(str(converted)).name
         command, env = wrap_macos_child_command([str(compiler), str(package), str(asset)], bundle_binary_env())
-        proc = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                **supervised_popen_kwargs())
+        # Tracked: an overlay restart re-execs under the same pid, so the
+        # supervisor would not notice; the terminal shutdown stops it instead.
+        proc = spawn_tracked(command, stop=stop_supervised, env=env, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, **supervised_popen_kwargs())
         try:
             import time
             deadline = time.monotonic() + 180
@@ -159,13 +172,14 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
                     record_comparison_failure(cli_binary, model_path, "coreml-compile timed out")
                     return False
                 time.sleep(0.2)
-            if cancelled():
-                return False
+            if cancelled() or cut_short(proc):
+                return False   # stopped by a switch or Quit: not this Mac's failure
             if proc.returncode:
                 record_comparison_failure(cli_binary, model_path, f"coreml-compile exited {proc.returncode}")
                 return False
         finally:
             stop_supervised(proc)
+            forget_tracked(proc)
         (asset / COREML_MANIFEST).write_text(json.dumps(marker))
         publish = stage / "ready"
         publish.mkdir(mode=0o700)
@@ -239,16 +253,25 @@ def comparison_failures(cli_binary: str, model_path: str) -> int:
         return 0
 
 
-def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> int:
-    """Count a failed conversion or comparison; returns the new count."""
+def comparison_blocked(cli_binary: str, model_path: str) -> str | None:
+    """Why no Core ML attempt runs now, or None when one may."""
     try:
         key = _failure_key(cli_binary, model_path)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return 0
-    rows = _read_failures()
-    previous = rows.get(key)
-    count = (int(previous.get("count", 0)) if isinstance(previous, dict) else 0) + 1
-    rows[key] = {"count": count, "reason": reason[:200], "at": int(time.time())}
+        row = _read_failures().get(key)
+        count = int(row["count"]) if isinstance(row, dict) else 0
+        at = float(row.get("at", 0)) if isinstance(row, dict) else 0.0
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
+        return None
+    if key in _session_failures:
+        return "it failed earlier this session"
+    if count >= MAX_COMPARISON_FAILURES:
+        wait = min(MAX_FAILURE_BACKOFF_S, FAILURE_BACKOFF_S * 2 ** (count - MAX_COMPARISON_FAILURES))
+        if time.time() - at < wait:
+            return f"it failed {count} times; next try within {wait / 3600:.0f} h"
+    return None
+
+
+def _write_failures(rows: dict) -> None:
     path = _failure_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp = tempfile.mkstemp(prefix=".coreml-failures-", dir=path.parent)
@@ -259,6 +282,42 @@ def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> 
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
+
+
+def clear_comparison_failures(cli_binary: str, model_path: str) -> None:
+    """A finished comparison or hand-over ends the failure streak."""
+    try:
+        key = _failure_key(cli_binary, model_path)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return
+    _session_failures.discard(key)
+    rows = _read_failures()
+    if rows.pop(key, None) is not None:
+        _write_failures(rows)
+
+
+def reset_comparison_failures() -> None:
+    """The user's retry (turning GPU acceleration on): every model gets a
+    fresh Core ML attempt."""
+    _session_failures.clear()
+    try:
+        _failure_path().unlink()
+    except FileNotFoundError:
+        pass
+
+
+def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> int:
+    """Count a failed conversion or comparison; returns the new count."""
+    try:
+        key = _failure_key(cli_binary, model_path)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+    _session_failures.add(key)
+    rows = _read_failures()
+    previous = rows.get(key)
+    count = (int(previous.get("count", 0)) if isinstance(previous, dict) else 0) + 1
+    rows[key] = {"count": count, "reason": reason[:200], "at": int(time.time())}
+    _write_failures(rows)
     return count
 
 
@@ -298,15 +357,21 @@ def record_comparison(cli_binary: str, model_path: str, metal_seconds: float,
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
+    clear_comparison_failures(cli_binary, model_path)
     return preferred
 
 
-def coreml_resident() -> bool:
-    """Whether the published dictation server already runs the Core ML twin."""
-    from wayfinder.core.transcriber import WhisperServerBackend as cls
+def coreml_resident(server_binary: str, model_path: str, threads) -> bool:
+    """Whether the published dictation server is this Core ML server, loaded:
+    the same binary, converted model, threads and GPU mode, and past its
+    readiness check (a server still loading would make a dictation wait)."""
+    from wayfinder.core.transcriber import WhisperServerBackend as cls, _expand_path
     proc = cls._server_process
-    return (proc is not None and proc.poll() is None
-            and Path(cls._server_binary or "").parent.name == "whisper-coreml")
+    return (proc is not None and proc.poll() is None and cls._server_ready is proc
+            and cls._server_use_gpu is True
+            and cls._server_binary == _expand_path(server_binary)
+            and cls._server_model_path == _expand_path(model_path)
+            and cls._server_threads == threads)
 
 
 def coreml_twin(cli_binary: str, model_path: str) -> str | None:
@@ -359,7 +424,10 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     import copy
     import socket
     from types import SimpleNamespace
-    from wayfinder.utils.child_supervisor import supervised_popen_kwargs, wrap_macos_child_command
+    from wayfinder.utils.child_supervisor import (
+        HelperStopped, cut_short, forget_tracked, spawn_tracked, supervised_popen_kwargs,
+        wrap_macos_child_command,
+    )
     from wayfinder.utils.hostexec import bundle_binary_env
     from wayfinder.utils.loopback_http import urlopen_loopback
     from wayfinder.utils.macos_ggml_env import whisper_metal_env
@@ -373,8 +441,10 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     candidate.model_path = model
     command = candidate._server_cmd_attempts(port)[0] + ["--host", "127.0.0.1"]
     command, env = wrap_macos_child_command(command, bundle_binary_env(whisper_metal_env(gpu=True)))
-    proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            **supervised_popen_kwargs())
+    # Tracked until published: no server stop reaches a probe, and its
+    # supervisor misses an overlay restart's same-pid re-exec.
+    proc = spawn_tracked(command, stop=_stop_probe, env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, **supervised_popen_kwargs())
     tail = deque(maxlen=100)
     reader = threading.Thread(target=backend._drain_server_output, args=(proc.stdout, tail), daemon=True)
     reader.start()
@@ -385,6 +455,8 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
             if cancelled():
                 raise InterruptedError("Encoder preparation superseded")
             if proc.poll() is not None:
+                if cut_short(proc):
+                    raise HelperStopped("Core ML probe stopped by a terminal shutdown")
                 # A crash on load is a failure, not a pause: retrying it as an
                 # interruption looped forever on a Mac where it always crashes.
                 raise RuntimeError(f"probe exited with {proc.returncode}: {''.join(list(tail)[-3:])[-200:]}")
@@ -408,10 +480,18 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
             time.sleep(0.2)
         else:
             raise TimeoutError("Encoder device preparation timed out")
-        yield probe
+        try:
+            yield probe
+        except Exception as exc:
+            # Whatever the body saw of a probe Quit stopped (an exit, a refused
+            # request) is the shutdown, not this Mac's failure.
+            if cut_short(proc) and not isinstance(exc, HelperStopped):
+                raise HelperStopped("Core ML probe stopped by a terminal shutdown") from exc
+            raise
     finally:
         if not probe.adopted:
             _stop_probe(proc)
+            forget_tracked(proc)
             reader.join(timeout=1)
 
 
@@ -465,6 +545,7 @@ def _publish_probe(probe, cancelled, decide=lambda: True) -> bool:
     decide() runs under the server lock, after the idle and epoch checks, and
     says whether to publish."""
     from wayfinder.core.transcriber import WhisperServerBackend
+    from wayfinder.utils.child_supervisor import forget_tracked, track_existing
     cls = WhisperServerBackend
     old = None
     chosen = False
@@ -479,24 +560,41 @@ def _publish_probe(probe, cancelled, decide=lambda: True) -> bool:
                 # Its config predates a switch or shutdown, whose teardown may
                 # already have run: publishing now would outlive it.
                 return False
-            chosen = decide()
-            if chosen:
-                old = cls._server_process
-                cls._server_epoch = epoch
-                cls._server_process = probe.proc
-                cls._server_port = probe.port
-                cls._server_model_path = probe.backend.model_path
-                cls._server_binary = probe.backend.whisper_server_binary
-                cls._server_use_gpu = True
-                cls._server_threads = probe.backend.threads
-                cls._server_log_tail = probe.tail
-                cls._server_log_thread = probe.reader
-                cls._server_disabled = False
-                probe.adopted = True
+            retiring = cls._server_process
+            if retiring is probe.proc:
+                retiring = None
+            if retiring is not None and not track_existing(retiring, stop=_stop_probe):
+                # A terminal shutdown began: once published, nothing would stop
+                # the old server before the exit. Leave both to the shutdown.
+                return False
+            try:
+                chosen = decide()
+            finally:
+                if not chosen and retiring is not None:
+                    forget_tracked(retiring)   # still the published server
+            if not chosen:
+                return False
+            old = retiring
+            cls._server_epoch = epoch
+            cls._server_process = probe.proc
+            cls._server_port = probe.port
+            cls._server_model_path = probe.backend.model_path
+            cls._server_binary = probe.backend.whisper_server_binary
+            cls._server_use_gpu = True
+            cls._server_threads = probe.backend.threads
+            cls._server_log_tail = probe.tail
+            cls._server_log_thread = probe.reader
+            cls._server_disabled = False
+            cls._server_ready = probe.proc
+            probe.adopted = True
+            # Published now, so the server stops reach it; the old one is
+            # tracked until it is gone.
+            forget_tracked(probe.proc)
         finally:
             cls._server_lock.release()
-    if old is not None and old is not probe.proc:
+    if old is not None:
         _stop_probe(old)  # outside arbitration: a slow exit cannot hold the hotkey
+        forget_tracked(old)
     return chosen
 
 
@@ -506,7 +604,7 @@ def _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancell
                           lambda: record_comparison(cli, source_model, metal, coreml, same_words))
 
 
-def _hand_off(backend, twin: str, source_model: str, cancelled) -> bool:
+def _hand_off(backend, cli: str, twin: str, source_model: str, cancelled) -> bool:
     """Relaunch or reload with Core ML already chosen: its load takes ~11 s on
     an M1, Metal's under 1 s. Metal serves meanwhile; Core ML loads beside it
     and takes over at the first idle moment."""
@@ -525,6 +623,7 @@ def _hand_off(backend, twin: str, source_model: str, cancelled) -> bool:
                 continue  # a dictation began after the idle check: wait it out
             if published:
                 print("[Whisper] macOS encoder: Core ML (took over from Metal)")
+                clear_comparison_failures(cli, source_model)
                 return True
             if probe.proc.poll() is not None:
                 raise RuntimeError(f"Core ML server exited before taking over ({probe.proc.returncode})")
@@ -547,38 +646,50 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
     if not source_model or Path(backend.whisper_server_binary).parent.name == "whisper-coreml":
         return False
     from wayfinder.core.transcriber import WhisperServerBackend
+    from wayfinder.utils.child_supervisor import HelpersClosed
     superseded = cancelled
     # A terminal shutdown (Quit) admits no server after it, a probe included.
+    # Quit supersedes before it stops any child, so a job it cut short stays
+    # superseded after a reopen too: its dead child is never counted.
     cancelled = lambda: (superseded() or WhisperServerBackend._closed
                          or not get_feature_gate().has_feature("gpu_acceleration"))
-    failures = comparison_failures(cli, source_model)
-    if failures >= MAX_COMPARISON_FAILURES:
-        print(f"[Whisper] Core ML comparison failed {failures} times on this Mac; keeping Metal")
+    blocked = comparison_blocked(cli, source_model)
+    if blocked:
+        print(f"[Whisper] Core ML skipped: {blocked}; keeping Metal")
         return False
-    if cancelled() or not prepare_encoder(cli, source_model, cancelled=cancelled):
+    if cancelled():
         return False
-    twin = prepared_twin(cli, source_model)
-    if not twin:
-        return False
-    if comparison(cli, source_model) is not None:
-        # Already compared. If Core ML won, Metal is only serving while it
-        # loads (see get_backend), so bring it up and hand over.
-        if not coreml_twin(cli, source_model) or coreml_resident():
+    try:
+        # The conversion counts too: one that always raises (an unsupported
+        # tensor, a write error) would otherwise be retried every launch.
+        if not prepare_encoder(cli, source_model, cancelled=cancelled):
             return False
-        work = lambda: _hand_off(backend, twin, source_model, cancelled)
-    else:
+        twin = prepared_twin(cli, source_model)
+        if not twin:
+            return False
+        if comparison(cli, source_model) is not None:
+            # Already compared. If Core ML won, Metal is only serving while it
+            # loads (see get_backend), so bring it up and hand over.
+            if not coreml_twin(cli, source_model) or coreml_resident(
+                    str(Path(twin).with_name("whisper-server")),
+                    str(converted_model_path(source_model)), backend.threads):
+                return False
+            return _hand_off(backend, cli, twin, source_model, cancelled)
         clip = _public_probe()
         if not clip.is_file():
             return False
-        work = lambda: _compare_with_probes(config, backend, cli, source_model, twin, clip, cancelled)
-    try:
-        return work()
+        return _compare_with_probes(config, backend, cli, source_model, twin, clip, cancelled)
     except InterruptedError:
         raise
+    except HelpersClosed as exc:
+        raise InterruptedError("Encoder preparation superseded by shutdown") from exc
     except Exception as exc:
+        if cancelled():
+            # Stopped by a switch or Quit, not a failure of this Mac.
+            raise InterruptedError("Encoder preparation superseded") from exc
         count = record_comparison_failure(cli, source_model, f"{type(exc).__name__}: {exc}")
-        print(f"[Whisper] Core ML comparison failed ({type(exc).__name__}, attempt {count} of "
-              f"{MAX_COMPARISON_FAILURES}); keeping Metal")
+        print(f"[Whisper] Core ML preparation failed ({type(exc).__name__}, failure {count}); "
+              "keeping Metal")
         raise
 
 
@@ -595,6 +706,9 @@ def _compare_with_probes(config: dict, backend, cli: str, source_model: str, twi
         same_words = bool(baseline_words[0] and all(words == baseline_words[0] for words in baseline_words + outputs))
         metal, coreml = statistics.median(baseline), statistics.median(timings)
         preferred = _activate_probe(probe, cli, source_model, metal, coreml, same_words, cancelled)
+        if not preferred and probe.proc.poll() is not None and comparison(cli, source_model) is None:
+            raise RuntimeError(f"Core ML server exited before the comparison was recorded "
+                               f"({probe.proc.returncode})")
         print(f"[Whisper] Encoder comparison: Metal={metal:.3f}s CoreML={coreml:.3f}s; selected={'CoreML' if preferred else 'Metal'}")
         return preferred
 
@@ -606,16 +720,17 @@ def cancel_preparation(config: dict) -> None:
     GPU-mode comparison started before the switch would finish and hot-swap a
     Core ML server in. The parked worker wakes, sees CPU, and parks again.
     """
-    global _latest_config
+    global _latest_config, _latest_epoch
+    from wayfinder.core.transcriber import WhisperServerBackend
     with _worker_lock:
         if _worker is not None and _worker.is_alive():
-            _latest_config = dict(config)
+            _latest_config, _latest_epoch = dict(config), WhisperServerBackend._epoch
             _preparation_requested.set()
 
 
 def schedule_preparation(config: dict, backend) -> None:
     """Single daemon job, retried after dictation; model/settings changes supersede it."""
-    global _worker, _latest_config
+    global _worker, _latest_config, _latest_epoch
     if sys.platform != "darwin" or not backend.use_gpu:
         return
     from wayfinder.core.transcriber import _resolve_whisper_cli_binary
@@ -623,12 +738,18 @@ def schedule_preparation(config: dict, backend) -> None:
     model = Path(os.path.expanduser(str(config.get("model_path", ""))))
     if not model.is_file() or not _binary_twin(cli):
         return
+    from wayfinder.core.transcriber import LOAD_EPOCH_KEY, WhisperServerBackend
+    epoch = getattr(backend, "_load_epoch", WhisperServerBackend._epoch)
     keys = _PREPARATION_KEYS
     with _worker_lock:
-        if (_job_running.is_set() and _latest_config is not None
+        if epoch != WhisperServerBackend._epoch:
+            # Read before a switch (a dictation that waited): the switch's own
+            # path decides what to prepare, a CPU switch nothing at all.
+            return
+        if (_job_running.is_set() and _latest_config is not None and _latest_epoch == epoch
                 and all(_latest_config.get(k) == config.get(k) for k in keys)):
             return  # the running job already serves this request
-        _latest_config = config
+        _latest_config, _latest_epoch = config, epoch
         _preparation_requested.set()
         if _worker is not None and _worker.is_alive():
             return
@@ -645,11 +766,16 @@ def schedule_preparation(config: dict, backend) -> None:
                 try:
                     attempts = 0
                     while attempts < 3:
-                        live = _latest_config
+                        live, job_epoch = _latest_config, _latest_epoch
                         snapshot = dict(live)
+                        if job_epoch is not None:
+                            snapshot[LOAD_EPOCH_KEY] = job_epoch
                         cancelled = lambda: (_preparation_requested.is_set() or live is not _latest_config
+                                             or WhisperServerBackend._epoch != job_epoch
                                              or any(live.get(k) != snapshot.get(k) for k in keys))
                         try:
+                            if cancelled():
+                                break   # a stale request: nothing to prepare
                             current = get_backend(snapshot)
                             if not current.use_gpu or not snapshot.get("whisper_coreml_encoder", True):
                                 break
