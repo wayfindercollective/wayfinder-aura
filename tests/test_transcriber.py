@@ -3552,6 +3552,12 @@ class TestUnpromptedTranscription:
         "{noise} Okay.",
         "（music） Okay.",
         "[loud (crashing] noise) Okay.",
+        # Sol pr67 r8: what is wrapped is decided on the original text, so
+        # removing one bracket kind can't expose another's contents.
+        "[noise (] loud crashing [) noise] Okay.",
+        "(noise [) loud crashing (] noise) Okay.",
+        "<|nospeech|> [Music (] loud [|>] Okay.",
+        "*a* Okay *crashing",
     ])
     def test_unprompted_noise_never_counts_wrapped_words(
         self, prompts, monkeypatch, heard, raw
@@ -3570,6 +3576,12 @@ class TestUnpromptedTranscription:
         # known phrase said twice.
         "Thank you.Thank you.",
         "Thanks for watching!Thanks for watching!",
+        # Sol pr67 r8: a text made of catch-phrases and nothing else, however
+        # they are punctuated or spaced.
+        "Subtitles by the Amara.org community. Subtitles by the Amara.org community.",
+        "Thank you, thank you.",
+        "Thank you Thank you",
+        "Thank you. Thanks for watching!",
     ])
     def test_unprompted_noise_rejects_repeats_with_no_space_between(
         self, prompts, monkeypatch, heard, raw
@@ -3581,12 +3593,6 @@ class TestUnpromptedTranscription:
         self.config["raw_transcription"] = raw
         text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
         assert text == ""
-
-    def test_noise_check_split_keeps_a_decimal_whole(self):
-        from wayfinder.core.transcriber import _split_sentences_for_noise_check
-
-        assert _split_sentences_for_noise_check("It is 3.5 now.Okay.") == [
-            "It is 3.5 now.", "Okay."]
 
     @pytest.mark.parametrize("raw", [False, True])
     @pytest.mark.parametrize("heard", [

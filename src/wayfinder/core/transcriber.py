@@ -3092,62 +3092,15 @@ def _collapse_whisper_repetitions(text: str) -> str:
     return " ".join(words)
 
 
-# Sentence end for the noise-check repeat comparison ONLY (Sol pr67 r4):
-# normal cleanup keeps splitting on bare "(?<=[.!?])\s+" below, unchanged
-# from 2dad2af.
-_SENTENCE_END_NOISE_CHECK = r'[.!?][\'"’”)\]]*'
-
-
-def _split_sentences_for_noise_check(text: str) -> list:
-    """Sentence split for the noise-check repeat comparison only (Sol pr67
-    r4). A sentence end is [.!?], optionally followed by a closing quote or
-    bracket, then whitespace, end of text, a letter, or any non-ASCII
-    character (a script written without spaces)."""
+def _collapse_repeated_sentences_for_phrase_match(text: str) -> str:
+    """Return one sentence for exact repeats, only for hallucination matching."""
     import re
 
-    text = text.strip()
-    sentences = []
-    start = 0
-    for m in re.finditer(_SENTENCE_END_NOISE_CHECK, text):
-        end = m.end()
-        # A letter right after the stop also ends it: "Thank you.Thank you."
-        # (Sol pr67 r7). A digit doesn't, so "3.5" stays one number.
-        if (end == len(text) or text[end].isspace() or ord(text[end]) > 127
-                or text[end].isalpha()):
-            sentence = text[start:end].strip()
-            if sentence:
-                sentences.append(sentence)
-            start = end
-    tail = text[start:].strip()
-    if tail:
-        sentences.append(tail)
-    return sentences
-
-
-def _collapse_repeated_sentences_for_phrase_match(text: str, *, noise_check: bool = False) -> str:
-    """Return one sentence for exact repeats, only for hallucination matching.
-
-    *noise_check* (Sol pr67 r4): the noise path's own repeat check uses the
-    quote/bracket- and non-ASCII-aware split above and a key that keeps any
-    script's letters and digits, so "Thank you." "Thank you." and
-    "Thank you。Thank you。" both collapse. Normal cleanup (noise_check=False)
-    keeps 2dad2af's exact ASCII-only split and key so its output never
-    changes.
-    """
-    import re
-
-    if noise_check:
-        sentences = _split_sentences_for_noise_check(text)
-    else:
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
     if len(sentences) < 2:
         return text
 
     def key(sentence: str) -> str:
-        if noise_check:
-            # Any script's letters and digits count (Sol pr67 r3, noise
-            # path only as of Sol pr67 r4).
-            return re.sub(r'[\W_]+', ' ', sentence.lower()).strip()
         return re.sub(r'[^a-z0-9]+', ' ', sentence.lower()).strip()
 
     first = key(sentences[0])
@@ -3176,19 +3129,28 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
 })
 
 
-# Punctuation variants folded to ASCII for the hallucination-phrase
-# comparison only, never the text: "Thank you for watching…" slipped past
-# the safety copy's check (Sol pr67 r3).
-_HALLUCINATION_PUNCTUATION_FOLD = str.maketrans({
-    "…": ".", "‘": "'", "’": "'", "“": '"', "”": '"',
-    # A full-width stop takes no space after it: one is added, so the
-    # repeat check sees two sentences ("Thank you。Thank you。").
-    "。": ". ", "，": ",", "！": "! ", "？": "? ", "：": ":", "；": ";",
-})
+def _noise_phrase_words(text: str) -> tuple:
+    """Lowercased words, every run of punctuation or whitespace a single
+    break, for the noise path's phrase check only (Sol pr67 r8)."""
+    import re
+
+    return tuple(re.sub(r'[\W_]+', ' ', (text or '').lower()).split())
 
 
-def _fold_hallucination_punctuation(text: str) -> str:
-    return text.translate(_HALLUCINATION_PUNCTUATION_FOLD)
+_NOISE_PHRASE_WORDS = frozenset(
+    _noise_phrase_words(phrase) for phrase in _WHISPER_PHRASE_HALLUCINATIONS)
+_NOISE_PHRASE_MAX_WORDS = max(len(words) for words in _NOISE_PHRASE_WORDS)
+
+
+def _made_of_known_phrases(words: tuple) -> bool:
+    """Whether *words* split, end to end, into known catch-phrases only."""
+    ends = [True] + [False] * len(words)
+    for end in range(1, len(words) + 1):
+        for size in range(1, min(_NOISE_PHRASE_MAX_WORDS, end) + 1):
+            if ends[end - size] and words[end - size:end] in _NOISE_PHRASE_WORDS:
+                ends[end] = True
+                break
+    return bool(words) and ends[-1]
 
 
 def _is_whisper_phrase_hallucination(text: str, *, noise_check: bool = False) -> bool:
@@ -3197,13 +3159,14 @@ def _is_whisper_phrase_hallucination(text: str, *, noise_check: bool = False) ->
     matches it at the end of its cleanup (repeated sentences collapsed,
     trailing punctuation stripped). Never a mid-sentence substring match.
 
-    *noise_check* (Sol pr67 r4): the noise path's own check folds
-    punctuation variants to ASCII first ("Thank you for watching…", a
-    curly-quoted phrase, "谢谢观看。") and strips a leading mark too (a
-    quoted phrase has one). A repeat counts only when the repeated
-    sentence is one of the catch-phrases: "Turn it down. Turn it down." over
-    a fan is speech. Normal cleanup (noise_check=False) keeps 2dad2af's
-    exact behaviour: no fold, trailing punctuation only.
+    *noise_check* (Sol pr67 r8): the noise path's own check ignores every
+    mark and space between words, then asks whether the whole text is made
+    of catch-phrases and nothing else: "Thank you, thank you", "Thank
+    you.Thank you." and a repeated "Subtitles by the Amara.org community."
+    all are, while "Turn it down. Turn it down." over a fan is speech.
+    Splitting into sentences first kept missing a repeat written some new
+    way. Normal cleanup (noise_check=False) keeps 2dad2af's exact
+    behaviour: trailing punctuation only.
     """
     stripped = (text or "").strip()
     if not noise_check:
@@ -3211,11 +3174,7 @@ def _is_whisper_phrase_hallucination(text: str, *, noise_check: bool = False) ->
         key = candidate.lower().rstrip('.!?,;: ').strip()
         return key in _WHISPER_PHRASE_HALLUCINATIONS
 
-    folded = _fold_hallucination_punctuation(stripped)
-    candidate = _collapse_repeated_sentences_for_phrase_match(folded, noise_check=True)
-    # Both ends: a quoted or bracketed phrase has a leading mark too.
-    key = candidate.lower().strip('.!?,;:\'"()[] ')
-    return key in _WHISPER_PHRASE_HALLUCINATIONS
+    return _made_of_known_phrases(_noise_phrase_words(stripped))
 
 
 # Whisper's bracketed/parenthesized non-speech annotations ("[audience noise]",
@@ -3268,14 +3227,7 @@ def _strip_non_speech_markers(text: str) -> str:
 
 
 # Anything Whisper wrapped, whatever it says inside: [Music], (door opens),
-# {noise}, full-width and CJK brackets, <|endoftext|>. Innermost first, so
-# nested pairs go too. Asterisks and music symbols open and close alike, so
-# their nesting can't be told apart ("*a loud **crashing** noise*"): from
-# the first to the last of them goes whole instead (Sol pr67 r7).
-_WRAPPED_SPAN = (
-    r'\[[^\[\]]*\]|\([^()]*\)|\{[^{}]*\}|（[^（）]*）|【[^【】]*】'
-    r'|「[^「」]*」|『[^『』]*』|<\|[^|]*\|>'
-)
+# {noise}, full-width and CJK brackets, <|endoftext|>.
 _WRAP_OPENERS = '[({（【「『'
 _WRAP_CLOSERS = '])}）】」』'
 # Whisper's own music symbols (its tokenizer's non-speech set), all one kind.
@@ -3288,33 +3240,56 @@ def _noise_check_safety_copy(text: str) -> str:
     downstream, sees: an accepted recording's text is returned unchanged.
 
     Nothing Whisper wrapped counts as a spoken word here, whatever is
-    inside (Sol pr67 r6): brackets, parentheses, braces, asterisks, music
-    symbols and special tokens go whole, and an opener left unmatched runs
-    to the end (a closer, from the start). Telling a sound annotation from someone's
-    emphasis or code by its words kept failing both ways — "*a loud noise*
-    Okay." passing as speech, "Turn **music**" losing a word — so it is no
-    longer tried. Erring towards removal is safe on this path only: these
-    are recordings 1.3.0 dropped outright as having no speech activity, so
-    a wrongly rejected one is dropped exactly as it was before, while
-    annotation text wrongly counted as speech would type something that was
-    never said. Whitespace is then canonicalised the same way normal
-    cleanup does right before its own final hallucination check.
+    inside (Sol pr67 r6). Erring towards removal is safe on this path only:
+    these are recordings 1.3.0 dropped outright as having no speech
+    activity, so a wrongly rejected one is dropped exactly as it was
+    before, while annotation text wrongly counted as speech would type
+    something that was never said.
+
+    What is wrapped is worked out on the original text in one pass, then
+    removed together (Sol pr67 r8): removing one kind of bracket first
+    exposed another kind's contents ("[noise (] loud [) noise]"). Brackets
+    of every kind, and <| |> special tokens, count as one nesting depth, so
+    a crossed or mismatched pair still covers everything between; an opener
+    never closed covers to the end, a closer never opened, from the start.
+    Asterisks and music symbols open and close alike, so their nesting
+    can't be told apart (Sol pr67 r7): from the first of a kind to the last
+    is covered, or to the end when their count is odd. Whitespace is then
+    canonicalised the same way normal cleanup does right before its own
+    final hallucination check.
     """
     import re
 
     text = text or ""
-    previous = None
-    while previous != text:
-        previous = text
-        text = re.sub(_WRAPPED_SPAN, ' ', text)
+    covered = [False] * len(text)
+    depth = 0
+    cut_before = 0
+    i = 0
+    while i < len(text):
+        if text.startswith('<|', i) or text[i] in _WRAP_OPENERS:
+            width = 2 if text.startswith('<|', i) else 1
+            depth += 1
+            covered[i:i + width] = [True] * width
+        elif text.startswith('|>', i) or text[i] in _WRAP_CLOSERS:
+            width = 2 if text.startswith('|>', i) else 1
+            covered[i:i + width] = [True] * width
+            if depth:
+                depth -= 1
+            else:
+                cut_before = i + width
+        else:
+            width = 1
+            if depth:
+                covered[i] = True
+        i += width
+    covered[:cut_before] = [True] * cut_before
     for symbols in ('*', _MUSIC_SYMBOLS):
-        cls = '[' + re.escape(symbols) + ']'
-        text = re.sub(cls + '.*' + cls, ' ', text, flags=re.DOTALL)
-    closers = '[' + re.escape(_WRAP_CLOSERS) + ']'
-    openers = '[' + re.escape(_WRAP_OPENERS + '*' + _MUSIC_SYMBOLS) + ']'
-    text = re.sub('^.*' + closers, ' ', text, flags=re.DOTALL)
-    text = re.sub(openers + '.*$', ' ', text, flags=re.DOTALL)
-    return re.sub(r'\s+', ' ', text).strip()
+        at = [k for k, ch in enumerate(text) if ch in symbols]
+        if at:
+            last = at[-1] if len(at) % 2 == 0 else len(text) - 1
+            covered[at[0]:last + 1] = [True] * (last + 1 - at[0])
+    kept = ''.join(' ' if gone else ch for ch, gone in zip(text, covered))
+    return re.sub(r'\s+', ' ', kept).strip()
 
 
 # whisper.cpp refuses more than 8 decoders ("too many decoders requested"),
