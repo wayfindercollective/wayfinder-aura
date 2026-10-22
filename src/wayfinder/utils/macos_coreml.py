@@ -165,6 +165,7 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
         # Tracked: an overlay restart re-execs under the same pid, so the
         # watcher would not notice; the terminal shutdown stops it instead.
         proc = spawn_tracked(command, stop=stop_supervised, popen=spawn_supervised, env=bundle_binary_env(),
+                             before_helper=_refuse_when(cancelled, "Background encoder conversion superseded"),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             import time
@@ -479,6 +480,16 @@ def _wait_for_idle(cancelled) -> None:
         raise InterruptedError("Encoder preparation superseded")
 
 
+def _refuse_when(cancelled, message: str):
+    """A spawn check: a switch that cancelled this background work while
+    its watcher got ready gets no helper. Dictation's own check passes here,
+    since no dictation owns this work (Sol mac r19)."""
+    def check() -> None:
+        if cancelled():
+            raise InterruptedError(message)
+    return check
+
+
 def _stop_probe(proc) -> None:
     from wayfinder.utils.child_supervisor import stop_supervised
     stop_supervised(proc)
@@ -509,6 +520,7 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     # watcher misses an overlay restart's same-pid re-exec.
     proc = spawn_tracked(command, stop=_stop_probe, popen=spawn_supervised,
                          env=bundle_binary_env(whisper_metal_env(gpu=True)),
+                         before_helper=_refuse_when(cancelled, "Encoder preparation superseded"),
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     tail = deque(maxlen=100)
     reader = threading.Thread(target=backend._drain_server_output, args=(proc.stdout, tail), daemon=True)

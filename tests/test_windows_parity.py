@@ -2494,8 +2494,11 @@ def test_a_windows_clipboard_write_asks_after_its_open_retries(monkeypatch, reti
         if retire:
             with pytest.raises(injector.InjectionCancelled):
                 w._clipboard_set_windows("retired words", transient=True)
-            assert rig.fake.events == ["window", "open", "close", "destroy"]
+            # The check now sits after the snapshot read (Sol mac r19
+            # Finding 4), so "read" happens; "empty" still never does.
+            assert rig.fake.events == ["window", "open", "read", "close", "destroy"]
             assert rig.clipboard == "theirs"
+            assert rig.fake.writes == []
         else:
             assert w._clipboard_set_windows("live words", transient=True)
             assert rig.clipboard == "live words"
@@ -2682,33 +2685,103 @@ def _refuse_text_writes(rig, w, refused):
     rig.fake.on_set = on_set
 
 
-def test_a_restore_left_empty_is_still_owed_on_the_next_try(monkeypatch):
-    # Sol mac r18: every write of one try refused leaves the clipboard empty
-    # and without the mark; nobody wrote since, so the next try restores.
+def test_restore_writes_the_mark_alone_when_nothing_lands(monkeypatch):
+    # (Sol mac r19) Finding 3: when neither the previous text nor the
+    # dictation can be written back, the mark goes on alone -- no text, but
+    # still recognisably Aura's -- instead of an empty clipboard whose only
+    # proof of ownership was a sequence number sampled after release.
+    rig, w = _windows_send_rig(monkeypatch)
+    mark = b"m" * w._OWNER_MARK_BYTES
+    rig.fake.on_set = lambda fmt, _handle: fmt == w._CF_UNICODETEXT   # every text write refused
+    with w._clipboard_held(require_owner=True) as held:
+        assert held
+        assert w._restore_open_clipboard("theirs", "dictation", mark) is False
+    assert rig.fake.clipboard is None
+    assert w._clipboard_mark() == mark
+
+
+def test_a_restore_left_empty_but_marked_is_still_owed_on_the_next_try(monkeypatch):
+    # (Sol mac r19) Finding 3: every text write of the first try refused
+    # leaves the clipboard holding only the mark; the next try still sees it
+    # as Aura's and restores the user's text.
     rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
     rig.fake.freed.clear()
     _refuse_text_writes(rig, w, [2 * w.WRITE_ATTEMPTS])   # all of the first try
     restore()
     assert rig.clipboard == "theirs"
     assert rig.fake.events.count("empty") == 2
-    assert len(rig.fake.freed) == 3 + 2   # try 1: all three blocks; try 2: the unused fallbacks
+    # try 1: previous + dictation freed, the mark lands; try 2: the unused fallbacks
+    assert len(rig.fake.freed) == 2 + 2
 
 
-def test_a_restore_that_is_always_refused_is_bounded_and_leaks_nothing(monkeypatch):
+def test_the_user_clearing_the_clipboard_right_after_a_refused_try_is_left_alone(monkeypatch):
+    # (Sol mac r19): the clear happens right at the first try's own close, so
+    # it beats even the outer retry's own wait -- the mark it took away must
+    # still stop the next try from restoring over it.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    _refuse_text_writes(rig, w, [2 * w.WRITE_ATTEMPTS])
+    close, cleared = rig.fake.CloseClipboard, []
+
+    def close_then_the_user_clears():
+        close()
+        if not cleared:
+            cleared.append(1)
+            rig.fake.OpenClipboard(None)
+            rig.fake.EmptyClipboard()
+            rig.fake.CloseClipboard()
+
+    monkeypatch.setattr(rig.fake, "CloseClipboard", close_then_the_user_clears)
+    restore()
+    assert cleared == [1]
+    assert rig.clipboard is None
+    assert rig.fake.events.count("empty") == 2   # the refused try, then the user's own clear
+
+
+def test_a_copy_right_after_a_refused_try_is_kept(monkeypatch):
+    # (Sol mac r19): same gap, but the user copies instead of clearing --
+    # their copy takes the mark away too, so it is kept rather than restored
+    # over.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    _refuse_text_writes(rig, w, [2 * w.WRITE_ATTEMPTS])
+    close, copied = rig.fake.CloseClipboard, []
+
+    def close_then_the_user_copies():
+        close()
+        if not copied:
+            copied.append(rig.fake.copy("new copy"))
+
+    monkeypatch.setattr(rig.fake, "CloseClipboard", close_then_the_user_copies)
+    restore()
+    assert copied == [True]
+    assert rig.clipboard == "new copy"
+    assert rig.fake.events.count("empty") == 1   # only the refused try; the copy never opened
+
+
+def _refuse_everything(rig, w):
+    mark_fmt = rig.fake.RegisterClipboardFormatW(w._OWNER_MARK_FORMAT)
+    rig.fake.on_set = lambda fmt, _h: fmt == w._CF_UNICODETEXT or fmt == mark_fmt
+
+
+def test_a_restore_always_refused_text_and_mark_is_bounded_and_leaks_nothing(monkeypatch):
+    # (Sol mac r19): when even the mark is refused, the clipboard is left
+    # truly empty with nothing left to prove it is still Aura's -- so unlike
+    # a refused text write alone, the outer retry has nothing to check and
+    # stops after the one try, instead of blindly retrying forever. Still
+    # bounded within that try, and every one of its three blocks freed
+    # exactly once.
     rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
     rig.fake.freed.clear()
     lines, sleeps = [], []
     monkeypatch.setattr(w, "_paste_reporter", lines.append)
     rig.on_sleep = lambda: sleeps.append(1)
-    _refuse_text_writes(rig, w, [10 ** 6])
+    _refuse_everything(rig, w)
     restore()
-    tries = 1 + w.RESTORE_RETRIES
     assert rig.clipboard is None                  # nothing could be written at all
     assert rig.fake.writes == ["dictation"]       # only the original paste write
-    assert rig.fake.events.count("empty") == tries
-    assert len(sleeps) == tries * (w.WRITE_ATTEMPTS - 1) + w.RESTORE_RETRIES
-    assert len(rig.fake.freed) == 3 * tries
-    assert len(lines) == tries and all("theirs" not in line for line in lines)
+    assert rig.fake.events.count("empty") == 1    # the one try that could still write
+    assert len(sleeps) == w.WRITE_ATTEMPTS - 1 + 1   # its own retries, then the outer wait
+    assert len(rig.fake.freed) == 3               # previous, dictation and the mark, once each
+    assert len(lines) == 1 and "theirs" not in lines[0]
 
 
 @pytest.mark.parametrize("meanwhile", ["copied", "cleared"])
@@ -2755,6 +2828,60 @@ def test_the_own_window_write_restores_the_previous_clipboard_in_place(monkeypat
     assert w._clipboard_set_windows("dictation", transient=True) is False
     assert rig.clipboard == "theirs"              # put back in place, not left empty
     assert rig.fake.events.count("empty") == 1    # no second EmptyClipboard for the rollback
+
+
+def test_own_window_write_cancelled_during_the_snapshot_read_writes_nothing(monkeypatch):
+    # (Sol mac r19) Finding 4: the check used to run before this function's
+    # own snapshot read, so a retirement during GetClipboardData still
+    # reached EmptyClipboard and overwrote the previous clipboard.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    rig.own_window = True
+    read = rig.fake.GetClipboardData
+
+    def read_then_retire(fmt):
+        rig.retired = True
+        return read(fmt)
+
+    monkeypatch.setattr(rig.fake, "GetClipboardData", read_then_retire)
+    with injector.cancellable(lambda: rig.retired):
+        with pytest.raises(injector.InjectionCancelled):
+            w.inject_text_windows("retired words")
+    assert "empty" not in rig.fake.events
+    assert rig.fake.writes == [] and rig.clipboard == "theirs"
+    assert len(rig.fake.freed) == 2   # the new-text block and the snapshot's rollback copy
+
+
+def test_own_window_new_text_refused_once_is_not_retried_once_cancelled(monkeypatch):
+    # (Sol mac r19) Finding 4: new-text retries need their own cancellation
+    # check -- the rollback always keeps going, even once retired.
+    import ctypes
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    attempts = {"new": 0, "prev": 0}
+    retired = [False]
+
+    def on_set(fmt, handle):
+        if fmt != w._CF_UNICODETEXT:
+            return False
+        value = ctypes.wstring_at(handle)
+        if value == "new text":
+            attempts["new"] += 1
+            if attempts["new"] == 1:
+                retired[0] = True     # cancelled right after the refusal
+            return True                # always refused
+        attempts["prev"] += 1
+        return attempts["prev"] == 1  # the rollback's own first try also fails
+
+    rig.fake.on_set = on_set
+    with injector.cancellable(lambda: retired[0]):
+        with pytest.raises(injector.InjectionCancelled):   # not a failed copy
+            w._clipboard_set_windows("new text")
+    assert attempts["new"] == 1          # never retried once retired
+    assert attempts["prev"] == 2         # the rollback kept going
+    assert rig.clipboard == "theirs"
+    assert rig.fake.writes == ["theirs"]
+    assert len(rig.fake.freed) == 1      # the refused new-text block
 
 
 def test_a_failed_transient_hint_frees_its_block(monkeypatch):
@@ -3003,6 +3130,84 @@ def test_a_failed_mark_restores_the_previous_clipboard_in_place(monkeypatch):
     assert rig.clipboard == "theirs"                           # rolled back in place
     assert rig.fake.writes == ["dictation", "theirs"]          # the only two CF_UNICODETEXT writes
     assert rig.fake.events.count("open") == 1 and rig.fake.events.count("close") == 1
+
+
+def test_a_failed_mark_rollback_retries_before_giving_up(monkeypatch):
+    # (Sol mac r19) Finding 5: the rollback after a refused mark now gets the
+    # same bounded retry as everything else, so a transient refusal of just
+    # its first attempt no longer loses the previous text.
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    pending = []
+    monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
+    mark_fmt = rig.fake.RegisterClipboardFormatW(w._OWNER_MARK_FORMAT)
+    calls = {"text": 0}
+
+    def on_set(fmt, _handle):
+        if fmt == mark_fmt:
+            return True   # the mark write always fails
+        if fmt == w._CF_UNICODETEXT:
+            calls["text"] += 1
+            return calls["text"] == 2   # the new text lands; the rollback's first try fails
+        return False
+
+    rig.fake.on_set = on_set
+    with pytest.raises(injector.InjectionError, match="Could not write"):
+        w.inject_text_paste_windows("dictation")
+    assert pending == [] and rig.sent == []
+    assert rig.clipboard == "theirs"              # the retried rollback put it back
+    assert rig.fake.writes == ["dictation", "theirs"]
+
+
+def test_initial_paste_survives_exactly_two_refused_writes(monkeypatch):
+    # (Sol mac r19) Finding 5: the old review's reproduction -- refusing the
+    # text write and its one rollback attempt used to leave the clipboard
+    # empty and discard the previous text, with no restore scheduled since
+    # the paste itself raised. Both are bounded now, so a third round lands.
+    rig, w = _windows_send_rig(monkeypatch)
+    pending = []
+    monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
+    calls = {"text": 0}
+
+    def on_set(fmt, _handle):
+        if fmt == w._CF_UNICODETEXT:
+            calls["text"] += 1
+            return calls["text"] <= 2   # the new text, then its one rollback attempt
+        return False
+
+    rig.fake.on_set = on_set
+    w.inject_text_paste_windows("dictation")   # must not raise
+    assert rig.clipboard == "dictation"
+    assert rig.clipboard is not None             # never left empty
+    assert len(pending) == 1
+    assert len(rig.fake.freed) == 1              # the unused rollback block
+
+
+def test_a_paste_retired_while_its_text_was_refused_puts_theirs_back_and_is_cancelled(monkeypatch):
+    # The new text is not offered again once retired; the rollback lands, and
+    # the paste ends as a cancellation, not a failed write.
+    import ctypes
+    from wayfinder.core import injector
+    rig, w = _windows_send_rig(monkeypatch)
+    pending = []
+    monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
+    attempts = {"new": 0}
+    retired = [False]
+
+    def on_set(fmt, handle):
+        if fmt == w._CF_UNICODETEXT and ctypes.wstring_at(handle) == "dictation":
+            attempts["new"] += 1
+            retired[0] = True
+            return True                 # refused
+        return False
+
+    rig.fake.on_set = on_set
+    with injector.cancellable(lambda: retired[0]):
+        with pytest.raises(injector.InjectionCancelled):
+            w.inject_text_paste_windows("dictation")
+    assert attempts["new"] == 1
+    assert rig.clipboard == "theirs"
+    assert pending == [] and rig.sent == []
 
 
 def test_a_failed_text_write_restores_the_previous_clipboard_in_place(monkeypatch):

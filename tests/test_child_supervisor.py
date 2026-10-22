@@ -237,6 +237,81 @@ def test_a_ready_watcher_runs_the_check_before_the_helper(monkeypatch):
         child_supervisor.stop_supervised(proc, term_wait=1, platform_name="darwin")
 
 
+# Sol mac r19: run_tracked's timeout began after the spawn, so the wait for
+# the lock and the watcher could spend a deadline's whole time left and the
+# helper still got its full timeout after it.
+
+@posix
+def test_a_tracked_run_whose_watcher_never_gets_ready_times_out_in_its_own_time(monkeypatch, tmp_path):
+    marker = tmp_path / "ran"
+    _record_spawns(monkeypatch)
+    monkeypatch.setattr(child_supervisor, "_watcher_command",
+                        lambda: [sys.executable, "-c", "import time; time.sleep(30)"])
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        child_supervisor.run_tracked(["touch", str(marker)], timeout=0.3, env=dict(os.environ),
+                                     popen=child_supervisor._darwin_spawn)
+    assert time.monotonic() - started < 3                 # not the 20 s readiness ceiling
+    assert caught.value.timeout == 0.3
+    [watcher] = _Recording.instances                      # the helper was never spawned
+    assert watcher.returncode is not None
+    assert not child_supervisor._tracked
+    time.sleep(0.2)
+    assert not marker.exists()
+
+
+@posix
+def test_a_tracked_run_gets_only_the_time_its_watcher_left(monkeypatch):
+    _record_spawns(monkeypatch)
+    ready = child_supervisor._watcher_ready
+
+    def slow_ready(watcher, timeout):
+        time.sleep(0.5)
+        return ready(watcher, timeout)
+
+    monkeypatch.setattr(child_supervisor, "_watcher_ready", slow_ready)
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        child_supervisor.run_tracked(["sleep", "5"], timeout=0.8, env=dict(os.environ),
+                                     popen=child_supervisor._darwin_spawn)
+    assert time.monotonic() - started < 1.2               # 0.8 s in all, not 0.5 s + 0.8 s
+    assert not child_supervisor._tracked
+
+
+@posix
+def test_a_tracked_run_out_of_time_while_waiting_for_the_lock_never_starts(tmp_path):
+    marker = tmp_path / "ran"
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with child_supervisor._tracked_lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    held.wait(5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            child_supervisor.run_tracked(["touch", str(marker)], timeout=0.2)
+        assert time.monotonic() - started < 1
+    finally:
+        release.set()
+        holder.join(5)
+    time.sleep(0.2)
+    assert not marker.exists()
+    assert not child_supervisor._tracked
+
+
+@posix
+def test_a_tracked_run_already_past_its_deadline_starts_nothing(monkeypatch):
+    spawned = _record_spawns(monkeypatch)
+    with pytest.raises(subprocess.TimeoutExpired):
+        child_supervisor.run_tracked(["true"], timeout=0)
+    assert spawned == []
+
+
 @posix
 def test_an_early_group_sigterm_cannot_end_a_slow_watcher(monkeypatch, tmp_path):
     # Sol mac r17: a watcher still starting up (here 1 s) did not yet ignore

@@ -499,15 +499,27 @@ def _run_spawn_checks() -> None:
         check()
 
 
+def _refuse_past(command, deadline) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise subprocess.TimeoutExpired(list(command), 0.0)
+
+
 def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
-                  **popen_kwargs) -> subprocess.Popen:
+                  deadline: float | None = None, **popen_kwargs) -> subprocess.Popen:
     """Popen (or *popen*, such as spawn_supervised) a helper that a terminal
     shutdown stops (with *stop*, default terminate then kill, its whole group
-    on macOS); refused once one has begun. macOS supervises it by default."""
+    on macOS); refused once one has begun. macOS supervises it by default.
+
+    *deadline* (time.monotonic()) bounds the wait for the lock and for the
+    watcher: past it, subprocess.TimeoutExpired and no helper (Sol mac r19)."""
     global _exit_hook_registered
     if popen is None and _supervise_by_default():
         popen = _darwin_spawn
-    with _tracked_lock:
+    if deadline is None:
+        _tracked_lock.acquire()
+    elif not _tracked_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise subprocess.TimeoutExpired(list(command), 0.0)
+    try:
         if _tracked_closed:
             raise HelpersClosed("shutting down: no new helper process")
         _run_spawn_checks()
@@ -528,11 +540,19 @@ def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
                 _run_spawn_checks()
                 if own_check is not None:
                     own_check()
+                _refuse_past(command, deadline)
             popen_kwargs["before_helper"] = recheck
+            if deadline is not None:
+                left = max(0.0, deadline - time.monotonic())
+                given = popen_kwargs.get("ready_within")
+                popen_kwargs["ready_within"] = left if given is None else min(given, left)
+        _refuse_past(command, deadline)
         proc = (popen or subprocess.Popen)(command, **popen_kwargs)
         if stop is None:
             stop = _stop_helper_group if _is_helper_group(proc) else _terminate_child
         _tracked[proc] = stop
+    finally:
+        _tracked_lock.release()
     bind_to_app_lifetime(proc)
     return proc
 
@@ -567,16 +587,23 @@ def shutdown_generation() -> int:
 
 def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = None,
                 check: bool = False, **kwargs) -> subprocess.CompletedProcess:
-    """subprocess.run() through spawn_tracked(): the same arguments and errors."""
+    """subprocess.run() through spawn_tracked(): the same arguments and errors.
+    *timeout* counts from this call, the wait for the lock and the watcher
+    included, so a deadline's time left really bounds the helper (Sol mac r19)."""
+    deadline = None if timeout is None else time.monotonic() + timeout
     if kwargs.pop("capture_output", False):
         kwargs["stdout"] = kwargs["stderr"] = subprocess.PIPE
     if input is not None:
         kwargs["stdin"] = subprocess.PIPE
-    proc = spawn_tracked(command, **kwargs)
+    try:
+        proc = spawn_tracked(command, deadline=deadline, **kwargs)
+    except subprocess.TimeoutExpired:
+        raise subprocess.TimeoutExpired(command, timeout) from None
     try:
         with proc:
             try:
-                stdout, stderr = proc.communicate(input, timeout=timeout)
+                left = None if deadline is None else max(0.0, deadline - time.monotonic())
+                stdout, stderr = proc.communicate(input, timeout=left)
             except subprocess.TimeoutExpired:
                 _kill_helper(proc)
                 proc.wait()

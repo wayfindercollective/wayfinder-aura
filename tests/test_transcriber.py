@@ -2760,6 +2760,20 @@ class TestARetiredDictationsHelpers:
         assert getattr(backend, "_supported_flags_cache", None) is None   # not "no flags"
         assert backend._gpu_supported is None                              # not "no GPU"
 
+    def test_a_gpu_probe_that_runs_out_of_time_caches_nothing(self, tmp_path, monkeypatch):
+        # Sol mac r19: the probe's time now counts its watcher's start too,
+        # and a slow start says nothing about the binary.
+        import subprocess
+        from wayfinder.core import transcriber
+
+        def timed_out(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+        monkeypatch.setattr(transcriber, "run_tracked", timed_out)
+        backend = self._backend(tmp_path)
+        assert backend.supports_gpu() is False
+        assert backend._gpu_supported is None                              # not "no GPU"
+
     @pytest.mark.parametrize("at", ["flag-probe", "transcription"])
     def test_a_transcription_refused_at_the_spawn_lock_is_abandoned(self, tmp_path, monkeypatch, at):
         import subprocess

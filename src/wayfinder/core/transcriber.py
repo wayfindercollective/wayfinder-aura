@@ -488,6 +488,10 @@ class WhisperCppBackend(TranscriptionBackend):
             return self._gpu_supported
         except HelpersClosed:
             return False  # refused or cut short by Quit: learned nothing, cache nothing
+        except subprocess.TimeoutExpired:
+            # Its time counts the helper's watcher start too: a slow start
+            # says nothing about the binary, so a later call asks again.
+            return False
         except Exception:
             self._gpu_supported = False
             return False
