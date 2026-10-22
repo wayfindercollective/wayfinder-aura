@@ -3264,12 +3264,20 @@ def clean_whisper_artifacts(
         # _collapse_whisper_repetitions only tries 2-4 word windows, so a stuck
         # decode that loops a whole SENTENCE (whisper-server runs -nf, so it
         # never retries a looping decode itself) passes through untouched.
-        # Shared with chunk_text_looks_looped (chunking.py), which decides
-        # whether to re-hear a prompted chunk unprompted in the first place.
-        from wayfinder.core.chunking import collapse_phrase_window_loops, collapse_sentence_loops
+        # Shared with chunk_loop_evidence (chunking.py), which decides whether
+        # to re-hear a prompted chunk unprompted in the first place — but this
+        # runs with no chunk timing at all, so it needs stronger evidence than
+        # that non-destructive check before collapsing anything: LOOP_CLEANUP_
+        # MIN_RUN rather than LOOP_MIN_RUN, so 3-4 copies of an intentionally
+        # repeated sentence or unpunctuated phrase survive (Sol loop r3).
+        from wayfinder.core.chunking import (
+            LOOP_CLEANUP_MIN_RUN,
+            collapse_phrase_window_loops,
+            collapse_sentence_loops,
+        )
 
-        text = collapse_sentence_loops(text)
-        text = collapse_phrase_window_loops(text)
+        text = collapse_sentence_loops(text, min_run=LOOP_CLEANUP_MIN_RUN)
+        text = collapse_phrase_window_loops(text, min_run=LOOP_CLEANUP_MIN_RUN)
 
     # Clean up multiple spaces
     text = re.sub(r'\s+', ' ', text)

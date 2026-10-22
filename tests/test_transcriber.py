@@ -1419,21 +1419,59 @@ class TestWhisperArtifactCleanup:
 
         # _collapse_whisper_repetitions alone only tries 2-4 word windows, so
         # a stuck decode looping a whole sentence needs the sibling collapse
-        # that clean_whisper_artifacts also runs under the same switch.
+        # that clean_whisper_artifacts also runs under the same switch. Five
+        # copies (clean_whisper_artifacts collapses at LOOP_CLEANUP_MIN_RUN,
+        # not the lower, non-destructive LOOP_MIN_RUN — three intentional
+        # copies must survive cleanup; see test_three_ordinary_paced_copies_
+        # survive_cleanup_in_full below, Sol loop r3).
         pre = "Let's go over the plan first."
         loop = "If the player is level one they're going to be level one."
-        looped_text = " ".join([pre, loop, loop, loop])
+        looped_text = " ".join([pre, loop, loop, loop, loop, loop])
         assert clean_whisper_artifacts(looped_text) == f"{pre} {loop}"
         assert clean_whisper_artifacts(looped_text, collapse_repetitions=False) == looped_text
+
+    def test_three_ordinary_paced_copies_survive_cleanup_in_full(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # Sol loop r3: three intentional, ordinary-paced repeats of a short
+        # sentence used to collapse to one copy even with no chunk timing to
+        # suggest a stuck decode. clean_whisper_artifacts runs at
+        # LOOP_CLEANUP_MIN_RUN now, so 3-4 copies survive; only a longer run
+        # (5+, see test_a_sentence_length_repetition_loop_is_collapsed above)
+        # is collapsed outright.
+        sentence = "We need to go home."
+        text = " ".join([sentence] * 3)
+        assert clean_whisper_artifacts(text) == text
+
+    def test_an_unpunctuated_phrase_x3_survives_cleanup_in_full(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        phrase = "we need to go home"
+        text = " ".join([phrase] * 3)
+        assert clean_whisper_artifacts(text) == text
+
+    def test_a_closing_quote_at_a_sentence_boundary_survives_cleanup(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # Sol loop r3, finding 1: a closing quote right after the period used
+        # to defeat sentence splitting and let a window scan delete real
+        # words at the far sentence's end.
+        text = (
+            '"We need to go home." "We need to go home." '
+            '"We need to go home before dinner."'
+        )
+        assert clean_whisper_artifacts(text) == text
 
     def test_a_phrase_loop_inside_one_sentence_collapses_despite_terminal_punctuation(self):
         from wayfinder.core.transcriber import clean_whisper_artifacts
 
         # A single terminal period hides the loop from collapse_sentence_loops
         # (it's all one "sentence"); collapse_phrase_window_loops used to skip
-        # any punctuated text entirely, so this slipped through both.
+        # any punctuated text entirely, so this slipped through both. Five
+        # copies so this clears the cleanup bar (LOOP_CLEANUP_MIN_RUN; Sol
+        # loop r3) rather than the lower, non-destructive LOOP_MIN_RUN.
         phrase = "we need to update the database before lunch"
-        looped_text = " ".join([phrase] * 3) + "."
+        looped_text = " ".join([phrase] * 5) + "."
         cleaned = clean_whisper_artifacts(looped_text)
         assert cleaned != looped_text
         assert cleaned.count("database") == 1
@@ -1610,10 +1648,11 @@ class TestTranscribeWithConfig:
 
         # End to end through the ensure_punctuation=True path (the default):
         # the loop is one "sentence" by punctuation, so it must be caught by
-        # word-window detection, not sentence-level detection.
+        # word-window detection, not sentence-level detection. Five copies to
+        # clear the cleanup bar (LOOP_CLEANUP_MIN_RUN; Sol loop r3).
         phrase = "we need to update the database before lunch"
         backend = MagicMock()
-        backend.transcribe.return_value = " ".join([phrase] * 3) + "."
+        backend.transcribe.return_value = " ".join([phrase] * 5) + "."
         mock_get_backend.return_value = backend
         sample_config.update({"ensure_punctuation": True, "post_processing_enabled": False})
 

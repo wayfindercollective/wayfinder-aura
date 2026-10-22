@@ -7,6 +7,7 @@ exercise the exact same boundary logic as the UI runtime.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 
 _TERMINAL_MARKERS = frozenset({"[error]", "[empty]"})
@@ -88,6 +89,17 @@ LOOP_MIN_RUN = 3
 # A repeat cut short still counts, from this many words.
 LOOP_TRUNCATED_MIN_WORDS = 3
 
+# A run of LOOP_MIN_RUN only SUSPECTS a loop: in wayfinder_main it triggers a
+# non-destructive unprompted re-hear, nothing is thrown away. Collapsing text
+# outright — the unprompted cleanup in transcriber.py's clean_whisper_artifacts,
+# which has no chunk timing to go on — needs more evidence than that: three
+# ordinary-paced, intentionally repeated sentences ("We need to go home." x3)
+# must survive. collapse_sentence_loops and collapse_phrase_window_loops take
+# the run length to collapse at as a min_run parameter; cleanup passes this
+# higher bar instead of LOOP_MIN_RUN, so 3-4 copies of a sentence or
+# unpunctuated phrase come through untouched (Sol loop r3).
+LOOP_CLEANUP_MIN_RUN = 5
+
 
 def _loop_words(phrase: str) -> list[str]:
     """Normalised words for loop matching (see _norm) with empties dropped."""
@@ -121,27 +133,57 @@ def _is_loop_repeat(anchor_words: list[str], candidate_words: list[str]) -> bool
     )
 
 
-def collapse_sentence_loops(text: str) -> str:
-    """Collapse a run of 3+ consecutive repeats of one sentence to the first.
+# The sentence boundary shared by collapse_sentence_loops and
+# collapse_phrase_window_loops: a sentence ends at [.!?], optionally followed
+# by a closing quote or bracket, then whitespace. A closing quote right
+# after the terminator ("He said "stop." Then left.") used to defeat a
+# lookbehind that only accepted [.!?] itself before the split point, which
+# left the quoted run unsplit and let a word-window match straddle it,
+# deleting real words at the far sentence's end (Sol loop r3). Python's re
+# can't lookbehind a variable width, so this scans forward with finditer and
+# splits on the whitespace group instead, keeping the separators themselves
+# as parts so joining with "" reproduces the original text exactly.
+_SENTENCE_END = re.compile(r'[.!?]["\'”’)\]]*(\s+)')
+
+
+def _split_sentences_with_seps(text: str) -> list[str]:
+    """``[sentence, sep, sentence, sep, ..., sentence]``; ``"".join(...) == text``."""
+    parts = []
+    start = 0
+    for m in _SENTENCE_END.finditer(text):
+        sep_start, sep_end = m.span(1)
+        parts.append(text[start:sep_start])
+        parts.append(text[sep_start:sep_end])
+        start = sep_end
+    parts.append(text[start:])
+    return parts
+
+
+def collapse_sentence_loops(text: str, *, min_run: int = LOOP_MIN_RUN) -> str:
+    """Collapse a run of ``min_run``+ consecutive repeats of one sentence to
+    the first.
 
     Targets a stuck decode that loops a whole SENTENCE — _collapse_whisper_
     repetitions (transcriber.py) only tries 2-4 word windows, so a loop built
-    from 5-40 word sentences passes it untouched. Two repeats are left alone
-    (people do say a sentence twice), and only word-for-word repeats (or one
-    cut short) join a run, so list-like sentences differing in a word all
-    survive. Text with no run comes back exactly as given.
+    from 5-40 word sentences passes it untouched. Fewer than ``min_run``
+    repeats are left alone (people do say a sentence twice, or even three
+    times on purpose — see LOOP_CLEANUP_MIN_RUN), and only word-for-word
+    repeats (or one cut short) join a run, so list-like sentences differing
+    in a word all survive. Text with no run comes back exactly as given.
 
-    A cut-short repeat may only extend a run that already has 3 FULL copies
-    behind it (the anchor plus 2 exact repeats): a prefix match alone is too
-    cheap a coincidence to trust. Without that gate, "I want to go home after
-    the meeting. I want to go home. I want to go." — three distinct sentences,
-    each a prefix of the one before — collapsed to the first sentence alone.
+    A cut-short repeat may only extend a run that already has LOOP_MIN_RUN
+    FULL copies behind it (the anchor plus 2 exact repeats), regardless of
+    ``min_run``: a prefix match alone is too cheap a coincidence to trust.
+    Without that gate, "I want to go home after the meeting. I want to go
+    home. I want to go." — three distinct sentences, each a prefix of the one
+    before — collapsed to the first sentence alone. The run as a whole must
+    still reach ``min_run`` members (full or trailing truncated) to collapse.
     """
     if not any(mark in text for mark in ".!?"):
         return text  # nothing to split on; collapse_phrase_window_loops covers this
 
-    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
-    if len(sentences) < LOOP_MIN_RUN:
+    sentences = [s for s in _split_sentences_with_seps(text.strip())[0::2] if s.strip()]
+    if len(sentences) < min_run:
         return text
 
     kept = []
@@ -168,7 +210,7 @@ def collapse_sentence_loops(text: str) -> str:
             break
 
         kept.append(sentences[i])  # first member only, whether or not a run formed
-        if j - i >= LOOP_MIN_RUN:
+        if j - i >= min_run:
             changed = True
             i = j
         else:
@@ -177,7 +219,7 @@ def collapse_sentence_loops(text: str) -> str:
     return " ".join(kept) if changed else text
 
 
-def _window_scan_one_span(text: str) -> str:
+def _window_scan_one_span(text: str, *, min_run: int = LOOP_MIN_RUN) -> str:
     """The window scan itself, run over one span (a sentence, or the whole
     text when it has none) by collapse_phrase_window_loops below.
 
@@ -195,16 +237,17 @@ def _window_scan_one_span(text: str) -> str:
     After a collapse it starts again from the smallest window: removing a
     run can expose a shorter loop at a size already scanned (Sol loop r2).
     Every collapse shortens the text, so this ends. Returns the identical
-    object when nothing changed.
+    object when nothing changed. ``min_run`` is the run length (in window
+    repeats) required to collapse — see LOOP_CLEANUP_MIN_RUN (Sol loop r3).
     """
     words = text.split()
-    if len(words) < LOOP_MIN_RUN * LOOP_PHRASE_MIN_WORDS:
+    if len(words) < min_run * LOOP_PHRASE_MIN_WORDS:
         return text
 
     changed_any = False
     window = LOOP_PHRASE_MIN_WORDS
     while True:
-        max_window = min(LOOP_PHRASE_MAX_WORDS, len(words) // LOOP_MIN_RUN)
+        max_window = min(LOOP_PHRASE_MAX_WORDS, len(words) // min_run)
         if window > max_window:
             break
 
@@ -223,7 +266,7 @@ def _window_scan_one_span(text: str) -> str:
             j = i + window
             while j + window <= len(words) and norm[j:j + window] == anchor:
                 j += window
-            if (j - i) // window >= LOOP_MIN_RUN:
+            if (j - i) // window >= min_run:
                 kept.extend(words[i:i + window])  # first occurrence only
                 i = j
                 changed = True
@@ -240,11 +283,7 @@ def _window_scan_one_span(text: str) -> str:
     return " ".join(words) if changed_any else text
 
 
-# collapse_sentence_loops' boundary, keeping the separators for the rejoin.
-_SENTENCE_BOUNDARY = re.compile(r"((?<=[.!?])\s+)")
-
-
-def collapse_phrase_window_loops(text: str) -> str:
+def collapse_phrase_window_loops(text: str, *, min_run: int = LOOP_MIN_RUN) -> str:
     """Same loop shape as collapse_sentence_loops, scanning fixed-size word
     windows instead of sentences — the only way to see a loop stuck inside a
     single sentence, or in speech with no sentence punctuation at all.
@@ -253,31 +292,71 @@ def collapse_phrase_window_loops(text: str) -> str:
     "we need to go home" over "We need to go home. We need to go home. We
     need to go home before dinner." and deleted "before dinner" (Sol loop
     r2). Repeats across sentences are collapse_sentence_loops' job. Text
-    with no run comes back as the same object.
+    with no run comes back as the same object. ``min_run`` is forwarded to
+    _window_scan_one_span (see LOOP_CLEANUP_MIN_RUN, Sol loop r3).
     """
     if not any(mark in text for mark in ".!?"):
-        return _window_scan_one_span(text)
+        return _window_scan_one_span(text, min_run=min_run)
 
-    parts = _SENTENCE_BOUNDARY.split(text)  # [sentence, sep, sentence, sep, ...]
+    parts = _split_sentences_with_seps(text)  # [sentence, sep, sentence, sep, ...]
     changed_any = False
     for i in range(0, len(parts), 2):
-        collapsed = _window_scan_one_span(parts[i])
+        collapsed = _window_scan_one_span(parts[i], min_run=min_run)
         if collapsed is not parts[i]:
             changed_any = True
             parts[i] = collapsed
     return "".join(parts) if changed_any else text
 
 
-def chunk_text_looks_looped(text: str, seconds: float | None) -> bool:
-    """Whether a prompted chunk's text is a Whisper repetition loop, not real speech."""
+@dataclass(frozen=True)
+class LoopEvidence:
+    """What chunk_loop_evidence found in a prompted chunk's own raw text.
+
+    ``strong`` lowers the bar a retry must clear to replace the prompted
+    text: any non-empty, non-looped retry does. Otherwise the retry needs at
+    least ``kept_words`` words — what collapsing at LOOP_MIN_RUN left of the
+    prompted text — to be trusted over ordinary-paced, intentionally
+    repeated speech (Sol loop r3).
+    """
+
+    strong: bool
+    kept_words: int
+
+
+def chunk_loop_evidence(text: str, seconds: float | None = None) -> LoopEvidence | None:
+    """Whether a prompted chunk's RAW text shows a Whisper repetition loop.
+
+    None unless collapsing at LOOP_MIN_RUN actually changes the text: word
+    rate alone is never a loop on its own — a fast, 31-word, non-repeating
+    5 s chunk used to trip the old rate check with no repetition at all
+    (Sol loop r3). Once a run of LOOP_MIN_RUN+ copies is found, ``strong`` is
+    set when collapsing at the higher LOOP_CLEANUP_MIN_RUN bar still changes
+    it (a long enough run to collapse outright), or the rate is implausible
+    for speech; either makes any non-empty, non-looped retry trustworthy.
+    Otherwise the retry must match or beat ``kept_words``.
+    """
     if not text:
-        return False
-    words = text.split()
-    if seconds and seconds >= _MIN_LOOP_SECONDS and len(words) > MAX_WORDS_PER_SECOND * seconds:
-        return True
-    return (
-        collapse_phrase_window_loops(collapse_sentence_loops(text)) != text
+        return None
+
+    collapsed = collapse_phrase_window_loops(
+        collapse_sentence_loops(text, min_run=LOOP_MIN_RUN), min_run=LOOP_MIN_RUN
     )
+    if collapsed == text:
+        return None
+
+    collapsed_for_cleanup = collapse_phrase_window_loops(
+        collapse_sentence_loops(text, min_run=LOOP_CLEANUP_MIN_RUN), min_run=LOOP_CLEANUP_MIN_RUN
+    )
+    words = text.split()
+    strong = collapsed_for_cleanup != text or (
+        bool(seconds) and seconds >= _MIN_LOOP_SECONDS and len(words) > MAX_WORDS_PER_SECOND * seconds
+    )
+    return LoopEvidence(strong=strong, kept_words=len(collapsed.split()))
+
+
+def chunk_text_looks_looped(text: str, seconds: float | None = None) -> bool:
+    """Whether a prompted chunk's text is a Whisper repetition loop, not real speech."""
+    return chunk_loop_evidence(text, seconds) is not None
 
 
 def find_text_overlap(

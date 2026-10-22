@@ -152,8 +152,14 @@ def test_the_app_prompts_each_chunk_with_the_trimmed_context():
     assert "raw_prompted_text = raw_prompted[0] if raw_prompted else text" in body
     assert "chunk_text_looks_looped(raw_prompted_text, get_wav_duration_seconds(chunk_path))" in body
     assert "raw_retry[0] if raw_retry else retry" in body
-    # An empty or still-looped retry is discarded rather than trusted whole.
-    assert "if retry.strip() and not retry_looped:" in body
+    # The dictation's retirement is rechecked right after the retry returns,
+    # before any of its text is used (Sol loop r3, minor 4).
+    assert "WhisperServerBackend._check_not_abandoned(request_token)" in body
+    # An empty, still-looped, or too-short retry is discarded rather than
+    # trusted whole: rate alone is never enough, only the prompted text's own
+    # repetition evidence authorizes replacing it (Sol loop r3).
+    assert "evidence = chunk_loop_evidence(raw_prompted_text, get_wav_duration_seconds(chunk_path))" in body
+    assert "evidence.strong or len(retry.split()) >= evidence.kept_words" in body
 
 
 def test_a_collapsed_prompted_chunk_is_heard_again():
@@ -391,3 +397,137 @@ def test_a_collapse_exposes_a_smaller_loop_in_one_call_and_is_idempotent():
     once = collapse_phrase_window_loops(text)
     assert once == p
     assert collapse_phrase_window_loops(once) == once
+
+
+# --- Closing quotes/brackets at a sentence boundary (Sol loop r3) -----------
+
+def test_a_closing_quote_after_the_period_still_splits_the_sentence():
+    from wayfinder.core.chunking import chunk_text_looks_looped, collapse_sentence_loops
+
+    # A closing quote right after [.!?] used to defeat the lookbehind split,
+    # merging all three quoted sentences into one long "sentence" that a
+    # window scan then matched across, deleting "before dinner.""
+    text = (
+        '"We need to go home." "We need to go home." '
+        '"We need to go home before dinner."'
+    )
+    assert collapse_sentence_loops(text) is text
+    assert not chunk_text_looks_looped(text, 10.0)
+
+
+def test_a_closing_quote_survives_the_full_default_cleanup_unchanged():
+    from wayfinder.core.chunking import collapse_phrase_window_loops, collapse_sentence_loops
+
+    text = (
+        '"We need to go home." "We need to go home." '
+        '"We need to go home before dinner."'
+    )
+    cleaned = collapse_phrase_window_loops(collapse_sentence_loops(text))
+    assert cleaned == text
+
+
+@pytest.mark.parametrize("closer", ['"', "'", "”", "’", ")", "]"])
+def test_other_closers_also_split_the_sentence(closer):
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    sentence = f"We need to go home.{closer}"
+    text = " ".join([sentence, sentence, "We need to go home before dinner." + closer])
+    assert collapse_sentence_loops(text) is text
+
+
+# --- min_run: the non-destructive "suspect" bar vs. the cleanup bar --------
+# LOOP_MIN_RUN (3) only suspects a loop; LOOP_CLEANUP_MIN_RUN (5) is what
+# unprompted cleanup (clean_whisper_artifacts) collapses at, so 3-4 copies of
+# intentional repetition survive it (Sol loop r3).
+
+def test_three_copies_suspect_a_loop_but_do_not_collapse_at_the_cleanup_bar():
+    from wayfinder.core.chunking import (
+        LOOP_CLEANUP_MIN_RUN,
+        LOOP_MIN_RUN,
+        collapse_sentence_loops,
+    )
+
+    sentence = "We need to go home."
+    text = " ".join([sentence] * 3)
+    assert collapse_sentence_loops(text, min_run=LOOP_MIN_RUN) == sentence
+    assert collapse_sentence_loops(text, min_run=LOOP_CLEANUP_MIN_RUN) is text
+
+
+def test_four_copies_still_survive_the_cleanup_bar():
+    from wayfinder.core.chunking import LOOP_CLEANUP_MIN_RUN, collapse_sentence_loops
+
+    sentence = "We need to go home."
+    text = " ".join([sentence] * 4)
+    assert collapse_sentence_loops(text, min_run=LOOP_CLEANUP_MIN_RUN) is text
+
+
+def test_five_copies_collapse_at_the_cleanup_bar():
+    from wayfinder.core.chunking import LOOP_CLEANUP_MIN_RUN, collapse_sentence_loops
+
+    sentence = "We need to go home."
+    text = " ".join([sentence] * 5)
+    assert collapse_sentence_loops(text, min_run=LOOP_CLEANUP_MIN_RUN) == sentence
+
+
+def test_an_unpunctuated_phrase_x3_survives_the_cleanup_bar_but_not_min_run():
+    from wayfinder.core.chunking import (
+        LOOP_CLEANUP_MIN_RUN,
+        LOOP_MIN_RUN,
+        collapse_phrase_window_loops,
+    )
+
+    phrase = "we need to go home"
+    text = " ".join([phrase] * 3)
+    assert collapse_phrase_window_loops(text, min_run=LOOP_MIN_RUN) == phrase
+    assert collapse_phrase_window_loops(text, min_run=LOOP_CLEANUP_MIN_RUN) == text
+
+
+# --- chunk_loop_evidence: repetition required, rate alone is never enough --
+
+def test_chunk_loop_evidence_is_none_for_a_fast_nonrepeating_chunk():
+    from wayfinder.core.chunking import chunk_loop_evidence
+
+    # Sol loop r3: rate alone used to authorize a destructive replacement
+    # with no repetition at all.
+    text = (
+        "Pack my red bag with the clean socks then put that blue coat by "
+        "the front door and leave the keys on top so I can find them when "
+        "I leave."
+    )
+    assert len(text.split()) == 31
+    assert chunk_loop_evidence(text, 5.0) is None
+
+
+def test_chunk_loop_evidence_is_weak_for_three_ordinary_paced_copies():
+    from wayfinder.core.chunking import chunk_loop_evidence
+
+    sentence = "We need to go home."
+    text = " ".join([sentence] * 3)
+    evidence = chunk_loop_evidence(text, 17.0)
+    assert evidence is not None
+    assert evidence.strong is False
+    assert evidence.kept_words == len(sentence.split())
+
+
+def test_chunk_loop_evidence_is_strong_when_the_run_collapses_at_the_cleanup_bar():
+    from wayfinder.core.chunking import chunk_loop_evidence
+
+    sentence = "We need to go home."
+    text = " ".join([sentence] * 13)
+    evidence = chunk_loop_evidence(text, 17.0)
+    assert evidence is not None
+    assert evidence.strong is True
+
+
+def test_chunk_loop_evidence_is_strong_by_rate_only_with_real_repetition_present():
+    from wayfinder.core.chunking import chunk_loop_evidence
+
+    # Three copies of a long sentence in a short chunk: too few to collapse
+    # at the cleanup bar, but the rate alone is implausible for speech. Rate
+    # only makes already-suspected repetition strong — it never conjures
+    # evidence out of nonrepeating text (see the "fast nonrepeating" test).
+    sentence = "we packed the car with every bag we could carry for the trip"
+    text = " ".join([sentence] * 3)
+    evidence = chunk_loop_evidence(text, 5.0)
+    assert evidence is not None
+    assert evidence.strong is True

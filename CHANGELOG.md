@@ -9,14 +9,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **A chunk no longer repeats the same sentence over and over.** In Auto mode,
-  a chunk prompted with the previous chunk's text could get stuck echoing one
-  sentence or phrase many times instead of hearing the rest of the speech. A
-  looping chunk is now re-heard without that prompt — the loop is caught on
-  the recognizer's raw output, before cleanup can collapse away the evidence
-  — and an empty or still-looped retry never throws out a good prompted
-  rendering for it. Any loop that still slips through is collapsed down to
-  the sentence or phrase it actually said, whatever the punctuation.
+- **A chunk no longer repeats the same sentence over and over — and three
+  intentional repeats are no longer mistaken for one.** In Auto mode, a
+  chunk prompted with the previous chunk's text could get stuck echoing one
+  sentence or phrase many times instead of hearing the rest of the speech.
+  A run of 3 or more verbatim copies is re-heard without that prompt — the
+  loop is suspected on the recognizer's raw output, before cleanup can
+  collapse away the evidence — but an empty, still-looped, or too-short
+  retry never throws out a good prompted rendering for it, and word rate
+  alone can no longer authorize that replacement on its own. Only a longer
+  run (5+ copies, or an implausible word rate alongside real repetition) is
+  collapsed outright, so saying the same short sentence three times on
+  purpose survives untouched. A closing quote right after a sentence's
+  period, question mark, or exclamation point no longer hides the sentence
+  boundary from either check.
 
 ## [1.3.0] — 2026-10-20
 
