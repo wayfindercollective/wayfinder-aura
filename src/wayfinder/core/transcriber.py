@@ -25,7 +25,7 @@ from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import (
     HelpersClosed, bind_to_app_lifetime, run_tracked, signal_supervised,
-    spawn_supervised, wait_supervised, wrap_macos_child_command,
+    spawn_supervised, wait_supervised,
 )
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
@@ -120,6 +120,12 @@ def dictation_requests(token: Optional[int]):
         yield
     finally:
         _dictation.token = None
+
+
+def _retired_dictation() -> bool:
+    """Whether this thread runs the requests of a dictation the app retired."""
+    token = getattr(_dictation, "token", None)
+    return token is not None and token != WhisperServerBackend._abandoned
 
 
 class RequestAbandoned(TranscriptionError):
@@ -537,6 +543,9 @@ class WhisperCppBackend(TranscriptionBackend):
             )
         except HelpersClosed:
             raise TranscriptionError("Aura is shutting down")
+        # Retired while the probe ran: no GPU re-test and no attempt (Sol mac
+        # r7). A failed attempt checks again before the next (_activate_fallback).
+        WhisperServerBackend._check_not_abandoned(abandoned_at)
         # Under a salvage DEADLINE the --help probe may have been truncated to empty, so
         # do NOT fail OPEN on the version-fragile flags (v1.7.2 aborts on them → silent
         # empty transcription — the very failure this filtering prevents). Emit those
@@ -969,8 +978,8 @@ class WhisperServerBackend(TranscriptionBackend):
                     return port  # Port is free
                 # macOS never adopts an unowned HTTP service: a local process
                 # could serve a page containing "whisper" and receive Aura's
-                # audio at /inference. There the supervised child is the
-                # ownership proof and cannot outlive the app. Linux keeps
+                # audio at /inference. There our own child is the ownership
+                # proof, and its watcher ends it if the app dies. Linux keeps
                 # main's reuse of our own server (no supervisor yet, so a
                 # crash would otherwise stack a second server per launch).
                 # Windows: the server is bound to the app by a job object
@@ -1230,6 +1239,10 @@ class WhisperServerBackend(TranscriptionBackend):
             # macOS never adopts (see _find_available_port).
             port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
             _abandon_if_superseded()
+            # Retired during the stop or the port scan: nothing of this start
+            # runs yet, so nothing is spawned for it (Sol mac r7). A dead
+            # attempt checks again before the next spawn (end of the loop).
+            self._check_not_abandoned(abandoned_at)
 
             if (
                 sys.platform not in ("darwin", "win32")
@@ -1262,11 +1275,9 @@ class WhisperServerBackend(TranscriptionBackend):
                 else:
                     print(f"[Whisper Server] Starting on port {port}...")
 
-                spawn_cmd, spawn_env = wrap_macos_child_command(
-                    cmd, bundle_binary_env(whisper_metal_env(cmd))
-                )
+                spawn_env = bundle_binary_env(whisper_metal_env(cmd))
                 proc = spawn_supervised(
-                    spawn_cmd,
+                    cmd,
                     env=spawn_env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -1344,9 +1355,8 @@ class WhisperServerBackend(TranscriptionBackend):
                 # A child a switch stopped is not a failed start (the check
                 # above it in the loop can race the switch's kill).
                 _abandon_if_superseded()
-                # The supervisor exited, but a server it left behind (it was
-                # killed first) still holds the model and port: stop its group
-                # before the next attempt replaces the record (Sol mac r6).
+                # Reap the attempt (and on macOS end whatever it forked into
+                # its group) before the next one replaces the record (Sol mac r6).
                 self._stop_server_internal(deadline=deadline)
                 # A retired dictation spawns no reduced-flags retry and
                 # disables nothing: its failure may be the reset's doing.
@@ -1413,10 +1423,8 @@ class WhisperServerBackend(TranscriptionBackend):
             term_wait, kill_wait = 5.0, 2.0
             if deadline is not None:
                 term_wait = max(0.1, min(term_wait, deadline - time.monotonic()))
-            # macOS: the supervisor's whole group, so a SIGKILL cannot orphan
-            # the whisper-server it runs.
-            # Waits for the native child too: a supervisor that died first
-            # left it running (Sol mac r6).
+            # macOS: the server's whole group, while it is unreaped and so
+            # still ours, whatever became of its watcher (Sol mac r6/r7).
             try:
                 signal_supervised(cls._server_process)
                 if not wait_supervised(cls._server_process, term_wait):
@@ -1790,7 +1798,10 @@ class WhisperServerBackend(TranscriptionBackend):
                 # undecodable response — routes to the SAME bounded recovery below, so
                 # a bad response can never silently drop the chunk's words.
                 text = _post(port, req_timeout)
-                if self._ready_only_fallback is not None:
+                # A retired dictation's answer proves nothing about Core ML
+                # (Sol mac r7).
+                if (self._ready_only_fallback is not None
+                        and WhisperServerBackend._abandoned == abandoned_at):
                     self._record_coreml_success()
                 return text
             except Exception as e:
@@ -2865,7 +2876,8 @@ def get_backend(config: dict) -> TranscriptionBackend:
                     config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"), 30.0)
                 server_backend._ready_only_config = requested_config
             if server_backend.is_available():
-                if coreml_pending:
+                # Not for a dictation retired while this ran (Sol mac r7).
+                if coreml_pending and not _retired_dictation():
                     from wayfinder.utils.macos_coreml import schedule_preparation
                     schedule_preparation(requested_config, server_backend)
                 return server_backend
@@ -3626,9 +3638,14 @@ def transcribe_with_config(
     
     config["prompt"] = original_prompt
     
+    # A caller without a dictation (the Welcome test, a benchmark) is one
+    # from here: a retirement during ASR still skips its cleanup (Sol mac r7).
+    if request_token is None:
+        request_token = WhisperServerBackend.request_token()
     with dictation_requests(request_token):
         WhisperServerBackend._check_not_abandoned(request_token)
         backend = get_backend(config)
+        WhisperServerBackend._check_not_abandoned(request_token)
         text = backend.transcribe(audio_path, context=context)
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep

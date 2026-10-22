@@ -153,7 +153,6 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
         return False
     from wayfinder.utils.child_supervisor import (
         cut_short, forget_tracked, spawn_supervised, spawn_tracked, stop_supervised,
-        wrap_macos_child_command,
     )
     from wayfinder.utils.hostexec import bundle_binary_env
     print("[Whisper] Converting downloaded model locally in the background (no additional model download)")
@@ -162,10 +161,10 @@ def prepare_encoder(cli_binary: str, model_path: str, *, cancelled=lambda: False
         package = stage / "encoder.mlpackage"
         marker = populate_package(model, package, cancelled=cancelled)
         asset = stage / encoder_path(str(converted)).name
-        command, env = wrap_macos_child_command([str(compiler), str(package), str(asset)], bundle_binary_env())
+        command = [str(compiler), str(package), str(asset)]
         # Tracked: an overlay restart re-execs under the same pid, so the
-        # supervisor would not notice; the terminal shutdown stops it instead.
-        proc = spawn_tracked(command, stop=stop_supervised, popen=spawn_supervised, env=env,
+        # watcher would not notice; the terminal shutdown stops it instead.
+        proc = spawn_tracked(command, stop=stop_supervised, popen=spawn_supervised, env=bundle_binary_env(),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             import time
@@ -474,7 +473,6 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     from types import SimpleNamespace
     from wayfinder.utils.child_supervisor import (
         HelperStopped, cut_short, forget_tracked, spawn_supervised, spawn_tracked,
-        wrap_macos_child_command,
     )
     from wayfinder.utils.hostexec import bundle_binary_env
     from wayfinder.utils.loopback_http import urlopen_loopback
@@ -488,10 +486,10 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
     candidate.whisper_server_binary = binary
     candidate.model_path = model
     command = candidate._server_cmd_attempts(port)[0] + ["--host", "127.0.0.1"]
-    command, env = wrap_macos_child_command(command, bundle_binary_env(whisper_metal_env(gpu=True)))
     # Tracked until published: no server stop reaches a probe, and its
-    # supervisor misses an overlay restart's same-pid re-exec.
-    proc = spawn_tracked(command, stop=_stop_probe, popen=spawn_supervised, env=env,
+    # watcher misses an overlay restart's same-pid re-exec.
+    proc = spawn_tracked(command, stop=_stop_probe, popen=spawn_supervised,
+                         env=bundle_binary_env(whisper_metal_env(gpu=True)),
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     tail = deque(maxlen=100)
     reader = threading.Thread(target=backend._drain_server_output, args=(proc.stdout, tail), daemon=True)
@@ -509,15 +507,9 @@ def _probe_server(backend, binary: str, model: str, *, coreml: bool, cancelled):
                 # interruption looped forever on a Mac where it always crashes.
                 raise RuntimeError(f"probe exited with {proc.returncode}: {''.join(list(tail)[-3:])[-200:]}")
             # Device compilation may continue while recording; only public
-            # inference is paused. Verify ownership before trusting loopback.
-            rows = subprocess.check_output(["ps", "-axo", "uid=,pid=,ppid=,command="], text=True).splitlines()
-            owned = False
-            for row in rows:
-                parts = row.split(None, 3)
-                if (len(parts) == 4 and parts[0] == str(os.getuid()) and parts[2] == str(proc.pid)
-                        and parts[3].startswith(binary + " ")):
-                    owned = pid_listens_on_tcp(int(parts[1]), port) is True
-            if owned:
+            # inference is paused. Verify ownership before trusting loopback:
+            # the probe is our own unreaped child, so its pid is no one else's.
+            if pid_listens_on_tcp(proc.pid, port) is True:
                 try:
                     with urlopen_loopback(f"http://127.0.0.1:{port}/health", timeout=1) as response:
                         ready = response.status == 200

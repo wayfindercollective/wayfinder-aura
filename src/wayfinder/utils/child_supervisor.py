@@ -1,31 +1,29 @@
 """Keep long-lived native children bound to the macOS app lifetime.
 
-Linux uses ``PR_SET_PDEATHSIG`` for its overlay. macOS has no equivalent, so a
-small Python supervisor watches the owning PID and terminates the native child
-if the app crashes. Normal shutdown signals are forwarded through the same path.
+Linux uses ``PR_SET_PDEATHSIG`` for its overlay. macOS has no equivalent, so
+each helper stays this app's own child (spawn_supervised) and a small watcher
+process (run_watcher) ends it if the app dies first, a crash included.
 
-Windows needs no supervisor process: ``bind_to_app_lifetime`` puts the child in
-a job object that the kernel closes when the app exits for any reason, crash
+Windows needs no watcher: ``bind_to_app_lifetime`` puts the child in a job
+object that the kernel closes when the app exits for any reason, crash
 included, killing the child with it.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
 import threading
 import time
-import weakref
 from pathlib import Path
 from typing import Mapping, Sequence
 
 
-COMMAND_ENV = "WAYFINDER_SUPERVISED_COMMAND"
-PARENT_PID_ENV = "WAYFINDER_SUPERVISOR_PARENT_PID"
+CHILD_PID_ENV = "WAYFINDER_SUPERVISED_PID"
 
 
 def parent_process_alive(pid: int) -> bool:
@@ -39,96 +37,83 @@ def parent_process_alive(pid: int) -> bool:
         return True
 
 
-def wrap_macos_child_command(
-    command: Sequence[str],
-    env: Mapping[str, str],
-    *,
-    platform_name: str | None = None,
-    parent_pid: int | None = None,
-) -> tuple[list[str], dict[str, str]]:
-    """Wrap a native child so it is reaped if the macOS owner disappears."""
-    active_platform = platform_name or sys.platform
-    child_env = dict(env)
-    original = [str(part) for part in command]
-    if active_platform != "darwin":
-        return original, child_env
-
-    child_env[COMMAND_ENV] = json.dumps(original)
-    child_env[PARENT_PID_ENV] = str(parent_pid or os.getpid())
+def _watcher_command() -> list[str]:
     if getattr(sys, "frozen", False):
-        supervisor = [sys.executable, "--child-supervisor"]
-    else:
-        supervisor = [sys.executable, str(Path(__file__).resolve())]
-    return supervisor, child_env
-
-
-ALIVE_FD_ENV = "WAYFINDER_SUPERVISOR_ALIVE_FD"
+        return [sys.executable, "--child-supervisor"]
+    return [sys.executable, str(Path(__file__).resolve())]
 
 
 def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str], popen=None,
                      platform_name: str | None = None, **popen_kwargs) -> subprocess.Popen:
-    """Popen a command from wrap_macos_child_command.
+    """Popen a native helper that must not outlive the app.
 
-    macOS: the supervisor leads its own process group, which its native child
-    inherits, so stop_supervised() can end both at once. Killing only the
-    supervisor (SIGKILL cannot be forwarded) used to orphan whisper-server,
-    which then kept the model loaded and port 8178 open.
+    macOS: the helper is this app's own child and leads a new process group.
+    Until Popen reaps it, its pid, and so its group id, can be no one else's,
+    so stop_supervised() ends it and whatever it forked into that group, with
+    no help from the watcher and whatever the helper does with inherited
+    descriptors (Sol mac r7). The watcher only covers the app dying first.
+    Killing a supervisor in front of the helper used to orphan whisper-server,
+    which then kept the model loaded and its port open.
 
-    The native child also holds the write end of a pipe whose read end stays
-    here (see _child_alive). A supervisor can die before its child. Once it is
-    reaped its pid is free, but its group id is not while the child lives, and
-    the open pipe is what proves the child still does (Sol mac r6)."""
+    Elsewhere a plain Popen: Linux binds by PR_SET_PDEATHSIG, Windows by
+    bind_to_app_lifetime()."""
     popen = popen or subprocess.Popen
     if (platform_name or sys.platform) != "darwin":
         return popen(command, env=env, **popen_kwargs)
-    read_end, write_end = os.pipe()
+    proc = popen(command, env=env, start_new_session=True, **popen_kwargs)
+    proc._aura_group = True
     try:
-        os.set_blocking(read_end, False)
-        child_env = dict(env)
-        child_env[ALIVE_FD_ENV] = str(write_end)
-        passed = tuple(popen_kwargs.pop("pass_fds", ())) + (write_end,)
-        proc = popen(command, env=child_env, start_new_session=True, pass_fds=passed,
-                     **popen_kwargs)
-    except BaseException:
-        os.close(read_end)
-        raise
-    finally:
-        os.close(write_end)   # only the supervisor and its child hold it now
-    try:
-        weakref.finalize(proc, os.close, read_end)
-    except TypeError:
-        os.close(read_end)    # a stand-in without weakrefs: no token
+        watcher = subprocess.Popen(
+            _watcher_command(),
+            env={**os.environ, CHILD_PID_ENV: str(proc.pid)},
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            bufsize=0, start_new_session=True,
+        )
+    except Exception as exc:
+        # Still stopped as ever. Only an app crash could leave it running,
+        # and the next launch stops it (reap_orphaned_helpers).
+        print(f"[Helpers] no crash watcher for {Path(str(command[0])).name} "
+              f"({type(exc).__name__})", flush=True)
         return proc
-    proc._aura_child_alive = read_end
+    # The watcher's stdin is the app's lifeline: the app holds the only
+    # write end, so the kernel closes it however the app exits.
+    proc._aura_watcher = watcher
     return proc
 
 
-def _child_alive(proc: subprocess.Popen) -> bool:
-    """Whether the native child of *proc* (spawn_supervised) still runs: its
-    end of the pipe closes when it exits. Nothing is ever written to it, so a
-    read sees end-of-file or nothing yet."""
-    token = getattr(proc, "_aura_child_alive", None)
-    if not isinstance(token, int):
-        return False
+def _owns_group(proc: subprocess.Popen, platform_name: str | None) -> bool:
+    """macOS: *proc* leads its own group (spawn_supervised) and is not reaped,
+    so that group id cannot have been reused."""
+    return ((platform_name or sys.platform) == "darwin"
+            and getattr(proc, "_aura_group", False) is True
+            and proc.returncode is None)
+
+
+def _release_watcher(proc: subprocess.Popen) -> None:
+    """*proc* is reaped: its watcher lets go without signalling anything."""
+    watcher = getattr(proc, "_aura_watcher", None)
+    if not isinstance(watcher, subprocess.Popen):
+        return
+    proc._aura_watcher = None
     try:
-        return os.read(token, 1) != b""
-    except BlockingIOError:
-        return True
-    except OSError:
-        return False
+        watcher.stdin.write(b"r")
+    except (OSError, ValueError, AttributeError):
+        pass  # it already left: it saw the helper exit
+    try:
+        watcher.stdin.close()
+    except (OSError, ValueError, AttributeError):
+        pass
+    watcher.poll()   # reaped now if it already left; otherwise when collected
 
 
 def wait_supervised(proc: subprocess.Popen, timeout: float) -> bool:
-    """Wait up to *timeout* for *proc* and the native child it ran to exit."""
-    deadline = time.monotonic() + timeout
+    """Wait up to *timeout* for *proc* to exit. Once it is reaped, its watcher
+    is released, so it signals nothing that later takes the pid."""
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         return False
-    while _child_alive(proc):
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
+    _release_watcher(proc)
     return True
 
 
@@ -136,22 +121,14 @@ def signal_supervised(proc: subprocess.Popen, *, kill: bool = False,
                       platform_name: str | None = None) -> None:
     """Terminate (or kill) a supervised child: its whole group on macOS."""
     sig = signal.SIGKILL if kill else signal.SIGTERM
-    if (platform_name or sys.platform) == "darwin":
-        if proc.returncode is not None and not _child_alive(proc):
-            # Reaped, and nothing it ran lives: its pid and group id may
-            # belong to someone else now, so neither is signalled.
-            return
-        # Unreaped, its pid (the group id) is still ours. Reaped with its
-        # native child alive (the supervisor SIGKILLed or crashed), the group
-        # id is too: it is never reused while the group has a member, and
-        # nothing outside the group can join it (Sol mac r5/r6).
+    if _owns_group(proc, platform_name):
         try:
             os.killpg(proc.pid, sig)
             return
         except OSError:
-            pass  # no such group: spawned without spawn_supervised
+            pass  # exited and gone meanwhile: the signal below says so
     if proc.returncode is not None:
-        return
+        return   # reaped: its pid may be someone else's
     try:
         proc.kill() if kill else proc.terminate()
     except OSError:
@@ -160,8 +137,7 @@ def signal_supervised(proc: subprocess.Popen, *, kill: bool = False,
 
 def stop_supervised(proc: subprocess.Popen, term_wait: float = 5.0, kill_wait: float = 2.0, *,
                     platform_name: str | None = None) -> None:
-    """SIGTERM, then SIGKILL after *term_wait*; on macOS to the whole group,
-    even when the supervisor died first."""
+    """SIGTERM, then SIGKILL after *term_wait*; on macOS to the whole group."""
     signal_supervised(proc, platform_name=platform_name)
     if wait_supervised(proc, term_wait):
         return
@@ -169,8 +145,9 @@ def stop_supervised(proc: subprocess.Popen, term_wait: float = 5.0, kill_wait: f
     wait_supervised(proc, kill_wait)
 
 
-# Native helpers an older Aura could leave behind (its supervisor SIGKILLed,
-# or a crash with llama-server, which is not supervised).
+# Native helpers an earlier Aura could leave behind: the app and its watcher
+# both SIGKILLed, an older release's supervisor SIGKILLed, or a crash with
+# llama-server, which is not supervised.
 _ORPHAN_HELPERS = re.compile(
     r"^/.+/Wayfinder Aura[^/]*\.app/Contents/Frameworks/bin/"
     r"(?:whisper-coreml/)?(?:whisper-server|whisper-cli|llama-server|llama-simple|coreml-compile)(?: |$)"
@@ -388,67 +365,125 @@ def reopen_tracked() -> None:
         _tracked_closed = False
 
 
-def _alive_fd(value: str | None) -> int | None:
-    try:
-        fd = int(value or "")
-        os.fstat(fd)
-    except (TypeError, ValueError, OSError):
-        return None
-    return fd
+class _Watch:
+    """Wakes on news from the app's pipe (one byte, or end of file) or on the
+    helper's exit. kqueue on macOS; a pidfd and select() where only that
+    exists (the Linux tests); polling otherwise."""
+
+    def __init__(self, pipe_fd: int, child_pid: int):
+        self.pipe_fd = pipe_fd
+        self.child_pid = child_pid
+        self.pipe_open = True
+        self.child_gone = False
+        self._kq = self._pidfd = None
+        if hasattr(select, "kqueue"):
+            self._kq = select.kqueue()
+            self._kq.control([select.kevent(pipe_fd, select.KQ_FILTER_READ, select.KQ_EV_ADD)], 0, 0)
+            try:
+                self._kq.control([select.kevent(
+                    child_pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                    select.KQ_NOTE_EXIT)], 0, 0)
+            except OSError:
+                self.child_gone = True   # already exited
+        elif hasattr(os, "pidfd_open"):
+            try:
+                self._pidfd = os.pidfd_open(child_pid)
+            except OSError:
+                self.child_gone = True
+        elif not parent_process_alive(child_pid):
+            self.child_gone = True
+
+    def close_pipe(self) -> None:
+        self.pipe_open = False
+        if self._kq is not None:
+            try:
+                self._kq.control([select.kevent(self.pipe_fd, select.KQ_FILTER_READ,
+                                                select.KQ_EV_DELETE)], 0, 0)
+            except OSError:
+                pass
+
+    def wait(self, timeout: float | None) -> bool:
+        """Block up to *timeout* (None: no limit); True when the pipe has news.
+        A helper exit found on the way sets child_gone."""
+        if self._kq is not None:
+            readable = False
+            for event in self._kq.control(None, 4, timeout):
+                if event.filter == select.KQ_FILTER_PROC:
+                    self.child_gone = True
+                elif event.filter == select.KQ_FILTER_READ:
+                    readable = True
+            return readable
+        fds = [self.pipe_fd] if self.pipe_open else []
+        if self._pidfd is not None and not self.child_gone:
+            fds.append(self._pidfd)
+        if self._pidfd is None:   # no exit notice: look every 0.2 s
+            timeout = 0.2 if timeout is None else min(timeout, 0.2)
+        if fds:
+            ready = select.select(fds, [], [], timeout)[0]
+        else:
+            time.sleep(timeout or 0)
+            ready = []
+        if self._pidfd is not None and self._pidfd in ready:
+            self.child_gone = True
+        if self._pidfd is None and not parent_process_alive(self.child_pid):
+            self.child_gone = True
+        return self.pipe_fd in ready
 
 
-def run_supervised_command(
-    command: Sequence[str],
-    parent_pid: int,
-    *,
-    poll_interval: float = 0.2,
-) -> int:
-    """Run *command* until it exits or its owning app process disappears."""
-    if parent_pid <= 1 or not parent_process_alive(parent_pid):
-        return 0
+def run_watcher(child_pid: int, *, pipe_fd: int = 0, term_wait: float = 3.0) -> int:
+    """The helper's watcher (see spawn_supervised): end its group once the app
+    is gone.
 
-    stop = threading.Event()
-
-    def request_stop(_signum, _frame):
-        stop.set()
-
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, request_stop)
-
-    child_env = os.environ.copy()
-    child_env.pop(COMMAND_ENV, None)
-    child_env.pop(PARENT_PID_ENV, None)
-    alive = _alive_fd(child_env.pop(ALIVE_FD_ENV, None))
-    try:
-        # The native child keeps the pipe open for as long as it runs (see
-        # spawn_supervised); this process lets go of it at once.
-        proc = subprocess.Popen([str(part) for part in command], env=child_env,
-                                pass_fds=() if alive is None else (alive,))
-    finally:
-        if alive is not None:
-            os.close(alive)
-    while proc.poll() is None:
-        if stop.is_set() or not parent_process_alive(parent_pid):
-            _terminate_child(proc)
+    The app holds the only write end of *pipe_fd*: end of file means it
+    exited without letting go of the helper, a crash or SIGKILL included; a
+    byte means it reaped the helper. Nothing is signalled once the helper has
+    exited, so a pid reused since is never hit."""
+    watch = _Watch(pipe_fd, child_pid)
+    while not watch.child_gone:
+        if not watch.wait(None):
+            continue
+        try:
+            news = os.read(pipe_fd, 1)
+        except OSError:
+            news = b""
+        if news:
+            return 0          # released: the app reaped it
+        watch.close_pipe()
+        watch.wait(0)         # an exit that came with the app's own
+        if watch.child_gone:
             return 0
-        time.sleep(poll_interval)
-    return int(proc.returncode or 0)
+        _end_group(watch, term_wait)
+        return 0
+    return 0
+
+
+def _end_group(watch: _Watch, term_wait: float) -> None:
+    for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, 2.0)):
+        try:
+            os.killpg(watch.child_pid, sig)
+        except OSError:
+            return
+        deadline = time.monotonic() + wait
+        while not watch.child_gone:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            watch.wait(left)
+        if watch.child_gone:
+            return
 
 
 def run_from_env() -> int:
-    """Supervisor entry point used by source and frozen application processes."""
+    """Watcher entry point used by source and frozen application processes."""
     try:
-        command = json.loads(os.environ[COMMAND_ENV])
-        parent_pid = int(os.environ[PARENT_PID_ENV])
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        child_pid = int(os.environ[CHILD_PID_ENV])
+    except (KeyError, TypeError, ValueError) as exc:
         print(f"Invalid child-supervisor request: {exc}", file=sys.stderr, flush=True)
         return 2
-    if not isinstance(command, list) or not command or not all(
-        isinstance(part, str) and part for part in command
-    ):
-        print("Invalid child-supervisor command", file=sys.stderr, flush=True)
+    if child_pid <= 1:
+        print("Invalid child-supervisor request: no helper", file=sys.stderr, flush=True)
         return 2
-    return run_supervised_command(command, parent_pid)
+    return run_watcher(child_pid)
 
 
 if __name__ == "__main__":

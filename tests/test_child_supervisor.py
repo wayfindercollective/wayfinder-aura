@@ -1,75 +1,21 @@
-"""Parent-lifetime supervision for native macOS helper processes."""
+"""Parent-lifetime supervision for native macOS helper processes.
+
+The macOS shape (the helper as the app's own child, leading its group, plus a
+watcher) runs on any POSIX host with platform_name="darwin"."""
 
 from __future__ import annotations
 
-import json
 import os
+import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
 from wayfinder.utils import child_supervisor
 
-
-def test_non_macos_command_is_unchanged():
-    command, env = child_supervisor.wrap_macos_child_command(
-        ["whisper-server", "--port", "8178"],
-        {"A": "1"},
-        platform_name="linux",
-    )
-    assert command == ["whisper-server", "--port", "8178"]
-    assert env == {"A": "1"}
-
-
-def test_macos_source_command_uses_supervisor_and_records_owner(monkeypatch):
-    monkeypatch.delattr(child_supervisor.sys, "frozen", raising=False)
-    monkeypatch.setattr(child_supervisor.sys, "executable", "/python312")
-    command, env = child_supervisor.wrap_macos_child_command(
-        ["whisper-server", "--port", "8178"],
-        {"A": "1"},
-        platform_name="darwin",
-        parent_pid=4242,
-    )
-    assert command[0] == "/python312"
-    assert command[1].endswith("child_supervisor.py")
-    assert json.loads(env[child_supervisor.COMMAND_ENV]) == [
-        "whisper-server", "--port", "8178"
-    ]
-    assert env[child_supervisor.PARENT_PID_ENV] == "4242"
-
-
-def test_supervisor_terminates_child_when_owner_dies(monkeypatch):
-    class Proc:
-        returncode = None
-
-        def __init__(self):
-            self.terminated = False
-
-        def poll(self):
-            return 0 if self.terminated else None
-
-        def terminate(self):
-            self.terminated = True
-            self.returncode = -15
-
-        def wait(self, timeout):
-            assert timeout > 0
-            return self.returncode
-
-        def kill(self):
-            raise AssertionError("graceful termination should have succeeded")
-
-    proc = Proc()
-    alive_checks = iter([True, False])
-    monkeypatch.setattr(
-        child_supervisor, "parent_process_alive", lambda _pid: next(alive_checks)
-    )
-    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: proc)
-    monkeypatch.setattr(child_supervisor.time, "sleep", lambda _seconds: None)
-
-    assert child_supervisor.run_supervised_command(["helper"], 4242) == 0
-    assert proc.terminated is True
+posix = pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
 
 
 def _state(pid: int) -> str:
@@ -78,43 +24,256 @@ def _state(pid: int) -> str:
     return "" if out.strip().startswith("Z") else out.strip()
 
 
-def test_killing_the_supervisor_group_cannot_orphan_a_wedged_server(tmp_path):
-    # Recovery stops the server with a short SIGTERM wait, then SIGKILL. A
-    # SIGKILL to the supervisor alone left whisper-server running under
-    # launchd, still holding the model and port 8178 (MacBook Air, 1.2.0).
-    import sys
-    import time
+def _gone(pid: int, within: float = 3.0) -> bool:
+    deadline = time.monotonic() + within
+    while _state(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return _state(pid) == ""
 
-    pid_file = tmp_path / "server.pid"
-    server = [sys.executable, "-c",
-              "import os, signal, time\n"
-              "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-              f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
-              "time.sleep(60)\n"]
-    command, env = child_supervisor.wrap_macos_child_command(server, dict(os.environ), platform_name="darwin")
-    proc = child_supervisor.spawn_supervised(command, env=env, platform_name="darwin")
+
+def _wait_for(path, what: str):
     deadline = time.monotonic() + 10
-    while not (pid_file.exists() and pid_file.read_text()):
-        assert time.monotonic() < deadline, "the supervised server never started"
+    while not (path.exists() and path.read_text().strip()):
+        assert time.monotonic() < deadline, f"{what} never started"
         time.sleep(0.05)
-    server_pid = int(pid_file.read_text())
+    return path.read_text().split()
 
-    child_supervisor.stop_supervised(proc, term_wait=0.2, kill_wait=2, platform_name="darwin")
 
+def _helper(tmp_path, body: str = "", *, ignores_term: bool = False, name: str = "server"):
+    """A real helper spawned the macOS way; returns its Popen once it runs."""
+    pid_file = tmp_path / f"{name}.pid"
+    script = ("import os, signal, sys, time\n"
+              + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignores_term else "")
+              + body
+              + f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+              + "time.sleep(60)\n")
+    proc = child_supervisor.spawn_supervised([sys.executable, "-c", script], env=dict(os.environ),
+                                             platform_name="darwin")
+    assert _wait_for(pid_file, "the helper") == [str(proc.pid)]
+    return proc
+
+
+def _boot(seconds: float = 1.0) -> None:
+    time.sleep(seconds)   # the watcher is a fresh Python: let it start watching
+
+
+def test_other_platforms_spawn_plainly():
+    made = []
+
+    def popen(command, **kwargs):
+        made.append((command, kwargs))
+        return subprocess.Popen(["true"])
+
+    proc = child_supervisor.spawn_supervised(["whisper-server"], env={"A": "1"}, popen=popen,
+                                             platform_name="linux")
+    proc.wait()
+    assert made == [(["whisper-server"], {"env": {"A": "1"}})]
+    assert getattr(proc, "_aura_watcher", None) is None
+
+
+def test_the_watcher_command_reexecs_the_app_or_runs_this_module(monkeypatch):
+    monkeypatch.setattr(child_supervisor.sys, "executable", "/python312")
+    monkeypatch.delattr(child_supervisor.sys, "frozen", raising=False)
+    command = child_supervisor._watcher_command()
+    assert command[0] == "/python312" and command[1].endswith("child_supervisor.py")
+    monkeypatch.setattr(child_supervisor.sys, "frozen", True, raising=False)
+    assert child_supervisor._watcher_command() == ["/python312", "--child-supervisor"]
+
+
+@posix
+def test_a_macos_helper_is_the_apps_own_child_and_leads_its_group(tmp_path):
+    proc = _helper(tmp_path)
+    watcher = proc._aura_watcher
+    try:
+        # Ours until reaped, whatever happens to anything else.
+        assert os.getpgid(proc.pid) == proc.pid
+        assert os.getsid(proc.pid) == proc.pid
+        assert watcher.poll() is None and os.getpgid(watcher.pid) != os.getpgid(0)
+        child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
+        assert proc.returncode is not None
+        # Released once reaped: it leaves without signalling anything.
+        watcher.wait(timeout=5)
+        assert proc._aura_watcher is None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+@posix
+@pytest.mark.parametrize("ignores_term", [False, True])
+def test_the_watcher_ends_the_helper_when_the_app_dies(tmp_path, ignores_term):
+    # The app SIGKILLed (a crash, Force Quit): no Python code of its runs, and
+    # the helper must not keep the model loaded and the port open.
+    app = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, sys, time\n"
+         f"sys.path.insert(0, {str(child_supervisor.Path(child_supervisor.__file__).parents[2])!r})\n"
+         "from wayfinder.utils import child_supervisor as cs\n"
+         "body = 'import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); ' if "
+         f"{ignores_term!r} else ''\n"
+         "proc = cs.spawn_supervised([sys.executable, '-c', body + 'import time; time.sleep(60)'],"
+         " env=dict(os.environ), platform_name='darwin')\n"
+         "print(proc.pid, proc._aura_watcher.pid, flush=True)\n"
+         "time.sleep(60)\n"],
+        stdout=subprocess.PIPE, text=True)
+    helper, watcher = map(int, app.stdout.readline().split())
+    try:
+        _boot()
+        app.kill()
+        app.wait()
+        # SIGTERM, then SIGKILL after the watcher's 3 s grace.
+        assert _gone(helper, within=7), "the helper outlived the app"
+        assert _gone(watcher, within=3)
+    finally:
+        for pid in (helper, watcher):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+@posix
+@pytest.mark.parametrize("ignores_term", [False, True])
+def test_a_helper_whose_watcher_died_is_still_stopped(tmp_path, ignores_term):
+    # Sol mac r6: a supervisor SIGKILLed first used to leave its server
+    # running after Quit. Now only the crash cover goes with the watcher.
+    proc = _helper(tmp_path, ignores_term=ignores_term)
+    proc._aura_watcher.kill()
+    proc._aura_watcher.wait()
+    child_supervisor.stop_supervised(proc, term_wait=0.5, kill_wait=2, platform_name="darwin")
     assert proc.returncode is not None
-    deadline = time.monotonic() + 3
-    while _state(server_pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert _state(server_pid) == "", "the server outlived its supervisor"
+    assert _gone(proc.pid, within=1)
 
 
-def test_signal_supervised_never_targets_a_reaped_pid(monkeypatch):
+@posix
+def test_a_helper_that_closes_inherited_descriptors_is_still_ours(tmp_path):
+    # Sol mac r7: ownership must not rest on a descriptor the helper keeps.
+    proc = _helper(tmp_path, "os.closerange(3, 4096)\n")
+    _boot()
+    os.kill(proc._aura_watcher.pid, signal.SIGKILL)
+    child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
+    assert _gone(proc.pid, within=1)
+
+
+@posix
+def test_the_group_signal_reaches_what_the_helper_forked(tmp_path):
+    grandchild_file = tmp_path / "grandchild.pid"
+    proc = _helper(tmp_path,
+                   "if os.fork() == 0:\n"
+                   f"    open({str(grandchild_file)!r}, 'w').write(str(os.getpid()))\n"
+                   "    time.sleep(60)\n"
+                   "    os._exit(0)\n")
+    grandchild = int(_wait_for(grandchild_file, "the fork")[0])
+    child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
+    assert _gone(grandchild, within=2)
+
+
+def test_signal_supervised_never_targets_a_reaped_pid(monkeypatch, tmp_path):
     sent = []
     monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
-    proc = subprocess.Popen(["true"])
+    proc = child_supervisor.spawn_supervised(["true"], env=dict(os.environ), platform_name="darwin")
     proc.wait()
     child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
+    child_supervisor.signal_supervised(proc, platform_name="darwin")
     assert sent == []
+
+
+def test_a_child_outside_its_own_group_is_never_group_signalled(monkeypatch):
+    # Its pid is no group id of ours: a group of that number could be anyone's.
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    proc = subprocess.Popen(["sleep", "30"])  # not through spawn_supervised
+    child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
+    assert proc.returncode is not None and sent == []
+
+
+def test_only_macos_signals_a_group(monkeypatch):
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    proc._aura_group = True
+    try:
+        child_supervisor.signal_supervised(proc, platform_name="linux")
+        proc.wait(timeout=5)
+        assert sent == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+# The watcher itself, in this process: a pipe stands for the app's lifeline.
+
+@posix
+def test_the_watcher_signals_nothing_once_the_helper_has_exited(monkeypatch):
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    helper = subprocess.Popen(["true"])
+    helper.wait()                      # exited and reaped: its pid is free
+    read_end, write_end = os.pipe()
+    os.close(write_end)                # and then the app died
+    try:
+        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end) == 0
+    finally:
+        os.close(read_end)
+    assert sent == []
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="needs a wait that leaves the zombie")
+def test_a_helper_that_exits_with_the_app_is_not_signalled(monkeypatch):
+    # Both ends at once: the exit is seen with the app's, so its pid (free
+    # once reaped) is never signalled.
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    helper = subprocess.Popen(["true"], start_new_session=True)
+    os.waitid(os.P_PID, helper.pid, os.WEXITED | os.WNOWAIT)   # exited, not reaped
+    read_end, write_end = os.pipe()
+    os.close(write_end)
+    try:
+        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end) == 0
+    finally:
+        os.close(read_end)
+        helper.wait()
+    assert sent == []
+
+
+@posix
+def test_a_released_watcher_signals_nothing(monkeypatch):
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    helper = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    read_end, write_end = os.pipe()
+    try:
+        os.write(write_end, b"r")
+        os.close(write_end)
+        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end) == 0
+        assert sent == []
+    finally:
+        os.close(read_end)
+        helper.kill()
+        helper.wait()
+
+
+@posix
+def test_a_watcher_whose_app_died_ends_the_helper_group():
+    helper = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    read_end, write_end = os.pipe()
+    os.close(write_end)
+    try:
+        started = time.monotonic()
+        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end, term_wait=2) == 0
+        assert helper.wait(timeout=2) == -signal.SIGTERM
+        assert time.monotonic() - started < 2
+    finally:
+        os.close(read_end)
+        if helper.poll() is None:
+            helper.kill()
+
+
+def test_a_watcher_without_a_helper_refuses(monkeypatch):
+    monkeypatch.delenv(child_supervisor.CHILD_PID_ENV, raising=False)
+    assert child_supervisor.run_from_env() == 2
+    monkeypatch.setenv(child_supervisor.CHILD_PID_ENV, "1")
+    assert child_supervisor.run_from_env() == 2
 
 
 def test_orphaned_helpers_are_only_launchd_parented_aura_binaries():
@@ -137,142 +296,3 @@ def test_orphaned_helpers_are_only_launchd_parented_aura_binaries():
 
 def test_reaping_is_macos_only():
     assert child_supervisor.reap_orphaned_helpers(platform_name="linux") == []
-
-
-def test_a_child_outside_its_own_group_is_still_stopped():
-    proc = subprocess.Popen(["sleep", "30"])  # not through spawn_supervised
-    child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
-    assert proc.returncode is not None
-
-
-def _supervised(tmp_path, body: str, name: str = "server"):
-    """A real supervised group (the macOS shape, on any POSIX host); returns
-    the supervisor and its native child's pid."""
-    import time
-
-    pid_file = tmp_path / f"{name}.pid"
-    server = [sys.executable, "-c",
-              "import os, signal, sys, time\n"
-              f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n" + body]
-    command, env = child_supervisor.wrap_macos_child_command(server, dict(os.environ), platform_name="darwin")
-    proc = child_supervisor.spawn_supervised(command, env=env, platform_name="darwin")
-    deadline = time.monotonic() + 10
-    while not (pid_file.exists() and pid_file.read_text()):
-        assert time.monotonic() < deadline, "the supervised server never started"
-        time.sleep(0.05)
-    return proc, int(pid_file.read_text())
-
-
-def _gone(pid: int, within: float = 3.0) -> bool:
-    import time
-
-    deadline = time.monotonic() + within
-    while _state(pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    return _state(pid) == ""
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
-def test_the_native_child_holds_the_pipe_and_nothing_else_does(tmp_path):
-    import signal
-
-    proc, server_pid = _supervised(tmp_path, "time.sleep(60)\n")
-    assert child_supervisor._child_alive(proc)
-    os.kill(proc.pid, signal.SIGKILL)
-    proc.wait()   # the supervisor is gone; the child it ran is not
-    assert child_supervisor._child_alive(proc)
-    os.kill(server_pid, signal.SIGKILL)
-    assert _gone(server_pid)
-    assert not child_supervisor._child_alive(proc)
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
-def test_a_child_that_died_under_a_live_supervisor_reads_as_gone(tmp_path):
-    # The supervisor lets go of the pipe, so only the child keeps it open.
-    import signal
-
-    proc, server_pid = _supervised(tmp_path, "time.sleep(60)\n")
-    os.kill(proc.pid, signal.SIGSTOP)   # alive, but cannot notice its child exit
-    try:
-        os.kill(server_pid, signal.SIGKILL)
-        assert _gone(server_pid)
-        assert not child_supervisor._child_alive(proc)
-    finally:
-        os.kill(proc.pid, signal.SIGKILL)
-        proc.wait()
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
-def test_a_reaped_supervisor_whose_child_is_gone_signals_no_group(tmp_path, monkeypatch):
-    # Sol mac r6: once the child is gone the group id can be reused, by a
-    # group whose leader has already exited, holding another app's
-    # whisper-server. Nothing may be signalled then, whatever runs in it.
-    import signal
-
-    proc, server_pid = _supervised(tmp_path, "time.sleep(60)\n")
-    os.kill(proc.pid, signal.SIGKILL)
-    proc.wait()
-    os.kill(server_pid, signal.SIGKILL)
-    assert _gone(server_pid)
-    sent = []
-    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
-    child_supervisor.signal_supervised(proc, platform_name="darwin")
-    child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
-    child_supervisor.stop_supervised(proc, term_wait=0.2, kill_wait=0.2, platform_name="darwin")
-    assert sent == []
-
-
-def test_only_macos_signals_what_a_reaped_supervisor_left(monkeypatch):
-    sent = []
-    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
-    monkeypatch.setattr(child_supervisor, "_child_alive", lambda proc: True)
-    proc = subprocess.Popen(["true"])
-    proc.wait()
-    child_supervisor.signal_supervised(proc, platform_name="linux")
-    assert sent == []
-    child_supervisor.signal_supervised(proc, platform_name="darwin")
-    import signal
-    assert sent == [(proc.pid, signal.SIGTERM)]
-
-
-def test_a_stand_in_process_carries_no_token():
-    class Stand:
-        __slots__ = ("pid", "returncode")
-
-    made = []
-    proc = child_supervisor.spawn_supervised(
-        ["x"], env={}, platform_name="darwin",
-        popen=lambda command, **kwargs: made.append(kwargs) or Stand())
-    assert not child_supervisor._child_alive(proc)
-    assert made[0]["start_new_session"] is True
-    assert made[0]["env"][child_supervisor.ALIVE_FD_ENV]
-
-
-def test_other_platforms_spawn_plainly():
-    made = []
-    child_supervisor.spawn_supervised(
-        ["x"], env={"A": "1"}, platform_name="linux",
-        popen=lambda command, **kwargs: made.append(kwargs) or object())
-    assert made == [{"env": {"A": "1"}}]
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
-@pytest.mark.parametrize("ignores_term", [False, True])
-def test_a_server_whose_supervisor_died_first_is_still_stopped(tmp_path, ignores_term):
-    # Sol mac r5: the supervisor SIGKILLed while whisper-server lived on. Once
-    # the supervisor was reaped, stop_supervised returned at once, so recovery
-    # lost the server and Quit left it holding the model and port.
-    import signal
-
-    proc, server_pid = _supervised(
-        tmp_path,
-        ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignores_term else "")
-        + "time.sleep(60)\n")
-    os.kill(proc.pid, signal.SIGKILL)
-    proc.wait()   # reaped: the supervisor's pid is free, its group lives on
-    assert _state(server_pid), "the server died with its supervisor"
-
-    child_supervisor.stop_supervised(proc, term_wait=0.5, kill_wait=2, platform_name="darwin")
-
-    assert _gone(server_pid), "the server outlived its dead supervisor"
-    assert not child_supervisor._child_alive(proc)

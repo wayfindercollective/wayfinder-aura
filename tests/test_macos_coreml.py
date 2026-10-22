@@ -667,15 +667,13 @@ def _loading_probe_backend(ready_line="Core ML model loaded"):
 
 
 def _ready_once_listening(monkeypatch, binary):
-    """The probe's readiness checks, faked: a server under each tracked child
-    owns the port and answers /health."""
+    """The probe's readiness checks, faked: each tracked probe owns the port
+    (asked about any other pid, it does not) and answers /health."""
     import contextlib
     from wayfinder.utils import child_supervisor, loopback_http, macos_procinfo
 
-    rows = lambda *a, **kw: "\n".join(f"{os.getuid()} 1 {proc.pid} {binary} --port 1"
-                                      for proc in list(child_supervisor._tracked))
-    monkeypatch.setattr(macos_coreml.subprocess, "check_output", rows)
-    monkeypatch.setattr(macos_procinfo, "pid_listens_on_tcp", lambda pid, port: True)
+    monkeypatch.setattr(macos_procinfo, "pid_listens_on_tcp", lambda pid, port: any(
+        proc.pid == pid for proc in list(child_supervisor._tracked)))
     monkeypatch.setattr(loopback_http, "urlopen_loopback",
                         lambda *a, **kw: contextlib.nullcontext(SimpleNamespace(status=200)))
 
@@ -831,9 +829,9 @@ def _helper_stopped(pid, within=5.0):
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 @pytest.mark.parametrize("helper", ["probe", "compile"])
-def test_a_core_ml_helper_whose_supervisor_died_first_is_stopped(tmp_path, monkeypatch, helper):
-    # Sol mac r6: the probe and compile helpers spawned plainly, so a helper
-    # that outlived its supervisor kept loading after the failure that ended it.
+def test_a_core_ml_helper_whose_watcher_died_is_stopped(tmp_path, monkeypatch, helper):
+    # Sol mac r6/r7: the probe and compile helpers are the app's own
+    # children, so ending the probe or compile stops them with no watcher.
     import signal
     import sys
     from wayfinder.utils import child_supervisor, macos_coreml_convert
@@ -841,20 +839,30 @@ def test_a_core_ml_helper_whose_supervisor_died_first_is_stopped(tmp_path, monke
     def as_darwin(fn):
         return lambda *args, **kwargs: fn(*args, **{**kwargs, "platform_name": "darwin"})
 
-    for name in ("wrap_macos_child_command", "spawn_supervised", "signal_supervised", "stop_supervised"):
+    spawn = as_darwin(child_supervisor.spawn_supervised)
+
+    def spawn_without_watcher(*args, **kwargs):
+        proc = spawn(*args, **kwargs)
+        os.kill(proc._aura_watcher.pid, signal.SIGKILL)
+        return proc
+
+    monkeypatch.setattr(child_supervisor, "spawn_supervised", spawn_without_watcher)
+    for name in ("signal_supervised", "stop_supervised"):
         monkeypatch.setattr(child_supervisor, name, as_darwin(getattr(child_supervisor, name)))
     pid_file = tmp_path / "helper.pid"
+
+    def started():   # superseded once the helper runs
+        return pid_file.exists() and bool(pid_file.read_text())
     body = ("import os, signal, time\n"
             f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
-            "os.kill(os.getppid(), signal.SIGKILL)\n"
             "time.sleep(60)\n")
     try:
         if helper == "probe":
             monkeypatch.setattr(macos_coreml.subprocess, "check_output", lambda *a, **k: "")
             backend = _probe_backend([sys.executable, "-c", body])
-            with pytest.raises(RuntimeError, match="probe exited"):
+            with pytest.raises(InterruptedError):
                 with macos_coreml._probe_server(backend, "/bin/whisper-server", "/m.bin",
-                                                coreml=True, cancelled=lambda: False):
+                                                coreml=True, cancelled=started):
                     pass
         else:
             cli = tmp_path / "bin" / "whisper-cli"
@@ -874,8 +882,8 @@ def test_a_core_ml_helper_whose_supervisor_died_first_is_stopped(tmp_path, monke
             monkeypatch.setattr(macos_coreml_convert, "template_path", lambda: None)
             monkeypatch.setattr(macos_coreml_convert, "load_bindings", lambda path: {"weights_size": 1})
             monkeypatch.setattr(macos_coreml_convert, "populate_package", lambda m, p, cancelled: {"format": 2})
-            assert macos_coreml.prepare_encoder(str(cli), str(model), cancelled=lambda: False) is False
-        assert _helper_stopped(int(pid_file.read_text())), "the helper outlived its supervisor's failure"
+            assert macos_coreml.prepare_encoder(str(cli), str(model), cancelled=started) is False
+        assert _helper_stopped(int(pid_file.read_text()), within=1), "the helper outlived its work"
     finally:
         if pid_file.exists():
             try:
@@ -1954,3 +1962,34 @@ def test_a_hand_over_that_finds_this_models_core_ml_dead_publishes_nothing(compa
         macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False)
     assert cls._server_process is old and not probe.adopted
     assert macos_coreml.comparison_failures(*key) == 1
+
+
+def test_a_reset_while_the_backend_is_built_schedules_no_preparation(monkeypatch):
+    # Sol mac r7: get_backend scheduled the Core ML preparation for a
+    # dictation retired while it ran, and a reset leaves that job eligible.
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+    token = cls.request_token()
+    cls.abandon_requests()
+    with transcriber.dictation_requests(token):
+        _backend, _config, scheduled = _darwin_selection(monkeypatch, resident=False)
+    assert scheduled == []
+
+
+def test_a_core_ml_answer_after_a_reset_proves_nothing(monkeypatch, tmp_path):
+    # Sol mac r7 (minor): the retired dictation's answer recorded a runtime
+    # success, which clears failure history and marks the launch proven.
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=True)
+    seen = _runtime_memory(monkeypatch)
+
+    def answer(*_a, **_k):
+        cls.abandon_requests()   # Escape as the answer came back
+        return _Words("late words")
+
+    monkeypatch.setattr(transcriber, "urlopen_loopback", answer)
+    rig.backend.transcribe(rig.audio)
+    assert seen.successes == 0 and seen.failures == []
