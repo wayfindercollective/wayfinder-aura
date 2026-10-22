@@ -428,7 +428,9 @@ class WhisperCppBackend(TranscriptionBackend):
             # but do NOT cache it, so a later unhurried call can still introspect.
             return set()
         except HelpersClosed:
-            return set()  # refused or cut short by Quit: do not cache it
+            # Refused or cut short by Quit: no answer. Not an empty set, which
+            # would fail open and run the CLI with flags it may not have.
+            raise
         except Exception:
             pass
         self._supported_flags_cache = flags
@@ -493,9 +495,12 @@ class WhisperCppBackend(TranscriptionBackend):
         # lacks --no-speech-thold / --suppress-nst, and whisper-cli aborts (transcribing nothing)
         # on the first unknown flag. Emit version-fragile flags only when --help advertises them;
         # _flag_ok fails OPEN (empty set => no filtering) so an un-introspectable binary is safe.
-        _sup = self._supported_flags(
-            probe_timeout=probe_timeout, binary=active_binary
-        )
+        try:
+            _sup = self._supported_flags(
+                probe_timeout=probe_timeout, binary=active_binary
+            )
+        except HelpersClosed:
+            raise TranscriptionError("Aura is shutting down")
         # Under a salvage DEADLINE the --help probe may have been truncated to empty, so
         # do NOT fail OPEN on the version-fragile flags (v1.7.2 aborts on them → silent
         # empty transcription — the very failure this filtering prevents). Emit those

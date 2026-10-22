@@ -328,7 +328,9 @@ class TestProbesAndDetectionAtQuit:
         backend = WhisperCppBackend(whisper_binary=binary, model_path=model, use_gpu=False)
         child_supervisor.close_tracked()
         with patch("subprocess.Popen") as popen:
-            assert backend._supported_flags() == set()
+            # No answer, which is not "no flags": that would fail open.
+            with pytest.raises(child_supervisor.HelpersClosed):
+                backend._supported_flags()
             assert backend.supports_gpu() is False
         popen.assert_not_called()
         # Nothing was learned, so nothing is cached for after a reopen.
@@ -347,7 +349,10 @@ class TestProbesAndDetectionAtQuit:
                    lambda cmd, **kw: child_supervisor.run_tracked(cmd, **{**kw, "timeout": 60})):
             outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
                 run, lambda: child_supervisor.close_tracked())
-        assert outcome.get("value") in (set(), False)
+        if probe == "_supported_flags":
+            assert isinstance(outcome.get("error"), child_supervisor.HelperStopped)
+        else:
+            assert outcome.get("value") is False
         assert getattr(backend, "_supported_flags_cache", None) is None
         assert backend._gpu_supported is None
 
@@ -519,6 +524,42 @@ class TestACutShortRunIsNeverAResult:
                 lambda: backend.transcribe(audio), self._resume_after_reopen(monkeypatch))
         assert isinstance(outcome.get("error"), transcriber.TranscriptionError)
         assert transcriber._CPU_FALLBACK_ACTIVE == {} and transcriber._gpu_retry_state == {}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    def test_a_dictation_whose_flag_probe_quit_stopped_runs_no_cli(self, tmp_path, monkeypatch):
+        # Sol r11: an empty flag set failed open, so after the reopen the CLI
+        # ran with flags it lacks; its "unknown argument" beside the Vulkan
+        # init lines read as a GPU failure and cached the CPU fallback.
+        import wayfinder.core.transcriber as transcriber
+        ran = tmp_path / "ran"
+        script = textwrap.dedent(f"""\
+            #!/bin/sh
+            case "$*" in *--help*) exec sleep 30;; esac
+            echo "$0" >> {ran}
+            echo "ggml_vulkan: Found 1 Vulkan devices" >&2
+            echo "error: unknown argument: --no-speech-thold" >&2
+            exit 1
+            """)
+        binary, cpu = tmp_path / "whisper-cli", tmp_path / "whisper-cli-cpu"
+        for helper in (binary, cpu):
+            helper.write_text(script)
+            helper.chmod(0o755)
+        (tmp_path / "m.bin").touch()
+        monkeypatch.setattr(transcriber, "_cpu_fallback_binary", lambda b: str(cpu))
+        monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+        monkeypatch.setattr(transcriber, "_gpu_retry_state", {})
+        self._long(transcriber, monkeypatch)
+        backend = transcriber.WhisperCppBackend(whisper_binary=str(binary),
+                                                model_path=str(tmp_path / "m.bin"),
+                                                use_gpu=True, timeout=60)
+        audio = TestNoCliAfterQuit._audio(tmp_path)
+        outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+            lambda: backend.transcribe(audio), self._resume_after_reopen(monkeypatch))
+        assert isinstance(outcome.get("error"), transcriber.TranscriptionError)
+        assert "shutting down" in str(outcome["error"])
+        assert not ran.exists()   # no CLI after the reopen
+        assert transcriber._CPU_FALLBACK_ACTIVE == {} and transcriber._gpu_retry_state == {}
+        assert getattr(backend, "_supported_flags_cache", None) is None
 
     @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
     def test_a_stopped_gpu_recovery_probe_changes_no_gpu_state(self, tmp_path, monkeypatch):
