@@ -3720,6 +3720,7 @@ def transcribe_with_config(
     context: str = "",
     skip_post_processing: bool = False,
     request_token: Optional[int] = None,
+    unprompted: bool = False,
 ) -> str:
     """
     Transcribe using settings from config dictionary.
@@ -3733,6 +3734,10 @@ def transcribe_with_config(
             where post-processing should happen on the final combined text)
         request_token: The dictation's WhisperServerBackend.request_token(),
             taken when it began; a retirement since raises RequestAbandoned
+        unprompted: Send Whisper no prompt, vocabulary or context. For audio the
+            speech check calls steady noise: primed with the dictation prompt,
+            large-v3-turbo turned 9 of 36 fan/hum/hiss recordings into invented
+            sentences; unprompted, 90 of 90 came back as "." or one word.
 
     Returns:
         Transcribed text string
@@ -3761,6 +3766,14 @@ def transcribe_with_config(
         WhisperServerBackend._check_not_abandoned(request_token)
         backend = get_backend(config)
         WhisperServerBackend._check_not_abandoned(request_token)
+        if unprompted:
+            # A Core ML server not yet loaded hands the audio to its Metal
+            # stand-in, which would otherwise prime Whisper with its own prompt.
+            for heard_by in (backend, getattr(backend, "_ready_only_fallback", None)):
+                if heard_by is not None:
+                    heard_by.prompt = ""
+                    heard_by.custom_vocabulary = []
+            context = ""
         text = backend.transcribe(audio_path, context=context)
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep

@@ -3109,3 +3109,64 @@ class TestARetiredDictationsActions:
 def threading_enumerate(name):
     import threading
     return [t for t in threading.enumerate() if t.name == name]
+
+class TestUnpromptedTranscription:
+    """Noise-verdict audio is heard with no prompt: primed with the dictation
+    prompt, large-v3-turbo turned fan/hum/hiss into invented sentences (2026-10-13)."""
+
+    @pytest.fixture
+    def prompts(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        import wayfinder.license as lic
+        from wayfinder.core import transcriber as T
+
+        gate = SimpleNamespace(is_premium=True, has_feature=lambda f: True)
+        monkeypatch.setattr(lic, "get_feature_gate", lambda *a, **k: gate)
+        heard = []
+
+        def transcribe(backend, audio_path, context="", deadline=None):
+            heard.append(backend._build_prompt(context))
+            return "hello there"
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
+        model = tmp_path / "ggml-base.en.bin"
+        model.write_bytes(b"\0")
+        self.config = {"transcription_backend": "whisper_cpp", "model_path": str(model),
+                       "whisper_server_mode": False, "post_processing_enabled": False,
+                       "output_tone": "professional", "custom_vocabulary": ["Wayfinder"]}
+        self.audio = str(tmp_path / "a.wav")
+        return heard
+
+    def test_dictation_is_primed_with_prompt_vocabulary_and_context(self, prompts):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        transcribe_with_config(self.audio, self.config)
+        transcribe_with_config(self.audio, self.config, context="earlier words")
+        assert "Use proper punctuation" in prompts[0] and "Wayfinder" in prompts[0]
+        assert prompts[1].startswith("earlier words")
+
+    def test_unprompted_reaches_the_core_ml_servers_metal_stand_in(self, prompts, monkeypatch):
+        from types import SimpleNamespace
+
+        from wayfinder.core import transcriber as T
+
+        heard = []
+        stand_in = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"])
+        stand_in.transcribe = lambda audio_path, context="": heard.append(
+            (stand_in.prompt, stand_in.custom_vocabulary, context)) or "hello there"
+        server = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"],
+                                 _ready_only_fallback=stand_in)
+        # Core ML not loaded yet: the dictation goes to the Metal stand-in.
+        server.transcribe = lambda audio_path, context="": stand_in.transcribe(audio_path, context)
+        monkeypatch.setattr(T, "get_backend", lambda config: server)
+        T.transcribe_with_config(self.audio, self.config, context="earlier words", unprompted=True)
+        assert heard == [("", [], "")]
+
+    def test_unprompted_sends_no_prompt_vocabulary_or_context(self, prompts):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        text = transcribe_with_config(self.audio, self.config, context="earlier words",
+                                      unprompted=True)
+        assert prompts == [""]
+        assert text == "Hello there."

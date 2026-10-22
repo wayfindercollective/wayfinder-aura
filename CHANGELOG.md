@@ -7,6 +7,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dictations no longer vanish as "No speech detected" when the mic picks up
+  steady background noise.** A recording whose loudness barely varied was
+  thrown away before transcription, even when it held real speech (six
+  dictations in one afternoon on a MacBook Air). Such recordings are now
+  transcribed without the dictation prompt, which kept Whisper from inventing
+  sentences out of fan, hum or hiss noise in testing; the result is used only
+  if Whisper hears at least two words. Only near-silent recordings are still
+  rejected, and the activity log records the levels behind every rejection.
+
 ## [1.3.0] — 2026-10-20
 
 ### Added

@@ -181,6 +181,7 @@ class FakeApp:
     _finalize_chunked_transcription = WApp._finalize_chunked_transcription
     _deduplicate_overlap_text = WApp._deduplicate_overlap_text
     _find_text_overlap = WApp._find_text_overlap
+    _speech_check = WApp._speech_check
     _silence_error_message = WApp._silence_error_message
     _maybe_show_gpu_nudge = WApp._maybe_show_gpu_nudge
     _has_visual_pyqt_overlay = WApp._has_visual_pyqt_overlay
@@ -1278,8 +1279,9 @@ class TestChunkRetryAfterReset:
         cls = transcriber.WhisperServerBackend
         monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
         monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
-        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
-        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        from wayfinder.core.recorder import SpeechActivity
+        monkeypatch.setattr(wayfinder_main, "analyze_wav_speech_activity",
+                            lambda _p: SpeechActivity("speech", 20000, 2000, 20000))
         monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 17.0)
         monkeypatch.setattr(app.recorder, "start", lambda: None)
         built = []
@@ -1311,8 +1313,9 @@ class TestChunkRetryAfterReset:
         from wayfinder.core import transcriber
         cls = transcriber.WhisperServerBackend
         monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
-        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
-        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        from wayfinder.core.recorder import SpeechActivity
+        monkeypatch.setattr(wayfinder_main, "analyze_wav_speech_activity",
+                            lambda _p: SpeechActivity("speech", 20000, 2000, 20000))
         monkeypatch.setattr(app.recorder, "start", lambda: None)
         monkeypatch.setattr(transcriber, "get_backend",
                             lambda _config: pytest.fail("a retired dictation built a backend"))
@@ -1396,6 +1399,16 @@ def _quiet_noise_wav(tmp_path):
     return path
 
 
+def _steady_noise_wav(tmp_path):
+    """Audible hiss whose loudness barely varies: the speech check's "noise"."""
+    import numpy as np
+
+    path = tmp_path / "fan.wav"
+    rng = np.random.default_rng(9)
+    _write_wav(path, np.clip(rng.normal(0, 300, 48000), -32768, 32767).astype(np.int16))
+    return path
+
+
 class TestSilentMicMessage:
     """Field report 2026-10-01: a muted USB headset recorded pure zeros and the
     banner said "try again, a bit closer to the mic", so the owner blamed paste.
@@ -1474,8 +1487,51 @@ class TestSilentMicMessage:
         assert self.transcribed == []
         assert any(m.startswith("⚠ No speech detected from “Wireless Stereo Headset”")
                    for m in app.logs)
+        assert any(m.startswith("🔇 Speech check: silence (peak ") for m in app.logs)
         assert not any("sent no sound" in m for m in app.logs)
         assert self.banners == ["No speech detected — try again, a bit closer to the mic."]
+
+    def _outcome(self, app):
+        """(texts the recording produced, errors it raised) from the event queue."""
+        events = wayfinder_main.EventType
+        texts, errors = [], []
+        while not app.event_queue.empty():
+            event_type, data = app.event_queue.get_nowait()
+            payload, _gen = app._split_gen(data)
+            if event_type in (events.TRANSCRIPTION_DONE, events.CHUNKED_TRANSCRIPTION_DONE):
+                texts.append(payload)
+            elif event_type == events.TRANSCRIPTION_ERROR:
+                errors.append(payload)
+        return [t for t in texts if t], errors
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
+    def test_steady_noise_is_heard_unprompted_and_its_stray_word_dropped(
+        self, app, tmp_path, monkeypatch, chunked
+    ):
+        """Field report 2026-10-13: six real MacBook Air dictations got the noise
+        verdict and were deleted unheard. Noise now reaches Whisper without a
+        prompt (primed, it invents sentences), and its lone "So," is no speech."""
+        calls = []
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
+                            lambda path, cfg, **k: calls.append(k) or "So,")
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked), chunked)
+
+        assert [k.get("unprompted") for k in calls] == [True]
+        assert any(m.startswith("🔇 Speech check: noise (peak ") for m in app.logs)
+        texts, errors = self._outcome(app)
+        assert texts == []
+        assert errors == (["No speech detected"] if chunked else [])
+
+    @pytest.mark.parametrize("chunked", [False, True], ids=["one-shot", "chunked"])
+    def test_speech_the_check_calls_noise_is_kept(self, app, tmp_path, monkeypatch, chunked):
+        spoken = "I need a technical manager who can run this"
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
+                            lambda path, cfg, **k: spoken)
+        app.config["post_processing_enabled"] = False
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked), chunked)
+
+        assert self._outcome(app) == ([spoken], [])
+        assert self.banners == []
 
     def test_all_zero_recording_without_a_device_name(self, app, tmp_path):
         app.config["audio_device_name"] = None
@@ -1881,8 +1937,9 @@ class TestARestartCutShortDictationIsNeverTyped:
             from wayfinder.utils import overlay_process
             monkeypatch.setattr(overlay_process, "kill_stale_overlay_from_pidfile", lambda: None)
         # Every chunk carries speech, so each one reaches its transcription.
-        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _path: 0.5)
-        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _path: True)
+        from wayfinder.core.recorder import SpeechActivity
+        monkeypatch.setattr(wayfinder_main, "analyze_wav_speech_activity",
+                            lambda _path: SpeechActivity("speech", 0.5, 0.05, 0.5))
         app.warm_mic = SimpleNamespace(device=7, close=lambda: None)
         typed = []
         monkeypatch.setattr(wayfinder_main, "inject_text", lambda text, *_a, **_k: typed.append(text))
