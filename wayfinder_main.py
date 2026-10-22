@@ -21110,13 +21110,30 @@ class WayfinderApp(ctk.CTk):
         except Exception:
             pass
 
+    def _defer_model_selection(self, path) -> bool:
+        """Mid-dictation, a model the user picks waits for IDLE, as a finished
+        download does: loading it reloads the server under the running
+        request, whose recovery then brings the old model back (Sol mac r3)."""
+        if getattr(self, "app_state", AppState.IDLE) == AppState.IDLE:
+            return False
+        pending = getattr(self, "_pending_model_activations", None)
+        if pending is None:
+            pending = {}
+            self._pending_model_activations = pending
+        pending["whisper"] = (str(path), None)  # the latest pick wins
+        self.log(f"⚙ Switching to {_model_display_name(path)} when this dictation finishes")
+        return True
+
     def _set_active_whisper_model(self, path: str) -> None:
         """Persist + apply a speech model: the Save & Apply path.
 
         Shared by the Whisper Models panel and download auto-activation. The
         transcriber reloads on the next dictation because the resident
-        whisper-server is keyed by model path.
+        whisper-server is keyed by model path. Mid-dictation it is queued
+        until IDLE (_defer_model_selection).
         """
+        if WayfinderApp._defer_model_selection(self, path):
+            return
         store = str(path)
         home = str(Path.home())
         if store.startswith(home):
@@ -22124,6 +22141,8 @@ class WayfinderApp(ctk.CTk):
             if not transcription_model_allowed(str(model_path), self.feature_gate):
                 self.show_from_tray()
                 self._show_premium_prompt("large_models")
+                return
+            if WayfinderApp._defer_model_selection(self, model_path):
                 return
             # Store with ~ for portability (collapse $HOME -> ~ like the model panel does)
             home = str(Path.home())

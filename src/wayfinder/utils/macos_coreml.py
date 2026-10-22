@@ -31,6 +31,12 @@ _latest_config = None
 # older one is for a mode the user has left.
 _latest_epoch = None
 _job_running = threading.Event()
+# Bumped by every model or CPU/GPU change (cancel_preparation). A backend
+# built before one is for a model the user has left: it schedules no
+# hand-over, and a job started before one cannot publish (Sol mac r3).
+_selection_generation = 0
+# Failure keys a successful Core ML dictation cleared this session.
+_runtime_proven = set()
 # Failure keys counted this session: one failed attempt per launch, so the
 # automatic retries cannot spend the whole allowance at once.
 _session_failures = set()
@@ -304,6 +310,37 @@ def reset_comparison_failures() -> None:
         _failure_path().unlink()
     except FileNotFoundError:
         pass
+
+
+def _runtime_key(config: dict) -> tuple[str, str]:
+    from wayfinder.core.transcriber import _resolve_whisper_cli_binary
+    return (_resolve_whisper_cli_binary(config.get("whisper_binary", "")),
+            str(config.get("model_path", "")))
+
+
+def record_runtime_failure(config: dict, reason: str) -> int:
+    """A loaded Core ML server failed a dictation or exited on its own.
+
+    Counted like a failed preparation: a load proves nothing, so a server
+    that loads but cannot transcribe would otherwise be handed over again
+    after every dictation. Metal serves the rest of the session; the next
+    launch tries once more, then the backoff applies (Sol mac r3)."""
+    cli, model = _runtime_key(config)
+    _runtime_proven.discard((cli, model))
+    return record_comparison_failure(cli, model, f"Core ML runtime: {reason}")
+
+
+def record_runtime_success(config: dict) -> None:
+    """A Core ML dictation succeeded: that ends the failure streak (once a session)."""
+    key = _runtime_key(config)
+    if key in _runtime_proven:
+        return
+    clear_comparison_failures(*key)
+    _runtime_proven.add(key)
+
+
+def selection_generation() -> int:
+    return _selection_generation
 
 
 def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> int:
@@ -622,8 +659,9 @@ def _hand_off(backend, cli: str, twin: str, source_model: str, cancelled) -> boo
                     raise
                 continue  # a dictation began after the idle check: wait it out
             if published:
+                # A load proves nothing: its first successful dictation clears
+                # the failure streak (record_runtime_success).
                 print("[Whisper] macOS encoder: Core ML (took over from Metal)")
-                clear_comparison_failures(cli, source_model)
                 return True
             if probe.proc.poll() is not None:
                 raise RuntimeError(f"Core ML server exited before taking over ({probe.proc.returncode})")
@@ -726,9 +764,12 @@ def cancel_preparation(config: dict) -> None:
     starts next (a model change's warm-up) is never replaced by the old
     job's (Sol mac r2).
     """
-    global _latest_config, _latest_epoch
+    global _latest_config, _latest_epoch, _selection_generation
     from wayfinder.core.transcriber import WhisperServerBackend
     with _worker_lock:
+        # Before the worker check: with no worker yet, a backend built for
+        # the old model must still schedule nothing.
+        _selection_generation += 1
         if _worker is None or not _worker.is_alive():
             return
         _latest_config, _latest_epoch = dict(config), WhisperServerBackend._epoch
@@ -749,11 +790,13 @@ def schedule_preparation(config: dict, backend) -> None:
         return
     from wayfinder.core.transcriber import LOAD_EPOCH_KEY, WhisperServerBackend
     epoch = getattr(backend, "_load_epoch", WhisperServerBackend._epoch)
+    generation = getattr(backend, "_coreml_generation", None)
     keys = _PREPARATION_KEYS
     with _worker_lock:
-        if epoch != WhisperServerBackend._epoch:
-            # Read before a switch (a dictation that waited): the switch's own
-            # path decides what to prepare, a CPU switch nothing at all.
+        if epoch != WhisperServerBackend._epoch or generation not in (None, _selection_generation):
+            # Read before a switch (a dictation that waited, or one's Metal
+            # fallback after the user picked another model): the switch's
+            # own path decides what to prepare, a CPU switch nothing at all.
             return
         if (_job_running.is_set() and _latest_config is not None and _latest_epoch == epoch
                 and all(_latest_config.get(k) == config.get(k) for k in keys)):
@@ -775,12 +818,15 @@ def schedule_preparation(config: dict, backend) -> None:
                 try:
                     attempts = 0
                     while attempts < 3:
-                        live, job_epoch = _latest_config, _latest_epoch
+                        with _worker_lock:
+                            live, job_epoch = _latest_config, _latest_epoch
+                            job_generation = _selection_generation
                         snapshot = dict(live)
                         if job_epoch is not None:
                             snapshot[LOAD_EPOCH_KEY] = job_epoch
                         cancelled = lambda: (_preparation_requested.is_set() or live is not _latest_config
                                              or WhisperServerBackend._epoch != job_epoch
+                                             or _selection_generation != job_generation
                                              or any(live.get(k) != snapshot.get(k) for k in keys))
                         try:
                             if cancelled():
