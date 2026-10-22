@@ -1804,6 +1804,41 @@ class TestLoopedChunkRetry:
         assert len(contexts_heard) == 1   # no retry: never looked like a loop
         assert "before lunch tomorrow" in store[1]  # the last item survives whole
 
+    def test_a_quoted_list_joined_by_or_triggers_no_retry(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r6: four quoted items joined by "or", then a longer fifth
+        # holding "or" itself — its prefix read as a fifth "<item> or", so the
+        # list looked like a loop and a one-word retry replaced all of it.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 10.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        text = " or ".join(['"we need to go home"'] * 4) + ' or "we need to go home or stay here"'
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return text if context else "Leave."
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(contexts_heard) == 1   # no retry: never looked like a loop
+        assert store[1].count("we need to go home") == 5
+        assert "or stay here" in store[1]
+
     def test_a_possessive_loop_is_retried_and_a_looping_retry_is_rejected(
         self, app, monkeypatch, tmp_path
     ):

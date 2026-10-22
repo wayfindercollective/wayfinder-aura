@@ -582,6 +582,15 @@ def test_quoted_lists_of_four_survive_full_default_cleanup(item, last):
                  + ['or "we need to go home before dinner"']),
         " ".join(['"we need to go home",'] + ['and then "we need to go home",'] * 3
                  + ['and then "we need to go home before dinner"']),
+        # Sol loop r6: no commas, and the longer last item holds the joining
+        # word itself, so its prefix reads exactly like "<item> or"
+        " or ".join(['"we need to go home"'] * 4) + ' or "we need to go home or stay here"',
+        # mixed quoting: only the first item quoted
+        '"we need to go home", ' + "we need to go home, " * 3 + "we need to go home before dinner",
+        '"we need to go home", ' + "we need to go home, " * 4 + "we need to go home before dinner",
+        # no quotes at all: the "," that ends each item is kept too
+        "we need to go home, " * 4 + "we need to go home before dinner",
+        "; ".join(["we need to go home"] * 4) + "; we need to go home before dinner",
     ],
 )
 def test_quoted_lists_with_words_between_items_survive_full_default_cleanup(text):
@@ -606,6 +615,7 @@ def test_quoted_lists_with_words_between_items_survive_full_default_cleanup(text
         'we turned on the "fast" mode before lunch',
         '"Fast" mode is on before lunch',
         'we turned on the "fast", then the slow mode',
+        'we turned on "fast", then "slow" mode today',
     ],
 )
 def test_five_copies_with_apostrophes_or_interior_quotes_still_collapse(copy):
@@ -618,6 +628,32 @@ def test_five_copies_with_apostrophes_or_interior_quotes_still_collapse(copy):
     text = " ".join([copy] * 5) + "."
     assert chunk_text_looks_looped(text)
     assert collapse_phrase_window_loops(collapse_sentence_loops(text)) == copy
+
+
+@pytest.mark.parametrize("ending", [".", ""])
+def test_five_comma_joined_copies_collapse_whatever_ends_the_last(ending):
+    from wayfinder.core.chunking import (
+        chunk_text_looks_looped,
+        collapse_phrase_window_loops,
+        collapse_sentence_loops,
+    )
+
+    # Every copy but the last ends in the "," that leads into the next; the
+    # last ends the text with a period or nothing and still counts.
+    text = ", ".join(["we went to the store today"] * 5) + ending
+    assert chunk_text_looks_looped(text)
+    cleaned = collapse_phrase_window_loops(collapse_sentence_loops(text))
+    assert cleaned.rstrip(",") == "we went to the store today"
+
+
+def test_five_full_copies_collapse_and_a_longer_sixth_item_survives_whole():
+    from wayfinder.core.chunking import collapse_phrase_window_loops, collapse_sentence_loops
+
+    # Five full copies are the bar; the sixth item only starts the same way
+    # and must keep its own first words.
+    text = "we need to go home, " * 5 + "we need to go home before dinner"
+    assert (collapse_phrase_window_loops(collapse_sentence_loops(text))
+            == "we need to go home, we need to go home before dinner")
 
 
 # --- Sol loop r4, finding 4: loop normalisation keeps numeric meaning ------

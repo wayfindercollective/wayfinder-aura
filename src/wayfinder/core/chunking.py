@@ -99,6 +99,29 @@ def _loop_norm(word: str) -> str:
     return word.lstrip(edge).rstrip(edge + ".").lower()
 
 
+def _window_norm(word: str) -> str:
+    """_loop_norm for the phrase-window scan, which keeps quote marks,
+    brackets and a trailing ,;: — everything that can close a list item.
+    A word-window run can cross list items, and with those stripped the
+    prefix of a longer item ("we need to go home or stay here") matched a
+    full one ("we need to go home") and counted as a copy, collapsing a
+    four-item list (Sol loop r6). Kept, `"home"`, `home,` and `home` differ,
+    so a window only matches an item that ends the same way. A real loop
+    repeats its quotes, commas and possessives verbatim, so it still
+    matches; splitting spans at quotes instead hid such loops wherever a
+    quote or apostrophe was not a list boundary (Sol loop r5, finding 2).
+    """
+    return word.lstrip(",!?;:").rstrip(".!?").lower()
+
+
+def _same_copy_at_span_end(candidate: list[str], anchor: list[str]) -> bool:
+    """Whether the span's LAST copy matches the anchor but for the ,;: its
+    final word may lack: a loop's last copy ends the span with a period or
+    nothing where every earlier copy had the "," that led into the next."""
+    return (candidate[:-1] == anchor[:-1]
+            and candidate[-1].rstrip(",;:") == anchor[-1].rstrip(",;:"))
+
+
 def _loop_words(phrase: str) -> list[str]:
     """Normalised words for loop matching (see _loop_norm) with empties dropped."""
     return [w for w in (_loop_norm(word) for word in phrase.split()) if w]
@@ -135,55 +158,6 @@ def _is_truncated_loop_repeat(anchor_words: list[str], candidate_words: list[str
 # original text exactly.
 _CLOSERS = r'["\'`“”‘’)\]]'  # every quote _loop_norm strips, plus brackets
 _SENTENCE_END = re.compile(rf'[.!?]{_CLOSERS}*[,;:]?(\s+)')
-
-# collapse_phrase_window_loops' own span boundary: everything _SENTENCE_END
-# splits on, plus a closing quote/bracket alone (no [.!?] before it) that
-# ends a quoted list item with no terminal period ("we need to go home",
-# said next), so a word-window scan can never match across it (Sol loop r4,
-# finding 3). _CLOSERS must cover every quote _loop_norm strips: a backtick
-# it stripped but no boundary recognised let windows run across `quoted`
-# items (Sol loop r5, finding 1). A closer alone is ambiguous, though — the
-# apostrophe in "the players' equipment", or the quote after an interior
-# "fast" term, ends nothing, and splitting there hid real loops (Sol loop
-# r5, finding 2). So _split_phrase_spans only takes a lone closer when
-# another quoted item opens right after it ("we need to go home", "we ...),
-# or when list punctuation (,;:) follows it, a quote/bracket opened a word
-# earlier in the same span, and the next item opens within two words
-# ("we need to go home", or "we need to go home", and then "we ...).
-_OPENERS = "\"'`“‘„‚(["
-_WORD_START_OPENER = re.compile(r'(?<!\S)["\'`“‘„‚(\[]')
-_NEXT_ITEM_SOON = re.compile(r'(?:\S+\s+){1,2}["\'`“‘„‚(\[]')
-_PHRASE_SPAN_CANDIDATE = re.compile(rf'([.!?]{_CLOSERS}*|{_CLOSERS})([,;:]?)(\s+)')
-
-
-def _lone_closer_ends_item(text: str, m: re.Match, item_opened: bool) -> bool:
-    """Whether a _PHRASE_SPAN_CANDIDATE match with no [.!?] ends a quoted
-    list item (see above); ``item_opened``: a quote opened earlier in the span."""
-    if m.end() < len(text) and text[m.end()] in _OPENERS:
-        return True
-    return bool(m.group(2)) and item_opened and bool(_NEXT_ITEM_SOON.match(text, m.end()))
-
-
-def _split_phrase_spans(text: str) -> list[str]:
-    """``[span, sep, span, sep, ..., span]`` at phrase-span boundaries (see
-    _PHRASE_SPAN_CANDIDATE above); ``"".join(...) == text``."""
-    parts = []
-    start = 0
-    opener_at = -1  # first word-start opener at/after start (len(text): none)
-    for m in _PHRASE_SPAN_CANDIDATE.finditer(text):
-        if m.group(1)[0] not in ".!?":
-            if opener_at < start:  # stale: search on from this span only
-                found = _WORD_START_OPENER.search(text, start)
-                opener_at = found.start() if found else len(text)
-            if not _lone_closer_ends_item(text, m, opener_at < m.start(1)):
-                continue
-        sep_start, sep_end = m.span(3)
-        parts.append(text[start:sep_start])
-        parts.append(text[sep_start:sep_end])
-        start = sep_end
-    parts.append(text[start:])
-    return parts
-
 
 def _split_on(text: str, pattern: re.Pattern) -> list[str]:
     """``[span, sep, span, sep, ..., span]`` by ``pattern``; ``"".join(...) == text``."""
@@ -259,7 +233,7 @@ def collapse_sentence_loops(text: str) -> str:
 
 def _window_scan_one_span(text: str) -> str:
     """The window scan itself, run over one span (between the boundaries
-    _split_phrase_spans finds, or the whole text when it finds none) by
+    _SENTENCE_END finds, or the whole text when it finds none) by
     collapse_phrase_window_loops below.
 
     Tries the SMALLEST window first and keeps trying larger ones after a
@@ -292,7 +266,7 @@ def _window_scan_one_span(text: str) -> str:
         # Normalised once per window size, not re-derived for every slice
         # compared — keeps a long, loop-free chunk (the common case) from
         # doing quadratic work across the ~35 window sizes tried.
-        norm = [_loop_norm(w) for w in words]
+        norm = [_window_norm(w) for w in words]
         kept = []
         i = 0
         changed = False
@@ -303,6 +277,8 @@ def _window_scan_one_span(text: str) -> str:
             anchor = norm[i:i + window]
             j = i + window
             while j + window <= len(words) and norm[j:j + window] == anchor:
+                j += window
+            if j + window == len(words) and _same_copy_at_span_end(norm[j:], anchor):
                 j += window
             if (j - i) // window >= LOOP_MIN_RUN:
                 kept.extend(words[i:i + window])  # first occurrence only
@@ -326,16 +302,17 @@ def collapse_phrase_window_loops(text: str) -> str:
     windows instead of sentences — the only way to see a loop stuck inside a
     single sentence, or in speech with no sentence punctuation at all.
 
-    Each span between _split_phrase_spans boundaries is scanned on its own:
+    Each span between _SENTENCE_END boundaries is scanned on its own:
     across sentences a window matched "we need to go home" over "We need to
     go home. We need to go home. We need to go home before dinner." and
-    deleted "before dinner" (Sol loop r2); a quoted list item with no
-    terminal period is the same trap one token further out (Sol loop r4,
-    finding 3). Repeats across spans are collapse_sentence_loops' job. Text
-    with no boundary at all is scanned whole. Text with no run comes back as
-    the same object.
+    deleted "before dinner" (Sol loop r2). Quoted list items with no
+    terminal period have no boundary to split on: _window_norm keeps their
+    quotes instead, so a longer item's prefix never counts as a copy of a
+    shorter one (Sol loop r6). Repeats across spans are
+    collapse_sentence_loops' job. Text with no boundary at all is scanned
+    whole. Text with no run comes back as the same object.
     """
-    parts = _split_phrase_spans(text)  # [span, sep, span, sep, ...]
+    parts = _split_on(text, _SENTENCE_END)  # [span, sep, span, sep, ...]
     changed_any = False
     for i in range(0, len(parts), 2):
         collapsed = _window_scan_one_span(parts[i])

@@ -15,7 +15,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   Five or more word-for-word copies of a sentence or phrase in one chunk now
   count as a loop: that chunk is heard again without the prompt, and the loop
   is collapsed to one copy if the retry doesn't help. Saying something three
-  or four times on purpose is left alone, and quoted list items or numbers
+  or four times on purpose is left alone, and list items or numbers
   such as ".5" and "5" are never mistaken for copies.
 
 ## [1.3.0] — 2026-10-20
