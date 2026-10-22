@@ -14089,8 +14089,13 @@ class WayfinderApp(ctk.CTk):
             self._gpu_setup_failed = False
 
             def _prepare_gpu():
+                from wayfinder.utils.child_supervisor import HelpersClosed
                 try:
                     setup_gpu_environment(dict(self.config))
+                except HelpersClosed:
+                    # Quit cut the device probe short: not a GPU failure, so a
+                    # reopen after a failed restart keeps GPU on its default device.
+                    pass
                 except Exception as exc:
                     if self._gpu_setup_done is ready:
                         self._gpu_setup_failed = True

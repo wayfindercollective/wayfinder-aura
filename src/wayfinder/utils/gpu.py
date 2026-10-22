@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
 
-from wayfinder.utils.child_supervisor import helpers_closed, run_tracked
+from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
 
 
 @dataclass
@@ -409,6 +409,8 @@ def detect_ggml_devices() -> List[GgmlDevice]:
                 except (ValueError, IndexError):
                     continue
         
+    except HelpersClosed:
+        raise   # Quit: no device list, which would read as "no ggml devices"
     except Exception:
         pass
     finally:
@@ -519,7 +521,10 @@ def benchmark_gpu_devices(
     # IMPORTANT: Use ggml's device ordering, NOT vulkaninfo's!
     # ggml may order devices differently than vulkaninfo, so we must
     # detect devices the way ggml sees them to get correct benchmark results.
-    ggml_devices = detect_ggml_devices()
+    try:
+        ggml_devices = detect_ggml_devices()
+    except HelpersClosed:
+        return {"error": "Aura is shutting down", "fastest": "error"}
     
     # Fallback to vulkaninfo if ggml detection fails
     if not ggml_devices:
@@ -595,13 +600,13 @@ def benchmark_gpu_devices(
                     results[device_idx_str] = round(elapsed, 3)
             except subprocess.TimeoutExpired:
                 results[device_idx_str] = float(timeout)  # Timed out = slow
+            except HelpersClosed:
+                # Quit stopped or refused a device: the rest are no measurement,
+                # and the "fastest" left standing must never be cached.
+                return {"error": "Aura is shutting down", "fastest": "error"}
             except Exception:
                 pass  # Skip failed devices
         
-        if helpers_closed():
-            # Quit stopped a device mid-run: not a measurement, never cached.
-            return {"error": "Aura is shutting down", "fastest": "error"}
-
         # Find fastest
         if results:
             fastest = min(results, key=results.get)

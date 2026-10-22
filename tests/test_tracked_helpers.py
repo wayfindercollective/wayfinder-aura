@@ -12,6 +12,7 @@ import textwrap
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,7 +45,10 @@ class TestTheRegistry:
         outcome = {}
 
         def run():
-            outcome["result"] = child_supervisor.run_tracked(SLEEPER, capture_output=True, timeout=60)
+            try:
+                child_supervisor.run_tracked(SLEEPER, capture_output=True, timeout=60)
+            except child_supervisor.HelperStopped as exc:
+                outcome["stopped"] = exc
 
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
@@ -54,8 +58,29 @@ class TestTheRegistry:
         child_supervisor.close_tracked()
         thread.join(10)
         assert not thread.is_alive() and time.monotonic() - started < 6
-        assert proc.poll() is not None and outcome["result"].returncode != 0
+        # Its output says nothing about the machine: the run raises, never returns.
+        assert proc.poll() is not None and "stopped" in outcome
         assert not child_supervisor._tracked
+
+    def test_a_stopped_run_whose_timeout_fires_first_is_still_stopped(self):
+        # A stop that has not landed yet when the run's own timeout fires: the
+        # caller must still see Quit, not a timeout it would count as a failure.
+        outcome = {}
+
+        def run():
+            try:
+                child_supervisor.run_tracked(SLEEPER, timeout=1.0, stop=lambda proc: None)
+            except child_supervisor.HelperStopped:
+                outcome["stopped"] = True
+            except subprocess.TimeoutExpired:
+                outcome["timed out"] = True
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        assert _wait_for(lambda: child_supervisor._tracked)
+        child_supervisor.close_tracked(timeout=0.1)
+        thread.join(10)
+        assert outcome == {"stopped": True}
 
     def test_no_helper_starts_after_a_terminal_shutdown(self):
         child_supervisor.close_tracked()
@@ -304,8 +329,11 @@ class TestProbesAndDetectionAtQuit:
         monkeypatch.setattr("wayfinder.utils.gpu_simple.windows_vulkan_whisper", lambda c: binary)
         child_supervisor.close_tracked()
         with patch("subprocess.Popen") as popen:
-            assert detect_gpu_devices({"whisper_binary": binary}) == []
-            assert _detect_windows_vulkan_devices({}) == []
+            # No device list, which must not read as "no discrete GPU".
+            with pytest.raises(child_supervisor.HelpersClosed):
+                detect_gpu_devices({"whisper_binary": binary})
+            with pytest.raises(child_supervisor.HelpersClosed):
+                _detect_windows_vulkan_devices({})
         popen.assert_not_called()
 
     @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
@@ -322,7 +350,7 @@ class TestProbesAndDetectionAtQuit:
                 else (lambda: gpu_simple._detect_windows_vulkan_devices({})))
         outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
             work, lambda: child_supervisor.close_tracked())
-        assert outcome.get("value") == []
+        assert isinstance(outcome.get("error"), child_supervisor.HelperStopped)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
     def test_ggml_detection_in_flight_at_quit_is_stopped(self, tmp_path, monkeypatch):
@@ -337,7 +365,7 @@ class TestProbesAndDetectionAtQuit:
                             lambda cmd, **kw: child_supervisor.run_tracked(cmd, **{**kw, "timeout": 60}))
         outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
             gpu.detect_ggml_devices, lambda: child_supervisor.close_tracked())
-        assert outcome.get("value") == []
+        assert isinstance(outcome.get("error"), child_supervisor.HelperStopped)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
     def test_a_benchmark_cut_short_by_quit_is_not_a_result(self, tmp_path, monkeypatch):
@@ -384,3 +412,172 @@ class TestAnInterpreterExit:
         env = {**os.environ, "PYTHONPATH": f"{ROOT / 'src'}{os.pathsep}{ROOT}"}
         subprocess.run([sys.executable, "-c", app], env=env, timeout=60, check=True)
         assert _wait_for(lambda: _gone(int(pid_file.read_text())))
+
+
+class TestACutShortRunIsNeverAResult:
+    """Sol PR 2 r9: the cut-short check read the global closed flag, so a
+    worker resuming after a reopen (a failed restart re-exec) cached its
+    interrupted result; and a stopped GPU run counted as a GPU failure. The
+    shutdown now marks each child it stops, and that run raises HelperStopped
+    however late its caller resumes."""
+
+    @staticmethod
+    def _resume_after_reopen(monkeypatch):
+        """Hold run_tracked between the stop and its result until reopen."""
+        real_forget = child_supervisor.forget_tracked
+        reopened = threading.Event()
+
+        def forget_after_reopen(proc):
+            if getattr(proc, "_aura_cut_short", False):
+                reopened.wait(5)
+            real_forget(proc)
+
+        monkeypatch.setattr(child_supervisor, "forget_tracked", forget_after_reopen)
+
+        def quit_then_reopen():
+            child_supervisor.close_tracked()
+            child_supervisor.reopen_tracked()
+            reopened.set()
+
+        return quit_then_reopen
+
+    @staticmethod
+    def _long(module, monkeypatch):
+        # The real registry with a long timeout, so only the stop ends the run.
+        monkeypatch.setattr(module, "run_tracked",
+                            lambda cmd, **kw: child_supervisor.run_tracked(cmd, **{**kw, "timeout": 60}))
+
+    def test_a_stopped_run_raises_even_after_a_reopen(self, monkeypatch):
+        quit_then_reopen = self._resume_after_reopen(monkeypatch)
+        outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+            lambda: child_supervisor.run_tracked(SLEEPER, capture_output=True), quit_then_reopen)
+        assert isinstance(outcome.get("error"), child_supervisor.HelperStopped)
+        assert child_supervisor.run_tracked([sys.executable, "-c", "pass"]).returncode == 0
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    @pytest.mark.parametrize("probe", ["_supported_flags", "supports_gpu"])
+    def test_a_probe_resuming_after_a_reopen_caches_nothing(self, tmp_path, monkeypatch, probe):
+        import wayfinder.core.transcriber as transcriber
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        backend = transcriber.WhisperCppBackend(whisper_binary=binary, model_path=model, use_gpu=False)
+        self._long(transcriber, monkeypatch)
+        TestAFallbackRacingQuitIsStopped._quit_while_running(
+            getattr(backend, probe), self._resume_after_reopen(monkeypatch))
+        assert getattr(backend, "_supported_flags_cache", None) is None
+        assert backend._gpu_supported is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    def test_a_stopped_gpu_transcription_is_not_a_gpu_failure(self, tmp_path, monkeypatch):
+        import wayfinder.core.transcriber as transcriber
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        cpu, _ = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli-cpu")
+        monkeypatch.setattr(transcriber, "_cpu_fallback_binary", lambda b: cpu)
+        monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+        monkeypatch.setattr(transcriber, "_gpu_retry_state", {})
+        self._long(transcriber, monkeypatch)
+        backend = transcriber.WhisperCppBackend(whisper_binary=binary, model_path=model,
+                                                use_gpu=True, timeout=60)
+        audio = TestNoCliAfterQuit._audio(tmp_path)
+        with patch.object(transcriber.WhisperCppBackend, "_supported_flags", return_value=set()):
+            outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+                lambda: backend.transcribe(audio), self._resume_after_reopen(monkeypatch))
+        assert isinstance(outcome.get("error"), transcriber.TranscriptionError)
+        assert transcriber._CPU_FALLBACK_ACTIVE == {} and transcriber._gpu_retry_state == {}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    def test_a_stopped_gpu_recovery_probe_changes_no_gpu_state(self, tmp_path, monkeypatch):
+        import wayfinder.core.transcriber as transcriber
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        on_cpu = {binary: binary + "-cpu"}
+        state = {binary: {"failures": 2, "next_retry": 0.0}}
+        monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", dict(on_cpu))
+        monkeypatch.setattr(transcriber, "_gpu_retry_state", {binary: dict(state[binary])})
+        self._long(transcriber, monkeypatch)
+        backend = transcriber.WhisperCppBackend(whisper_binary=binary, model_path=model, use_gpu=True)
+        outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+            backend._probe_gpu_recovery, self._resume_after_reopen(monkeypatch))
+        assert "error" not in outcome   # its thread ends quietly
+        assert transcriber._CPU_FALLBACK_ACTIVE == on_cpu and transcriber._gpu_retry_state == state
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    def test_a_stopped_llama_gpu_probe_caches_no_verdict(self, tmp_path, monkeypatch):
+        import wayfinder.core.postprocessor as postprocessor
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "llama-simple")
+        backend = postprocessor.LlamaCppCliBackend(llama_binary=binary, model_path=model,
+                                                   n_gpu_layers=-1, residency="auto")
+        monkeypatch.setattr(postprocessor.LlamaCppCliBackend, "_gpu_probe", {})
+        self._long(postprocessor, monkeypatch)
+        outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+            backend._subprocess_target, self._resume_after_reopen(monkeypatch))
+        assert isinstance(outcome.get("error"), child_supervisor.HelperStopped)
+        assert postprocessor.LlamaCppCliBackend._gpu_probe == {}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    @pytest.mark.parametrize("reopen", [False, True])
+    def test_a_benchmark_with_one_device_measured_is_not_a_result(self, tmp_path, monkeypatch, reopen):
+        # Device 0 finishes; Quit stops device 1. Device 0 must not be cached
+        # as the fastest, whether or not the app reopens before the loop resumes.
+        from types import SimpleNamespace
+        from wayfinder.utils import gpu
+        helper = tmp_path / "whisper-cli"
+        marker = tmp_path / "device1"
+        helper.write_text(f'#!/bin/sh\nif [ "$GGML_VK_VISIBLE_DEVICES" = 1 ]; then '
+                          f'touch {marker}; exec sleep 30; fi\nexit 0\n')
+        helper.chmod(0o755)
+        (tmp_path / "m.bin").touch()
+        monkeypatch.setattr(gpu, "detect_ggml_devices",
+                            lambda: [SimpleNamespace(index=0), SimpleNamespace(index=1)])
+        quit_call = (self._resume_after_reopen(monkeypatch) if reopen
+                     else child_supervisor.close_tracked)
+        outcome = {}
+        thread = threading.Thread(target=lambda: outcome.update(value=gpu.benchmark_gpu_devices(
+            whisper_cli=str(helper), model_path=str(tmp_path / "m.bin"), timeout=60)), daemon=True)
+        thread.start()
+        assert _wait_for(marker.exists)
+        quit_call()
+        thread.join(10)
+        assert outcome.get("value", {}).get("fastest") == "error"
+
+    def test_a_benchmark_whose_device_list_quit_stopped_is_not_a_result(self, tmp_path, monkeypatch):
+        from wayfinder.utils import gpu
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+
+        def stopped():
+            raise child_supervisor.HelperStopped("stopped by a terminal shutdown")
+
+        monkeypatch.setattr(gpu, "detect_ggml_devices", stopped)
+        monkeypatch.setattr(gpu, "detect_vulkan_devices",
+                            lambda: pytest.fail("fell back to vulkaninfo's ordering"))
+        assert gpu.benchmark_gpu_devices(whisper_cli=binary, model_path=model)["fastest"] == "error"
+
+    def test_gpu_setup_that_quit_cut_short_is_not_a_failed_setup(self, monkeypatch):
+        # Otherwise a reopen after a failed restart sends every dictation to
+        # the CPU path until GPU is toggled again.
+        import wayfinder_main
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, **_kwargs):
+                workers.append(target)
+
+            def start(self):
+                pass
+
+        def cut_short(config):
+            raise child_supervisor.HelperStopped("stopped by a terminal shutdown")
+
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main.threading, "Thread", DeferredThread)
+        monkeypatch.setattr("wayfinder.utils.gpu_simple.setup_gpu_environment", cut_short)
+        monkeypatch.setattr("wayfinder.core.transcriber.WhisperServerBackend.shutdown",
+                            lambda **_: None)
+        monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency", lambda **_: None)
+        logs = []
+        app = SimpleNamespace(config={"use_gpu": True, "whisper_server_mode": True,
+                                      "transcription_backend": "whisper_cpp"},
+                              log=logs.append)
+        wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, True)
+        workers[0]()
+        assert app._gpu_setup_done.is_set() and app._gpu_setup_failed is False
+        assert not any("GPU setup failed" in line for line in logs)

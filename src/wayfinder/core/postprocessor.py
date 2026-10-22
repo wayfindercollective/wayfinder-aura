@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from wayfinder.utils.child_supervisor import run_tracked
+from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.platform import (
     get_user_llm_models_dir,
@@ -2576,6 +2576,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 env=bundle_binary_env(),
                 **_NO_WINDOW,
             )
+        except HelpersClosed:
+            raise   # Quit, not the GPU: _subprocess_target caches no verdict
         except Exception:
             return False
         return r.returncode == 0 and (_t.time() - t0) < _GPU_PROBE_MAX_SECONDS
@@ -3301,6 +3303,8 @@ Cleaned text:"""
             raise PostProcessingError(f"llama timed out after {self.timeout}s")
         except FileNotFoundError:
             raise PostProcessingError(f"Could not execute: {self.llama_binary}")
+        except HelpersClosed:
+            raise PostProcessingError("Aura is shutting down")
         except Exception as e:
             raise PostProcessingError(f"llama processing failed: {e}")
 

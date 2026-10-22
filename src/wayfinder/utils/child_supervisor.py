@@ -107,6 +107,12 @@ class HelpersClosed(RuntimeError):
     """A helper process was refused: the app is shutting down."""
 
 
+class HelperStopped(HelpersClosed):
+    """A terminal shutdown stopped this helper mid-run. Its output and exit
+    status say nothing about the machine, even after a reopen, so no caller
+    may cache or count them."""
+
+
 def spawn_tracked(command: Sequence[str], *, stop=None, **popen_kwargs) -> subprocess.Popen:
     """Popen a helper that a terminal shutdown stops (with *stop*, default
     terminate then kill); refused once one has begun."""
@@ -124,12 +130,6 @@ def spawn_tracked(command: Sequence[str], *, stop=None, **popen_kwargs) -> subpr
         _tracked[proc] = stop or _terminate_child
     bind_to_app_lifetime(proc)
     return proc
-
-
-def helpers_closed() -> bool:
-    """Whether a terminal shutdown has begun: a helper cut short by it says
-    nothing about this machine, so its result must not be cached."""
-    return _tracked_closed
 
 
 def forget_tracked(proc: subprocess.Popen) -> None:
@@ -152,12 +152,16 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+                if getattr(proc, "_aura_cut_short", False):
+                    raise HelperStopped("stopped by a terminal shutdown") from None
                 raise
             except BaseException:
                 proc.kill()
                 raise
     finally:
         forget_tracked(proc)
+    if getattr(proc, "_aura_cut_short", False):
+        raise HelperStopped("stopped by a terminal shutdown")
     if check and proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, stdout, stderr)
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
@@ -170,6 +174,9 @@ def close_tracked(timeout: float = 6.0) -> None:
     with _tracked_lock:
         _tracked_closed = True
         running = list(_tracked.items())
+        for proc, _stop in running:
+            # Marked on the child itself, so it holds after a reopen too.
+            proc._aura_cut_short = True
     stoppers = [threading.Thread(target=stop, args=(proc,), daemon=True,
                                  name="helper-stop") for proc, stop in running]
     for thread in stoppers:

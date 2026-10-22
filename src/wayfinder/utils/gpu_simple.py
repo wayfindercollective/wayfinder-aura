@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
 
-from wayfinder.utils.child_supervisor import run_tracked
+from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
 
 
 @dataclass
@@ -119,6 +119,8 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
         )
         
         devices = parse_ggml_vulkan_devices(result.stdout + result.stderr)
+    except HelpersClosed:
+        raise   # Quit: no device list, and not "no discrete GPU" either
     except Exception:
         pass
     finally:
@@ -184,6 +186,8 @@ def _detect_windows_vulkan_devices(config: Optional[dict]) -> List[GpuDevice]:
         result = run_tracked([cli, "--help"], capture_output=True, text=True,
                                 timeout=20, env=env, **subprocess_no_window_kwargs())
         return parse_ggml_vulkan_devices(result.stdout + result.stderr)
+    except HelpersClosed:
+        raise
     except Exception:
         return []
 
