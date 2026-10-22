@@ -80,16 +80,28 @@ the microphone. It requires identical normalized words and at least a 10% /
 and hands off the already-warm winner only while idle. Synthetic tests run on
 separate, supervised children, never on the user's dictation server. They yield
 to recording and retry after it finishes. Metal remains usable throughout;
-device compilation can continue while recording. Changing models/settings
-supersedes old preparation. Hotkeys never convert, compile, benchmark, or wait
-for device preparation.
+device compilation can continue while recording (on a 16 GB M1 it did not
+slow Metal dictation). Changing models/settings, or a switch to CPU, retires
+old preparation before the new model loads. Hotkeys never convert, compile,
+benchmark, or wait for device preparation.
+Core ML serves only from a server that is already loaded. A dictation or
+warm-up that finds it missing (not yet loaded, crashed, or failing a request)
+runs on Metal, and the worker loads Core ML beside it and hands over at the
+next idle moment. After a relaunch the first dictation therefore runs on
+Metal (about 2 seconds on an M1) while Core ML loads (about 6–11 seconds).
+A preparation that fails twice for the same chip, files and model waits a
+day before retrying, doubling to at most a week; a success clears the count,
+and turning GPU acceleration on in Settings gives every model a fresh try.
 Setting it to false and restarting is the advanced Metal-only escape hatch.
 Local weight population/package compilation took 6.6 seconds on a 24 GiB M4.
-First device specialization took another ~59 seconds, in the background;
-native child startup is bounded to 120 seconds. Inference/recovery deadlines
-are unchanged. Public-clip tests of locally converted Q5 weights measured
-~0.51–0.64 seconds versus
-~0.97–1.19 on Metal Q5, with identical normalized words across five clips.
+First device specialization took another ~59 seconds there and about
+2.5 minutes cold on a 16 GB M1, in the background. A Core ML server's first
+load in the background is therefore bounded to 10 minutes, a background
+Metal probe's to 120 seconds.
+Inference/recovery deadlines are unchanged. Public-clip tests of locally
+converted Q5 weights measured ~0.51–0.64 seconds versus ~0.97–1.19 on Metal
+Q5 (M4), and 0.76 versus 2.2 seconds per clip on the M1, with identical
+normalized words.
 This is experimental, not a claim of instant completion or broad accuracy
 validation. Selection remains conditional on that Mac's local accuracy/speed
 check and the existing Ultra GPU entitlement.
