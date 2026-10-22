@@ -1,11 +1,15 @@
 """Windows pill topmost keeper (20 Oct 2026: the pill, still flagged topmost,
 was ranked below ordinary windows and hidden behind them)."""
+import ctypes
 import sys
 from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+# The keeper's logic is pure Python driven through a faked user32 (FakeUser32
+# below), so it's tested that way on macOS/Linux too — only the two tests
+# that need a real HWND/windll are Windows-only.
+windows_only = pytest.mark.skipif(not hasattr(ctypes, "windll"), reason="Windows only")
 
 ROOT = Path(__file__).resolve().parents[1]
 PILL = 100
@@ -39,7 +43,12 @@ class FakeUser32:
         self.restored.append((h, after))
         if not self.sticky:
             entry = self.stack.pop(self._index(h))
-            self.stack.insert(0, entry)
+            # after=HWND_TOPMOST (-1, never a real hwnd here): straight to the
+            # top, as before. A real hwnd: insert directly behind it, matching
+            # Win32's hWndInsertAfter semantics.
+            ids = [w[0] for w in self.stack]
+            at = ids.index(after) + 1 if after in ids else 0
+            self.stack.insert(at, entry)
         return 1
 
 
@@ -105,6 +114,20 @@ def test_keeper_restores_without_activating_and_reports_at_once(monkeypatch, wt)
     assert len(reports) == 1
 
 
+def test_restore_never_places_the_pill_above_a_legitimate_topmost_window(monkeypatch, wt):
+    """20 Oct: with [legit topmost A, ordinary B, pill], HWND_TOPMOST always
+    goes to the very top, giving [pill, A, B] and un-topping A. The repair
+    must land the pill just below A instead, leaving A on top."""
+    fake = use(monkeypatch, wt, [(1, True, True), (2, True, False), (PILL, True, True)])
+    reports = []
+    keeper = keeper_for(wt, reports)
+    assert keeper.check() == 1               # only ordinary B (2) counts as "above"
+    assert fake.restored == [(PILL, 1)]       # inserted just below A (hwnd 1), not HWND_TOPMOST
+    order = [w[0] for w in fake.stack]
+    assert order.index(1) < order.index(PILL) < order.index(2)   # A, pill, B
+    assert reports[-1]["held"] is True
+
+
 def test_later_restores_are_batched_and_flushed_in_a_quiet_spell(monkeypatch, wt):
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
     clock, reports = Clock(), []
@@ -153,6 +176,41 @@ def test_restores_that_hold_are_never_paused(monkeypatch, wt):
     assert all(r["held"] for r in reports)
 
 
+def test_delayed_redemotion_against_an_unchanged_foreground_backs_off(monkeypatch, wt):
+    """20 Oct: the sticky=True test above only models a restore that fails to
+    hold AT ONCE. Here every restore holds the instant check() verifies it,
+    but the same foreground window re-demotes the pill again before the next
+    tick — a mock with an unchanged foreground produced 120 restores in 120 s
+    with no back-off (window-order fighting, flicker)."""
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
+    clock, reports = Clock(), []
+    keeper = keeper_for(wt, reports, clock)   # front="Code.exe" the whole time
+    for _ in range(120):                      # re-demoted once a second for 2 minutes
+        fake.stack.insert(0, fake.stack.pop(fake._index(2)))
+        keeper.check()
+        clock.t += 1.0
+    assert len(fake.restored) < 20            # backed off well short of fighting every tick
+    assert all(r["held"] for r in reports)    # each individual restore still held when checked
+
+
+def test_contention_resets_when_the_foreground_changes(monkeypatch, wt):
+    """Switching to a different app must get a clean slate, not inherit the
+    previous app's back-off — the contention is specific to one offender."""
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
+    clock, reports = Clock(), []
+    fronts = iter(["Code.exe"] * 11 + ["Slack.exe"])
+    keeper = wt.TopmostKeeper(lambda: PILL, reports.append, clock=clock,
+                              front=lambda: next(fronts))
+    for _ in range(11):                       # just long enough to trip the back-off
+        fake.stack.insert(0, fake.stack.pop(fake._index(2)))
+        keeper.check()
+        clock.t += 1.0
+    assert clock.t < keeper._paused_until     # Code.exe tripped the back-off
+    fake.stack.insert(0, fake.stack.pop(fake._index(2)))
+    assert keeper.check() == 1                # Slack.exe gets a fresh try, not the pause
+    assert fake.restored[-1] == (PILL, wt._HWND_TOPMOST)
+
+
 def test_keeper_leaves_a_hidden_pill_alone(monkeypatch, wt):
     fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)])
     keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
@@ -171,6 +229,7 @@ def test_restore_flags_never_activate_move_or_resize(wt):
     assert wt._RESTORE_FLAGS == 0x213   # NOSIZE | NOMOVE | NOACTIVATE | NOOWNERZORDER
 
 
+@windows_only
 def test_real_foreground_hook_installs_and_uninstalls(wt):
     keeper = wt.TopmostKeeper(lambda: None, lambda info: None)
     assert keeper.install_foreground_hook()
@@ -178,6 +237,7 @@ def test_real_foreground_hook_installs_and_uninstalls(wt):
     assert keeper._hook is None
 
 
+@windows_only
 def test_real_z_order_walk_finds_a_real_window(wt):
     import tkinter as tk
 

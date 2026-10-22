@@ -33,6 +33,13 @@ REPORT_EVERY_S = 30.0
 # fight it every second. Restores that hold are cheap and never paused, even
 # when they come on every window switch, or the pill would stay hidden.
 BACKOFF_S = 60.0
+# A restore can hold at the instant check() verifies it and still be undone
+# before the next tick: the same foreground window re-demoting the pill every
+# turn for this long (20 Oct: 120 restores in 120 s, held=True every time, no
+# back-off) is window-order fighting, not a burst of real switches — those
+# settle well under this. Back off exponentially once it's been this long.
+CONTENTION_AFTER_S = 10.0
+MAX_BACKOFF_S = 8 * BACKOFF_S
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -66,6 +73,14 @@ if sys.platform == "win32":
         _dwm_get.argtypes = (wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD)
     except Exception:
         _dwm_get = None
+else:
+    # Keep these names real attributes (not just absent) so tests can fake
+    # them with monkeypatch on macOS/Linux too — the keeper's logic is pure
+    # Python and is tested that way there; only the two tests that need a
+    # real HWND/windll are Windows-only.
+    _user32 = None
+    _kernel32 = None
+    _dwm_get = None
 
 
 def _cloaked(hwnd) -> bool:
@@ -103,6 +118,29 @@ def normal_windows_above(hwnd: int) -> int:
     return 0
 
 
+def topmost_above(hwnd: int) -> Optional[int]:
+    """The nearest OTHER legitimately-topmost window above *hwnd*, or None.
+
+    With [legit topmost A, ordinary B, pill], a repair must never place the
+    pill above A (20 Oct: HWND_TOPMOST always goes to the very top, giving
+    [pill, A, B] and un-topping A). Returns the lowest such window above
+    *hwnd* so the repair can insert the pill just below it instead.
+    """
+    last = None
+    h = _user32.GetTopWindow(None)
+    for _ in range(_MAX_WALK):
+        if not h:
+            return None
+        if h == hwnd:
+            return last
+        if (_user32.IsWindowVisible(h)
+                and _user32.GetWindowLongW(h, _GWL_EXSTYLE) & _WS_EX_TOPMOST
+                and not _cloaked(h)):
+            last = h
+        h = _user32.GetWindow(h, _GW_HWNDNEXT)
+    return None
+
+
 def foreground_exe() -> str:
     """The front window's program name (e.g. Code.exe), or "" if unknown."""
     try:
@@ -124,8 +162,12 @@ def foreground_exe() -> str:
 
 
 def restore_topmost(hwnd: int) -> bool:
-    """Put *hwnd* back at the top of the topmost band, without activating it."""
-    return bool(_user32.SetWindowPos(hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _RESTORE_FLAGS))
+    """Put *hwnd* back at the top of the topmost band, without activating it
+    — but just below another app's own legitimate topmost window, if one is
+    above it, rather than above it (see topmost_above)."""
+    above = topmost_above(hwnd)
+    after = above if above is not None else _HWND_TOPMOST
+    return bool(_user32.SetWindowPos(hwnd, after, 0, 0, 0, 0, _RESTORE_FLAGS))
 
 
 class TopmostKeeper:
@@ -151,6 +193,13 @@ class TopmostKeeper:
         self._pending: Optional[dict] = None
         self._last_report = float("-inf")
         self._paused_until = float("-inf")
+        # Which foreground window the current run of demotions is against, and
+        # how long it's been going: a restore that holds right after check()
+        # verifies it can still be undone before the next tick, by the same
+        # window, over and over (see CONTENTION_AFTER_S above).
+        self._contend_front: Optional[str] = None
+        self._contend_since = float("-inf")
+        self._contend_level = 0
         self._hook = None
         self._proc = None  # keep the ctypes callback alive while hooked
 
@@ -159,28 +208,45 @@ class TopmostKeeper:
         try:
             now = self._clock()
             self._flush(now)
+            front = None
             if now < self._paused_until:
-                return 0
+                front = self._front()
+                if front == self._contend_front:
+                    return 0
+                # A different app is in front now: the back-off was against
+                # the old offender, not this one — give it an immediate,
+                # fresh try rather than inheriting the old pause.
+                self._paused_until = float("-inf")
             hwnd = self._hwnd()
             if not hwnd:
                 return 0
             above = normal_windows_above(hwnd)
             if not above:
+                self._contend_front = None  # held on its own: contention is over
                 return 0
+            if front is None:
+                front = self._front()
+            if front != self._contend_front:
+                self._contend_front, self._contend_since, self._contend_level = front, now, 0
             restore_topmost(hwnd)
             held = normal_windows_above(hwnd) == 0
             if not held:
                 self._paused_until = now + BACKOFF_S
-            self._note(now, above, held)
+            elif now - self._contend_since >= CONTENTION_AFTER_S:
+                # held right now, but front has been re-demoting it on every
+                # turn for a while — back off with a growing pause instead of
+                # fighting it forever.
+                self._paused_until = now + min(BACKOFF_S * (2 ** self._contend_level), MAX_BACKOFF_S)
+                self._contend_level += 1
+            self._note(now, above, held, front)
             return above
         except Exception:
             return 0  # never let this break the overlay
 
-    def _note(self, now: float, above: int, held: bool) -> None:
+    def _note(self, now: float, above: int, held: bool, front: str) -> None:
         p = self._pending or {"restores": 0, "above": 0, "fronts": [], "held": True}
         p["restores"] += 1
         p["above"] = max(p["above"], above)
-        front = self._front()
         if front and (not p["fronts"] or p["fronts"][-1] != front) and len(p["fronts"]) < 5:
             p["fronts"].append(front)
         p["held"] = p["held"] and held

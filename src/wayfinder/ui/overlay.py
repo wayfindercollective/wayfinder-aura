@@ -50,6 +50,14 @@ try:
 except ImportError:  # standalone script — its own directory is on sys.path
     from stdin_reader import StdinCommandReader
 
+# Cloaked-window probe for the Windows topmost keeper's pill-hwnd lookup
+# below (_pill_hwnd_for). Reports False (never cloaked) off Windows, so this
+# import is safe on macOS/Linux too.
+try:
+    from wayfinder.ui.windows_topmost import _cloaked
+except ImportError:  # standalone script — its own directory is on sys.path
+    from windows_topmost import _cloaked
+
 # Force native Wayland path for PyQt6 if running on Wayland
 # This ensures proper transparency and always-on-top behavior
 if os.environ.get("XDG_SESSION_TYPE") == "wayland":
@@ -2671,6 +2679,22 @@ class GlassmorphicOverlay(QWidget):
 
 # === IPC Command Handler ===
 
+def _pill_hwnd_for(overlay: "GlassmorphicOverlay") -> Optional[int]:
+    """The pill's hwnd for the Windows topmost keeper (ui/windows_topmost.py),
+    or None while it isn't actually on screen.
+
+    20 Oct: persistent mode never calls hide() — _finish_hide() parks the
+    pill off-screen instead, so isVisible() stays True while HIDDEN, and the
+    keeper kept scanning/repairing a window nobody can see. A minimized or
+    cloaked (parked on another virtual desktop) pill reports isVisible()
+    True too, for the same reason: the keeper must leave all three alone.
+    """
+    if overlay._state == OverlayState.HIDDEN or overlay.isMinimized() or not overlay.isVisible():
+        return None
+    hwnd = int(overlay.winId())
+    return None if _cloaked(hwnd) else hwnd
+
+
 def run_overlay():
     """Run the overlay as a standalone application with stdin command handling."""
     import signal
@@ -3057,6 +3081,10 @@ def run_overlay():
                 else:
                     overlay.set_state(state)
                     _update_tray(state)
+                    # Resume the topmost keeper suspended by "hide" below —
+                    # the pill is back, so it's worth keeping on top again.
+                    if _topmost_timer is not None and not _topmost_timer.isActive():
+                        _topmost_timer.start(1000)
                 _emit_cmd_ack(cmd, ok=True, state_name=state_name)
             except Exception as e:
                 _debug_log(f"SHOW failed: {e}")
@@ -3080,6 +3108,11 @@ def run_overlay():
             else:
                 overlay.set_state(OverlayState.HIDDEN)
                 _update_tray(OverlayState.READY)
+                # Explicit user hiding: _pill_hwnd_for() already keeps the
+                # keeper from restoring a parked-offscreen pill, but there's
+                # no point even polling for it while hidden.
+                if _topmost_timer is not None:
+                    _topmost_timer.stop()
         
         elif command == "level":
             if tray_only:
@@ -3208,6 +3241,10 @@ def run_overlay():
     cmd_timer.timeout.connect(process_commands)
     cmd_timer.start(50)  # Check every 50ms (20Hz - responsive enough for state changes)
 
+    # None on macOS/Linux and in tray_only mode (the block below never runs
+    # there); handle_command()'s hide/show branches check this before use.
+    _topmost_timer = None
+
     if sys.platform == "win32" and not tray_only:
         # Pill diagnostics: report display changes (added/removed/resized/DPI)
         # to the main process, which logs them beside the pill state lines.
@@ -3247,7 +3284,7 @@ def run_overlay():
             from wayfinder.ui.windows_topmost import TopmostKeeper
 
             def _pill_hwnd():
-                return int(overlay.winId()) if overlay.isVisible() else None
+                return _pill_hwnd_for(overlay)
 
             def _report_restore(info: dict) -> None:
                 print(json.dumps({"event": "topmost", **info}), flush=True)

@@ -771,6 +771,44 @@ def test_disappearing_qt_pill_moves_without_remapping_or_raising(monkeypatch):
         overlay.deleteLater()
 
 
+def test_pill_hwnd_for_keeper_skips_hidden_minimized_and_cloaked(monkeypatch):
+    """20 Oct: persistent mode never calls hide() — _finish_hide() parks the
+    pill off-screen instead (see test_disappearing_qt_pill_... above), so
+    isVisible() stays True while HIDDEN and the Windows topmost keeper kept
+    scanning/repairing a pill nobody can see. A minimized or cloaked (parked
+    on another virtual desktop) pill reports isVisible() True too — exercise
+    the actual _pill_hwnd_for() wiring run_overlay() hands the keeper, not a
+    stand-in."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui import overlay as overlay_mod
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])
+    ov = GlassmorphicOverlay()
+    try:
+        ov._state = OverlayState.READY
+        ov.show()
+        app.processEvents()
+        assert ov.isVisible()
+        assert overlay_mod._pill_hwnd_for(ov) == int(ov.winId())  # normal case: a real hwnd
+
+        ov._state = OverlayState.HIDDEN
+        assert ov.isVisible()                            # parked off-screen, not hide()
+        assert overlay_mod._pill_hwnd_for(ov) is None     # but the keeper must leave it alone
+
+        ov._state = OverlayState.READY
+        monkeypatch.setattr(ov, "isMinimized", lambda: True)
+        assert overlay_mod._pill_hwnd_for(ov) is None     # minimized
+
+        monkeypatch.setattr(ov, "isMinimized", lambda: False)
+        monkeypatch.setattr(overlay_mod, "_cloaked", lambda h: True)
+        assert overlay_mod._pill_hwnd_for(ov) is None     # cloaked (other virtual desktop)
+    finally:
+        ov.deleteLater()
+
+
 @pytest.mark.parametrize("platform_name, expected", [("linux", "primary"), ("darwin", "pointer")])
 def test_overlay_screen_follows_pointer_on_macos_only(
     monkeypatch, overlay_module, platform_name, expected
