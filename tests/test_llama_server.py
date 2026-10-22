@@ -1633,3 +1633,30 @@ class TestAReusedChildStillRecovers:
         LlamaServerManager._process = new
         assert LlamaServerManager.note_failure(new) is False
         assert LlamaServerManager._consecutive_failures == 1
+
+
+class TestARetiredDictation:
+    """Sol mac r8: the cleanup of a dictation the app retired (a reset before
+    the chunked finalizer reached it) starts no server for discarded text."""
+
+    def test_starts_no_server(self, tmp_path):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        backend = TestWedgedServerRecovery._backend(None, tmp_path)
+        with patch.object(cls, "_abandoned", cls._abandoned), \
+             patch.object(LlamaServerManager, "ensure") as ensure, \
+             transcriber.dictation_requests(cls.request_token()):
+            cls.abandon_requests()
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._server_generate("prompt", 64)
+        ensure.assert_not_called()
+
+    def test_an_unretired_one_still_starts_it(self, tmp_path):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        backend = TestWedgedServerRecovery._backend(None, tmp_path)
+        with patch.object(LlamaServerManager, "ensure",
+                          side_effect=LlamaServerError("no server")) as ensure, \
+             transcriber.dictation_requests(cls.request_token()):
+            assert backend._server_generate("prompt", 64) is None
+        ensure.assert_called_once()
