@@ -366,3 +366,28 @@ def test_word_window_scan_stays_fast_on_a_long_non_looping_chunk():
     elapsed = time.perf_counter() - start
     assert result == text
     assert elapsed < 2.0
+
+
+def test_phrase_windows_do_not_erase_a_sentence_boundary():
+    from wayfinder.core.chunking import chunk_text_looks_looped, collapse_phrase_window_loops
+
+    # Sol loop r2: a window across the periods deleted "before dinner".
+    text = (
+        "We need to go home. We need to go home. "
+        "We need to go home before dinner."
+    )
+    assert collapse_phrase_window_loops(text) is text
+    assert not chunk_text_looks_looped(text, 10.0)
+
+
+def test_a_collapse_exposes_a_smaller_loop_in_one_call_and_is_idempotent():
+    from wayfinder.core.chunking import collapse_phrase_window_loops
+
+    # Sol loop r2: collapsing the 6-word loop exposes a 5-word one, which a
+    # scan only upward from 6 never saw.
+    p = "we need to go home"
+    q = "home we need to go home"
+    text = " ".join(["we need to go", q, q, q, p])
+    once = collapse_phrase_window_loops(text)
+    assert once == p
+    assert collapse_phrase_window_loops(once) == once

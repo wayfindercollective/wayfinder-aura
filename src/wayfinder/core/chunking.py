@@ -177,10 +177,9 @@ def collapse_sentence_loops(text: str) -> str:
     return " ".join(kept) if changed else text
 
 
-def collapse_phrase_window_loops(text: str) -> str:
-    """Same loop shape as collapse_sentence_loops, scanning fixed-size word
-    windows instead of sentences — the only way to see a loop stuck inside a
-    single sentence, or in speech with no sentence punctuation at all.
+def _window_scan_one_span(text: str) -> str:
+    """The window scan itself, run over one span (a sentence, or the whole
+    text when it has none) by collapse_phrase_window_loops below.
 
     Tries the SMALLEST window first and keeps trying larger ones after a
     collapse, rather than returning on the first window that changes
@@ -192,6 +191,11 @@ def collapse_phrase_window_loops(text: str) -> str:
     "period", 4x the real one); repeated 6 times it left 2 (a 16-word
     "period", 2x the real one). Smallest-first finds the true period and
     collapses the whole run to one copy.
+
+    After a collapse it starts again from the smallest window: removing a
+    run can expose a shorter loop at a size already scanned (Sol loop r2).
+    Every collapse shortens the text, so this ends. Returns the identical
+    object when nothing changed.
     """
     words = text.split()
     if len(words) < LOOP_MIN_RUN * LOOP_PHRASE_MIN_WORDS:
@@ -229,9 +233,39 @@ def collapse_phrase_window_loops(text: str) -> str:
         if changed:
             words = kept
             changed_any = True
+            window = LOOP_PHRASE_MIN_WORDS  # a smaller loop may now be exposed
+            continue
         window += 1
 
     return " ".join(words) if changed_any else text
+
+
+# collapse_sentence_loops' boundary, keeping the separators for the rejoin.
+_SENTENCE_BOUNDARY = re.compile(r"((?<=[.!?])\s+)")
+
+
+def collapse_phrase_window_loops(text: str) -> str:
+    """Same loop shape as collapse_sentence_loops, scanning fixed-size word
+    windows instead of sentences — the only way to see a loop stuck inside a
+    single sentence, or in speech with no sentence punctuation at all.
+
+    Each sentence is scanned on its own: across sentences a window matched
+    "we need to go home" over "We need to go home. We need to go home. We
+    need to go home before dinner." and deleted "before dinner" (Sol loop
+    r2). Repeats across sentences are collapse_sentence_loops' job. Text
+    with no run comes back as the same object.
+    """
+    if not any(mark in text for mark in ".!?"):
+        return _window_scan_one_span(text)
+
+    parts = _SENTENCE_BOUNDARY.split(text)  # [sentence, sep, sentence, sep, ...]
+    changed_any = False
+    for i in range(0, len(parts), 2):
+        collapsed = _window_scan_one_span(parts[i])
+        if collapsed is not parts[i]:
+            changed_any = True
+            parts[i] = collapsed
+    return "".join(parts) if changed_any else text
 
 
 def chunk_text_looks_looped(text: str, seconds: float | None) -> bool:

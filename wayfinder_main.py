@@ -25027,17 +25027,51 @@ class WayfinderApp(ctk.CTk):
                     prefer_fuller_chunk_text,
                 )
 
-                # The loop decision below is made on the backend's RAW text
+                # The loop decision is made on the backend's RAW text
                 # (raw_out, filled before clean_whisper_artifacts runs), not on
                 # `text`: with the default config that cleanup already
                 # collapses a 13-copy loop down to its first sentence, which
                 # then looks like ordinary, properly paced text and would trip
                 # neither check here — the audio would never be re-heard and
                 # the user gets the echoed sentence instead of their speech
-                # (Sol loop r1).
+                # (Sol loop r1). It comes before the truncation check: a loop
+                # cleaned down to a few words looked truncated, and that
+                # branch's word-count bar rejected a short correct retry
+                # (Sol loop r2). A loop is never speech, so any non-empty,
+                # non-looped retry wins.
                 raw_prompted_text = raw_prompted[0] if raw_prompted else text
 
-                if chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
+                if chunk_text_looks_looped(raw_prompted_text, get_wav_duration_seconds(chunk_path)):
+                    # The prompt made Whisper echo its own last chunk into a stuck
+                    # loop; hear it again without one — same shape as the
+                    # truncated-chunk retry below, same call shape.
+                    raw_retry = []
+                    try:
+                        retry = transcribe_with_config(
+                            chunk_path, asr_cfg, context="", skip_post_processing=True,
+                            request_token=request_token, raw_out=raw_retry,
+                        )
+                    except RequestAbandoned:
+                        raise   # a retirement owns the chunk's outcome
+                    except TranscriptionError as e:
+                        # A failed retry keeps the cleaned prompted text
+                        # rather than lose the chunk to [error] (Sol loop r2).
+                        self.log(f"🔁 Chunk {chunk_index + 1} loop retry failed "
+                                 f"({type(e).__name__}); keeping prompted text")
+                    else:
+                        retry_looped = chunk_text_looks_looped(
+                            raw_retry[0] if raw_retry else retry, get_wav_duration_seconds(chunk_path)
+                        )
+                        if retry.strip() and not retry_looped:
+                            text = retry
+                        # An empty or still-looped retry is worse than what's
+                        # already in hand: keep the prompted rendering as
+                        # transcribe_with_config already cleaned it under the
+                        # user's own config, rather than re-collapsing it by hand
+                        # and ignoring a collapse_whisper_repetitions=False the
+                        # user chose.
+                        self.log(f"🔁 Chunk {chunk_index + 1} looped with its prompt; retried without it")
+                elif chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
                     retry = transcribe_with_config(
                         chunk_path, asr_cfg, context="", skip_post_processing=True,
                         request_token=request_token,
@@ -25047,27 +25081,6 @@ class WayfinderApp(ctk.CTk):
                         self.log(f"↻ Chunk {chunk_index + 1} re-heard without context "
                                  f"({len(text.split())} → {len(fuller.split())} words)")
                     text = fuller
-                elif chunk_text_looks_looped(raw_prompted_text, get_wav_duration_seconds(chunk_path)):
-                    # The prompt made Whisper echo its own last chunk into a stuck
-                    # loop; hear it again without one — same shape as the
-                    # truncated-chunk retry above, same call shape.
-                    raw_retry = []
-                    retry = transcribe_with_config(
-                        chunk_path, asr_cfg, context="", skip_post_processing=True,
-                        request_token=request_token, raw_out=raw_retry,
-                    )
-                    retry_looped = chunk_text_looks_looped(
-                        raw_retry[0] if raw_retry else retry, get_wav_duration_seconds(chunk_path)
-                    )
-                    if retry.strip() and not retry_looped:
-                        text = retry
-                    # An empty or still-looped retry is worse than what's
-                    # already in hand: keep the prompted rendering as
-                    # transcribe_with_config already cleaned it under the
-                    # user's own config, rather than re-collapsing it by hand
-                    # and ignoring a collapse_whisper_repetitions=False the
-                    # user chose.
-                    self.log(f"🔁 Chunk {chunk_index + 1} looped with its prompt; retried without it")
             # Write into this session's private store — never touches a newer session's list.
             with self.chunk_transcription_lock:
                 while len(store) <= chunk_index:
