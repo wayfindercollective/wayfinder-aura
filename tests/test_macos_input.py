@@ -855,6 +855,18 @@ def test_the_pyautogui_cmd_v_releases_past_the_fail_safe(monkeypatch):
     assert rig.hotkeys == [("down", "command"), ("up", "v"), ("up", "command")]
 
 
+def test_a_failed_native_release_falls_back_to_the_public_one(monkeypatch):
+    sent = []
+    native = ModuleType("platformModule")
+    native._keyUp = lambda key: (_ for _ in ()).throw(RuntimeError("native sender gone"))
+    fake = ModuleType("pyautogui")
+    fake.platformModule = native
+    fake.keyDown = lambda key: sent.append(("down", key))
+    fake.keyUp = lambda key: sent.append(("up", key))
+    injector._pyautogui_command_v(fake)
+    assert sent == [("down", "command"), ("down", "v"), ("up", "v"), ("up", "command")]
+
+
 def test_the_real_pyautogui_wrappers_release_past_the_fail_safe(monkeypatch):
     pyautogui = pytest.importorskip("pyautogui")
     sent, where = [], iter([(500, 500)])

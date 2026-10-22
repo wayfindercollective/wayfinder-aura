@@ -154,7 +154,8 @@ def _piece_of_a_typing(index: int):
     except Exception as exc:
         if not index:
             raise
-        err = InjectionError(f"typing stopped part way: {exc}")
+        # The type only: a command's own message carries the dictated text.
+        err = InjectionError(f"typing stopped part way: {type(exc).__name__}")
         err.uncertain_delivery = True
         raise err from exc
 

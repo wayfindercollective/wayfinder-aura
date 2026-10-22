@@ -1426,7 +1426,7 @@ class TestLinuxTypingInPieces:
             typed = "".join(call.args[0][-1] for call in runs.call_args_list)
             assert runs.call_count > 1 and typed.replace(" ", "") == text.replace(" ", "")
 
-    @pytest.mark.parametrize("failure", ["exit", "timeout"])
+    @pytest.mark.parametrize("failure", ["exit", "timeout", "oserror"])
     @pytest.mark.parametrize("tool", ["xdotool", "wtype", "ydotool"])
     def test_a_later_piece_failing_is_uncertain_and_never_falls_back(self, tool, failure):
         # Part of the text landed: ydotool or a game-mode paste would type it
@@ -1442,6 +1442,8 @@ class TestLinuxTypingInPieces:
                 return ok
             if failure == "timeout":
                 raise subprocess.TimeoutExpired(argv, 120)
+            if failure == "oserror":
+                raise OSError(7, "Argument list too long")
             return failed
 
         with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
@@ -1460,6 +1462,8 @@ class TestLinuxTypingInPieces:
             with pytest.raises(injector.InjectionError) as caught:
                 injector.inject_text("word " * 200, game_mode=True, paste_fallback=True)
         assert caught.value.uncertain_delivery is True
+        assert "word" not in str(caught.value)              # never the dictated text
+        assert failure != "timeout" or "timed out" in str(caught.value)
         assert set(runs) == {tool} and len(runs) == 2
         noted.assert_not_called()
         pasted.assert_not_called()
