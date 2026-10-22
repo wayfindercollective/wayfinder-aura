@@ -1511,10 +1511,9 @@ class TestARetiredDictationAtTheTypeLock:
 
     def _real_keyboard(self, tmp_path, monkeypatch, clipboard=None):
         import wayfinder.core.injector as injector
-        kb = pk.PortalKeyboard(state_path=tmp_path / "state.json")
         sent = []
-        monkeypatch.setattr(kb, "_keysym", lambda value, down: sent.append(value))
-        monkeypatch.setattr(kb, "_key", lambda value, down: sent.append(value))
+        kb, _events = _bus_keyboard(tmp_path, monkeypatch,   # asked at the D-Bus call
+                                    lambda value, down: sent.append(value))
         monkeypatch.setattr(pk, "keyboard", lambda: kb)
         monkeypatch.setattr(pk, "ready", lambda: True)
         monkeypatch.setattr(pk, "X11Layout", lambda: _Layout(set()))
@@ -1604,41 +1603,100 @@ class TestARetiredDictationAtTheTypeLock:
         assert sent
 
 
+def _bus_keyboard(tmp_path, monkeypatch, on_call=None):
+    """A PortalKeyboard over a fake session bus: *events* gets each
+    (value, pressed) the portal was sent; *on_call* runs inside each D-Bus
+    call, as a reset can."""
+    from types import SimpleNamespace
+    kb = pk.PortalKeyboard(state_path=tmp_path / "state.json")
+    events = []
+
+    def call_sync(_dest, _path, _iface, _method, args, *_rest):
+        _session, _opts, value, pressed = args
+        events.append((value, bool(pressed)))
+        if on_call is not None:
+            on_call(value, bool(pressed))
+
+    glib = SimpleNamespace(Variant=lambda _fmt, args: args)
+    gio = SimpleNamespace(DBusCallFlags=SimpleNamespace(NONE=0))
+    monkeypatch.setattr(pk, "_gi", lambda: (gio, glib))
+    kb._bus, kb._session = SimpleNamespace(call_sync=call_sync), "/session/1"
+    return kb, events
+
+
+class _Shifting:   # a capital needs Shift
+    available = True
+
+    @staticmethod
+    def key_for(keysym):
+        return {0x41: (30, True), 0x62: (48, False), 0x76: (47, False),
+                0xFFE3: (29, False), 0xFFE1: (pk.KEY_LEFTSHIFT, False)}.get(keysym)
+
+
 class TestPortalKeysStopBetweenCharacters:
-    """Sol mac r12: the delay between characters can span a reset; each one
-    asks, and a Shift held for a capital is still released."""
+    """Sol mac r12/r13: the delay between characters, and the D-Bus call of
+    the press before, can span a reset; every press asks at the portal call,
+    and a held Shift or Ctrl is still released."""
 
     @pytest.mark.parametrize("layout", [None, "keys"])
     def test_typing_stops_at_a_retirement(self, tmp_path, monkeypatch, layout):
         import wayfinder.core.injector as injector
-        kb = pk.PortalKeyboard(state_path=tmp_path / "state.json")
         retired = [False]
-        events = []
 
-        def send(value, down):
-            events.append((value, down))
+        def on_call(value, down):
             if not down and value != pk.KEY_LEFTSHIFT:
                 retired[0] = True   # Escape after the first character
 
-        monkeypatch.setattr(kb, "_keysym", send)
-        monkeypatch.setattr(kb, "_key", send)
-        class Shifting:   # a capital needs Shift
-            available = True
-
-            @staticmethod
-            def key_for(keysym):
-                return {0x41: (30, True), 0x62: (48, False),
-                        0xFFE1: (pk.KEY_LEFTSHIFT, False)}.get(keysym)
-
-        lay = Shifting() if layout else None
+        kb, events = _bus_keyboard(tmp_path, monkeypatch, on_call)
         with injector.cancellable(lambda: retired[0]):
             with pytest.raises(injector.InjectionCancelled):
-                kb.type_text("Ab", 0.0, lay)
+                kb.type_text("Ab", 0.0, _Shifting() if layout else None)
         downs = [value for value, down in events if down]
         assert len([v for v in downs if v != pk.KEY_LEFTSHIFT]) == 1   # "A" only
         if layout:
             assert events[0] == (pk.KEY_LEFTSHIFT, True)
             assert events[-1] == (pk.KEY_LEFTSHIFT, False)   # Shift released
+
+    def test_a_reset_during_shifts_press_sends_no_capital(self, tmp_path, monkeypatch):
+        import wayfinder.core.injector as injector
+        retired = [False]
+
+        def on_call(value, down):
+            if value == pk.KEY_LEFTSHIFT and down:
+                retired[0] = True
+
+        kb, events = _bus_keyboard(tmp_path, monkeypatch, on_call)
+        with injector.cancellable(lambda: retired[0]):
+            with pytest.raises(injector.InjectionCancelled):
+                kb.type_text("A", 0.0, _Shifting())
+        assert events == [(pk.KEY_LEFTSHIFT, True), (pk.KEY_LEFTSHIFT, False)]
+
+    def test_a_reset_during_ctrls_press_sends_no_v(self, tmp_path, monkeypatch):
+        import wayfinder.core.injector as injector
+        retired = [False]
+
+        def on_call(value, down):
+            if value == 29 and down:
+                retired[0] = True
+
+        kb, events = _bus_keyboard(tmp_path, monkeypatch, on_call)
+        with injector.cancellable(lambda: retired[0]):
+            with pytest.raises(injector.InjectionCancelled):
+                kb.press_keys("ctrl+v", 0.0, _Shifting())
+        assert events == [(29, True), (29, False)]
+
+    def test_a_live_chord_and_releases_always_go_out(self, tmp_path, monkeypatch):
+        import wayfinder.core.injector as injector
+        kb, events = _bus_keyboard(tmp_path, monkeypatch)
+        with injector.cancellable(lambda: False):
+            kb.press_keys("ctrl+v", 0.0, _Shifting())
+        assert events == [(29, True), (47, True), (47, False), (29, False)]
+        events.clear()
+        with injector.cancellable(lambda: True):
+            kb._key(29, False)                    # a release is never refused
+            with pytest.raises(injector.InjectionCancelled):
+                kb._key(29, True)
+        assert events == [(29, False)]
 
     def test_a_portal_paste_retired_during_the_clipboard_read_writes_nothing(self, tmp_path,
                                                                              monkeypatch):

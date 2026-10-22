@@ -699,6 +699,10 @@ class PortalKeyboard:
 
     # -- keys -----------------------------------------------------------------
     def _notify(self, method: str, value: int, pressed: bool) -> None:
+        # Every press asks, never a release: the D-Bus call for the press
+        # before it (a Shift, a Ctrl) can span a reset (Sol mac r13).
+        if pressed:
+            _check_before_keys()
         bus, session = self._bus, self._session
         if bus is None or not session:
             raise PortalKeyboardError("the portal keyboard is not ready")
@@ -740,7 +744,6 @@ class PortalKeyboard:
         with self._type_lock:
             if layout is None or not layout.available:
                 for typed, ch in enumerate(text):
-                    _check_before_keys()   # each character: its delay can span a reset
                     try:
                         self._tap(self._keysym, keysym_for_char(ch))
                     except PortalKeyboardError as e:
@@ -753,7 +756,6 @@ class PortalKeyboard:
             shift_down = False
             try:
                 for typed, ch in enumerate(text):
-                    _check_before_keys()   # before its Shift too; the finally releases
                     try:
                         key = layout.key_for(keysym_for_char(ch))
                         if key is None:
@@ -787,7 +789,6 @@ class PortalKeyboard:
             if all(key is not None for key in keys):
                 send, values = self._key, [key[0] for key in keys]
         with self._type_lock:
-            _check_before_keys()
             pressed: list = []
             try:
                 for value in values:
