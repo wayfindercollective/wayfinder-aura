@@ -58,6 +58,24 @@ class hold_keys:
         _key_hold_s = self._prev
 
 
+# Asked right before each key press, never before a release: the injector
+# registers its check, which raises InjectionCancelled for a retired
+# dictation, so a press that waited on the one before it sends nothing
+# (Sol mac r13). Whatever was pressed is released however that ends. Kept
+# across importlib.reload, which tests use to undo the autouse stubs.
+_before_keys: list = globals().get("_before_keys", [])
+
+
+def check_before_keys(check) -> None:
+    if check not in _before_keys:
+        _before_keys.append(check)
+
+
+def _check_before_keys() -> None:
+    for check in _before_keys:
+        check()
+
+
 def _hold() -> None:
     if _key_hold_s > 0:
         import time
@@ -167,34 +185,56 @@ def post_command_v() -> None:
     )
 
     code = paste_keycode()
-    sequence = (
-        (_KVK_COMMAND, True, kCGEventFlagMaskCommand),
-        (code, True, kCGEventFlagMaskCommand),
-        (code, False, kCGEventFlagMaskCommand),
-        (_KVK_COMMAND, False, 0),
-    )
-    for keycode, pressed, flags in sequence:
+
+    def post(keycode, pressed, flags):
         event = CGEventCreateKeyboardEvent(None, keycode, pressed)
         if event is None:
             raise RuntimeError("could not create the Cmd+V key event")
         CGEventSetFlags(event, flags)
         CGEventPost(kCGHIDEventTap, event)
-        if keycode == code and pressed:
+
+    # Each press asks first, and what was pressed is released whatever stops
+    # the rest (a failed event, a retirement): Command left down turns the
+    # user's next clicks into Cmd-clicks (Sol mac r13).
+    _check_before_keys()
+    try:
+        post(_KVK_COMMAND, True, kCGEventFlagMaskCommand)
+        _check_before_keys()
+        try:
+            post(code, True, kCGEventFlagMaskCommand)
             _hold()
+        finally:
+            _release(post, code, kCGEventFlagMaskCommand)
+    finally:
+        _release(post, _KVK_COMMAND, 0)
+
+
+def _release(post, keycode, flags) -> None:
+    """Best effort: a release that fails must not hide why the sequence
+    stopped, nor make the caller paste again by another route."""
+    try:
+        post(keycode, False, flags)
+    except Exception:
+        pass
 
 
 def post_return() -> None:
     """Post a plain Return (no modifiers) to the frontmost app via Quartz."""
     from Quartz import CGEventCreateKeyboardEvent, CGEventPost, CGEventSetFlags, kCGHIDEventTap
 
-    for pressed in (True, False):
-        event = CGEventCreateKeyboardEvent(None, _KVK_RETURN, pressed)
+    def post(keycode, pressed, flags):
+        event = CGEventCreateKeyboardEvent(None, keycode, pressed)
         if event is None:
             raise RuntimeError("could not create the Return key event")
-        CGEventSetFlags(event, 0)
+        CGEventSetFlags(event, flags)
         CGEventPost(kCGHIDEventTap, event)
-        if pressed:
-            _hold()
+
+    _check_before_keys()
+    try:
+        post(_KVK_RETURN, True, 0)
+        _hold()
+    finally:
+        _release(post, _KVK_RETURN, 0)
 
 
 def frontmost_window_id() -> str | None:

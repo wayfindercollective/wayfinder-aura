@@ -66,6 +66,9 @@ def _refuse_if_cancelled(cancelled=None) -> None:
 # keys) that waited there for another one sends nothing for a retired dictation.
 from . import portal_keyboard as _portal_keyboard  # noqa: E402  (stdlib only)
 _portal_keyboard.check_before_keys(_refuse_if_cancelled)
+# And the Mac's Quartz key posts, before each press (Sol mac r13).
+from . import macos_paste as _macos_paste  # noqa: E402  (Quartz only when posting)
+_macos_paste.check_before_keys(_refuse_if_cancelled)
 
 
 def _run_key_tool(argv, **kwargs):
@@ -719,18 +722,23 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant", cancelled=N
         # Retired while a modifier was held: the pasteboard stays untouched.
         _refuse_if_cancelled(cancelled)
         pasteboard, snapshot = _snapshot_macos_pasteboard()
+        # ... or while the snapshot read the pasteboard: it is not written
+        # (Sol mac r13).
+        _refuse_if_cancelled(cancelled)
         injected_change = _write_macos_pasteboard_text(pasteboard, text)
         # ... or during the pasteboard writes: no Cmd+V, and the finally puts
         # the user's clipboard back now.
         _refuse_if_cancelled(cancelled)
         try:
             macos_paste.post_command_v()
+        except InjectionCancelled:
+            raise   # refused at a press: no other route sends it
         except Exception:
             import pyautogui
 
             # Retired while Quartz failed or PyAutoGUI loaded (Sol mac r12).
             _refuse_if_cancelled(cancelled)
-            pyautogui.hotkey("command", "v")
+            _pyautogui_command_v(pyautogui, cancelled)
         paste_succeeded = True
     except InjectionCancelled:
         raise
@@ -755,6 +763,29 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant", cancelled=N
                     # The injection error remains authoritative; restoration is
                     # best-effort and must not mask its actionable message.
                     pass
+
+
+def _pyautogui_command_v(pyautogui, cancelled=None) -> None:
+    """Cmd+V through PyAutoGUI, asking before each press: its Mac sender
+    sleeps after every key it posts, and hotkey() would press V after a
+    retirement during Command's (Sol mac r13). Releases always go out."""
+    try:
+        pyautogui.keyDown("command")
+        _refuse_if_cancelled(cancelled)
+        try:
+            pyautogui.keyDown("v")
+        finally:
+            _release_quietly(pyautogui.keyUp, "v")
+    finally:
+        _release_quietly(pyautogui.keyUp, "command")
+
+
+def _release_quietly(key_up, key) -> None:
+    # A failed release must not replace why the paste stopped.
+    try:
+        key_up(key)
+    except Exception:
+        pass
 
 
 def warmup_clipboard() -> None:
