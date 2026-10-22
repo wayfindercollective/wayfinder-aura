@@ -191,7 +191,9 @@ from wayfinder.utils.platform import (
 )
 from wayfinder.core.injector import inject_text, InjectionError
 from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, get_wav_duration_seconds, wav_has_speech_activity
-from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
+from wayfinder.core.transcriber import (
+    RequestAbandoned, TranscriptionError, dictation_requests, transcribe_with_config,
+)
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 from wayfinder.utils.audio_ducker import AudioDucker
@@ -25333,9 +25335,14 @@ class WayfinderApp(ctk.CTk):
                     epochs = _server_load_epochs()
                     cleanup_cfg = dict(WayfinderApp._gamer_asr_config(self, self.config))
                     cleanup_cfg.update(epochs)
-                    combined_text = process_with_config(combined_text, cleanup_cfg)
+                    # Under the dictation's token: a reset meanwhile starts,
+                    # restarts and falls back to nothing (Sol mac r8).
+                    with dictation_requests(WayfinderApp._dictation_request_token(self, gen)):
+                        combined_text = process_with_config(combined_text, cleanup_cfg)
                     if combined_text != original_text:
                         self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
+                except RequestAbandoned:
+                    return   # retired: nothing to emit for it
                 except Exception as e:
                     self.log(f"⚠ Post-processing error: {e}")
                     # Continue with original combined text

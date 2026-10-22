@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from wayfinder.core.transcriber import RequestAbandoned, _retired_dictation
 from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.platform import (
@@ -25,6 +26,14 @@ from wayfinder.utils.platform import (
 # Hide the child console window on Windows (empty on POSIX); splatted into each
 # llama subprocess spawn so no stray terminal appears.
 _NO_WINDOW = subprocess_no_window_kwargs()
+
+def _check_dictation() -> None:
+    """A cleanup for a dictation the app retired starts, restarts, retries and
+    counts nothing: its text is discarded, and a restart could stop the server
+    the next dictation is using (Sol mac r8)."""
+    if _retired_dictation():
+        raise RequestAbandoned("dictation abandoned")
+
 
 
 class PostProcessingError(Exception):
@@ -2843,6 +2852,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         if not binary:
             return None  # server not bundled in this build
         served = None   # the child this request reached, for a bound restart
+        _check_dictation()
         try:
             # Pass the port ensure() returned rather than letting complete()
             # re-read the class attribute: a concurrent shutdown (Quit, GPU
@@ -2892,6 +2902,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
                       "change - this cleanup uses the per-call CLI")
             return None
         except Exception as e:
+            # Retired meanwhile: no restart, no failure counted, no fallback.
+            _check_dictation()
             if served is not None:
                 # Attributed by the child the request reached, not by the
                 # switch count: a switch whose new mode reused that child left
@@ -3233,6 +3245,7 @@ Cleaned text:"""
                     # Quit or restart: nothing starts after a terminal shutdown,
                     # llama-simple and its GPU probe included.
                     raise PostProcessingError("Aura is shutting down")
+                _check_dictation()
                 # Fallback: spawn llama-simple. The prompt is POSITIONAL (llama-simple's
                 # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
                 # and -ngl must precede it so the model never sees the flag in context.
@@ -3305,6 +3318,8 @@ Cleaned text:"""
             raise PostProcessingError(f"Could not execute: {self.llama_binary}")
         except HelpersClosed:
             raise PostProcessingError("Aura is shutting down")
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"llama processing failed: {e}")
 
@@ -4372,6 +4387,8 @@ def _process_with_config(text: str, config: dict) -> str:
 
         return result
         
+    except RequestAbandoned:
+        raise   # nobody will type it: not the original text either
     except PostProcessingError as e:
         # If post-processing fails, return original text
         print(f"[Post-processing] ✗ Error: {e}")

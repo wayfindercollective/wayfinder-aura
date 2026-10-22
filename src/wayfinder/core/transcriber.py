@@ -1239,10 +1239,6 @@ class WhisperServerBackend(TranscriptionBackend):
             # macOS never adopts (see _find_available_port).
             port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
             _abandon_if_superseded()
-            # Retired during the stop or the port scan: nothing of this start
-            # runs yet, so nothing is spawned for it (Sol mac r7). A dead
-            # attempt checks again before the next spawn (end of the loop).
-            self._check_not_abandoned(abandoned_at)
 
             if (
                 sys.platform not in ("darwin", "win32")
@@ -1276,6 +1272,10 @@ class WhisperServerBackend(TranscriptionBackend):
                     print(f"[Whisper Server] Starting on port {port}...")
 
                 spawn_env = bundle_binary_env(whisper_metal_env(cmd))
+                # Last, after every wait of this start (the stop, the port
+                # scan, Linux's adoption probe): a retired dictation spawns
+                # nothing (Sol mac r7/r8).
+                self._check_not_abandoned(abandoned_at)
                 proc = spawn_supervised(
                     cmd,
                     env=spawn_env,
@@ -3715,13 +3715,16 @@ def transcribe_with_config(
                     print(f"[Post-processing] Using local model: {os.path.basename(model_path)}")
             
             original_text = text
-            text = process_with_config(text, config)
+            with dictation_requests(request_token):
+                text = process_with_config(text, config)
             
             if text != original_text:
                 print(f"[Post-processing] ✓ Text cleaned ({len(original_text)} → {len(text)} chars)")
             else:
                 print("[Post-processing] Text unchanged (or processing skipped)")
                 
+        except RequestAbandoned:
+            raise
         except ImportError as e:
             print(f"[Post-processing] ✗ Module not available: {e}")
         except Exception as e:

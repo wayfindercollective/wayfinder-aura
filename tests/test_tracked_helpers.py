@@ -33,6 +33,17 @@ def _wait_for(predicate, timeout: float = 5.0) -> bool:
 
 
 def _gone(pid: int) -> bool:
+    if sys.platform == "win32":
+        # os.kill(pid, 0) would terminate it there, not probe it.
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x00100000, False, pid)   # SYNCHRONIZE
+        if not handle:
+            return True
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == 0   # signalled: exited
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -92,7 +103,8 @@ class TestTheRegistry:
 
         def run():
             try:
-                child_supervisor.run_tracked(self.CUT_OFF, capture_output=True, text=True, timeout=60)
+                child_supervisor.run_tracked(self.CUT_OFF, capture_output=True, encoding="utf-8",
+                                             timeout=60)
             except Exception as exc:
                 outcome["error"] = exc
 
@@ -108,7 +120,7 @@ class TestTheRegistry:
     def test_a_bad_decode_nobody_stopped_keeps_its_own_error(self):
         script = [sys.executable, "-c", "import os; os.write(1, b'\\xe2\\x82')"]
         with pytest.raises(UnicodeDecodeError):
-            child_supervisor.run_tracked(script, capture_output=True, text=True, timeout=30)
+            child_supervisor.run_tracked(script, capture_output=True, encoding="utf-8", timeout=30)
 
     def test_no_helper_starts_after_a_terminal_shutdown(self):
         child_supervisor.close_tracked()
@@ -151,8 +163,12 @@ class TestTheRegistry:
             from wayfinder.utils import child_supervisor
             from wayfinder.core.llama_server import LlamaServerManager
             from wayfinder.core.transcriber import WhisperServerBackend
-            threading.Thread(target=child_supervisor.run_tracked, args=({helper!r},),
-                             daemon=True).start()
+            def run():
+                try:
+                    child_supervisor.run_tracked({helper!r})
+                except child_supervisor.HelperStopped:
+                    pass   # what every caller does with it
+            threading.Thread(target=run, daemon=True).start()
             while not (os.path.exists({str(pid_file)!r}) and open({str(pid_file)!r}).read()):
                 time.sleep(0.02)
             {quit_call}
@@ -439,8 +455,12 @@ class TestAnInterpreterExit:
         app = textwrap.dedent(f"""
             import os, threading, time
             from wayfinder.utils import child_supervisor
-            threading.Thread(target=child_supervisor.run_tracked, args=({helper!r},),
-                             daemon=True).start()
+            def run():
+                try:
+                    child_supervisor.run_tracked({helper!r})
+                except child_supervisor.HelperStopped:
+                    pass   # what every caller does with it
+            threading.Thread(target=run, daemon=True).start()
             while not (os.path.exists({str(pid_file)!r}) and open({str(pid_file)!r}).read()):
                 time.sleep(0.02)
             {ending}

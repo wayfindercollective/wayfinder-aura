@@ -1796,13 +1796,16 @@ class TestARestartCutShortDictationIsNeverTyped:
         import os
         from wayfinder.core.llama_server import LlamaServerManager
         from wayfinder.core.transcriber import WhisperServerBackend
-        from wayfinder.utils import child_supervisor, overlay_process
+        import sys
+        from wayfinder.utils import child_supervisor
 
         def no_exec(*_args):
             raise OSError("exec failed")
 
         monkeypatch.setattr(os, "execv", no_exec)
-        monkeypatch.setattr(overlay_process, "kill_stale_overlay_from_pidfile", lambda: None)
+        if sys.platform != "win32":   # POSIX only: the app's import of it fails there
+            from wayfinder.utils import overlay_process
+            monkeypatch.setattr(overlay_process, "kill_stale_overlay_from_pidfile", lambda: None)
         # Every chunk carries speech, so each one reaches its transcription.
         monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _path: 0.5)
         monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _path: True)
@@ -1895,3 +1898,132 @@ class TestARestartCutShortDictationIsNeverTyped:
         app._finalize_chunked_transcription(1, gen, store, FakeChunkedRecorder())
         app.pump_events()
         assert restart.typed == ["fresh words"]
+
+
+class TestCleanupAfterAReset:
+    """Sol mac r8: a reset while the llama-server cleanup runs retires the
+    dictation there too. The request that then times out restarts no server
+    (it could be the next dictation's), counts no failure and starts no CLI
+    fallback, in single-shot and chunked dictation alike."""
+
+    TEXT = "um so this is the dictation that the reset threw away just now okay"
+    CLEANUP = {
+        "output_tone": "minimal", "post_processing_enabled": True,
+        "normal_llm_cleanup": True, "fast_filler_removal": False,
+        "post_processing_backend": "llama_cpp",
+    }
+
+    @pytest.fixture
+    def cleanup(self, app, monkeypatch, tmp_path):
+        """The real llama cleanup ladder up to the server request, which a
+        reset interrupts (when asked) before it times out."""
+        import socket
+        import subprocess
+        import wayfinder.license as license_module
+        from wayfinder.core import postprocessor, transcriber
+        from wayfinder.core.llama_server import LlamaServerManager as M, LlamaServerSuperseded
+
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        for name in ("llama-simple", "llama-server", "m.gguf"):
+            (tmp_path / name).touch()
+        backend = postprocessor.LlamaCppCliBackend(
+            llama_binary=str(tmp_path / "llama-simple"),
+            model_path=str(tmp_path / "m.gguf"), residency="auto")
+        monkeypatch.setattr(backend, "_resident_model", lambda: None)
+        monkeypatch.setattr(postprocessor, "get_backend", lambda _config: backend)
+        app.config.update(self.CLEANUP, llama_cpp_model_path=str(tmp_path / "m.gguf"))
+        seen = SimpleNamespace(reset=None, requests=0, restarts=[], failures=[], cli=[])
+
+        def escape():
+            cls.abandon_requests()
+            app.session_generation += 1
+
+        def ensure(**_kwargs):
+            if seen.reset == "start":   # Escape, and the start is cancelled
+                escape()
+                raise LlamaServerSuperseded("cancelled")
+            return 8179
+
+        def complete(**_kwargs):
+            seen.requests += 1
+            if seen.reset == "request":   # Escape, as the request runs
+                escape()
+            raise socket.timeout()
+
+        def run_cli(cmd, **_kwargs):
+            seen.cli.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(M, "_closed", False)
+        monkeypatch.setattr(M, "ensure", ensure)
+        monkeypatch.setattr(M, "serving", lambda: None)
+        monkeypatch.setattr(M, "still_ours", lambda *_a: True)
+        monkeypatch.setattr(M, "complete", complete)
+        monkeypatch.setattr(M, "restart", lambda *a: seen.restarts.append(a))
+        monkeypatch.setattr(M, "note_failure", lambda *a: seen.failures.append(a) or False)
+        monkeypatch.setattr(backend, "_subprocess_target", lambda deadline=None: ("llama-simple", 0))
+        monkeypatch.setattr(postprocessor, "run_tracked", run_cli)
+
+        text = self.TEXT
+
+        class Asr:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                return text
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Asr())
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda _self: dict(app.config))
+        gen = app.session_generation
+        app._request_tokens = {gen: cls.request_token()}
+        return seen, gen
+
+    @staticmethod
+    def _events(app):
+        events = []
+        while not app.event_queue.empty():
+            events.append(app.event_queue.get_nowait()[0])
+        return events
+
+    @staticmethod
+    def _settle(seen):
+        import time as _time
+        deadline = _time.monotonic() + 2   # the restart runs on its own thread
+        while not seen.restarts and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+
+    @pytest.mark.parametrize("reset", ["request", "start", None])
+    def test_single_shot(self, app, cleanup, tmp_path, reset):
+        seen, gen = cleanup
+        seen.reset = reset
+        audio = tmp_path / "dictation.wav"
+        audio.write_bytes(b"\x00")
+        app.transcribe_and_inject(str(audio), gen)
+        self._settle(seen)
+        events = self._events(app)
+        assert seen.requests == (0 if reset == "start" else 1)
+        if reset:
+            assert (seen.restarts, seen.failures, seen.cli) == ([], [], [])
+            assert wayfinder_main.EventType.TRANSCRIPTION_DONE not in events
+        else:   # the same failure, unretired: restarted and served by the CLI
+            assert len(seen.restarts) == 1 and len(seen.cli) == 1
+            assert wayfinder_main.EventType.TRANSCRIPTION_DONE in events
+
+    @pytest.mark.parametrize("reset", ["request", None])
+    def test_chunked(self, app, cleanup, reset):
+        seen, gen = cleanup
+        seen.reset = reset
+        store = [self.TEXT]
+        app.chunk_transcriptions = store
+        app._finalize_chunked_transcription(1, gen, store, FakeChunkedRecorder())
+        self._settle(seen)
+        events = self._events(app)
+        assert seen.requests == 1
+        if reset:
+            assert (seen.restarts, seen.failures, seen.cli) == ([], [], [])
+            assert events == []
+        else:
+            assert len(seen.restarts) == 1 and len(seen.cli) == 1
+            assert events == [wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE]

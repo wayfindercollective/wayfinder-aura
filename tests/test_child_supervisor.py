@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -176,6 +177,105 @@ def test_signal_supervised_never_targets_a_reaped_pid(monkeypatch, tmp_path):
     child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
     child_supervisor.signal_supervised(proc, platform_name="darwin")
     assert sent == []
+
+
+def _exited_unreaped(proc) -> None:
+    deadline = time.monotonic() + 5
+    while _state(proc.pid):   # a zombie counts as gone
+        assert time.monotonic() < deadline, "the helper never exited"
+        time.sleep(0.02)
+    assert proc.returncode is None
+
+
+@posix
+def test_a_reap_on_another_thread_cannot_land_between_the_check_and_the_signal(monkeypatch):
+    # Sol mac r8: the unreaped check and the killpg hold Popen's reap lock,
+    # so a wait() racing them reaps only after the signal, never before it.
+    proc = child_supervisor.spawn_supervised(["true"], env=dict(os.environ), platform_name="darwin")
+    _exited_unreaped(proc)
+    during = []
+
+    def killpg(pid, sig):
+        reaper = threading.Thread(target=proc.wait, kwargs={"timeout": 5})
+        reaper.start()
+        reaper.join(0.3)   # an unlocked reap lands well within this
+        during.append(proc.returncode)
+
+    monkeypatch.setattr(child_supervisor.os, "killpg", killpg)
+    child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
+    assert during == [None]
+    assert proc.wait(timeout=5) == 0
+    child_supervisor.release_supervised(proc)
+
+
+@posix
+def test_a_group_whose_reap_lock_stays_busy_is_not_signalled(monkeypatch):
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(child_supervisor, "_REAP_LOCK_WAIT", 0.1)
+    proc = child_supervisor.spawn_supervised(["sleep", "30"], env=dict(os.environ), platform_name="darwin")
+    try:
+        with proc._waitpid_lock:   # a reap in progress, for all anyone knows
+            child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
+        assert sent == []
+    finally:
+        proc.kill()
+        proc.wait()
+        child_supervisor.release_supervised(proc)
+
+
+@posix
+def test_a_blocking_wait_on_a_helper_leaves_its_group_stoppable(monkeypatch):
+    # An untimed wait() would otherwise sit in waitpid() under the reap lock,
+    # and the stop would be refused as a reap in progress.
+    monkeypatch.setattr(child_supervisor, "_REAP_LOCK_WAIT", 0.5)
+    proc = child_supervisor.spawn_supervised(["sleep", "30"], env=dict(os.environ), platform_name="darwin")
+    waiter = threading.Thread(target=proc.wait, daemon=True)
+    waiter.start()
+    time.sleep(0.3)
+    child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
+    waiter.join(5)
+    assert not waiter.is_alive() and proc.returncode == -signal.SIGKILL
+    child_supervisor.release_supervised(proc)
+
+
+def test_a_stand_in_popen_gets_no_watcher_or_group(monkeypatch):
+    # A test's fake pid is no child of ours: a watcher on it could, once the
+    # fake is collected, signal a stranger's group.
+    started = []
+    monkeypatch.setattr(child_supervisor.subprocess, "Popen",
+                        lambda *a, **k: started.append(a) or type("Fake", (), {"pid": 1})())
+    proc = child_supervisor.spawn_supervised(["whisper-server"], platform_name="darwin")
+    assert len(started) == 1 and not hasattr(proc, "_aura_group") and not hasattr(proc, "_aura_watcher")
+
+
+@posix
+def test_macos_supervises_every_tracked_helper_by_default(monkeypatch):
+    # Sol mac r8: whisper-cli and llama-simple die with a Force Quit too.
+    monkeypatch.setattr(child_supervisor, "_supervise_by_default", lambda: True)
+    proc = child_supervisor.spawn_tracked(["sleep", "30"])
+    try:
+        assert proc._aura_group is True and os.getpgid(proc.pid) == proc.pid
+        assert isinstance(proc._aura_watcher, subprocess.Popen)
+        assert child_supervisor._tracked[proc] is child_supervisor._stop_helper_group
+    finally:
+        child_supervisor._stop_helper_group(proc)
+        child_supervisor.forget_tracked(proc)
+    assert proc.returncode is not None and proc._aura_watcher is None
+
+
+@posix
+def test_a_timed_out_tracked_helper_is_killed_with_its_group(monkeypatch, tmp_path):
+    monkeypatch.setattr(child_supervisor, "_supervise_by_default", lambda: True)
+    pid_file = tmp_path / "grandchild.pid"
+    script = (f"import subprocess, time\n"
+              f"g = subprocess.Popen(['sleep', '60'])\n"
+              f"open({str(pid_file)!r}, 'w').write(str(g.pid))\n"
+              f"time.sleep(60)\n")
+    with pytest.raises(subprocess.TimeoutExpired):
+        child_supervisor.run_tracked([sys.executable, "-c", script], timeout=3)
+    grandchild = int(_wait_for(pid_file, "the grandchild")[0])
+    assert _gone(grandchild, within=2)
 
 
 def test_a_child_outside_its_own_group_is_never_group_signalled(monkeypatch):

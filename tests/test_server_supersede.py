@@ -904,10 +904,11 @@ def test_quit_stops_a_loaded_server_whose_watcher_died(tmp_path, monkeypatch, ig
                 pass
 
 
-@pytest.mark.parametrize("stage", ["initial stop", "port scan"])
+@pytest.mark.parametrize("stage", ["initial stop", "port scan", "adoption probe"])
 def test_a_reset_before_the_spawn_starts_nothing(tmp_path, monkeypatch, stage):
-    # Sol mac r7: a reset during the stop of the previous server or the port
-    # scan went unseen, so a retired dictation loaded a model under the lock.
+    # Sol mac r7/r8: a reset during the stop of the previous server, the port
+    # scan or the adoption probe went unseen, so a retired dictation loaded a
+    # model under the lock.
     from wayfinder.core import transcriber
     backend = _one_attempt_backend(tmp_path, "import time\ntime.sleep(60)")
     monkeypatch.setattr(WhisperServerBackend, "_abandoned", WhisperServerBackend._abandoned)
@@ -919,7 +920,7 @@ def test_a_reset_before_the_spawn_starts_nothing(tmp_path, monkeypatch, stage):
             return stop(cls, deadline=deadline)
 
         monkeypatch.setattr(WhisperServerBackend, "_stop_server_internal", classmethod(stop_then_reset))
-    else:
+    elif stage == "port scan":
         scan = WhisperServerBackend._find_available_port
 
         def scan_then_reset(self, **kwargs):
@@ -928,6 +929,15 @@ def test_a_reset_before_the_spawn_starts_nothing(tmp_path, monkeypatch, stage):
             return port
 
         monkeypatch.setattr(WhisperServerBackend, "_find_available_port", scan_then_reset)
+    else:
+        # Linux asks whether the port already serves this model (Sol mac r8).
+        monkeypatch.setattr(transcriber.sys, "platform", "linux")
+
+        def probe_then_reset(self, port, timeout=2):
+            WhisperServerBackend.abandon_requests()
+            return False
+
+        monkeypatch.setattr(WhisperServerBackend, "_is_our_server", probe_then_reset)
     monkeypatch.setattr(transcriber, "spawn_supervised",
                         lambda *_a, **_k: pytest.fail("a retired dictation spawned a server"))
     monkeypatch.setattr(backend, "_cli_fallback",

@@ -43,7 +43,29 @@ def _watcher_command() -> list[str]:
     return [sys.executable, str(Path(__file__).resolve())]
 
 
-def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str], popen=None,
+_POPEN = subprocess.Popen
+
+
+def _bound_waits(proc) -> None:
+    """A macOS helper's untimed wait() polls, so no reap holds Popen's reap
+    lock for longer than one non-blocking waitpid, and signal_supervised can
+    always take that lock (Sol mac r8). Set on the instance, so Popen's own
+    communicate() and __exit__ use it too."""
+    timed_wait = proc.wait
+
+    def wait(timeout=None):
+        if timeout is not None:
+            return timed_wait(timeout)
+        while True:
+            try:
+                return timed_wait(0.05)
+            except subprocess.TimeoutExpired:
+                pass
+
+    proc.wait = wait
+
+
+def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = None, popen=None,
                      platform_name: str | None = None, **popen_kwargs) -> subprocess.Popen:
     """Popen a native helper that must not outlive the app.
 
@@ -57,10 +79,14 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str], popen=No
 
     Elsewhere a plain Popen: Linux binds by PR_SET_PDEATHSIG, Windows by
     bind_to_app_lifetime()."""
-    popen = popen or subprocess.Popen
     if (platform_name or sys.platform) != "darwin":
-        return popen(command, env=env, **popen_kwargs)
-    proc = popen(command, env=env, start_new_session=True, **popen_kwargs)
+        return (popen or subprocess.Popen)(command, env=env, **popen_kwargs)
+    proc = (popen or subprocess.Popen)(command, env=env, start_new_session=True, **popen_kwargs)
+    if not isinstance(proc, _POPEN):
+        # A test's stand-in: its pid is no child of ours, and a watcher on it
+        # could signal a stranger's group.
+        return proc
+    _bound_waits(proc)
     proc._aura_group = True
     try:
         watcher = subprocess.Popen(
@@ -82,11 +108,37 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str], popen=No
 
 
 def _owns_group(proc: subprocess.Popen, platform_name: str | None) -> bool:
-    """macOS: *proc* leads its own group (spawn_supervised) and is not reaped,
-    so that group id cannot have been reused."""
+    """macOS: *proc* leads its own group (spawn_supervised). Whether it is
+    still unreaped, so that group id cannot have been reused, is only known
+    under its reap lock (see _signal_group)."""
     return ((platform_name or sys.platform) == "darwin"
-            and getattr(proc, "_aura_group", False) is True
-            and proc.returncode is None)
+            and getattr(proc, "_aura_group", False) is True)
+
+
+# Long enough for any reap of a helper (one non-blocking waitpid).
+_REAP_LOCK_WAIT = 2.0
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """killpg while *proc* is provably unreaped: Popen reaps only under its
+    _waitpid_lock and sets returncode before letting go, so holding it, an
+    unset returncode means the pid, and so the group id, is still ours
+    (Sol mac r8: a reap on another thread could land between the check and
+    the signal)."""
+    lock = getattr(proc, "_waitpid_lock", None)
+    if lock is None or not lock.acquire(timeout=_REAP_LOCK_WAIT):
+        # Held this long only by a blocking wait() that _bound_waits did not
+        # bound: signalling now could race that reap, so do not.
+        print(f"[Helpers] not signalling pid {proc.pid}: its reap lock is busy", flush=True)
+        return
+    try:
+        if proc.returncode is None:
+            try:
+                os.killpg(proc.pid, sig)
+            except OSError:
+                pass   # the whole group has exited; the leader awaits its reap
+    finally:
+        lock.release()
 
 
 def _release_watcher(proc: subprocess.Popen) -> None:
@@ -106,6 +158,12 @@ def _release_watcher(proc: subprocess.Popen) -> None:
     watcher.poll()   # reaped now if it already left; otherwise when collected
 
 
+def release_supervised(proc) -> None:
+    """For a caller that reaped *proc* itself: its watcher lets go."""
+    if getattr(proc, "returncode", None) is not None:
+        _release_watcher(proc)
+
+
 def wait_supervised(proc: subprocess.Popen, timeout: float) -> bool:
     """Wait up to *timeout* for *proc* to exit. Once it is reaped, its watcher
     is released, so it signals nothing that later takes the pid."""
@@ -122,11 +180,8 @@ def signal_supervised(proc: subprocess.Popen, *, kill: bool = False,
     """Terminate (or kill) a supervised child: its whole group on macOS."""
     sig = signal.SIGKILL if kill else signal.SIGTERM
     if _owns_group(proc, platform_name):
-        try:
-            os.killpg(proc.pid, sig)
-            return
-        except OSError:
-            pass  # exited and gone meanwhile: the signal below says so
+        _signal_group(proc, sig)
+        return
     if proc.returncode is not None:
         return   # reaped: its pid may be someone else's
     try:
@@ -245,6 +300,21 @@ _shutdowns = 0
 _exit_hook_registered = False
 
 
+def _darwin_spawn(command, **popen_kwargs):
+    return spawn_supervised(command, platform_name="darwin", **popen_kwargs)
+
+
+def _is_helper_group(proc) -> bool:
+    return getattr(proc, "_aura_group", False) is True
+
+
+def _kill_helper(proc: subprocess.Popen) -> None:
+    if _is_helper_group(proc):
+        signal_supervised(proc, kill=True, platform_name="darwin")
+    else:
+        proc.kill()
+
+
 class HelpersClosed(RuntimeError):
     """A helper process was refused: the app is shutting down."""
 
@@ -255,12 +325,24 @@ class HelperStopped(HelpersClosed):
     may cache or count them."""
 
 
+def _supervise_by_default() -> bool:
+    """macOS: every tracked helper (whisper-cli, llama-simple, their probes)
+    is a native binary that must not outlive a Force Quit either (Sol mac r8)."""
+    return sys.platform == "darwin"
+
+
+def _stop_helper_group(proc: subprocess.Popen) -> None:
+    stop_supervised(proc, 3.0, 1.0, platform_name="darwin")
+
+
 def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
                   **popen_kwargs) -> subprocess.Popen:
     """Popen (or *popen*, such as spawn_supervised) a helper that a terminal
-    shutdown stops (with *stop*, default terminate then kill); refused once
-    one has begun."""
+    shutdown stops (with *stop*, default terminate then kill, its whole group
+    on macOS); refused once one has begun. macOS supervises it by default."""
     global _exit_hook_registered
+    if popen is None and _supervise_by_default():
+        popen = _darwin_spawn
     with _tracked_lock:
         if _tracked_closed:
             raise HelpersClosed("shutting down: no new helper process")
@@ -271,7 +353,9 @@ def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
             atexit.register(close_tracked)
             _exit_hook_registered = True
         proc = (popen or subprocess.Popen)(command, **popen_kwargs)
-        _tracked[proc] = stop or _terminate_child
+        if stop is None:
+            stop = _stop_helper_group if _is_helper_group(proc) else _terminate_child
+        _tracked[proc] = stop
     bind_to_app_lifetime(proc)
     return proc
 
@@ -317,13 +401,13 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
             try:
                 stdout, stderr = proc.communicate(input, timeout=timeout)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _kill_helper(proc)
                 proc.wait()
                 if cut_short(proc):
                     raise HelperStopped("stopped by a terminal shutdown") from None
                 raise
             except BaseException as exc:
-                proc.kill()
+                _kill_helper(proc)
                 if isinstance(exc, Exception) and cut_short(proc):
                     # Output cut off mid-character, a closed pipe: the stop's
                     # doing, not the helper's answer.
@@ -331,6 +415,7 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
                 raise
     finally:
         forget_tracked(proc)
+        release_supervised(proc)   # reaped by the with block
     if cut_short(proc):
         raise HelperStopped("stopped by a terminal shutdown")
     if check and proc.returncode:

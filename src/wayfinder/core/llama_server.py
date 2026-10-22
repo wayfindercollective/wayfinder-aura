@@ -35,6 +35,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
+from wayfinder.utils.child_supervisor import release_supervised, signal_supervised, spawn_supervised
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 
@@ -564,7 +565,9 @@ class LlamaServerManager:
                     if _left() <= 0:
                         raise LlamaServerError("deadline hit before the next rung")
                     try:
-                        proc = subprocess.Popen(
+                        # macOS: its own group, with a watcher for a Force
+                        # Quit (Sol mac r8); a plain Popen elsewhere.
+                        proc = spawn_supervised(
                             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=bundle_binary_env(cls._spawn_env_overrides()),
                         )
@@ -624,16 +627,18 @@ class LlamaServerManager:
                             errors.append(
                                 f"{Path(cmd[0]).name}: the listener on port {port} {why}")
                             try:
-                                proc.kill()
+                                cls._signal(proc, kill=True)
                                 proc.wait(timeout=5)
+                                release_supervised(proc)
                             except Exception:
                                 pass
                             continue
                         if not cls._serving_model(port, model_path):
                             errors.append(f"{Path(cmd[0]).name}: serving an unexpected model")
                             try:
-                                proc.kill()
+                                cls._signal(proc, kill=True)
                                 proc.wait(timeout=5)
+                                release_supervised(proc)
                             except Exception:
                                 pass
                             continue
@@ -660,8 +665,9 @@ class LlamaServerManager:
                     errors.append(f"{Path(cmd[0]).name}: not ready "
                                   f"(rc={proc.poll()}) {cls.log_tail()[-300:]}")
                     try:
-                        proc.kill()
+                        cls._signal(proc, kill=True)
                         proc.wait(timeout=5)
+                        release_supervised(proc)
                     except Exception:
                         pass
 
@@ -908,17 +914,29 @@ class LlamaServerManager:
     @staticmethod
     def _kill(proc: Optional[subprocess.Popen]) -> None:
         """Terminate, then kill, a child that ignores SIGTERM."""
-        if proc is None or proc.poll() is not None:
+        if proc is None:
             return
         try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+            if proc.poll() is None:
+                LlamaServerManager._signal(proc)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    LlamaServerManager._signal(proc, kill=True)
+                    proc.wait(timeout=5)
+            release_supervised(proc)
         except Exception:
             pass
+
+    @staticmethod
+    def _signal(proc: subprocess.Popen, kill: bool = False) -> None:
+        """SIGTERM or SIGKILL: on macOS to its whole group (spawn_supervised)."""
+        if getattr(proc, "_aura_group", False) is True:
+            signal_supervised(proc, kill=kill)
+        elif kill:
+            proc.kill()
+        else:
+            proc.terminate()
 
     @classmethod
     def reset_for_tests(cls) -> None:
