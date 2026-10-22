@@ -82,15 +82,16 @@ def test_the_watcher_command_reexecs_the_app_or_runs_this_module(monkeypatch):
 
 
 @posix
-def test_a_macos_helper_is_the_apps_own_child_and_leads_its_group(tmp_path):
+def test_a_macos_helper_is_the_apps_own_child_in_its_watchers_group(tmp_path):
     proc = _helper(tmp_path)
     watcher = proc._aura_watcher
     try:
-        # Ours until reaped, whatever happens to anything else; its watcher,
-        # a member of its group, keeps the group's id until it is reaped too.
-        assert os.getpgid(proc.pid) == proc.pid
-        assert os.getsid(proc.pid) == os.getsid(0)   # the app's session, so it can be joined
-        assert watcher.poll() is None and os.getpgid(watcher.pid) == proc.pid
+        # Both ours until reaped, whatever happens to anything else; the
+        # watcher leads the group the helper was started into, and either of
+        # them, unreaped, keeps the group's id.
+        assert watcher.poll() is None and os.getpgid(watcher.pid) == watcher.pid
+        assert os.getpgid(proc.pid) == watcher.pid == proc._aura_gid
+        assert os.getsid(watcher.pid) == os.getsid(0)   # the app's session, so it can be joined
         assert proc._aura_guarded is True
         child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
         assert proc.returncode is not None
@@ -100,6 +101,121 @@ def test_a_macos_helper_is_the_apps_own_child_and_leads_its_group(tmp_path):
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+class _Recording(subprocess.Popen):
+    """Real processes, with each spawn's process group recorded."""
+    spawned: list = []
+    instances: list = []
+
+    def __init__(self, args, **kwargs):
+        _Recording.spawned.append((list(args), kwargs.get("process_group")))
+        super().__init__(args, **kwargs)
+        _Recording.instances.append(self)
+
+
+def _record_spawns(monkeypatch):
+    _Recording.spawned, _Recording.instances = [], []
+    monkeypatch.setattr(child_supervisor, "_POPEN", _Recording)
+    monkeypatch.setattr(child_supervisor.subprocess, "Popen", _Recording)
+    return _Recording.spawned
+
+
+@posix
+def test_the_watcher_starts_before_the_helper_which_starts_in_its_group(monkeypatch):
+    # Sol mac r15: a helper started first ran unwatched until its watcher did.
+    spawned = _record_spawns(monkeypatch)
+    proc = child_supervisor.spawn_supervised(["sleep", "30"], env=dict(os.environ),
+                                             platform_name="darwin")
+    try:
+        watcher = proc._aura_watcher
+        assert spawned == [(child_supervisor._watcher_command(), 0), (["sleep", "30"], watcher.pid)]
+    finally:
+        child_supervisor.stop_supervised(proc, term_wait=1, platform_name="darwin")
+
+
+@posix
+def test_no_watcher_no_helper(monkeypatch, tmp_path):
+    marker = tmp_path / "ran"
+    monkeypatch.setattr(child_supervisor, "_watcher_command", lambda: [str(tmp_path / "missing")])
+    with pytest.raises(OSError):
+        child_supervisor.spawn_supervised(["touch", str(marker)], env=dict(os.environ),
+                                          platform_name="darwin")
+    time.sleep(0.2)
+    assert not marker.exists()
+
+
+@posix
+def test_a_helper_that_cannot_start_takes_its_watcher_with_it(monkeypatch, tmp_path):
+    _record_spawns(monkeypatch)
+    with pytest.raises(FileNotFoundError):
+        child_supervisor.spawn_supervised([str(tmp_path / "missing-helper")], env=dict(os.environ),
+                                          platform_name="darwin")
+    [watcher] = _Recording.instances
+    assert watcher.returncode is not None                 # stopped and reaped
+
+
+@posix
+def test_a_watcher_gone_before_it_is_told_the_helper_stops_it(monkeypatch):
+    # Nothing would end the helper if the app died: it does not run.
+    spawned = _record_spawns(monkeypatch)
+
+    class _Closed:
+        def __init__(self, pipe):
+            self.pipe = pipe
+
+        def write(self, data):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def close(self):
+            self.pipe.close()
+
+    real_init = _Recording.__init__
+
+    def init(self, args, **kwargs):
+        real_init(self, args, **kwargs)
+        if kwargs.get("process_group") == 0:
+            self.stdin = _Closed(self.stdin)
+
+    monkeypatch.setattr(_Recording, "__init__", init)
+    with pytest.raises(OSError, match="no crash watcher"):
+        child_supervisor.spawn_supervised(["sleep", "30"], env=dict(os.environ),
+                                          platform_name="darwin")
+    watcher, helper = _Recording.instances
+    assert [group for _args, group in spawned] == [0, watcher.pid]
+    assert helper.returncode is not None and watcher.returncode is not None   # both reaped
+
+
+@posix
+def test_an_app_killed_before_naming_its_helper_leaves_nothing_running(tmp_path):
+    # Sol mac r15: Force Quit between the helper's start and its watcher's
+    # used to leave the helper running for good. Now the watcher is already
+    # there, and the app dies before it can name the helper.
+    app = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, signal, subprocess, sys\n"
+         f"sys.path.insert(0, {str(child_supervisor.Path(child_supervisor.__file__).parents[2])!r})\n"
+         "from wayfinder.utils import child_supervisor as cs\n"
+         "class Dying(subprocess.Popen):\n"
+         "    def __init__(self, args, **kwargs):\n"
+         "        super().__init__(args, **kwargs)\n"
+         "        if list(args)[1:2] == ['-c']:   # the helper, not the watcher\n"
+         "            print(self.pid, os.getpgid(self.pid), flush=True)\n"
+         "            os.kill(os.getpid(), signal.SIGKILL)\n"
+         "cs._POPEN = cs.subprocess.Popen = Dying\n"
+         "cs.spawn_supervised([sys.executable, '-c', 'import signal, time; "
+         "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],"
+         " env=dict(os.environ), platform_name='darwin')\n"],
+        stdout=subprocess.PIPE, text=True)
+    helper, group = map(int, app.stdout.readline().split())
+    watcher = group if group != helper else None
+    app.wait()
+    try:
+        assert app.returncode == -signal.SIGKILL
+        assert _gone(helper, within=5), "the helper outlived the app"
+        assert watcher is not None and _gone(watcher, within=3)
+    finally:
+        _kill_quietly(helper, *([watcher] if watcher else []))
 
 
 @posix
@@ -341,38 +457,48 @@ def test_the_watcher_ends_the_worker_of_a_leader_that_left_on_its_own(tmp_path):
 
 
 @posix
-def test_the_group_keeps_its_id_while_the_watcher_lives(tmp_path):
-    # Sol mac r14: the id a watcher signals must be the helper's group even
-    # after the leader is gone and reaped. A member keeps it: no process can
-    # be given that number, nor make a group of it, meanwhile.
-    proc = child_supervisor.spawn_supervised(["true"], env=dict(os.environ), platform_name="darwin")
-    watcher = proc._aura_watcher
-    proc.wait()
+@pytest.mark.parametrize("reaped", ["helper", "watcher"])
+def test_the_group_keeps_its_id_while_either_member_lives(tmp_path, reaped):
+    # Sol mac r14: the id signalled must be the helper's group even after one
+    # of its two members is gone and reaped. The other keeps it: no process
+    # can be given that number, nor make a group of it, meanwhile.
+    proc = child_supervisor.spawn_supervised(["sleep", "30"], env=dict(os.environ),
+                                             platform_name="darwin")
+    watcher, gid = proc._aura_watcher, proc._aura_gid
+    gone, kept = (proc, watcher) if reaped == "helper" else (watcher, proc)
     try:
-        os.killpg(proc.pid, 0)                          # still there: the watcher
-        assert os.getpgid(watcher.pid) == proc.pid
+        gone.kill()
+        gone.wait()
+        os.killpg(gid, 0)                               # still there: the other member
+        assert os.getpgid(kept.pid) == gid
     finally:
-        child_supervisor.release_supervised(proc)
+        child_supervisor.stop_supervised(proc, term_wait=1, platform_name="darwin")
     assert watcher.wait(timeout=3) is not None
 
 
 @posix
-@pytest.mark.parametrize("case", ["app-died", "helper-left", "app-died-after-it-left"])
-def test_a_member_watcher_signals_its_group_by_zero_never_by_number(monkeypatch, case):
-    # Sol mac r14: once the leader is reaped by launchd its number can be
-    # handed out again; a member signals its own group (killpg 0) instead.
+@pytest.mark.parametrize("case", ["app-died", "helper-left", "app-died-after-it-left",
+                                  "app-died-before-naming-it", "released", "released-with-its-name"])
+def test_the_watcher_signals_its_group_by_zero_never_by_number(monkeypatch, case):
+    # Sol mac r14: once a member is reaped by launchd its number can be
+    # handed out again; the watcher signals its own group (killpg 0) instead.
+    # Sol mac r15: an app gone before naming the helper ends the group too.
     sent, ignored = [], []
-    helper = subprocess.Popen(["sleep", "30"] if case == "app-died" else ["true"])
-    if case != "app-died":
+    helper = subprocess.Popen(["sleep", "30"] if case in ("app-died", "released") else ["true"])
+    if case not in ("app-died", "released"):
         helper.wait()                                   # gone and reaped
-    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: helper.pid)
+    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: os.getpid())   # it leads
     monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
     monkeypatch.setattr(child_supervisor.signal, "signal", lambda sig, how: ignored.append(sig))
     read_end, write_end = os.pipe()
+    if case != "app-died-before-naming-it":
+        os.write(write_end, b"%d\n" % helper.pid)
+    if case.startswith("released"):
+        os.write(write_end, b"r")
     if case != "helper-left":
-        os.close(write_end)                             # the app died
+        os.close(write_end)                             # the app died, or let go
     try:
-        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end, term_wait=0.2) == 0
+        assert child_supervisor.run_watcher(pipe_fd=read_end, term_wait=0.2) == 0
     finally:
         os.close(read_end)
         if case == "helper-left":
@@ -380,13 +506,45 @@ def test_a_member_watcher_signals_its_group_by_zero_never_by_number(monkeypatch,
         helper.kill()
         helper.wait()
     assert ignored == [signal.SIGTERM]
-    expected = [(0, signal.SIGTERM), (0, signal.SIGKILL)] if case == "app-died" else [(0, signal.SIGKILL)]
+    expected = {"app-died": [(0, signal.SIGTERM), (0, signal.SIGKILL)],
+                "released": [], "released-with-its-name": []}.get(case, [(0, signal.SIGKILL)])
     assert sent == expected
 
 
 @posix
+@pytest.mark.parametrize("line", [b"0\n", b"1\n", b"-5\n", b"x\n"])
+def test_a_watcher_told_no_real_helper_ends_its_group(monkeypatch, line):
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: os.getpid())
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr(child_supervisor.signal, "signal", lambda sig, how: None)
+    read_end, write_end = os.pipe()
+    os.write(write_end, line)
+    try:
+        assert child_supervisor.run_watcher(pipe_fd=read_end) == 0
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+    assert sent == [(0, signal.SIGKILL)]
+
+
+@posix
+def test_a_watcher_that_does_not_lead_its_group_signals_nothing(monkeypatch):
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: os.getpid() + 1)
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    read_end, write_end = os.pipe()
+    os.close(write_end)
+    try:
+        assert child_supervisor.run_watcher(pipe_fd=read_end) == 2
+    finally:
+        os.close(read_end)
+    assert sent == []
+
+
+@posix
 def test_a_reaped_helpers_group_is_signalled_only_while_its_watcher_holds_it(monkeypatch):
-    # Sol mac r14: poll() reaping a leader that left on its own made every
+    # Sol mac r14: poll() reaping a helper that left on its own made every
     # later group signal refuse, and what it forked ran on. The watcher's
     # membership still proves the group; released, nothing does.
     sent = []
@@ -394,9 +552,9 @@ def test_a_reaped_helpers_group_is_signalled_only_while_its_watcher_holds_it(mon
     proc = child_supervisor.spawn_supervised(["true"], env=dict(os.environ), platform_name="darwin")
     proc.wait()
     child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
-    assert sent == [(proc.pid, signal.SIGKILL)]
+    assert sent == [(proc._aura_gid, signal.SIGKILL)]
     child_supervisor.release_supervised(proc)          # sweeps, then lets go
-    assert sent == [(proc.pid, signal.SIGKILL)] * 2 and proc._aura_watcher is None
+    assert sent == [(proc._aura_gid, signal.SIGKILL)] * 2 and proc._aura_watcher is None
     sent.clear()
     child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
     child_supervisor.signal_supervised(proc, platform_name="darwin")
@@ -471,7 +629,7 @@ def test_a_group_whose_reap_lock_stays_busy_is_not_signalled(monkeypatch):
         assert sent == []
         with proc._waitpid_lock:   # the watcher's proof is enough alone
             child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
-        assert sent == [(proc.pid, signal.SIGKILL)]
+        assert sent == [(proc._aura_gid, signal.SIGKILL)]
     finally:
         proc.kill()
         proc.wait()
@@ -509,8 +667,9 @@ def test_macos_supervises_every_tracked_helper_by_default(monkeypatch):
     monkeypatch.setattr(child_supervisor, "_supervise_by_default", lambda: True)
     proc = child_supervisor.spawn_tracked(["sleep", "30"])
     try:
-        assert proc._aura_group is True and os.getpgid(proc.pid) == proc.pid
         assert isinstance(proc._aura_watcher, subprocess.Popen)
+        assert proc._aura_group is True
+        assert os.getpgid(proc.pid) == proc._aura_gid == proc._aura_watcher.pid
         assert child_supervisor._tracked[proc] is child_supervisor._stop_helper_group
     finally:
         child_supervisor._stop_helper_group(proc)
@@ -560,76 +719,39 @@ def test_only_macos_signals_a_group(monkeypatch):
 # The watcher itself, in this process: a pipe stands for the app's lifeline.
 
 @posix
-def test_the_watcher_signals_nothing_once_the_helper_has_exited(monkeypatch):
+def test_a_watcher_whose_app_died_waits_only_for_the_helper_to_go(monkeypatch):
     sent = []
-    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
-    helper = subprocess.Popen(["true"])
-    helper.wait()                      # exited and reaped: its pid is free
-    read_end, write_end = os.pipe()
-    os.close(write_end)                # and then the app died
-    try:
-        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end) == 0
-    finally:
-        os.close(read_end)
-    assert sent == []
+    helper = subprocess.Popen(["sleep", "30"])
 
+    def killpg(pgid, sig):
+        sent.append((pgid, sig))
+        if sig == signal.SIGTERM:
+            helper.terminate()                          # it heeds the group's SIGTERM
 
-@pytest.mark.skipif(not hasattr(os, "waitid"), reason="needs a wait that leaves the zombie")
-def test_a_helper_that_exits_with_the_app_is_not_signalled(monkeypatch):
-    # Both ends at once: the exit is seen with the app's, so its pid (free
-    # once reaped) is never signalled.
-    sent = []
-    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
-    helper = subprocess.Popen(["true"], start_new_session=True)
-    os.waitid(os.P_PID, helper.pid, os.WEXITED | os.WNOWAIT)   # exited, not reaped
+    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: os.getpid())
+    monkeypatch.setattr(child_supervisor.os, "killpg", killpg)
+    monkeypatch.setattr(child_supervisor.signal, "signal", lambda sig, how: None)
     read_end, write_end = os.pipe()
+    os.write(write_end, b"%d\n" % helper.pid)
     os.close(write_end)
     try:
-        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end) == 0
-    finally:
-        os.close(read_end)
-        helper.wait()
-    assert sent == []
-
-
-@posix
-def test_a_released_watcher_signals_nothing(monkeypatch):
-    sent = []
-    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
-    helper = subprocess.Popen(["sleep", "30"], start_new_session=True)
-    read_end, write_end = os.pipe()
-    try:
-        os.write(write_end, b"r")
-        os.close(write_end)
-        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end) == 0
-        assert sent == []
+        started = time.monotonic()
+        assert child_supervisor.run_watcher(pipe_fd=read_end, term_wait=5) == 0
+        assert time.monotonic() - started < 2
     finally:
         os.close(read_end)
         helper.kill()
         helper.wait()
+    assert sent == [(0, signal.SIGTERM), (0, signal.SIGKILL)]
 
 
-@posix
-def test_a_watcher_whose_app_died_ends_the_helper_group():
-    helper = subprocess.Popen(["sleep", "30"], start_new_session=True)
-    read_end, write_end = os.pipe()
-    os.close(write_end)
-    try:
-        started = time.monotonic()
-        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end, term_wait=2) == 0
-        assert helper.wait(timeout=2) == -signal.SIGTERM
-        assert time.monotonic() - started < 2
-    finally:
-        os.close(read_end)
-        if helper.poll() is None:
-            helper.kill()
-
-
-def test_a_watcher_without_a_helper_refuses(monkeypatch):
-    monkeypatch.delenv(child_supervisor.CHILD_PID_ENV, raising=False)
-    assert child_supervisor.run_from_env() == 2
-    monkeypatch.setenv(child_supervisor.CHILD_PID_ENV, "1")
-    assert child_supervisor.run_from_env() == 2
+def test_a_watcher_started_outside_the_protocol_refuses(monkeypatch):
+    watched = []
+    monkeypatch.setattr(child_supervisor, "run_watcher", lambda **kwargs: watched.append(kwargs) or 0)
+    monkeypatch.delenv(child_supervisor.WATCHER_ENV, raising=False)
+    assert child_supervisor.run_from_env() == 2 and watched == []
+    monkeypatch.setenv(child_supervisor.WATCHER_ENV, "1")
+    assert child_supervisor.run_from_env() == 0 and watched == [{}]
 
 
 def test_orphaned_helpers_are_only_launchd_parented_aura_binaries():
