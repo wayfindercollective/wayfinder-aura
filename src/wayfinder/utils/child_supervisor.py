@@ -69,32 +69,41 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
                      platform_name: str | None = None, **popen_kwargs) -> subprocess.Popen:
     """Popen a native helper that must not outlive the app.
 
-    macOS: the helper is this app's own child and leads a new process group.
-    Until Popen reaps it, its pid, and so its group id, can be no one else's,
-    so stop_supervised() ends it and whatever it forked into that group, with
-    no help from the watcher and whatever the helper does with inherited
-    descriptors (Sol mac r7). The watcher only covers the app dying first.
-    Killing a supervisor in front of the helper used to orphan whisper-server,
-    which then kept the model loaded and its port open.
+    macOS: the helper is this app's own child and leads a new process group
+    in the app's session, and its watcher (the app's child too) joins that
+    group. A group keeps its id while it has a member, an exited one too
+    until it is reaped (XNU's reap_child_locked leaves the group, as Linux's
+    release_task does), so while the watcher is unreaped the group id can be
+    no one else's, however the helper ended and whoever reaped it (Sol mac
+    r14). stop_supervised() ends the helper and whatever it forked into that
+    group, whatever the helper does with inherited descriptors (Sol mac r7);
+    the watcher also ends the group if the app dies first. Killing a
+    supervisor in front of the helper used to orphan whisper-server, which
+    then kept the model loaded and its port open.
 
     Elsewhere a plain Popen: Linux binds by PR_SET_PDEATHSIG, Windows by
     bind_to_app_lifetime()."""
     if (platform_name or sys.platform) != "darwin":
         return (popen or subprocess.Popen)(command, env=env, **popen_kwargs)
-    proc = (popen or subprocess.Popen)(command, env=env, start_new_session=True, **popen_kwargs)
+    proc = (popen or subprocess.Popen)(command, env=env, process_group=0, **popen_kwargs)
     if not isinstance(proc, _POPEN):
         # A test's stand-in: its pid is no child of ours, and a watcher on it
         # could signal a stranger's group.
         return proc
     _bound_waits(proc)
     proc._aura_group = True
+    watcher_kwargs = dict(env={**os.environ, CHILD_PID_ENV: str(proc.pid)},
+                          stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, bufsize=0)
     try:
-        watcher = subprocess.Popen(
-            _watcher_command(),
-            env={**os.environ, CHILD_PID_ENV: str(proc.pid)},
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            bufsize=0, start_new_session=True,
-        )
+        try:
+            # Unreaped, the helper keeps its group, so the watcher can join it.
+            watcher = subprocess.Popen(_watcher_command(), process_group=proc.pid, **watcher_kwargs)
+            proc._aura_guarded = True
+        except OSError:
+            # Outside the group it is crash cover only, and signals the group
+            # only while the helper runs.
+            watcher = subprocess.Popen(_watcher_command(), start_new_session=True, **watcher_kwargs)
     except Exception as exc:
         # Still stopped as ever. Only an app crash could leave it running,
         # and the next launch stops it (reap_orphaned_helpers).
@@ -108,9 +117,9 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
 
 
 def _owns_group(proc: subprocess.Popen, platform_name: str | None) -> bool:
-    """macOS: *proc* leads its own group (spawn_supervised). Whether it is
-    still unreaped, so that group id cannot have been reused, is only known
-    under its reap lock (see _signal_group)."""
+    """macOS: *proc* leads its own group (spawn_supervised). Whether that
+    group id is still its own is only known under a member's reap lock (see
+    _signal_group)."""
     return ((platform_name or sys.platform) == "darwin"
             and getattr(proc, "_aura_group", False) is True)
 
@@ -120,23 +129,44 @@ _REAP_LOCK_WAIT = 2.0
 
 
 def _signal_group(proc: subprocess.Popen, sig: int) -> None:
-    """killpg while *proc* is provably unreaped: Popen reaps only under its
-    _waitpid_lock and sets returncode before letting go, so holding it, an
-    unset returncode means the pid, and so the group id, is still ours
-    (Sol mac r8: a reap on another thread could land between the check and
-    the signal)."""
-    lock = getattr(proc, "_waitpid_lock", None)
+    """killpg the helper's group while a member of it is provably unreaped:
+    its watcher (a member for life, see spawn_supervised), or else the
+    helper itself. Popen reaps only under its _waitpid_lock and sets
+    returncode before letting go, so holding it, an unset returncode means
+    that member, and so the group id, is still there (Sol mac r8: a reap on
+    another thread could land between the check and the signal). The
+    watcher's proof holds after the helper was reaped too, by poll() or
+    another thread (Sol mac r14)."""
+    watcher = getattr(proc, "_aura_watcher", None)
+    members = [proc]
+    if getattr(proc, "_aura_guarded", False) and isinstance(watcher, _POPEN):
+        members.insert(0, watcher)
+    busy = False
+    for member in members:
+        ran = _while_unreaped(member, lambda: os.killpg(proc.pid, sig))
+        if ran:
+            return
+        busy = busy or ran is None
+    if busy:
+        print(f"[Helpers] not signalling group {proc.pid}: its reap lock is busy", flush=True)
+
+
+def _while_unreaped(member: subprocess.Popen, act):
+    """Run *act* under *member*'s reap lock if it is unreaped: True if it ran,
+    False if *member* was reaped, None if its lock stayed busy (only a
+    blocking wait() that _bound_waits did not bound holds it this long, and
+    signalling then could race that reap)."""
+    lock = getattr(member, "_waitpid_lock", None)
     if lock is None or not lock.acquire(timeout=_REAP_LOCK_WAIT):
-        # Held this long only by a blocking wait() that _bound_waits did not
-        # bound: signalling now could race that reap, so do not.
-        print(f"[Helpers] not signalling pid {proc.pid}: its reap lock is busy", flush=True)
-        return
+        return None
     try:
-        if proc.returncode is None:
-            try:
-                os.killpg(proc.pid, sig)
-            except OSError:
-                pass   # the whole group has exited; the leader awaits its reap
+        if member.returncode is not None:
+            return False
+        try:
+            act()
+        except OSError:
+            pass   # every member has exited; they await their reap
+        return True
     finally:
         lock.release()
 
@@ -159,8 +189,11 @@ def _release_watcher(proc: subprocess.Popen) -> None:
 
 
 def release_supervised(proc) -> None:
-    """For a caller that reaped *proc* itself: its watcher lets go."""
+    """For a caller that reaped *proc* itself: what it left in its group goes,
+    then its watcher lets go."""
     if getattr(proc, "returncode", None) is not None:
+        if getattr(proc, "_aura_guarded", False) and _owns_group(proc, "darwin"):
+            _signal_group(proc, signal.SIGKILL)
         _release_watcher(proc)
 
 
@@ -202,8 +235,9 @@ def wait_supervised(proc: subprocess.Popen, timeout: float, *,
 
     macOS: a leader that exited may leave what it forked behind (a worker that
     ignored SIGTERM, Sol mac r13). Its exit is awaited without the reap, and
-    the group is SIGKILLed while the unreaped leader still holds its id
-    (_signal_group asks that under the reap lock), before the reap."""
+    the group is SIGKILLed while a member still holds its id (_signal_group),
+    before the reap: also when the leader exited on its own and poll() or
+    another thread already reaped it (Sol mac r14)."""
     if _owns_group(proc, platform_name) and (hasattr(select, "kqueue") or hasattr(os, "waitid")):
         if not _exited_unreaped(proc, timeout):
             return False
@@ -580,10 +614,14 @@ def run_watcher(child_pid: int, *, pipe_fd: int = 0, term_wait: float = 3.0) -> 
 
     The app holds the only write end of *pipe_fd*: end of file means it
     exited without letting go of the helper, a crash or SIGKILL included; a
-    byte means it reaped the helper. Nothing is signalled once the helper has
-    exited, so a pid reused since is never hit; the one exception is the
-    group's leftovers at the instant its leader leaves on our SIGTERM (see
-    _kill_leftovers)."""
+    byte means it reaped the helper and swept its group. A member of the
+    helper's group ends that group, its leftovers included, when the app
+    dies or the helper exits; its membership keeps the group's id (Sol mac
+    r14). Outside the group, nothing is signalled once the helper has
+    exited, so a pid reused since is never hit."""
+    member = os.getpgrp() == child_pid
+    if member:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)   # its own group's SIGTERM
     watch = _Watch(pipe_fd, child_pid)
     while not watch.child_gone:
         if not watch.wait(None):
@@ -596,14 +634,19 @@ def run_watcher(child_pid: int, *, pipe_fd: int = 0, term_wait: float = 3.0) -> 
             return 0          # released: the app reaped it
         watch.close_pipe()
         watch.wait(0)         # an exit that came with the app's own
-        if watch.child_gone:
-            return 0
-        _end_group(watch, term_wait)
+        if member:
+            _end_own_group(watch, term_wait)
+        elif not watch.child_gone:
+            _end_group(watch, term_wait)
         return 0
+    if member:
+        os.killpg(0, signal.SIGKILL)   # the helper left: what it forked goes
     return 0
 
 
 def _end_group(watch: _Watch, term_wait: float) -> None:
+    """Outside the helper's group: SIGTERM, then SIGKILL, to its id only while
+    the helper runs (gone, the id may be someone else's)."""
     for sig, wait in ((signal.SIGTERM, term_wait), (signal.SIGKILL, 2.0)):
         try:
             os.killpg(watch.child_pid, sig)
@@ -616,22 +659,26 @@ def _end_group(watch: _Watch, term_wait: float) -> None:
                 break
             watch.wait(left)
         if watch.child_gone:
-            if sig == signal.SIGTERM:
-                _kill_leftovers(watch.child_pid)
             return
 
 
-def _kill_leftovers(pgid: int) -> None:
-    """The leader left on SIGTERM, just now: whatever it forked that ignored
-    it goes too (Sol mac r13). Sent the instant its exit is seen. A group id
-    is not reused while the group has a member (POSIX), so a group still
-    there is the helper's; once it is empty this finds none (ESRCH), since an
-    id freed this instant is not handed out again before the pid counter
-    wraps."""
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except OSError:
-        pass
+def _end_own_group(watch: _Watch, term_wait: float) -> None:
+    """A member of the helper's group signals its own group (killpg 0, no
+    number that could be reused): SIGTERM, which it ignores, while the helper
+    runs, and after up to *term_wait* SIGKILL, which ends the watcher too,
+    with whatever the helper forked (Sol mac r13, r14)."""
+    if not watch.child_gone:
+        try:
+            os.killpg(0, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.monotonic() + term_wait
+        while not watch.child_gone:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            watch.wait(left)
+    os.killpg(0, signal.SIGKILL)
 
 
 def run_from_env() -> int:

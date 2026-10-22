@@ -86,10 +86,12 @@ def test_a_macos_helper_is_the_apps_own_child_and_leads_its_group(tmp_path):
     proc = _helper(tmp_path)
     watcher = proc._aura_watcher
     try:
-        # Ours until reaped, whatever happens to anything else.
+        # Ours until reaped, whatever happens to anything else; its watcher,
+        # a member of its group, keeps the group's id until it is reaped too.
         assert os.getpgid(proc.pid) == proc.pid
-        assert os.getsid(proc.pid) == proc.pid
-        assert watcher.poll() is None and os.getpgid(watcher.pid) != os.getpgid(0)
+        assert os.getsid(proc.pid) == os.getsid(0)   # the app's session, so it can be joined
+        assert watcher.poll() is None and os.getpgid(watcher.pid) == proc.pid
+        assert proc._aura_guarded is True
         child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
         assert proc.returncode is not None
         # Released once reaped: it leaves without signalling anything.
@@ -248,14 +250,170 @@ def test_the_watcher_ends_what_the_helper_forked_when_the_app_dies(tmp_path):
                 pass
 
 
+def _forking_helper(tmp_path, *, leader_leaves: bool = False):
+    """A helper that forks a worker ignoring SIGTERM; the leader exits by
+    itself first if *leader_leaves*. Returns (proc, worker pid)."""
+    worker_file = tmp_path / "worker.pid"
+    proc = _helper(tmp_path,
+                   "if os.fork() == 0:\n"
+                   "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                   f"    open({str(worker_file)!r}, 'w').write(str(os.getpid()))\n"
+                   "    time.sleep(60)\n"
+                   "    os._exit(0)\n")
+    worker = int(_wait_for(worker_file, "the worker")[0])
+    if leader_leaves:
+        os.kill(proc.pid, signal.SIGUSR1)   # the default action: it leaves
+    return proc, worker
+
+
+def _kill_quietly(*pids):
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 @posix
-def test_signal_supervised_never_targets_a_reaped_pid(monkeypatch, tmp_path):
+@pytest.mark.parametrize("stop", ["llama", "stop_supervised"])
+def test_a_leader_that_left_on_its_own_and_was_reaped_still_takes_its_worker(tmp_path, monkeypatch, stop):
+    # Sol mac r14: poll() reaped a leader that exited by itself, every group
+    # signal then refused, and the worker it forked ran on. The watcher is
+    # killed first (unreaped, it still holds the group), so this is the
+    # app's own sweep.
+    from wayfinder.core.llama_server import LlamaServerManager
+    proc, worker = _forking_helper(tmp_path)
+    os.kill(proc._aura_watcher.pid, signal.SIGKILL)
+    os.kill(proc.pid, signal.SIGUSR1)
+    try:
+        deadline = time.monotonic() + 5
+        while proc.poll() is None:                     # the competing reaper
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert _state(worker), "the worker should still run here"
+        if stop == "llama":
+            monkeypatch.setattr(child_supervisor.sys, "platform", "darwin")
+            LlamaServerManager._kill(proc)
+        else:
+            child_supervisor.stop_supervised(proc, term_wait=1, platform_name="darwin")
+        assert _gone(worker, within=2), "the worker outlived its reaped leader"
+    finally:
+        _kill_quietly(worker)
+
+
+@posix
+def test_a_reaper_racing_the_stop_cannot_save_the_worker(tmp_path):
+    # Sol mac r14: a concurrent poll() reaping the leader between its exit
+    # and the stop's sweep made the sweep refuse.
+    proc, worker = _forking_helper(tmp_path)
+    os.kill(proc._aura_watcher.pid, signal.SIGKILL)   # the app's sweep alone
+    done = threading.Event()
+
+    def reap():
+        while not done.is_set() and proc.poll() is None:
+            time.sleep(0.001)
+
+    reaper = threading.Thread(target=reap, daemon=True)
+    reaper.start()
+    try:
+        child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
+        assert proc.returncode == -signal.SIGTERM
+        assert _gone(worker, within=2)
+    finally:
+        done.set()
+        reaper.join(2)
+        _kill_quietly(worker)
+
+
+@posix
+def test_the_watcher_ends_the_worker_of_a_leader_that_left_on_its_own(tmp_path):
+    # With no stop from the app at all: the watcher, a member, sees the
+    # leader leave and ends its group, itself included.
+    proc, worker = _forking_helper(tmp_path, leader_leaves=True)
+    watcher = proc._aura_watcher
+    try:
+        assert _gone(worker, within=3), "the worker outlived its leader"
+        assert watcher.wait(timeout=3) == -signal.SIGKILL
+        proc.wait(timeout=3)
+        child_supervisor.release_supervised(proc)
+    finally:
+        _kill_quietly(worker)
+
+
+@posix
+def test_the_group_keeps_its_id_while_the_watcher_lives(tmp_path):
+    # Sol mac r14: the id a watcher signals must be the helper's group even
+    # after the leader is gone and reaped. A member keeps it: no process can
+    # be given that number, nor make a group of it, meanwhile.
+    proc = child_supervisor.spawn_supervised(["true"], env=dict(os.environ), platform_name="darwin")
+    watcher = proc._aura_watcher
+    proc.wait()
+    try:
+        os.killpg(proc.pid, 0)                          # still there: the watcher
+        assert os.getpgid(watcher.pid) == proc.pid
+    finally:
+        child_supervisor.release_supervised(proc)
+    assert watcher.wait(timeout=3) is not None
+
+
+@posix
+@pytest.mark.parametrize("case", ["app-died", "helper-left", "app-died-after-it-left"])
+def test_a_member_watcher_signals_its_group_by_zero_never_by_number(monkeypatch, case):
+    # Sol mac r14: once the leader is reaped by launchd its number can be
+    # handed out again; a member signals its own group (killpg 0) instead.
+    sent, ignored = [], []
+    helper = subprocess.Popen(["sleep", "30"] if case == "app-died" else ["true"])
+    if case != "app-died":
+        helper.wait()                                   # gone and reaped
+    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: helper.pid)
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr(child_supervisor.signal, "signal", lambda sig, how: ignored.append(sig))
+    read_end, write_end = os.pipe()
+    if case != "helper-left":
+        os.close(write_end)                             # the app died
+    try:
+        assert child_supervisor.run_watcher(helper.pid, pipe_fd=read_end, term_wait=0.2) == 0
+    finally:
+        os.close(read_end)
+        if case == "helper-left":
+            os.close(write_end)
+        helper.kill()
+        helper.wait()
+    assert ignored == [signal.SIGTERM]
+    expected = [(0, signal.SIGTERM), (0, signal.SIGKILL)] if case == "app-died" else [(0, signal.SIGKILL)]
+    assert sent == expected
+
+
+@posix
+def test_a_reaped_helpers_group_is_signalled_only_while_its_watcher_holds_it(monkeypatch):
+    # Sol mac r14: poll() reaping a leader that left on its own made every
+    # later group signal refuse, and what it forked ran on. The watcher's
+    # membership still proves the group; released, nothing does.
     sent = []
     monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
     proc = child_supervisor.spawn_supervised(["true"], env=dict(os.environ), platform_name="darwin")
     proc.wait()
     child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
+    assert sent == [(proc.pid, signal.SIGKILL)]
+    child_supervisor.release_supervised(proc)          # sweeps, then lets go
+    assert sent == [(proc.pid, signal.SIGKILL)] * 2 and proc._aura_watcher is None
+    sent.clear()
+    child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
     child_supervisor.signal_supervised(proc, platform_name="darwin")
+    assert sent == []
+
+
+@posix
+def test_signal_supervised_never_targets_a_reaped_pid_without_its_watcher(monkeypatch):
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    proc = child_supervisor.spawn_supervised(["true"], env=dict(os.environ), platform_name="darwin")
+    proc._aura_watcher.kill()
+    proc._aura_watcher.wait()                           # its watcher reaped: no member is ours
+    proc.wait()
+    child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
+    child_supervisor.signal_supervised(proc, platform_name="darwin")
+    child_supervisor.release_supervised(proc)
     assert sent == []
 
 
@@ -268,23 +426,35 @@ def _exited_unreaped(proc) -> None:
 
 
 @posix
-def test_a_reap_on_another_thread_cannot_land_between_the_check_and_the_signal(monkeypatch):
-    # Sol mac r8: the unreaped check and the killpg hold Popen's reap lock,
-    # so a wait() racing them reaps only after the signal, never before it.
+@pytest.mark.parametrize("member", ["watcher", "helper"])
+def test_a_reap_on_another_thread_cannot_land_between_the_check_and_the_signal(monkeypatch, member):
+    # Sol mac r8: the unreaped check and the killpg hold the member's reap
+    # lock, so a wait() racing them reaps only after the signal, never before.
     proc = child_supervisor.spawn_supervised(["true"], env=dict(os.environ), platform_name="darwin")
-    _exited_unreaped(proc)
+    watcher = proc._aura_watcher
+    if member == "watcher":
+        proc.wait()                    # the helper reaped: the watcher holds the group
+        os.kill(watcher.pid, signal.SIGKILL)
+        _exited_unreaped(watcher)
+        held = watcher
+    else:
+        watcher.kill()
+        watcher.wait()                 # no watcher: the helper's own proof
+        _exited_unreaped(proc)
+        held = proc
     during = []
 
     def killpg(pid, sig):
-        reaper = threading.Thread(target=proc.wait, kwargs={"timeout": 5})
+        reaper = threading.Thread(target=held.wait, kwargs={"timeout": 5})
         reaper.start()
         reaper.join(0.3)   # an unlocked reap lands well within this
-        during.append(proc.returncode)
+        during.append(held.returncode)
 
     monkeypatch.setattr(child_supervisor.os, "killpg", killpg)
     child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
     assert during == [None]
-    assert proc.wait(timeout=5) == 0
+    held.wait(timeout=5)
+    proc.wait(timeout=5)
     child_supervisor.release_supervised(proc)
 
 
@@ -295,9 +465,13 @@ def test_a_group_whose_reap_lock_stays_busy_is_not_signalled(monkeypatch):
     monkeypatch.setattr(child_supervisor, "_REAP_LOCK_WAIT", 0.1)
     proc = child_supervisor.spawn_supervised(["sleep", "30"], env=dict(os.environ), platform_name="darwin")
     try:
-        with proc._waitpid_lock:   # a reap in progress, for all anyone knows
+        # A reap in progress on both members, for all anyone knows.
+        with proc._waitpid_lock, proc._aura_watcher._waitpid_lock:
             child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
         assert sent == []
+        with proc._waitpid_lock:   # the watcher's proof is enough alone
+            child_supervisor.signal_supervised(proc, kill=True, platform_name="darwin")
+        assert sent == [(proc.pid, signal.SIGKILL)]
     finally:
         proc.kill()
         proc.wait()
