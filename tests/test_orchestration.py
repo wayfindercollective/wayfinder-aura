@@ -193,7 +193,13 @@ class FakeApp:
     _error_guidance = WApp._error_guidance
     on_error = WApp.on_error
     handle_event = WApp.handle_event
+    _restart_for_overlay_change = WApp._restart_for_overlay_change
+    _do_force_reset = WApp._do_force_reset
+    _cleanup_overlay = WApp._cleanup_overlay
     _split_gen = staticmethod(WApp._split_gen)  # real code: it's a @staticmethod
+
+    def _close_audio_ducking(self):
+        """Ducking is off in these tests."""
 
     def _macos_follow_default_input(self):
         """Real behaviour is covered in tests/test_macos_audio_input.py."""
@@ -1707,3 +1713,118 @@ class TestMacPreemptFinishTail:
         before = app.app_state
         app.on_hotkey()
         assert app.app_state == before
+
+
+# ===========================================================================
+# Overlay restart: a dictation it cut short is never typed
+# ===========================================================================
+
+class TestARestartCutShortDictationIsNeverTyped:
+    """Sol PR 2 r12: the overlay restart stopped a chunk's helper, the exec
+    failed and helpers reopened. The chunk counted as failed, so the
+    finalizer typed the chunks that had finished, or reported silence."""
+
+    @pytest.fixture
+    def restart(self, app, monkeypatch, tmp_path):
+        import os
+        from wayfinder.core.llama_server import LlamaServerManager
+        from wayfinder.core.transcriber import WhisperServerBackend
+        from wayfinder.utils import child_supervisor, overlay_process
+
+        def no_exec(*_args):
+            raise OSError("exec failed")
+
+        monkeypatch.setattr(os, "execv", no_exec)
+        monkeypatch.setattr(overlay_process, "kill_stale_overlay_from_pidfile", lambda: None)
+        # Every chunk carries speech, so each one reaches its transcription.
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _path: 0.5)
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _path: True)
+        app.warm_mic = SimpleNamespace(device=7, close=lambda: None)
+        typed = []
+        monkeypatch.setattr(wayfinder_main, "inject_text", lambda text, *_a, **_k: typed.append(text))
+        child_supervisor.reopen_tracked()
+        yield SimpleNamespace(typed=typed, chunk=str(tmp_path / "chunk.wav"))
+        WhisperServerBackend.reopen()
+        LlamaServerManager.reopen()
+
+    @staticmethod
+    def _helper_transcription(monkeypatch, tmp_path, text, hold):
+        """transcribe_with_config running a real tracked helper; `hold` keeps
+        it running until something stops it."""
+        import sys
+        from wayfinder.utils import child_supervisor
+
+        running = tmp_path / f"running-{text or 'held'}"
+
+        def transcribe(*_args, **_kwargs):
+            child_supervisor.run_tracked(
+                [sys.executable, "-c",
+                 f"import time; open({str(running)!r}, 'w').close(); time.sleep({30 if hold else 0})"],
+                timeout=60,
+            )
+            return text
+
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config", transcribe)
+        return running
+
+    @pytest.mark.parametrize("store,index", [
+        (["chunk one words", ""], 1),
+        ([""], 0),
+    ], ids=["after a finished chunk", "the only chunk"])
+    def test_a_failed_restart_types_nothing_and_returns_to_idle(
+            self, app, restart, monkeypatch, tmp_path, store, index):
+        import time
+
+        running = self._helper_transcription(monkeypatch, tmp_path, "never typed", hold=True)
+        app.app_state = AppState.PROCESSING
+        gen = app.session_generation
+        worker = threading.Thread(target=app._transcribe_chunk,
+                                  args=(restart.chunk, index, gen, store), daemon=True)
+        # The finalizer waits on its own thread, as stop_recording leaves it.
+        finalizer = threading.Thread(target=app._finalize_chunked_transcription,
+                                     args=(len(store), gen, store, FakeChunkedRecorder()),
+                                     daemon=True)
+        worker.start()
+        finalizer.start()
+        deadline = time.time() + 10
+        while not running.exists():
+            assert time.time() < deadline, "the chunk's helper never started"
+            time.sleep(0.02)
+
+        def the_dictation_finishes_during_cleanup():
+            worker.join(10)
+            finalizer.join(10)
+
+        from wayfinder.utils import overlay_process
+        monkeypatch.setattr(overlay_process, "kill_stale_overlay_from_pidfile",
+                            the_dictation_finishes_during_cleanup)
+        app._restart_for_overlay_change()   # stops the helper; the exec fails
+        assert not worker.is_alive(), "the restart did not stop the chunk's helper"
+        assert not finalizer.is_alive()
+        assert store[index] in ("[error]", "")   # failed, or skipped as superseded
+
+        events = []
+        while not app.event_queue.empty():
+            events.append(app.event_queue.get_nowait())
+        terminal = {wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE,
+                    wayfinder_main.EventType.TRANSCRIPTION_ERROR}
+        assert not [e for e in events if e[0] in terminal], "a retired dictation reported a result"
+        for event_type, data in events:
+            app.handle_event(event_type, data)
+        assert restart.typed == []
+        assert app.app_state == AppState.IDLE
+
+    def test_dictation_works_after_a_failed_restart(self, app, restart, monkeypatch, tmp_path):
+        # The reopen gives helpers back: the next dictation is typed.
+        app._restart_for_overlay_change()
+        assert app.app_state == AppState.IDLE
+        self._helper_transcription(monkeypatch, tmp_path, "fresh words", hold=False)
+        app.session_generation += 1   # start_recording's new session
+        app.app_state = AppState.PROCESSING
+        gen = app.session_generation
+        store = [""]
+        app._transcribe_chunk(restart.chunk, 0, gen, store)
+        assert store == ["fresh words"]
+        app._finalize_chunked_transcription(1, gen, store, FakeChunkedRecorder())
+        app.pump_events()
+        assert restart.typed == ["fresh words"]

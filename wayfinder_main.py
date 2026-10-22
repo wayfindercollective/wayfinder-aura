@@ -18156,6 +18156,12 @@ class WayfinderApp(ctk.CTk):
         # Exec keeps the same PID, so neither the native child supervisor nor
         # macOS will infer that old resources should be released. Clean them
         # explicitly before replacing the interpreter.
+        # The exec replaces any dictation in flight, so retire it before the
+        # shutdown below stops its helpers: a chunk cut short reads as a failed
+        # chunk, and a failed exec would otherwise let the finalizer type out
+        # the chunks that did finish, or report silence. The generation never
+        # comes back, so the reopen cannot revive it.
+        self.session_generation += 1
         try:
             self._close_audio_ducking()
             if getattr(self, "warm_mic", None):
@@ -18180,6 +18186,8 @@ class WayfinderApp(ctk.CTk):
             WhisperServerBackend.reopen()
             LlamaServerManager.reopen()
             print(f"[Restart] could not restart Aura ({e}); restart it to apply the change")
+            # The retired dictation's recorder, timers and state: back to IDLE.
+            self._do_force_reset()
 
     def clear_log(self):
         self.log_textbox.configure(state="normal")
@@ -22688,6 +22696,11 @@ class WayfinderApp(ctk.CTk):
             crash_reports.mark_clean_exit()
         except Exception:
             pass
+        # Retire any dictation in flight before the shutdown below stops its
+        # helpers. Quit can run off the Tk thread (the tray), which keeps
+        # handling events meanwhile: a chunked dictation cut short must not
+        # be typed as partial text, or reported as silence, on the way out.
+        self.session_generation += 1
         # Signal all background threads to stop
         self.stop_event.set()
         if hasattr(self, '_evdev_stop_event'):

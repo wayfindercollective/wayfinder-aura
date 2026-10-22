@@ -654,6 +654,17 @@ def test_quit_and_restart_stop_everything_a_racing_start_too(marker):
         assert "WhisperServerBackend.reopen()" in body and "LlamaServerManager.reopen()" in body
 
 
+@pytest.mark.parametrize("marker", ["    def quit_app(self, icon=None, item=None):",
+                                    "    def _restart_for_overlay_change(self):"])
+def test_quit_and_restart_retire_the_dictation_before_stopping_its_helpers(marker):
+    # Sol PR 2 r12: a chunked dictation they cut short was typed as the chunks
+    # that had finished, or reported as silence. The restart's behaviour is
+    # driven end to end in test_orchestration.py; Quit ends in os._exit.
+    body = _main_body(marker)
+    assert (body.index("self.session_generation += 1")
+            < body.index("WhisperServerBackend.shutdown(terminal=True)"))
+
+
 def test_the_terminal_release_closes_the_cleanup_server():
     body = _main_body("def _release_cleanup_residency(")
     assert "LlamaServerManager.close()" in body
