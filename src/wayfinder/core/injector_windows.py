@@ -438,6 +438,17 @@ if _user32 is not None:
     _user32.RegisterClipboardFormatW.restype = wintypes.UINT
     _user32.GetClipboardSequenceNumber.argtypes = ()
     _user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
+    _user32.CreateWindowExW.argtypes = (
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID)
+    _user32.CreateWindowExW.restype = wintypes.HWND
+    _user32.DestroyWindow.argtypes = (wintypes.HWND,)
+    _user32.DestroyWindow.restype = wintypes.BOOL
+    _kernel32.GlobalSize.argtypes = (wintypes.HGLOBAL,)
+    _kernel32.GlobalSize.restype = ctypes.c_size_t
+
+_HWND_MESSAGE = -3
 
 # Registered formats Windows' clipboard history (Win+V), Cloud Clipboard sync
 # and well-behaved clipboard managers honour. Dictations and the restored
@@ -488,13 +499,23 @@ def _clipboard_sequence() -> int | None:
         return None
 
 
-def _open_clipboard(retries: int = 5) -> bool:
+def _open_clipboard(retries: int = 5, owner=None) -> bool:
     """OpenClipboard with brief retries (another app may hold it momentarily)."""
     for _ in range(retries):
-        if _user32.OpenClipboard(None):
+        if _user32.OpenClipboard(owner):
             return True
         time.sleep(0.02)
     return False
+
+
+def _clipboard_window():
+    """A message-only window of Aura's own on this thread to open the
+    clipboard with, or None (then it opens with no owner)."""
+    try:
+        return _user32.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0,
+                                       _HWND_MESSAGE, None, None, None) or None
+    except Exception:
+        return None
 
 
 _clipboard_hold = threading.local()
@@ -503,21 +524,29 @@ _clipboard_hold = threading.local()
 @contextmanager
 def _clipboard_held():
     """One OpenClipboard for the reads and writes inside it; yields whether
-    the clipboard opened. Nested uses share the outer one. While Aura holds
-    it, another app's OpenClipboard fails, so no copy lands between a check
-    and the write that depends on it (checked on Windows 11, node 4)."""
+    the clipboard opened. Nested uses share the outer one. Opened by a window
+    of Aura's own, every other app's OpenClipboard fails while Aura holds it,
+    a script's with no window too, so no copy lands between a check and the
+    write that depends on it. A hold with no owner let another ownerless
+    open through (Sol mac r14); the text outlives the window (both checked
+    on Windows 11, node 4)."""
     if getattr(_clipboard_hold, "open", False):
         yield True
         return
-    if not _open_clipboard():
-        yield False
-        return
-    _clipboard_hold.open = True
+    owner = _clipboard_window()
     try:
-        yield True
+        if not _open_clipboard(owner=owner):
+            yield False
+            return
+        _clipboard_hold.open = True
+        try:
+            yield True
+        finally:
+            _clipboard_hold.open = False
+            _user32.CloseClipboard()
     finally:
-        _clipboard_hold.open = False
-        _user32.CloseClipboard()
+        if owner:
+            _user32.DestroyWindow(owner)
 
 
 def _clipboard_get_windows() -> str | None:
@@ -644,10 +673,54 @@ _pending_restore = _DeferredRestore()
 atexit.register(_pending_restore.flush)
 
 
+# Written beside each dictation, a fresh random value each time, in a format
+# only Aura reads: any other write empties the clipboard and takes it away, a
+# "Copy" of the same words included (Sol mac r14).
+_OWNER_MARK_FORMAT = "WayfinderAuraDictationMark"
+_OWNER_MARK_BYTES = 16
+
+
+def _mark_open_clipboard() -> bytes | None:
+    """Put a fresh mark beside Aura's text (clipboard already open); the mark,
+    or None if it could not be written."""
+    try:
+        fmt = _user32.RegisterClipboardFormatW(_OWNER_MARK_FORMAT)
+        mark = os.urandom(_OWNER_MARK_BYTES)
+        handle = _global_copy(mark) if fmt else None
+        if handle and _user32.SetClipboardData(fmt, handle):
+            return mark
+    except Exception:
+        pass
+    return None
+
+
+def _clipboard_mark() -> bytes | None:
+    """The mark on the clipboard now, or None."""
+    with _clipboard_held() as held:
+        if not held:
+            return None
+        fmt = _user32.RegisterClipboardFormatW(_OWNER_MARK_FORMAT)
+        handle = _user32.GetClipboardData(fmt) if fmt else None
+        if not handle or _kernel32.GlobalSize(handle) < _OWNER_MARK_BYTES:
+            return None
+        ptr = _kernel32.GlobalLock(handle)
+        if not ptr:
+            return None
+        try:
+            return ctypes.string_at(ptr, _OWNER_MARK_BYTES)
+        finally:
+            _kernel32.GlobalUnlock(handle)
+
+
 def _clipboard_untouched(text: str, ours) -> bool:
-    """Whether the clipboard is as Aura left it: the same change counter (a
-    "Copy" of the same words bumps it) and still our text."""
-    return (ours is None or _clipboard_sequence() == ours) and _clipboard_get_windows() == text
+    """Whether the clipboard is as Aura left it: still our text, and still our
+    write's mark (bytes) or, when no mark could be written, the same change
+    counter (a "Copy" of the same words bumps it)."""
+    if isinstance(ours, bytes):
+        owned = _clipboard_mark() == ours
+    else:
+        owned = ours is None or _clipboard_sequence() == ours
+    return owned and _clipboard_get_windows() == text
 
 
 def _restore_clipboard(previous: str, text: str, ours) -> tuple[bool, bool]:
@@ -692,9 +765,13 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
 
         previous = _clipboard_get_windows()
         diag.previous(previous)
-        if not _clipboard_set_windows(text, transient=True):
-            raise InjectionError("Could not write to the Windows clipboard for paste.")
-        ours = _clipboard_sequence()
+        with _clipboard_held() as held:
+            if not held or not _clipboard_set_windows(text, transient=True):
+                raise InjectionError("Could not write to the Windows clipboard for paste.")
+            mark = _mark_open_clipboard()
+        # The mark proves the clipboard ours; the counter, read after the
+        # close, could already count a copy made right after it.
+        ours = mark if mark is not None else _clipboard_sequence()
         diag.mark("set")
         time.sleep(0.03)
         diag.start_watch()
@@ -718,8 +795,8 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
         # something new in the meantime.
         if previous is not None:
             def restore(previous=previous, text=text, diag=diag, ours=ours):
-                # Untouched since Aura wrote it: same change counter (a "Copy"
-                # of the same words bumps it) and still our text.
+                # Untouched since Aura wrote it: still our mark (a "Copy" of
+                # the same words takes it away) and still our text.
                 untouched, restored = _restore_clipboard(previous, text, ours)
                 diag.at_restore(untouched)
                 if restored:

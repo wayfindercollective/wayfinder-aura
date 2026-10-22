@@ -193,7 +193,7 @@ def test_transient_paste_marks_history_exclusion_formats(monkeypatch):
     from wayfinder.core import injector_windows as w
 
     registered, placed = {}, []
-    monkeypatch.setattr(w, "_open_clipboard", lambda retries=5: True)
+    monkeypatch.setattr(w, "_open_clipboard", lambda retries=5, owner=None: True)
     monkeypatch.setattr(w._user32, "EmptyClipboard", lambda: True)
     monkeypatch.setattr(w._user32, "CloseClipboard", lambda: True)
     monkeypatch.setattr(
@@ -239,17 +239,9 @@ def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
 def test_a_failed_paste_leaves_the_dictation_on_the_clipboard(monkeypatch):
     """The error tells the user to press Ctrl+V themselves; restoring the old
     clipboard after a failed paste made that paste the wrong text."""
-    from wayfinder.core import injector_windows as w
     from wayfinder.core.injector import InjectionError
 
-    clipboard = {"text": "user's own clipboard"}
-    monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
-    monkeypatch.setattr(w, "_refuse_own_window", lambda text: None)
-    monkeypatch.setattr(w, "require_modifier_release_windows", lambda: None)
-    monkeypatch.setattr(w.time, "sleep", lambda s: None)
-    monkeypatch.setattr(w, "_clipboard_get_windows", lambda: clipboard["text"])
-    monkeypatch.setattr(w, "_clipboard_set_windows",
-                        lambda text, transient=False: clipboard.update(text=text) or True)
+    rig, w = _windows_send_rig(monkeypatch)
 
     def refused(_keys):
         raise InjectionError("SendInput injected 0/4 events")
@@ -257,7 +249,7 @@ def test_a_failed_paste_leaves_the_dictation_on_the_clipboard(monkeypatch):
     monkeypatch.setattr(w, "_press_keys", refused)
     with pytest.raises(InjectionError):
         w.inject_text_paste_windows("dictated words")
-    assert clipboard["text"] == "dictated words"
+    assert rig.clipboard == "dictated words"
 
 
 def test_active_window_uses_the_foreground_hwnd_on_windows(monkeypatch):
@@ -1855,29 +1847,17 @@ def test_clipboard_read_watcher_is_off_unless_asked_for(monkeypatch):
 
 
 def test_a_failed_ctrl_v_leaves_the_dictation_and_schedules_no_restore(monkeypatch):
-    from wayfinder.core import injector_windows as iw
-
-    monkeypatch.setattr(iw, "_paste_reporter", None)
-    monkeypatch.setattr(iw, "_user32", SimpleNamespace(GetForegroundWindow=lambda: 1))
-    monkeypatch.setattr(iw, "_window_app", lambda hwnd: "app.exe/Cls")
-    monkeypatch.setattr(iw, "_require_foreground_window", lambda: None)
-    monkeypatch.setattr(iw, "_refuse_own_window", lambda text: None)
-    monkeypatch.setattr(iw, "require_modifier_release_windows", lambda: None)
-    clip = {"v": "old"}
-    monkeypatch.setattr(iw, "_clipboard_get_windows", lambda: clip["v"])
-    monkeypatch.setattr(iw, "_clipboard_set_windows",
-                        lambda t, transient=False: clip.update(v=t) or True)
-    monkeypatch.setattr(iw, "_clipboard_sequence", lambda: None)
-    monkeypatch.setattr(iw.time, "sleep", lambda s: None)
+    rig, w = _windows_send_rig(monkeypatch)
+    pending = []
+    monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
 
     def refuse(vks):
         raise RuntimeError("SendInput blocked")
 
-    monkeypatch.setattr(iw, "_press_keys", refuse)
+    monkeypatch.setattr(w, "_press_keys", refuse)
     with pytest.raises(RuntimeError):
-        iw.inject_text_paste_windows("dictated")
-    iw._pending_restore.flush()
-    assert clip["v"] == "dictated"   # the user can still press Ctrl+V
+        w.inject_text_paste_windows("dictated")
+    assert pending == [] and rig.clipboard == "dictated"   # the user can still press Ctrl+V
 
 
 # --- Pill + power diagnostics (overlay acks, windows_lifecycle) -------------
@@ -2045,15 +2025,35 @@ class _FakeWindows:
     """user32 + kernel32 for injector_windows, so tests drive its real
     SendInput and clipboard code. The clipboard keeps Windows' rules, as
     measured on node 4 (Windows 11): one holder at a time (another app's copy
-    fails while Aura has it open), the change counter moves at each change
-    and again at the close after one, and reads never move it."""
+    fails while Aura has it open; a script's with no window fails only while
+    a window holds it), the change counter moves at each change and again at
+    the close after one, reads never move it, and the data outlives the
+    window that wrote it."""
 
     def __init__(self, clipboard="theirs"):
         self.sent, self.writes, self.events = [], [], []
         self.clipboard, self.seq = clipboard, 1
         self.opened = self._changed = False
+        self.holder = None
         self.on_open = self.on_write = self.on_send = None
+        self.windows, self.formats, self._names = set(), {}, {}
+        self.no_windows = False
         self._memory = {}
+
+    def CreateWindowExW(self, _ex, cls, _name, _style, _x, _y, _w, _h, parent, *_rest):
+        assert cls == "STATIC" and parent == -3     # message-only
+        if self.no_windows:
+            return None
+        hwnd = 0x1000 + len(self.events)
+        self.windows.add(hwnd)
+        self.events.append("window")
+        return hwnd
+
+    def DestroyWindow(self, hwnd):
+        assert hwnd in self.windows and self.holder != hwnd, "destroyed a window still holding"
+        self.windows.discard(hwnd)
+        self.events.append("destroy")
+        return 1
 
     def SendInput(self, n, arr, _size):
         from wayfinder.core import injector_windows as w
@@ -2063,18 +2063,19 @@ class _FakeWindows:
             self.on_send(n)
         return n
 
-    def OpenClipboard(self, _hwnd):
+    def OpenClipboard(self, hwnd):
         if self.on_open is not None and self.on_open() is False:
             return 0
         if self.opened:
             return 0
-        self.opened = True
+        assert hwnd is None or hwnd in self.windows
+        self.opened, self.holder = True, hwnd
         self.events.append("open")
         return 1
 
     def CloseClipboard(self):
         assert self.opened, "closed a clipboard Aura did not hold"
-        self.opened = False
+        self.opened, self.holder = False, None
         self.events.append("close")
         if self._changed:
             self.seq, self._changed = self.seq + 1, False
@@ -2084,6 +2085,7 @@ class _FakeWindows:
         assert self.opened
         self.events.append("empty")
         self.clipboard, self.seq, self._changed = None, self.seq + 1, True
+        self.formats.clear()
         return 1
 
     def SetClipboardData(self, fmt, handle):
@@ -2095,6 +2097,8 @@ class _FakeWindows:
             self.events.append(("set", self.clipboard))
             if self.on_write is not None:
                 self.on_write(self.clipboard)
+        else:
+            self.formats[fmt] = bytes(self._memory[handle])
         self.seq, self._changed = self.seq + 1, True
         return handle
 
@@ -2102,7 +2106,11 @@ class _FakeWindows:
         import ctypes
         assert self.opened
         self.events.append("read")
-        if fmt != 13 or self.clipboard is None:
+        if fmt != 13:
+            if fmt not in self.formats:
+                return 0
+            return self._keep(ctypes.create_string_buffer(self.formats[fmt], len(self.formats[fmt])))
+        if self.clipboard is None:
             return 0
         return self._keep(ctypes.create_unicode_buffer(self.clipboard))
 
@@ -2110,13 +2118,23 @@ class _FakeWindows:
         return self.seq
 
     def RegisterClipboardFormatW(self, name):
-        return 0xC000 + len(name)
+        return self._names.setdefault(name, 0xC000 + len(self._names))
 
     def copy(self, text):
         """Another app's Ctrl+C: it fails while Aura holds the clipboard."""
         if self.opened:
             return False
         self.clipboard, self.seq = text, self.seq + 3
+        self.formats.clear()
+        return True
+
+    def copy_without_a_window(self, text):
+        """A script's copy that opens with no owner: Windows lets it through
+        a hold with no owner, never one by a window (node 4)."""
+        if self.opened and self.holder is not None:
+            return False
+        self.clipboard, self.seq = text, self.seq + 3
+        self.formats.clear()
         return True
 
     # kernel32
@@ -2129,6 +2147,10 @@ class _FakeWindows:
 
     def GlobalUnlock(self, _handle):
         return 1
+
+    def GlobalSize(self, handle):
+        import ctypes
+        return ctypes.sizeof(self._memory[handle])
 
     def _keep(self, buffer):
         import ctypes
@@ -2282,7 +2304,8 @@ def test_a_windows_clipboard_write_asks_after_its_open_retries(monkeypatch, reti
         if retire:
             with pytest.raises(injector.InjectionCancelled):
                 w._clipboard_set_windows("retired words", transient=True)
-            assert rig.fake.events == ["open", "close"] and rig.clipboard == "theirs"
+            assert rig.fake.events == ["window", "open", "close", "destroy"]
+            assert rig.clipboard == "theirs"
         else:
             assert w._clipboard_set_windows("live words", transient=True)
             assert rig.clipboard == "live words"
@@ -2322,7 +2345,9 @@ def test_the_windows_restore_checks_and_writes_under_one_open(monkeypatch):
     rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
     restore()
     assert rig.clipboard == "theirs"
-    assert rig.fake.events == ["open", "read", "empty", ("set", "theirs"), "close"]
+    # the mark, the text, then the write; the window outlives the hold
+    assert rig.fake.events == ["window", "open", "read", "read", "empty", ("set", "theirs"),
+                               "close", "destroy"]
 
 
 def test_the_windows_restore_keeps_a_same_words_copy_made_while_it_waited(monkeypatch):
@@ -2343,6 +2368,62 @@ def test_the_windows_restore_keeps_a_same_words_copy_made_while_it_waited(monkey
     restore()
     assert rig.fake.writes == ["dictation"]               # no "theirs" over it
     assert rig.clipboard == "dictation" and not rig.fake.opened
+
+
+def test_a_script_with_no_window_cannot_copy_into_the_restore(monkeypatch):
+    # Sol mac r14: a hold with no owner let another ownerless OpenClipboard
+    # through, so a script's copy could land between the check and the write.
+    rig, w, restore = _pasted_with_a_pending_restore(monkeypatch)
+    attempts, read = [], rig.fake.GetClipboardData
+
+    def read_while_a_script_copies(fmt):
+        attempts.append(rig.fake.copy_without_a_window("script's"))
+        return read(fmt)
+
+    monkeypatch.setattr(rig.fake, "GetClipboardData", read_while_a_script_copies)
+    restore()
+    assert attempts and not any(attempts) and rig.clipboard == "theirs"
+    assert rig.fake.copy_without_a_window("script's")      # free again after
+
+
+def test_a_same_words_copy_right_after_the_write_is_kept(monkeypatch):
+    # Sol mac r14: the counter was read after the close, so a copy of the same
+    # words in between became Aura's, and the restore overwrote it.
+    rig, w = _windows_send_rig(monkeypatch)
+    pending = []
+    monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
+    close, copied = rig.fake.CloseClipboard, []
+
+    def close_then_the_user_copies():
+        close()
+        if rig.clipboard == "dictation" and not copied:     # once, at the first close
+            copied.append(rig.fake.copy("dictation"))
+
+    monkeypatch.setattr(rig.fake, "CloseClipboard", close_then_the_user_copies)
+    w.inject_text_paste_windows("dictation")
+    pending[0]()
+    assert copied == [True]
+    assert rig.fake.writes == ["dictation"] and rig.clipboard == "dictation"
+
+
+@pytest.mark.parametrize("missing", ["window", "mark"])
+def test_the_windows_paste_works_without_its_window_or_mark(monkeypatch, missing):
+    # No window: the hold has no owner, as before. No mark: the change
+    # counter tells a copy made while the restore waited.
+    rig, w = _windows_send_rig(monkeypatch)
+    rig.fake.no_windows = missing == "window"
+    if missing == "mark":
+        monkeypatch.setattr(w, "_mark_open_clipboard", lambda: None)
+    pending = []
+    monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
+    w.inject_text_paste_windows("dictation")
+    pending[0]()
+    assert rig.clipboard == "theirs"
+    assert ("window" in rig.fake.events) is (missing == "mark")
+    w.inject_text_paste_windows("again")
+    rig.fake.copy("again")                                  # the same words, copied
+    pending[1]()
+    assert rig.clipboard == "again" and rig.fake.writes[-1] == "again"
 
 
 def test_the_cancel_restore_goes_out_under_a_retired_scope(monkeypatch):
