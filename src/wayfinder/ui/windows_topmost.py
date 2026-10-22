@@ -313,11 +313,13 @@ class TopmostKeeper:
             self._last_repair_at = now
             restore_topmost(hwnd)
             held = normal_windows_above(hwnd) == 0
+            pause = None
             if not held:
                 delay = BACKOFF_S
                 if self._active:
                     delay = min(delay, ACTIVE_MAX_PAUSE_S)
                 self._paused_until = now + delay
+                pause = delay
             elif now - self._contend_since >= CONTENTION_AFTER_S:
                 # held right now, but front has been re-demoting it on every
                 # turn for a while — back off with a growing pause instead of
@@ -332,7 +334,7 @@ class TopmostKeeper:
                     delay = min(delay, ACTIVE_MAX_PAUSE_S)
                 self._paused_until = now + delay
                 self._contend_level = min(self._contend_level + 1, _MAX_CONTEND_LEVEL)
-            self._note(now, above, held, exe_cache[0] if exe_cache else self._front())
+            self._note(now, above, held, exe_cache[0] if exe_cache else self._front(), pause)
             return above
         except Exception:
             return 0  # never let this break the overlay
@@ -377,8 +379,11 @@ class TopmostKeeper:
         else:
             self._active = active
 
-    def _note(self, now: float, above: int, held: bool, front: str) -> None:
+    def _note(self, now: float, above: int, held: bool, front: str,
+              pause: float | None = None) -> None:
         p = self._pending or {"restores": 0, "above": 0, "fronts": [], "held": True}
+        if pause is not None:
+            p["pause_s"] = pause   # how long it now waits, for the log line
         p["restores"] += 1
         p["above"] = max(p["above"], above)
         if front and (not p["fronts"] or p["fronts"][-1] != front) and len(p["fronts"]) < 5:

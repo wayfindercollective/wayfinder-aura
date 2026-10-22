@@ -5335,12 +5335,14 @@ class OverlayController:
                 if data.get("event") == "topmost":
                     count = int(data.get("restores") or 1)
                     fronts = ", ".join(data.get("fronts") or []) or "unknown"
+                    pause = round(float(data.get("pause_s") or 60))
+                    waits = "a minute" if pause == 60 else f"{pause} seconds"
                     self._log(
                         f"🫧 Pill was pushed behind {data.get('above')} window(s) — put back on "
                         f"top (in front: {fronts}"
                         + (f"; {count} times since the last report" if count > 1 else "")
                         + (")" if data.get("held", True) else
-                           "; it keeps being pushed down, pausing for a minute)")
+                           f"; it keeps being pushed down, trying again in {waits})")
                     )
         except Exception:
             pass

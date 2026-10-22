@@ -194,6 +194,31 @@ def test_restore_that_does_not_hold_backs_off_for_a_minute(monkeypatch, wt):
     assert len(fake.restored) == 2      # tries again after the pause
 
 
+def test_a_restore_that_does_not_hold_while_active_tries_again_every_few_seconds(monkeypatch, wt):
+    # Sol pill r5: during a dictation the pause after a restore that did not
+    # hold is ACTIVE_MAX_PAUSE_S, not the minute-long back-off.
+    fake = use(monkeypatch, wt, [(2, True, False), (PILL, True, True)], sticky=True)
+    clock, reports = Clock(), []
+    keeper = keeper_for(wt, reports, clock)
+    keeper.set_active(True)                     # one immediate attempt; sticky never holds
+    assert len(fake.restored) == 1
+    assert reports[-1]["held"] is False and reports[-1]["pause_s"] == wt.ACTIVE_MAX_PAUSE_S
+    attempts = [clock.t]
+    for _ in range(30):
+        clock.t += 1
+        before = len(fake.restored)
+        keeper.check()
+        if len(fake.restored) > before:
+            attempts.append(clock.t)
+    gaps = [b - a for a, b in zip(attempts, attempts[1:])]
+    assert len(gaps) >= 5 and all(gap == wt.ACTIVE_MAX_PAUSE_S + 1 or gap == wt.ACTIVE_MAX_PAUSE_S
+                                  for gap in gaps)
+    keeper.set_active(False)
+    clock.t += 10
+    keeper.check()
+    assert reports[-1]["pause_s"] == wt.BACKOFF_S   # idle again: the full back-off
+
+
 def test_rapid_real_switches_are_throttled_by_the_repair_cooldown_not_backoff(monkeypatch, wt):
     """Demoted on every window switch (20 Oct): every restore must go ahead
     before too long, or the pill would stay hidden behind the window just
@@ -685,3 +710,4 @@ def test_main_logs_the_restore():
     src = (ROOT / "wayfinder_main.py").read_text(encoding="utf-8")
     assert 'data.get("event") == "topmost"' in src
     assert "🫧 Pill was pushed behind" in src
+    assert 'data.get("pause_s")' in src and "pausing for a minute" not in src   # Sol pill r5

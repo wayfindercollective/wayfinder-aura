@@ -38,8 +38,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 - **Windows: the dictation pill no longer disappears behind other windows.**
   Windows sometimes ranked the always-on-top pill below the app you were in,
-  hiding it. The pill now puts itself back on top within a second, without
-  taking focus, and the activity log notes each time it happened.
+  hiding it. The pill now puts itself back on top within about two seconds,
+  without taking focus, and the activity log notes each time it happened.
 - **Windows: hotkey freezes are logged with their cause.** A press that
   keeps Aura busy for 5 seconds or more is recorded with what Aura was doing
   from the start, not only at the end.
