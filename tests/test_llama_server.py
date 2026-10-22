@@ -1726,7 +1726,8 @@ class TestARetiredStart:
             # ladder as a machine that cannot run the server.
             LlamaServerManager.ensure(binary, model, 2048, 4, 0,
                                       deadline=time.monotonic() + 0.3)
-        assert started == [] and len(waits) == 1 and 0 < waits[0] <= 0.3
+        # Windows' coarse clock can leave the time left a hair over 0.3.
+        assert started == [] and len(waits) == 1 and 0 < waits[0] <= 0.3 + 1e-6
         assert LlamaServerManager._disabled is False
 
     def test_a_retirement_during_a_failed_load_runs_no_next_rung_and_disables_nothing(self, tmp_path):
