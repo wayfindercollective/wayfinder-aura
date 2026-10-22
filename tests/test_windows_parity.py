@@ -216,28 +216,24 @@ def test_transient_paste_marks_history_exclusion_formats(monkeypatch):
     assert placed == [w._CF_UNICODETEXT]
 
 
-@windows_only
 def test_paste_injection_marks_dictation_and_restore_transient(monkeypatch):
-    from wayfinder.core import injector_windows as w
+    # Over the fake user32 on every platform: a Windows-only stub of
+    # _clipboard_set_windows lacked its restoring keyword (Sol mac r13), and
+    # the deferred restore swallowed the TypeError.
+    rig, w = _windows_send_rig(monkeypatch)
+    sets, write = [], w._write_open_clipboard
 
-    sets = []
-    clipboard = {"text": "user's own clipboard"}
-    monkeypatch.setattr(w, "_require_foreground_window", lambda: None)
-    monkeypatch.setattr(w, "require_modifier_release_windows", lambda: None)
-    monkeypatch.setattr(w, "_send", lambda inputs: None)
-    monkeypatch.setattr(w.time, "sleep", lambda s: None)
-    monkeypatch.setattr(w, "_clipboard_get_windows", lambda: clipboard["text"])
-    monkeypatch.setattr(w, "_clipboard_sequence", lambda: None)
-
-    def fake_set(text, transient=False):
+    def spy(text, transient):
         sets.append((text, transient))
-        clipboard["text"] = text
-        return True
+        return write(text, transient)
 
-    monkeypatch.setattr(w, "_clipboard_set_windows", fake_set)
+    monkeypatch.setattr(w, "_write_open_clipboard", spy)
+    pending = []
+    monkeypatch.setattr(w._pending_restore, "schedule", pending.append)
     w.inject_text_paste_windows("dictated words")
-    w._pending_restore.flush()           # the deferred restore, run now
-    assert sets == [("dictated words", True), ("user's own clipboard", True)]
+    pending[0]()                         # the deferred restore, run now
+    assert sets == [("dictated words", True), ("theirs", True)]
+    assert rig.clipboard == "theirs"
 
 
 def test_a_failed_paste_leaves_the_dictation_on_the_clipboard(monkeypatch):
