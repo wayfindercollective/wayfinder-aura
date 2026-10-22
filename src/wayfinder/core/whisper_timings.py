@@ -28,6 +28,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from wayfinder.utils.child_supervisor import run_tracked
+
 # whisper.cpp v1.9.x prints (to stderr):
 #   whisper_print_timings:     load time =    73.08 ms
 #   whisper_print_timings:    total time =   124.24 ms
@@ -143,7 +145,7 @@ def measure_transcription(
     warmed_ok = False
     if warmup_audio_path:
         try:
-            warmup = subprocess.run(
+            warmup = run_tracked(
                 argv + ["-f", warmup_audio_path],
                 capture_output=True,
                 timeout=warmup_timeout if warmup_timeout is not None else timeout,
@@ -156,7 +158,7 @@ def measure_transcription(
 
     try:
         start = time.perf_counter()
-        result = subprocess.run(
+        result = run_tracked(
             argv + ["-f", audio_path],
             capture_output=True,
             timeout=timeout,

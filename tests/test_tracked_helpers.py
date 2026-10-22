@@ -253,3 +253,134 @@ class TestAFallbackRacingQuitIsStopped:
         # Stopped mid-run: the dictation keeps its words, uncleaned.
         assert (isinstance(outcome.get("error"), PostProcessingError)
                 or outcome.get("value") == "some words to clean up")
+
+
+class TestProbesAndDetectionAtQuit:
+    """Sol PR 2 r8: the --help flag probe, the GPU probe and GPU detection
+    launched whisper-cli untracked, so one could start after Quit or keep
+    running through it. They now go through the same registry."""
+
+    @staticmethod
+    def _model_dir(tmp_path, monkeypatch):
+        from wayfinder.utils import platform as wf_platform
+        models = tmp_path / "models"
+        models.mkdir()
+        (models / "ggml-tiny.bin").touch()
+        monkeypatch.setattr(wf_platform, "get_whisper_model_search_dirs", lambda: [models])
+
+    def test_the_flag_probe_after_quit_runs_nothing(self, tmp_path):
+        from wayfinder.core.transcriber import WhisperCppBackend
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        backend = WhisperCppBackend(whisper_binary=binary, model_path=model, use_gpu=False)
+        child_supervisor.close_tracked()
+        with patch("subprocess.Popen") as popen:
+            assert backend._supported_flags() == set()
+            assert backend.supports_gpu() is False
+        popen.assert_not_called()
+        # Nothing was learned, so nothing is cached for after a reopen.
+        assert getattr(backend, "_supported_flags_cache", None) is None
+        assert backend._gpu_supported is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    @pytest.mark.parametrize("probe", ["_supported_flags", "supports_gpu"])
+    def test_a_flag_probe_in_flight_at_quit_is_stopped(self, tmp_path, probe):
+        from wayfinder.core.transcriber import WhisperCppBackend
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        backend = WhisperCppBackend(whisper_binary=binary, model_path=model, use_gpu=False)
+        run = (lambda: backend._supported_flags(probe_timeout=60)) if probe == "_supported_flags" \
+            else backend.supports_gpu
+        with patch("wayfinder.core.transcriber.run_tracked",
+                   lambda cmd, **kw: child_supervisor.run_tracked(cmd, **{**kw, "timeout": 60})):
+            outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+                run, lambda: child_supervisor.close_tracked())
+        assert outcome.get("value") in (set(), False)
+        assert getattr(backend, "_supported_flags_cache", None) is None
+        assert backend._gpu_supported is None
+
+    def test_gpu_detection_after_quit_runs_nothing(self, tmp_path, monkeypatch):
+        from wayfinder.utils.gpu_simple import _detect_windows_vulkan_devices, detect_gpu_devices
+        binary, _ = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        self._model_dir(tmp_path, monkeypatch)
+        monkeypatch.setattr("wayfinder.utils.gpu_simple.windows_vulkan_whisper", lambda c: binary)
+        child_supervisor.close_tracked()
+        with patch("subprocess.Popen") as popen:
+            assert detect_gpu_devices({"whisper_binary": binary}) == []
+            assert _detect_windows_vulkan_devices({}) == []
+        popen.assert_not_called()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    @pytest.mark.parametrize("path", ["linux", "windows"])
+    def test_gpu_detection_in_flight_at_quit_is_stopped(self, tmp_path, monkeypatch, path):
+        # The GPU-on worker runs this off the Tk thread, so Quit can land mid-probe.
+        from wayfinder.utils import gpu_simple
+        binary, _ = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        self._model_dir(tmp_path, monkeypatch)
+        monkeypatch.setattr(gpu_simple, "windows_vulkan_whisper", lambda c: binary)
+        monkeypatch.setattr(gpu_simple, "run_tracked",
+                            lambda cmd, **kw: child_supervisor.run_tracked(cmd, **{**kw, "timeout": 60}))
+        work = ((lambda: gpu_simple.detect_gpu_devices({"whisper_binary": binary})) if path == "linux"
+                else (lambda: gpu_simple._detect_windows_vulkan_devices({})))
+        outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+            work, lambda: child_supervisor.close_tracked())
+        assert outcome.get("value") == []
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    def test_ggml_detection_in_flight_at_quit_is_stopped(self, tmp_path, monkeypatch):
+        from wayfinder.utils import gpu
+        home = tmp_path / "home"
+        (home / "whisper.cpp" / "build" / "bin").mkdir(parents=True)
+        TestAFallbackRacingQuitIsStopped._hanging_helper(home / "whisper.cpp" / "build" / "bin",
+                                                          "whisper-cli")
+        monkeypatch.setenv("HOME", str(home))
+        self._model_dir(tmp_path, monkeypatch)
+        monkeypatch.setattr(gpu, "run_tracked",
+                            lambda cmd, **kw: child_supervisor.run_tracked(cmd, **{**kw, "timeout": 60}))
+        outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+            gpu.detect_ggml_devices, lambda: child_supervisor.close_tracked())
+        assert outcome.get("value") == []
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="shell-script helper")
+    def test_a_benchmark_cut_short_by_quit_is_not_a_result(self, tmp_path, monkeypatch):
+        # Otherwise the device left standing would be cached as the fastest.
+        from types import SimpleNamespace
+        from wayfinder.utils import gpu
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        monkeypatch.setattr(gpu, "detect_ggml_devices", lambda: [SimpleNamespace(index=0)])
+        outcome = TestAFallbackRacingQuitIsStopped._quit_while_running(
+            lambda: gpu.benchmark_gpu_devices(whisper_cli=binary, model_path=model, timeout=60),
+            lambda: child_supervisor.close_tracked())
+        assert outcome.get("value", {}).get("fastest") == "error"
+
+    def test_timing_and_setup_checks_after_quit_run_nothing(self, tmp_path):
+        from wayfinder.core.setup import check_whisper_cpp
+        from wayfinder.core.whisper_timings import measure_transcription
+        binary, model = TestAFallbackRacingQuitIsStopped._hanging_helper(tmp_path, "whisper-cli")
+        audio = TestNoCliAfterQuit._audio(tmp_path)
+        child_supervisor.close_tracked()
+        with patch("subprocess.Popen") as popen:
+            assert measure_transcription([binary, "-m", model], audio, audio).ok is False
+            check_whisper_cpp({"whisper_binary": binary})
+        popen.assert_not_called()
+
+
+class TestAnInterpreterExit:
+    @pytest.mark.parametrize("ending", ["", "import sys; sys.exit(0)"])
+    def test_a_plain_exit_stops_a_tracked_helper(self, tmp_path, ending):
+        # No server ever started, so no server exit hook exists (main.py,
+        # CLI verbs): the registry's own hook stops the helper.
+        pid_file = tmp_path / "helper.pid"
+        helper = [sys.executable, "-c",
+                  f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+                  "time.sleep(60)"]
+        app = textwrap.dedent(f"""
+            import os, threading, time
+            from wayfinder.utils import child_supervisor
+            threading.Thread(target=child_supervisor.run_tracked, args=({helper!r},),
+                             daemon=True).start()
+            while not (os.path.exists({str(pid_file)!r}) and open({str(pid_file)!r}).read()):
+                time.sleep(0.02)
+            {ending}
+        """)
+        env = {**os.environ, "PYTHONPATH": f"{ROOT / 'src'}{os.pathsep}{ROOT}"}
+        subprocess.run([sys.executable, "-c", app], env=env, timeout=60, check=True)
+        assert _wait_for(lambda: _gone(int(pid_file.read_text())))

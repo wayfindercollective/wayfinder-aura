@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
 
+from wayfinder.utils.child_supervisor import run_tracked
+
 
 @dataclass
 class GpuDevice:
@@ -108,7 +110,7 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
         # as device 0, and the probe would then select physical device 0.
         env = dict(os.environ)
         env.pop("GGML_VK_VISIBLE_DEVICES", None)
-        result = subprocess.run(
+        result = run_tracked(
             [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"],
             capture_output=True,
             text=True,
@@ -179,7 +181,7 @@ def _detect_windows_vulkan_devices(config: Optional[dict]) -> List[GpuDevice]:
 
         env = dict(os.environ)
         env.pop("GGML_VK_VISIBLE_DEVICES", None)  # list every device, not the chosen one
-        result = subprocess.run([cli, "--help"], capture_output=True, text=True,
+        result = run_tracked([cli, "--help"], capture_output=True, text=True,
                                 timeout=20, env=env, **subprocess_no_window_kwargs())
         return parse_ggml_vulkan_devices(result.stdout + result.stderr)
     except Exception:

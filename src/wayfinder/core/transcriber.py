@@ -24,7 +24,7 @@ from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import (
-    HelpersClosed, bind_to_app_lifetime, run_tracked, wrap_macos_child_command,
+    HelpersClosed, bind_to_app_lifetime, helpers_closed, run_tracked, wrap_macos_child_command,
 )
 from wayfinder.utils.platform import subprocess_no_window_kwargs
 
@@ -374,7 +374,7 @@ class WhisperCppBackend(TranscriptionBackend):
             return False
         
         try:
-            result = subprocess.run(
+            result = run_tracked(
                 [self.whisper_binary, "--help"],
                 capture_output=True,
                 text=True,
@@ -382,6 +382,8 @@ class WhisperCppBackend(TranscriptionBackend):
                 env=bundle_binary_env(whisper_metal_env(gpu=False)),
                 **_NO_WINDOW,
             )
+            if helpers_closed():
+                return False  # cut short by Quit: learned nothing, cache nothing
             # Check for GPU-related flags in help output
             # Vulkan builds have --no-gpu (GPU on by default)
             # Older builds might have -ngl or --gpu-layers
@@ -392,6 +394,8 @@ class WhisperCppBackend(TranscriptionBackend):
                 "--gpu-layers" in help_text
             )
             return self._gpu_supported
+        except HelpersClosed:
+            return False
         except Exception:
             self._gpu_supported = False
             return False
@@ -414,17 +418,21 @@ class WhisperCppBackend(TranscriptionBackend):
         flags = set()
         try:
             import re
-            h = subprocess.run(
+            h = run_tracked(
                 [binary or self.whisper_binary, "--help"],
                 capture_output=True, text=True, timeout=probe_timeout,
                 env=bundle_binary_env(whisper_metal_env(gpu=False)),
                 **_NO_WINDOW,
             )
+            if helpers_closed():
+                return set()  # cut short by Quit: do not cache it
             flags = set(re.findall(r"--[a-z][a-z0-9-]+", (h.stdout or "") + (h.stderr or "")))
         except subprocess.TimeoutExpired:
             # A deadline-truncated probe learned nothing — return empty for THIS call
             # but do NOT cache it, so a later unhurried call can still introspect.
             return set()
+        except HelpersClosed:
+            return set()  # Quit: the transcription after this is refused too
         except Exception:
             pass
         self._supported_flags_cache = flags

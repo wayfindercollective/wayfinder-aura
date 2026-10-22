@@ -100,6 +100,7 @@ def _terminate_child(proc: subprocess.Popen, timeout: float = 3.0) -> None:
 _tracked_lock = threading.Lock()
 _tracked: dict = {}   # Popen -> its stop function
 _tracked_closed = False
+_exit_hook_registered = False
 
 
 class HelpersClosed(RuntimeError):
@@ -109,13 +110,26 @@ class HelpersClosed(RuntimeError):
 def spawn_tracked(command: Sequence[str], *, stop=None, **popen_kwargs) -> subprocess.Popen:
     """Popen a helper that a terminal shutdown stops (with *stop*, default
     terminate then kill); refused once one has begun."""
+    global _exit_hook_registered
     with _tracked_lock:
         if _tracked_closed:
             raise HelpersClosed("shutting down: no new helper process")
+        if not _exit_hook_registered:
+            # An interpreter exit with no server started (main.py, CLI verbs)
+            # runs no server exit hook: this one stops the helpers itself.
+            import atexit
+            atexit.register(close_tracked)
+            _exit_hook_registered = True
         proc = subprocess.Popen(command, **popen_kwargs)
         _tracked[proc] = stop or _terminate_child
     bind_to_app_lifetime(proc)
     return proc
+
+
+def helpers_closed() -> bool:
+    """Whether a terminal shutdown has begun: a helper cut short by it says
+    nothing about this machine, so its result must not be cached."""
+    return _tracked_closed
 
 
 def forget_tracked(proc: subprocess.Popen) -> None:

@@ -540,7 +540,9 @@ def _tracked_runs_follow_a_patched_subprocess_run(monkeypatch):
         return subprocess.run(command, **kwargs)
 
     import importlib
-    for module in ("wayfinder.core.transcriber", "wayfinder.core.postprocessor"):
+    for module in ("wayfinder.core.transcriber", "wayfinder.core.postprocessor",
+                   "wayfinder.utils.gpu_simple", "wayfinder.utils.gpu",
+                   "wayfinder.core.whisper_timings", "wayfinder.core.setup"):
         loaded = importlib.import_module(module)
         if getattr(loaded, "run_tracked", None) is real_tracked:
             monkeypatch.setattr(loaded, "run_tracked", run_tracked)

@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
 
+from wayfinder.utils.child_supervisor import helpers_closed, run_tracked
+
 
 @dataclass
 class GPUInfo:
@@ -366,7 +368,7 @@ def detect_ggml_devices() -> List[GgmlDevice]:
         # We use --no-prints to minimize output but GPU info still appears
         cmd = [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"]
         
-        result = subprocess.run(
+        result = run_tracked(
             cmd,
             capture_output=True,
             text=True,
@@ -581,7 +583,7 @@ def benchmark_gpu_devices(
             
             try:
                 start = time.perf_counter()
-                result = subprocess.run(
+                result = run_tracked(
                     cmd,
                     capture_output=True,
                     timeout=timeout,
@@ -596,6 +598,10 @@ def benchmark_gpu_devices(
             except Exception:
                 pass  # Skip failed devices
         
+        if helpers_closed():
+            # Quit stopped a device mid-run: not a measurement, never cached.
+            return {"error": "Aura is shutting down", "fastest": "error"}
+
         # Find fastest
         if results:
             fastest = min(results, key=results.get)
