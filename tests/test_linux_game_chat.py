@@ -246,8 +246,10 @@ def test_type_text_without_the_portal_uses_the_hardened_xdotool_command(monkeypa
     assert timeout >= 10
 
     seen.clear()
-    gc.type_text("x" * 2000)  # ~24 s of typing at 12 ms per key
-    assert seen[0][1] > 2000 * gc.TYPE_DELAY_MS / 1000
+    gc.type_text("x" * 2000)  # ~24 s of typing at 12 ms per key, in pieces
+    pieces = [(argv[argv.index("--") + 1], timeout) for argv, timeout in seen]
+    assert "".join(piece for piece, _ in pieces) == "x" * 2000 and len(pieces) > 1
+    assert all(timeout > len(piece) * gc.TYPE_DELAY_MS / 1000 for piece, timeout in pieces)
 
 
 

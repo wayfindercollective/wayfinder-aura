@@ -89,6 +89,45 @@ def _run_key_tool(argv, **kwargs):
     return subprocess.run(argv, **kwargs)
 
 
+# A typing tool is one process that nothing can ask between its keys, so a
+# long transcript goes out in pieces of about TYPING_CHUNK_S each, every one
+# its own run of the tool, asked by _run_key_tool first. A reset mid-typing
+# then stops within one piece, and every key a piece pressed it released
+# (Sol mac r13). Most dictations fit in one piece.
+TYPING_CHUNK_S = 0.5
+_TYPING_CHUNK_MIN_CHARS = 16
+
+
+def typing_chunks(text: str, per_char_ms: float) -> list:
+    """*text* in pieces that take about TYPING_CHUNK_S to type, cut after a
+    space when there is one in the second half of the piece."""
+    size = max(_TYPING_CHUNK_MIN_CHARS, int(TYPING_CHUNK_S * 1000 / max(per_char_ms, 1.0)))
+    chunks = []
+    while len(text) > size:
+        cut = text.rfind(" ", size // 2, size) + 1 or size
+        if text[cut - 1] == "\r" and text[cut:cut + 1] == "\n":
+            cut += 1   # one Enter, not two
+        chunks.append(text[:cut])
+        text = text[cut:]
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+@contextlib.contextmanager
+def _piece_of_a_typing(index: int):
+    """A piece after the first failing means part of the text landed: no
+    fallback may type it all again."""
+    try:
+        yield
+    except InjectionCancelled:
+        raise
+    except InjectionError as err:
+        if index:
+            err.uncertain_delivery = True
+        raise
+
+
 # Set once a wtype attempt reveals the compositor refuses the virtual-keyboard
 # protocol (GNOME/Mutter always does; some KWin setups deny it). Selection
 # happens before any attempt, so this session cache lets later injections skip
@@ -1279,6 +1318,8 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
                 # every key except the first one.  Give that rare fallback a
                 # full event-loop turn before the transcript begins.
                 _t.sleep(0.10)
+            except InjectionCancelled:
+                raise
             except Exception:
                 pass
 
@@ -1289,22 +1330,25 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     _require_modifier_release()
 
     text = fold_typography_for_typing(text)
-    cmd = build_xdotool_type_command(text, key_delay, warmup=xwayland)
-    try:
-        result = _run_key_tool(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=_env,
-        )
-        if result.returncode != 0:
-            error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-            raise InjectionError(f"xdotool failed (exit {result.returncode}): {error_detail}")
-    except subprocess.TimeoutExpired:
-        raise InjectionError("xdotool timed out after 120s")
-    except FileNotFoundError:
-        raise InjectionError("xdotool not found in PATH")
+    for index, piece in enumerate(typing_chunks(text, key_delay + 1)):
+        # Each run is a new XTEST client: each one gets the warm-up.
+        cmd = build_xdotool_type_command(piece, key_delay, warmup=xwayland)
+        with _piece_of_a_typing(index):
+            try:
+                result = _run_key_tool(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=_env,
+                )
+                if result.returncode != 0:
+                    error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+                    raise InjectionError(f"xdotool failed (exit {result.returncode}): {error_detail}")
+            except subprocess.TimeoutExpired:
+                raise InjectionError("xdotool timed out after 120s")
+            except FileNotFoundError:
+                raise InjectionError("xdotool not found in PATH")
 
 
 # Belt-and-suspenders for the very first wtype injection after launch: even with the
@@ -1329,18 +1373,20 @@ def _inject_text_wtype(text: str) -> None:
     # settle): a physically-held modifier corrupts virtual-keyboard typing the
     # same way it corrupts XTEST typing.
     _require_modifier_release()
-    try:
-        result = _run_key_tool(
-            ["wtype", text],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-            raise InjectionError(f"wtype failed (exit {result.returncode}): {error_detail}")
-    except subprocess.TimeoutExpired:
-        raise InjectionError("wtype timed out after 120s")
-    except FileNotFoundError:
-        raise InjectionError("wtype not found in PATH")
+    for index, piece in enumerate(typing_chunks(text, 1)):
+        with _piece_of_a_typing(index):
+            try:
+                result = _run_key_tool(
+                    ["wtype", piece],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode != 0:
+                    error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+                    raise InjectionError(f"wtype failed (exit {result.returncode}): {error_detail}")
+            except subprocess.TimeoutExpired:
+                raise InjectionError("wtype timed out after 120s")
+            except FileNotFoundError:
+                raise InjectionError("wtype not found in PATH")
 
 
 def prime_wayland_injection() -> "tuple[bool, str]":
@@ -1523,7 +1569,7 @@ def _inject_text_portal(text: str, typing_speed: str = "instant") -> None:
         layout.close()
 
 
-def _clipboard_write_linux(text: str) -> None:
+def _clipboard_write_linux(text: str, *, restoring: bool = False) -> None:
     """Write *text* to the session clipboard. Raises InjectionError on failure."""
     # Prefer Wayland tools when available; fall back to X11 clipboard utilities.
     for cmd in (
@@ -1533,6 +1579,10 @@ def _clipboard_write_linux(text: str) -> None:
     ):
         if not shutil.which(cmd[0]):
             continue
+        # A dictation's write asks before each writer, after the one before
+        # it failed or timed out; a restore always goes out (Sol mac r13).
+        if not restoring:
+            _refuse_if_cancelled()
         try:
             result = subprocess.run(
                 cmd,
@@ -1751,7 +1801,7 @@ def _inject_text_clipboard_paste(text: str, cancelled=None) -> None:
                 time.sleep(0.08)
                 current = _clipboard_read_linux()
                 if current == text:
-                    _clipboard_write_linux(old_clipboard)
+                    _clipboard_write_linux(old_clipboard, restoring=True)
             except Exception:
                 pass
 
@@ -1786,7 +1836,11 @@ def _inject_text_type_linux(
         try:
             _inject_text_wtype(text)
             return
+        except InjectionCancelled:
+            raise   # retired: no other tool types it (Sol mac r13)
         except InjectionError as wtype_err:
+            if getattr(wtype_err, "uncertain_delivery", False):
+                raise   # part of it landed: ydotool would type it twice
             # Tool selection can't know the compositor refuses the
             # virtual-keyboard protocol until the first real attempt
             # (GNOME/Mutter never supports it; some KWin setups deny it).
@@ -1822,25 +1876,27 @@ def _inject_text_type_linux(
             raise InjectionError(
                 "No host ydotool client found — install ydotool, or rely on wtype/xdotool"
             )
-        cmd = [
-            ydotool_bin, "type",
-            "--key-delay", str(key_delay),
-            "--key-hold", str(key_hold),
-            "--", text,
-        ]
         env = _get_ydotool_env()
         # Gate immediately before the synthetic keys (after readiness checks):
         # uinput-level typing merges with physically-held modifiers in the
         # compositor exactly like the other backends.
         _require_modifier_release()
-        result = _run_key_tool(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-        )
-        _check_ydotool_result(result, "type")
+        for index, piece in enumerate(typing_chunks(text, key_delay + key_hold)):
+            cmd = [
+                ydotool_bin, "type",
+                "--key-delay", str(key_delay),
+                "--key-hold", str(key_hold),
+                "--", piece,
+            ]
+            with _piece_of_a_typing(index):
+                result = _run_key_tool(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=env,
+                )
+                _check_ydotool_result(result, "type")
     except subprocess.TimeoutExpired:
         raise InjectionError("ydotool timed out after 120s")
     except FileNotFoundError:
@@ -1927,6 +1983,8 @@ def _inject_text(text, typing_speed, target_window, game_mode, paste_fallback, c
     try:
         _inject_text_type_linux(text, typing_speed, target_window)
         return
+    except InjectionCancelled:
+        raise   # retired: no clipboard paste either (Sol mac r13)
     except InjectionError as e:
         # Uncertain delivery (ydotool direct-uinput fallback engaged): the text
         # MAY have partially landed — a paste retry could duplicate it. Surface
