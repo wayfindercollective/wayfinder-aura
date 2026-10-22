@@ -3101,7 +3101,9 @@ def _collapse_repeated_sentences_for_phrase_match(text: str) -> str:
         return text
 
     def key(sentence: str) -> str:
-        return re.sub(r'[^a-z0-9]+', ' ', sentence.lower()).strip()
+        # Any script's letters and digits count: ASCII-only keys made
+        # "Thank you." and "Thank you, 李明。" the same sentence (Sol pr67 r3).
+        return re.sub(r'[\W_]+', ' ', sentence.lower()).strip()
 
     first = key(sentences[0])
     if first and all(key(s) == first for s in sentences[1:]):
@@ -3129,14 +3131,30 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
 })
 
 
+# Punctuation variants folded to ASCII for the hallucination-phrase
+# comparison only, never the text: "Thank you for watching…" slipped past
+# the safety copy's check (Sol pr67 r3).
+_HALLUCINATION_PUNCTUATION_FOLD = str.maketrans({
+    "…": ".", "‘": "'", "’": "'", "“": '"', "”": '"',
+    "。": ".", "，": ",", "！": "!", "？": "?", "：": ":", "；": ";",
+})
+
+
+def _fold_hallucination_punctuation(text: str) -> str:
+    return text.translate(_HALLUCINATION_PUNCTUATION_FOLD)
+
+
 def _is_whisper_phrase_hallucination(text: str) -> bool:
     """Whether *text* is, in full, one of Whisper's known silence/noise
     catch-phrases — matched the same way :func:`clean_whisper_artifacts`
     matches it at the end of its cleanup (repeated sentences collapsed,
-    trailing punctuation stripped). Never a mid-sentence substring match.
+    trailing punctuation stripped, punctuation variants folded to ASCII —
+    Sol pr67 r3). Never a mid-sentence substring match.
     """
     candidate = _collapse_repeated_sentences_for_phrase_match((text or "").strip())
-    key = candidate.lower().rstrip('.!?,;: ').strip()
+    candidate = _fold_hallucination_punctuation(candidate)
+    # Both ends: a quoted phrase has a leading mark too.
+    key = candidate.lower().strip('.!?,;:\'" ')
     return key in _WHISPER_PHRASE_HALLUCINATIONS
 
 
@@ -3164,17 +3182,26 @@ _NOISE_JOINER = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
 _NOISE_MARKER = r'\s*' + _NOISE_WORD + r'(?:' + _NOISE_JOINER + r'\s+' + _NOISE_WORD + r'){0,2}\s*'
 
 
-def _strip_non_speech_markers(text: str) -> str:
+def _strip_non_speech_markers(text: str, *, strict_asterisks: bool = False) -> str:
     """Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
-    [Music], (background noise), ♪ ... — the exact patterns
+    [Music], (background noise), ♪, special-token leaks like <|endoftext|>
+    or a <|0.00|> timestamp ... — the exact patterns
     :func:`clean_whisper_artifacts` strips during normal cleanup, reused here
     (Sol pr67 r2) to build a safety copy for the speech-guard's own checks,
-    which must never read one of Whisper's own annotations as a transcribed
-    word.
+    which must never read one of Whisper's own annotations, or a leaked
+    special token like <|endoftext|>, as a transcribed word (Sol pr67 r3).
+
+    *strict_asterisks* (the safety copy): only *noise words* go, so
+    "*args and **kwargs" keeps its words instead of losing everything up
+    to the last asterisk (Sol pr67 r3). Normal cleanup keeps the broad
+    pattern, so its output does not change.
     """
     import re
 
-    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
+    if strict_asterisks:
+        text = re.sub(r'\*' + _NOISE_MARKER + r'\*', ' ', text, flags=re.IGNORECASE)
+    else:
+        text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
     text = re.sub(r'\*+', '', text)
     text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
@@ -3183,21 +3210,24 @@ def _strip_non_speech_markers(text: str) -> str:
     text = re.sub(r'\[' + _NOISE_MARKER + r'\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\(' + _NOISE_MARKER + r'\)', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'♪+', ' ', text)
+    # Whisper special-token leaks: <|endoftext|>, a <|0.00|> timestamp, etc.
+    text = re.sub(r'<\|[^|]*\|>', ' ', text)
     return text
 
 
 def _noise_check_safety_copy(text: str) -> str:
     """A safety copy of *text* for the noise-verdict speech-guard's own two
     checks ONLY (Sol pr67 r2) — never what Raw Transcript, or anything else
-    downstream, sees. Strips Whisper's own non-speech annotations and then
-    canonicalises whitespace the same way normal cleanup does right before
-    its own final hallucination check: an annotation like "[Music]" must not
-    read as a transcribed word, and repeated whitespace inside a known
-    hallucination phrase must not defeat the full-text match.
+    downstream, sees. Strips Whisper's own non-speech annotations (only
+    noise words between asterisks, Sol pr67 r3) and then canonicalises
+    whitespace the same way normal cleanup does right before its own final
+    hallucination check: an annotation like "[Music]" must not read as a
+    transcribed word, and repeated whitespace inside a known hallucination
+    phrase must not defeat the full-text match.
     """
     import re
 
-    return re.sub(r'\s+', ' ', _strip_non_speech_markers(text or "")).strip()
+    return re.sub(r'\s+', ' ', _strip_non_speech_markers(text or "", strict_asterisks=True)).strip()
 
 
 # whisper.cpp refuses more than 8 decoders ("too many decoders requested"),
@@ -3257,9 +3287,6 @@ def clean_whisper_artifacts(
     # feedback). Shared with the speech-guard's safety copy (Sol pr67 r2) so
     # both strip exactly the same patterns.
     text = _strip_non_speech_markers(text)
-
-    # Remove Whisper special token leaks: <|...|> patterns (timestamps, end-of-text, etc.)
-    text = re.sub(r'<\|[^|]*\|>', ' ', text)
 
     # Fix angle brackets that Whisper inserts instead of punctuation
     # < often replaces commas, > often replaces periods

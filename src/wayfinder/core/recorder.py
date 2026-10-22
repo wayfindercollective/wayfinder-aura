@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import wave
 from collections.abc import Mapping
 from numbers import Real
@@ -213,15 +214,23 @@ def audio_has_speech_activity(audio_data: np.ndarray, sample_rate: int = 16000) 
 NOISE_TRANSCRIPT_MIN_WORDS = 2
 
 # A script that doesn't separate words with spaces (Chinese, Japanese kana,
-# Korean Hangul, Thai, ...) would otherwise read as one long "word" and get
-# silently dropped no matter how much was said; such a transcript is counted
-# by character instead, at roughly a word's worth per character.
+# Korean Hangul, Thai, Lao, Tibetan, Burmese, Khmer, Balinese, Javanese, ...)
+# would otherwise read as one long "word" and get silently dropped no matter
+# how much was said; such a transcript is counted by character instead, at
+# roughly a word's worth per character. Lao, Burmese and Khmer were missing
+# (Sol pr67 r3).
 NOISE_TRANSCRIPT_MIN_NO_SPACE_CHARS = 4
 _NO_SPACE_SCRIPT_RANGES = (
     (0x4E00, 0x9FFF),   # CJK Unified Ideographs
     (0x3040, 0x30FF),   # Hiragana + Katakana
     (0xAC00, 0xD7A3),   # Hangul syllables
     (0x0E00, 0x0E7F),   # Thai
+    (0x0E80, 0x0EFF),   # Lao
+    (0x0F00, 0x0FFF),   # Tibetan
+    (0x1000, 0x109F),   # Myanmar (Burmese)
+    (0x1780, 0x17FF),   # Khmer
+    (0x1B00, 0x1B7F),   # Balinese
+    (0xA980, 0xA9DF),   # Javanese
 )
 
 # Any Unicode letter or digit, excluding "_" (which \w matches but a word
@@ -230,7 +239,12 @@ _WORD_CHAR = re.compile(r"[^\W_]", re.UNICODE)
 
 
 def _is_no_space_script_letter(ch: str) -> bool:
-    return any(lo <= ord(ch) <= hi for lo, hi in _NO_SPACE_SCRIPT_RANGES)
+    """Whether *ch* is a letter or combining mark of a script written without
+    spaces: its block's digits and punctuation ("・・・・") are not speech
+    (Sol pr67 r3)."""
+    if not any(lo <= ord(ch) <= hi for lo, hi in _NO_SPACE_SCRIPT_RANGES):
+        return False
+    return unicodedata.category(ch)[0] in ("L", "M")
 
 
 def noise_transcript_has_speech(text: str) -> bool:

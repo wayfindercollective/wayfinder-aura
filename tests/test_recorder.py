@@ -466,7 +466,7 @@ class TestSilenceDetection:
     @pytest.mark.parametrize("text, kept", [
         ("", False), (".", False), ("So,", False), ("Okay.", False),
         ("Okay, sounds good.", True), ("It's crazy that Nico", True),
-        # Sol review (MAJOR): a bare \w+ scan split an apostrophe or a dotted
+        # Sol review: a bare \w+ scan split an apostrophe or a dotted
         # abbreviation into separate "words" and let a single filler word
         # through the two-word rule. Each of these is exactly one word.
         ("I'm.", False), ("Let's.", False), ("O.K.", False),
@@ -484,7 +484,7 @@ class TestSilenceDetection:
         ("我需要一个技术经理来管理这个项目", True),  # a real sentence, no spaces at all
     ])
     def test_noise_transcript_counts_characters_for_scripts_without_spaces(self, text, kept):
-        """Sol review (MAJOR): a CJK transcript has no whitespace to split on,
+        """Sol review: a CJK transcript has no whitespace to split on,
         so whitespace word-counting would see the WHOLE thing as one "word"
         and silently drop a real, long dictation. Such scripts are counted by
         character instead."""
@@ -493,7 +493,7 @@ class TestSilenceDetection:
         assert noise_transcript_has_speech(text) is kept
 
     @pytest.mark.parametrize("text, kept", [
-        # Sol pr67 r2 (MAJOR): the old check required EVERY letter in the
+        # Sol pr67 r2: the old check required EVERY letter in the
         # transcript to be from a no-space script, so a digit, a Latin word
         # or trailing CJK punctuation mixed into a real no-space sentence
         # fell through to whitespace word-counting, which sees the whole
@@ -513,6 +513,43 @@ class TestSilenceDetection:
         ("I'm.", False), ("O.K.", False), ("嗯", False), ("。", False),
     ])
     def test_noise_transcript_counts_no_space_script_letters_through_mixed_content(
+        self, text, kept
+    ):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is kept
+
+    @pytest.mark.parametrize("text", [
+        # Sol pr67 r3: these scripts fell outside the four ranges
+        # that used to be here, so the whole sentence read as one giant
+        # "word" under whitespace-counting and was dropped as noise no
+        # matter how much was actually said.
+        "សូមបិទទ្វារ",             # Khmer
+        "ມື້ນີ້ອາກາດດີ",             # Lao
+        "ကျွန်တော်နေကောင်းပါတယ်",   # Burmese (Myanmar)
+        # Added alongside them since the blocks are just as cheap to list.
+        "བཀྲ་ཤིས་བདེ་ལེགས",          # Tibetan
+        "ꦱꦸꦒꦼꦁꦫꦲꦪꦸ",                # Javanese
+        "ᬅᬓ᭄ᬱᬭᬩᬮᬶ",                  # Balinese
+    ])
+    def test_noise_transcript_counts_additional_no_space_scripts(self, text):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is True
+
+    @pytest.mark.parametrize("text, kept", [
+        # Sol pr67 r3: range membership alone also counted a
+        # no-space script's OWN digits and punctuation as speech content.
+        # Four Katakana middle dots ("・") reached the no-space-char floor
+        # purely as punctuation, and Thai numerals did the same.
+        ("・・・・", False),
+        ("๑๒๓๔", False),          # Thai digits, four of them
+        ("๑๒๓๔๕", False),         # five Thai digits: still not letters
+        # A real no-space-script sentence must still pass once its own
+        # digits/punctuation are excluded from the count.
+        ("我需要一个技术经理来管理这个项目", True),
+    ])
+    def test_noise_transcript_no_space_script_excludes_digits_and_punctuation(
         self, text, kept
     ):
         from wayfinder.core.recorder import noise_transcript_has_speech
