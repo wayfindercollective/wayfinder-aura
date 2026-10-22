@@ -3101,8 +3101,8 @@ _SENTENCE_END_NOISE_CHECK = r'[.!?][\'"’”)\]]*'
 def _split_sentences_for_noise_check(text: str) -> list:
     """Sentence split for the noise-check repeat comparison only (Sol pr67
     r4). A sentence end is [.!?], optionally followed by a closing quote or
-    bracket, then whitespace, end of text, or any non-ASCII character
-    (a script written without spaces)."""
+    bracket, then whitespace, end of text, a letter, or any non-ASCII
+    character (a script written without spaces)."""
     import re
 
     text = text.strip()
@@ -3110,7 +3110,10 @@ def _split_sentences_for_noise_check(text: str) -> list:
     start = 0
     for m in re.finditer(_SENTENCE_END_NOISE_CHECK, text):
         end = m.end()
-        if end == len(text) or text[end].isspace() or ord(text[end]) > 127:
+        # A letter right after the stop also ends it: "Thank you.Thank you."
+        # (Sol pr67 r7). A digit doesn't, so "3.5" stays one number.
+        if (end == len(text) or text[end].isspace() or ord(text[end]) > 127
+                or text[end].isalpha()):
             sentence = text[start:end].strip()
             if sentence:
                 sentences.append(sentence)
@@ -3265,9 +3268,18 @@ def _strip_non_speech_markers(text: str) -> str:
 
 
 # Anything Whisper wrapped, whatever it says inside: [Music], (door opens),
-# *a loud noise*, **music**, ♪ la la ♪, <|endoftext|>. Innermost first, so
-# nested wrappers go too.
-_WRAPPED_SPAN = r'\[[^\[\]]*\]|\([^()]*\)|\*+[^*]*\*+|♪[^♪]*♪|<\|[^|]*\|>'
+# {noise}, full-width and CJK brackets, <|endoftext|>. Innermost first, so
+# nested pairs go too. Asterisks and music symbols open and close alike, so
+# their nesting can't be told apart ("*a loud **crashing** noise*"): from
+# the first to the last of them goes whole instead (Sol pr67 r7).
+_WRAPPED_SPAN = (
+    r'\[[^\[\]]*\]|\([^()]*\)|\{[^{}]*\}|（[^（）]*）|【[^【】]*】'
+    r'|「[^「」]*」|『[^『』]*』|<\|[^|]*\|>'
+)
+_WRAP_OPENERS = '[({（【「『'
+_WRAP_CLOSERS = '])}）】」』'
+# Whisper's own music symbols (its tokenizer's non-speech set), all one kind.
+_MUSIC_SYMBOLS = '♩♪♫♬♭♮♯'
 
 
 def _noise_check_safety_copy(text: str) -> str:
@@ -3276,9 +3288,9 @@ def _noise_check_safety_copy(text: str) -> str:
     downstream, sees: an accepted recording's text is returned unchanged.
 
     Nothing Whisper wrapped counts as a spoken word here, whatever is
-    inside (Sol pr67 r6): brackets, parentheses, asterisks, music notes and
-    special tokens go whole, and an opener left unmatched runs to the end
-    (a closer, from the start). Telling a sound annotation from someone's
+    inside (Sol pr67 r6): brackets, parentheses, braces, asterisks, music
+    symbols and special tokens go whole, and an opener left unmatched runs
+    to the end (a closer, from the start). Telling a sound annotation from someone's
     emphasis or code by its words kept failing both ways — "*a loud noise*
     Okay." passing as speech, "Turn **music**" losing a word — so it is no
     longer tried. Erring towards removal is safe on this path only: these
@@ -3295,8 +3307,13 @@ def _noise_check_safety_copy(text: str) -> str:
     while previous != text:
         previous = text
         text = re.sub(_WRAPPED_SPAN, ' ', text)
-    text = re.sub(r'^.*[\])]', ' ', text, flags=re.DOTALL)
-    text = re.sub(r'[\[(*♪].*$', ' ', text, flags=re.DOTALL)
+    for symbols in ('*', _MUSIC_SYMBOLS):
+        cls = '[' + re.escape(symbols) + ']'
+        text = re.sub(cls + '.*' + cls, ' ', text, flags=re.DOTALL)
+    closers = '[' + re.escape(_WRAP_CLOSERS) + ']'
+    openers = '[' + re.escape(_WRAP_OPENERS + '*' + _MUSIC_SYMBOLS) + ']'
+    text = re.sub('^.*' + closers, ' ', text, flags=re.DOTALL)
+    text = re.sub(openers + '.*$', ' ', text, flags=re.DOTALL)
     return re.sub(r'\s+', ' ', text).strip()
 
 

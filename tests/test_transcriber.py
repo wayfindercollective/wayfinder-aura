@@ -3542,6 +3542,16 @@ class TestUnpromptedTranscription:
         "Okay [Music",
         "loud noise] Okay.",
         "♪ la la la",
+        # Sol pr67 r7: nested asterisks can't expose an inner word, every
+        # one of Whisper's music symbols counts, and the other bracket kinds.
+        "*a loud **crashing** noise* Okay.",
+        "**loud *crashing* noise** Okay.",
+        "♫ la la ♫ Okay.",
+        "♬ la la ♪ Okay.",
+        "Okay ♫ la la",
+        "{noise} Okay.",
+        "（music） Okay.",
+        "[loud (crashing] noise) Okay.",
     ])
     def test_unprompted_noise_never_counts_wrapped_words(
         self, prompts, monkeypatch, heard, raw
@@ -3553,6 +3563,30 @@ class TestUnpromptedTranscription:
         self.config["raw_transcription"] = raw
         text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
         assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r7: a repeat with no space after the stop is still one
+        # known phrase said twice.
+        "Thank you.Thank you.",
+        "Thanks for watching!Thanks for watching!",
+    ])
+    def test_unprompted_noise_rejects_repeats_with_no_space_between(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_noise_check_split_keeps_a_decimal_whole(self):
+        from wayfinder.core.transcriber import _split_sentences_for_noise_check
+
+        assert _split_sentences_for_noise_check("It is 3.5 now.Okay.") == [
+            "It is 3.5 now.", "Okay."]
 
     @pytest.mark.parametrize("raw", [False, True])
     @pytest.mark.parametrize("heard", [
