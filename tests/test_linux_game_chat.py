@@ -395,3 +395,59 @@ def test_game_chat_xdotool_presses_nothing_for_a_retired_dictation(monkeypatch):
         assert runs == []
         gc._xdotool("keyup", "Return")
     assert runs == [["xdotool", "keyup", "Return"]]
+
+
+def _tk_clipboard_app(run):
+    """An app whose after(0, fn) hands fn to *run*, as the Tk loop would; the
+    clipboard it writes is in *app.clip*."""
+    from types import SimpleNamespace
+    app = SimpleNamespace(clip=["theirs"])
+    app.after = lambda _ms, fn: run(fn)
+    app.clipboard_clear = lambda: app.clip.clear()
+    app.clipboard_append = lambda text: app.clip.append(text)
+    app.update_idletasks = lambda: None
+    return app
+
+
+def test_the_tk_clipboard_write_asks_the_workers_dictation_on_the_tk_thread():
+    # Sol mac r13: the portal paste and Linux game chat queue the write on
+    # Tk and wait; a reset before Tk ran it still wrote the retired text. The
+    # worker's scope does not reach the Tk thread, so the write carries it.
+    import threading
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+    retired = [False]
+
+    def tk_later(fn):
+        def run():
+            retired[0] = True                     # Escape before Tk got to it
+            fn()
+        threading.Thread(target=run).start()
+
+    app = _tk_clipboard_app(tk_later)
+    with injector.cancellable(lambda: retired[0]):
+        with pytest.raises(injector.InjectionCancelled):
+            wm.WayfinderApp._set_clipboard_from_worker(app, "retired words", 2.0)
+    assert app.clip == ["theirs"]
+
+
+def test_a_tk_clipboard_write_the_worker_gave_up_on_never_runs_late():
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+    queued = []
+    app = _tk_clipboard_app(queued.append)        # Tk is busy
+    with injector.cancellable(lambda: False):
+        assert wm.WayfinderApp._set_clipboard_from_worker(app, "late words", 0.05) is False
+    queued[0]()                                   # Tk gets to it after all
+    assert app.clip == ["theirs"]
+
+
+def test_a_live_tk_clipboard_write_goes_out():
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+    app = _tk_clipboard_app(lambda fn: fn())
+    with injector.cancellable(lambda: False):
+        assert wm.WayfinderApp._set_clipboard_from_worker(app, "live words", 2.0) is True
+    assert app.clip == ["live words"]
+    assert wm.WayfinderApp._set_clipboard_from_worker(app, "no scope", 2.0) is True
+    assert app.clip == ["no scope"]

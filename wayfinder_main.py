@@ -25722,16 +25722,30 @@ class WayfinderApp(ctk.CTk):
 
         The Flatpak ships no clipboard CLI; Tk owns the X11 CLIPBOARD selection
         and serves it to the game (Wine bridges it to the Windows clipboard).
+
+        The Tk thread asks the worker's dictation right before it clears the
+        clipboard, and a write the worker stopped waiting for never runs late
+        (Sol mac r13): a retired dictation's raises InjectionCancelled.
         """
+        from wayfinder.core.injector import InjectionCancelled, current_cancellation
+
+        cancelled = current_cancellation()
         done = threading.Event()
-        ok = [False]
+        step = threading.Lock()
+        state = {"ok": False, "refused": False, "abandoned": False}
 
         def _set():
             try:
-                self.clipboard_clear()
-                self.clipboard_append(text)
-                self.update_idletasks()
-                ok[0] = True
+                with step:
+                    if state["abandoned"]:
+                        return
+                    if cancelled is not None and cancelled():
+                        state["refused"] = True
+                        return
+                    self.clipboard_clear()
+                    self.clipboard_append(text)
+                    self.update_idletasks()
+                    state["ok"] = True
             except Exception:
                 pass
             finally:
@@ -25741,8 +25755,12 @@ class WayfinderApp(ctk.CTk):
             self.after(0, _set)
         except Exception:
             return False
-        done.wait(timeout)
-        return ok[0]
+        if not done.wait(timeout):
+            with step:   # one that already started finishes first
+                state["abandoned"] = True
+        if state["refused"]:
+            raise InjectionCancelled("the dictation was retired: nothing injected")
+        return state["ok"]
 
     def _get_clipboard_from_worker(self, timeout: float = 1.0) -> "str | None":
         """The clipboard's text, read on the Tk thread (None if empty or not

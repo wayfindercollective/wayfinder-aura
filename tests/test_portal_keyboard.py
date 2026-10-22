@@ -1715,3 +1715,22 @@ class TestPortalKeysStopBetweenCharacters:
             with pytest.raises(injector.InjectionCancelled):
                 injector._portal_paste("café")
         assert writes == []
+
+
+def test_the_portal_restore_without_a_restorer_is_never_refused(monkeypatch):
+    # The restore after a refused Ctrl+V runs under the retired scope; the
+    # writer the app hands over asks that scope, so the restore lifts it.
+    import wayfinder.core.injector as injector
+    clip = {"now": "dictation"}
+
+    def write(text):
+        injector._refuse_if_cancelled()           # as the app's Tk writer does
+        clip["now"] = text
+        return True
+
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_RESTORE", None)
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_READ", lambda: clip["now"])
+    monkeypatch.setattr(injector, "_PORTAL_CLIPBOARD_WRITE", write)
+    with injector.cancellable(lambda: True):
+        injector._restore_portal_clipboard("dictation", "theirs")
+    assert clip["now"] == "theirs"

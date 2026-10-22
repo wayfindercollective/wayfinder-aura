@@ -55,6 +55,16 @@ def cancellable(cancelled):
         _injection.cancelled = previous
 
 
+def current_cancellation():
+    """This thread's injection cancellation, for work it hands to another
+    thread (the Tk clipboard write: Sol mac r13), or None."""
+    return getattr(_injection, "cancelled", None)
+
+
+def _never_cancelled() -> bool:
+    return False
+
+
 def _refuse_if_cancelled(cancelled=None) -> None:
     if cancelled is None:
         cancelled = getattr(_injection, "cancelled", None)
@@ -1476,7 +1486,8 @@ def _restore_portal_clipboard(text: str, previous) -> None:
         if _PORTAL_CLIPBOARD_RESTORE is not None:
             _PORTAL_CLIPBOARD_RESTORE(text, previous)
         elif _PORTAL_CLIPBOARD_READ() == text:
-            _PORTAL_CLIPBOARD_WRITE(previous)
+            with cancellable(_never_cancelled):   # a restore always goes out
+                _PORTAL_CLIPBOARD_WRITE(previous)
     except Exception:
         pass
 
