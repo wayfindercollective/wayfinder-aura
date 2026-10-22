@@ -94,20 +94,30 @@ def _loop_words(phrase: str) -> list[str]:
     return [w for w in (_norm(word) for word in phrase.split()) if w]
 
 
-def _is_loop_repeat(anchor_words: list[str], candidate_words: list[str]) -> bool:
-    """Whether ``candidate_words`` is the same looped phrase as ``anchor_words``.
+def _is_full_loop_repeat(anchor_words: list[str], candidate_words: list[str]) -> bool:
+    """Whether ``candidate_words`` is the same looped phrase, word for word
+    (case and punctuation aside)."""
+    return candidate_words == anchor_words
 
-    The same words (case and punctuation aside), or the anchor cut short — a
-    late repeat in a loop sometimes ends early, e.g. "if the player is level
-    one." for the full sentence. Never merely similar: parallel sentences
-    differing in one word ("Add eggs to the list. Add milk to the list. Add
-    bread to the list.") are real dictation and must all survive.
-    """
-    if candidate_words == anchor_words:
-        return True
+
+def _is_truncated_loop_repeat(anchor_words: list[str], candidate_words: list[str]) -> bool:
+    """Whether ``candidate_words`` is the anchor cut short — a late repeat in
+    a loop sometimes ends early, e.g. "if the player is level one." for the
+    full sentence."""
     return (
         LOOP_TRUNCATED_MIN_WORDS <= len(candidate_words) < len(anchor_words)
         and candidate_words == anchor_words[: len(candidate_words)]
+    )
+
+
+def _is_loop_repeat(anchor_words: list[str], candidate_words: list[str]) -> bool:
+    """Whether ``candidate_words`` is the same looped phrase as ``anchor_words``:
+    full or cut short. Never merely similar: parallel sentences differing in
+    one word ("Add eggs to the list. Add milk to the list. Add bread to the
+    list.") are real dictation and must all survive.
+    """
+    return _is_full_loop_repeat(anchor_words, candidate_words) or _is_truncated_loop_repeat(
+        anchor_words, candidate_words
     )
 
 
@@ -120,6 +130,12 @@ def collapse_sentence_loops(text: str) -> str:
     (people do say a sentence twice), and only word-for-word repeats (or one
     cut short) join a run, so list-like sentences differing in a word all
     survive. Text with no run comes back exactly as given.
+
+    A cut-short repeat may only extend a run that already has 3 FULL copies
+    behind it (the anchor plus 2 exact repeats): a prefix match alone is too
+    cheap a coincidence to trust. Without that gate, "I want to go home after
+    the meeting. I want to go home. I want to go." — three distinct sentences,
+    each a prefix of the one before — collapsed to the first sentence alone.
     """
     if not any(mark in text for mark in ".!?"):
         return text  # nothing to split on; collapse_phrase_window_loops covers this
@@ -139,8 +155,17 @@ def collapse_sentence_loops(text: str) -> str:
             continue
 
         j = i + 1
-        while j < len(sentences) and _is_loop_repeat(anchor_words, _loop_words(sentences[j])):
-            j += 1
+        full_copies = 1  # the anchor itself
+        while j < len(sentences):
+            candidate_words = _loop_words(sentences[j])
+            if _is_full_loop_repeat(anchor_words, candidate_words):
+                full_copies += 1
+                j += 1
+                continue
+            if full_copies >= LOOP_MIN_RUN and _is_truncated_loop_repeat(anchor_words, candidate_words):
+                j += 1
+                continue
+            break
 
         kept.append(sentences[i])  # first member only, whether or not a run formed
         if j - i >= LOOP_MIN_RUN:
@@ -153,17 +178,36 @@ def collapse_sentence_loops(text: str) -> str:
 
 
 def collapse_phrase_window_loops(text: str) -> str:
-    """Same loop shape as collapse_sentence_loops, for speech with no sentence
-    punctuation to split on — scans fixed-size word windows instead."""
-    if any(mark in text for mark in ".!?"):
-        return text  # collapse_sentence_loops above already covers this text
+    """Same loop shape as collapse_sentence_loops, scanning fixed-size word
+    windows instead of sentences — the only way to see a loop stuck inside a
+    single sentence, or in speech with no sentence punctuation at all.
 
+    Tries the SMALLEST window first and keeps trying larger ones after a
+    collapse, rather than returning on the first window that changes
+    anything: a window that is a multiple of the true period matches too
+    (every block of N repeats looks identical to the next), so starting big
+    can collapse only part of the run under a composite period and return
+    before the true, smaller period is ever tried. An 8-word phrase repeated
+    13 times, tried largest-window-first, used to leave 5 copies (a 32-word
+    "period", 4x the real one); repeated 6 times it left 2 (a 16-word
+    "period", 2x the real one). Smallest-first finds the true period and
+    collapses the whole run to one copy.
+    """
     words = text.split()
     if len(words) < LOOP_MIN_RUN * LOOP_PHRASE_MIN_WORDS:
         return text
 
-    max_window = min(LOOP_PHRASE_MAX_WORDS, len(words) // LOOP_MIN_RUN)
-    for window in range(max_window, LOOP_PHRASE_MIN_WORDS - 1, -1):
+    changed_any = False
+    window = LOOP_PHRASE_MIN_WORDS
+    while True:
+        max_window = min(LOOP_PHRASE_MAX_WORDS, len(words) // LOOP_MIN_RUN)
+        if window > max_window:
+            break
+
+        # Normalised once per window size, not re-derived for every slice
+        # compared — keeps a long, loop-free chunk (the common case) from
+        # doing quadratic work across the ~35 window sizes tried.
+        norm = [_norm(w) for w in words]
         kept = []
         i = 0
         changed = False
@@ -171,11 +215,9 @@ def collapse_phrase_window_loops(text: str) -> str:
             if i + window > len(words):
                 kept.extend(words[i:])
                 break
-            anchor_words = [_norm(w) for w in words[i:i + window]]
+            anchor = norm[i:i + window]
             j = i + window
-            while j + window <= len(words) and _is_loop_repeat(
-                anchor_words, [_norm(w) for w in words[j:j + window]]
-            ):
+            while j + window <= len(words) and norm[j:j + window] == anchor:
                 j += window
             if (j - i) // window >= LOOP_MIN_RUN:
                 kept.extend(words[i:i + window])  # first occurrence only
@@ -185,8 +227,11 @@ def collapse_phrase_window_loops(text: str) -> str:
                 kept.append(words[i])
                 i += 1
         if changed:
-            return " ".join(kept)
-    return text
+            words = kept
+            changed_any = True
+        window += 1
+
+    return " ".join(words) if changed_any else text
 
 
 def chunk_text_looks_looped(text: str, seconds: float | None) -> bool:

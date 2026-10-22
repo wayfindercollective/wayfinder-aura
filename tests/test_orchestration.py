@@ -1381,6 +1381,165 @@ class TestLoopedChunkRetry:
         assert store[1].lower() == sentence
         assert any("looped" in message.lower() for message in app.logs)
 
+    def test_a_looped_prompted_chunk_is_retried_even_with_default_cleanup_on(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r1: with the DEFAULT config (collapse_whisper_repetitions
+        # on), clean_whisper_artifacts already collapses the 13 copies to one
+        # sentence before _transcribe_chunk used to look at it — so the old
+        # check against the CLEANED text never saw a loop and the audio was
+        # never re-heard. The echoed sentence ("if the player...") is wrong:
+        # it is not what the user actually said next ("the actual release
+        # date..."), which only the unprompted re-hear can recover.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        echoed_loop_sentence = "if the player is level one they are going to be level one."
+        real_speech = "the actual release date for the update is next friday afternoon."
+        looped = " ".join([echoed_loop_sentence] * 13)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return looped if context else real_speech
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""   # first heard with the prompt, looped
+        assert contexts_heard[1] == ""   # retried without it despite default cleanup
+        assert store[1].lower() == real_speech
+        assert any("looped" in message.lower() for message in app.logs)
+
+    def test_both_decodes_looping_keeps_the_already_cleaned_prompted_text(
+        self, app, monkeypatch, tmp_path
+    ):
+        # When the unprompted retry loops too, keep the prompted rendering as
+        # transcribe_with_config's own cleanup already left it, rather than
+        # hand-rolling another collapse (which used to run unconditionally,
+        # ignoring a collapse_whisper_repetitions=False the user chose).
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        prompted_sentence = "if the player is level one they are going to be level one."
+        retry_sentence = "we need to update the database before lunch today."
+        prompted_loop = " ".join([prompted_sentence] * 13)
+        retry_loop = " ".join([retry_sentence] * 13)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return prompted_loop if context else retry_loop
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""
+        assert contexts_heard[1] == ""
+        assert store[1].lower() == prompted_sentence
+
+    def test_an_empty_retry_does_not_replace_a_useful_prompted_intro(
+        self, app, monkeypatch, tmp_path
+    ):
+        # "The actual release date is Friday." survived cleanup fine; the
+        # loop that followed it triggered a retry, and an empty unprompted
+        # re-hear must never overwrite the valid introduction with "[empty]".
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        intro = "The actual release date is Friday."
+        loop_sentence = "if the player is level one they are going to be level one."
+        prompted = f"{intro} " + " ".join([loop_sentence] * 13)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return prompted if context else ""
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[1] == ""           # retried
+        assert store[1] != "[empty]"
+        assert "release date" in store[1].lower()  # the valid intro survives
+
+    def test_empty_retry_fallback_respects_collapse_whisper_repetitions_off(
+        self, app, monkeypatch, tmp_path
+    ):
+        # The old manual re-collapse in the "retry didn't help" fallback ran
+        # unconditionally. Falling back to the already-cleaned prompted text
+        # must not apply a collapse the user's own config turned off.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(
+            WApp, "_asr_config_for_dictation",
+            lambda self: {"collapse_whisper_repetitions": False},
+        )
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        loop_sentence = "if the player is level one they are going to be level one."
+        prompted = " ".join([loop_sentence] * 13)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return prompted if context else ""
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[1] == ""
+        # collapse_whisper_repetitions is off: the fallback keeps all 13
+        # copies rather than quietly collapsing them like the old manual
+        # re-collapse did regardless of this setting.
+        assert len(store[1].split()) == len(prompted.split())
+
 
 class TestChunkSilenceGuard:
     def test_silent_trailing_chunk_skips_whisper_and_completes_store(

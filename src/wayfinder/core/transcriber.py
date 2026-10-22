@@ -3724,11 +3724,12 @@ def ensure_punctuation_postprocess(text: str) -> str:
 
 
 def transcribe_with_config(
-    audio_path: str, 
-    config: dict, 
+    audio_path: str,
+    config: dict,
     context: str = "",
     skip_post_processing: bool = False,
     request_token: Optional[int] = None,
+    raw_out: Optional[list] = None,
 ) -> str:
     """
     Transcribe using settings from config dictionary.
@@ -3742,6 +3743,12 @@ def transcribe_with_config(
             where post-processing should happen on the final combined text)
         request_token: The dictation's WhisperServerBackend.request_token(),
             taken when it began; a retirement since raises RequestAbandoned
+        raw_out: When given, the backend's text is appended to it right after
+            backend.transcribe — before any Aura cleanup. A caller that needs
+            to know whether THIS chunk looped reads raw_out[0] rather than the
+            returned text: with the default config, clean_whisper_artifacts
+            already collapses a repetition loop before returning, so a check
+            against the cleaned text never sees it (Sol loop r1).
 
     Returns:
         Transcribed text string
@@ -3771,6 +3778,9 @@ def transcribe_with_config(
         backend = get_backend(config)
         WhisperServerBackend._check_not_abandoned(request_token)
         text = backend.transcribe(audio_path, context=context)
+
+    if raw_out is not None:
+        raw_out.append(text)
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep
     # entitlement checks in get_backend(), but bypass every Aura text rewrite

@@ -145,9 +145,15 @@ def test_the_app_prompts_each_chunk_with_the_trimmed_context():
     # A collapsed prompted chunk is heard again without the prompt.
     assert "chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path))" in body
     assert "prefer_fuller_chunk_text(text, retry)" in body
-    # A chunk that loops with its prompt is heard again without one too.
-    assert "chunk_text_looks_looped(text, get_wav_duration_seconds(chunk_path))" in body
-    assert "chunk_text_looks_looped(retry, get_wav_duration_seconds(chunk_path))" in body
+    # A chunk that loops with its prompt is heard again without one too. The
+    # decision is made on the backend's RAW text (raw_out), not the cleaned
+    # `text`/`retry` — the default config's own cleanup would otherwise
+    # collapse the loop away before either check ever saw it (Sol loop r1).
+    assert "raw_prompted_text = raw_prompted[0] if raw_prompted else text" in body
+    assert "chunk_text_looks_looped(raw_prompted_text, get_wav_duration_seconds(chunk_path))" in body
+    assert "raw_retry[0] if raw_retry else retry" in body
+    # An empty or still-looped retry is discarded rather than trusted whole.
+    assert "if retry.strip() and not retry_looped:" in body
 
 
 def test_a_collapsed_prompted_chunk_is_heard_again():
@@ -224,6 +230,16 @@ def test_text_without_a_loop_comes_back_exactly_as_given():
     assert not chunk_text_looks_looped(text, 6.0)
 
 
+def test_distinct_complete_sentences_do_not_collapse_via_prefix_alone():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    # Each sentence is a strict prefix of the one before it, but these are
+    # three distinct, shrinking thoughts — not a loop. A prefix match alone
+    # (with no full copies behind it) must never build a run.
+    text = "I want to go home after the meeting. I want to go home. I want to go."
+    assert collapse_sentence_loops(text) == text
+
+
 def test_a_short_fragment_does_not_extend_a_run():
     from wayfinder.core.chunking import collapse_sentence_loops
 
@@ -297,3 +313,56 @@ def test_chunk_text_looks_looped_false_for_ordinary_dictation_pace():
     )
     assert len(text.split()) == 40
     assert not chunk_text_looks_looped(text, 15.0)
+
+
+# --- Composite periods and punctuation-blind phrase loops -------------------
+# Trying windows largest-first finds a multiple of the true period (which
+# matches too, since every N-repeat block looks identical to the next) and
+# returns on the first window that changes anything, before the true,
+# smaller period is ever tried.
+
+def test_a_composite_period_x6_collapses_fully_not_to_two_copies():
+    from wayfinder.core.chunking import collapse_phrase_window_loops
+
+    phrase = "we need to update the database before lunch"
+    assert collapse_phrase_window_loops(" ".join([phrase] * 6)) == phrase
+
+
+def test_a_composite_period_x13_collapses_fully_not_to_five_copies():
+    from wayfinder.core.chunking import collapse_phrase_window_loops
+
+    phrase = "we need to update the database before lunch"
+    assert collapse_phrase_window_loops(" ".join([phrase] * 13)) == phrase
+
+
+def test_a_phrase_loop_inside_one_sentence_is_caught_despite_terminal_punctuation():
+    from wayfinder.core.chunking import (
+        chunk_text_looks_looped,
+        collapse_phrase_window_loops,
+        collapse_sentence_loops,
+    )
+
+    # One sentence, by punctuation — collapse_sentence_loops can't see
+    # repetition inside it. The old punctuation gate on
+    # collapse_phrase_window_loops left this loop uncaught entirely.
+    phrase = "we need to update the database before lunch"
+    text = " ".join([phrase] * 3) + "."
+    assert chunk_text_looks_looped(text, 17.0)
+    collapsed = collapse_phrase_window_loops(collapse_sentence_loops(text))
+    assert collapsed != text
+    assert collapsed.rstrip(".") == phrase
+
+
+def test_word_window_scan_stays_fast_on_a_long_non_looping_chunk():
+    import time
+
+    from wayfinder.core.chunking import collapse_phrase_window_loops
+
+    # 300 distinct words, no loop: the common case. Scanning ~35 window
+    # sizes over this must stay comfortably sub-second, not quadratic.
+    text = " ".join(f"word{i}" for i in range(300))
+    start = time.perf_counter()
+    result = collapse_phrase_window_loops(text)
+    elapsed = time.perf_counter() - start
+    assert result == text
+    assert elapsed < 2.0

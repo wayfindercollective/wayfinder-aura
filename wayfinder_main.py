@@ -25008,12 +25008,14 @@ class WayfinderApp(ctk.CTk):
             # Light ASR and first-session Windows GPU preparation are runtime
             # overlays only (never written back to disk).
             asr_cfg = WayfinderApp._asr_config_for_dictation(self)
+            raw_prompted = []
             text = transcribe_with_config(
                 chunk_path,
                 asr_cfg,
                 context=context,
                 skip_post_processing=True,
                 request_token=request_token,
+                raw_out=raw_prompted,
             )
             raw_session = WayfinderApp._raw_session_enabled(self)
             if context and not raw_session:
@@ -25022,10 +25024,18 @@ class WayfinderApp(ctk.CTk):
                 from wayfinder.core.chunking import (
                     chunk_text_looks_looped,
                     chunk_text_looks_truncated,
-                    collapse_phrase_window_loops,
-                    collapse_sentence_loops,
                     prefer_fuller_chunk_text,
                 )
+
+                # The loop decision below is made on the backend's RAW text
+                # (raw_out, filled before clean_whisper_artifacts runs), not on
+                # `text`: with the default config that cleanup already
+                # collapses a 13-copy loop down to its first sentence, which
+                # then looks like ordinary, properly paced text and would trip
+                # neither check here — the audio would never be re-heard and
+                # the user gets the echoed sentence instead of their speech
+                # (Sol loop r1).
+                raw_prompted_text = raw_prompted[0] if raw_prompted else text
 
                 if chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
                     retry = transcribe_with_config(
@@ -25037,26 +25047,26 @@ class WayfinderApp(ctk.CTk):
                         self.log(f"↻ Chunk {chunk_index + 1} re-heard without context "
                                  f"({len(text.split())} → {len(fuller.split())} words)")
                     text = fuller
-                elif chunk_text_looks_looped(text, get_wav_duration_seconds(chunk_path)):
+                elif chunk_text_looks_looped(raw_prompted_text, get_wav_duration_seconds(chunk_path)):
                     # The prompt made Whisper echo its own last chunk into a stuck
                     # loop; hear it again without one — same shape as the
                     # truncated-chunk retry above, same call shape.
+                    raw_retry = []
                     retry = transcribe_with_config(
                         chunk_path, asr_cfg, context="", skip_post_processing=True,
-                        request_token=request_token,
+                        request_token=request_token, raw_out=raw_retry,
                     )
-                    if chunk_text_looks_looped(retry, get_wav_duration_seconds(chunk_path)):
-                        # Loops even unprompted — keep whichever collapses shorter
-                        # rather than trust either rendering whole.
-                        collapsed_prompted = collapse_phrase_window_loops(collapse_sentence_loops(text))
-                        collapsed_retry = collapse_phrase_window_loops(collapse_sentence_loops(retry))
-                        text = (
-                            collapsed_retry
-                            if len(collapsed_retry.split()) < len(collapsed_prompted.split())
-                            else collapsed_prompted
-                        )
-                    else:
+                    retry_looped = chunk_text_looks_looped(
+                        raw_retry[0] if raw_retry else retry, get_wav_duration_seconds(chunk_path)
+                    )
+                    if retry.strip() and not retry_looped:
                         text = retry
+                    # An empty or still-looped retry is worse than what's
+                    # already in hand: keep the prompted rendering as
+                    # transcribe_with_config already cleaned it under the
+                    # user's own config, rather than re-collapsing it by hand
+                    # and ignoring a collapse_whisper_repetitions=False the
+                    # user chose.
                     self.log(f"🔁 Chunk {chunk_index + 1} looped with its prompt; retried without it")
             # Write into this session's private store — never touches a newer session's list.
             with self.chunk_transcription_lock:
