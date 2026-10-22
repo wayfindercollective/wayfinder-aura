@@ -289,17 +289,23 @@ def _write_failures(rows: dict) -> None:
             os.unlink(temp)
 
 
-def clear_comparison_failures(cli_binary: str, model_path: str) -> None:
-    """A finished comparison or hand-over ends the failure streak."""
+def clear_comparison_failures(cli_binary: str, model_path: str) -> bool:
+    """A finished comparison or a successful Core ML dictation ends the
+    failure streak; returns whether it did. Not once this launch recorded a
+    failure: a request that started before it and succeeded late proves
+    nothing about the failure, which holds until the next launch or the
+    user's retry, reset_comparison_failures (Sol mac r5)."""
     try:
         key = _failure_key(cli_binary, model_path)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return
+        return False
     with _failure_lock:
-        _session_failures.discard(key)
+        if key in _session_failures:
+            return False
         rows = _read_failures()
         if rows.pop(key, None) is not None:
             _write_failures(rows)
+        return True
 
 
 def reset_comparison_failures() -> None:
@@ -327,41 +333,37 @@ def record_runtime_failure(key: tuple[str, str], reason: str) -> int:
     Counted like a failed preparation: a load proves nothing, so a server
     that loads but cannot transcribe would otherwise be handed over again
     after every dictation. Metal serves the rest of the session; the next
-    launch tries once more, then the backoff applies (Sol mac r3). One
-    launch counts once: two chunks failing on one incident, or a death
-    after a failed request, are one failure (Sol mac r4)."""
+    launch tries once more, then the backoff applies (Sol mac r3)."""
     cli, model = key
     with _failure_lock:
         _runtime_proven.discard(key)
-        try:
-            failure_key = _failure_key(cli, model)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return 0
-        if failure_key in _session_failures:
-            return comparison_failures(cli, model)
         return record_comparison_failure(cli, model, f"Core ML runtime: {reason}")
 
 
 def record_runtime_success(key: tuple[str, str]) -> None:
     """A Core ML dictation succeeded: that ends the failure streak (once a session)."""
     with _failure_lock:
-        if key in _runtime_proven:
-            return
-        clear_comparison_failures(*key)
-        _runtime_proven.add(key)
+        if key not in _runtime_proven and clear_comparison_failures(*key):
+            _runtime_proven.add(key)
 
 
 def record_comparison_failure(cli_binary: str, model_path: str, reason: str) -> int:
-    """Count a failed conversion or comparison; returns the new count."""
+    """Count a failed conversion, comparison or Core ML server; returns the
+    count. One launch counts once, whatever failed: two chunks failing on one
+    incident, a death after a failed request, or a preparation admitted
+    before a runtime failure was recorded (Sol mac r4/r5)."""
     try:
         key = _failure_key(cli_binary, model_path)
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
     with _failure_lock:
-        _session_failures.add(key)
         rows = _read_failures()
         previous = rows.get(key)
-        count = (int(previous.get("count", 0)) if isinstance(previous, dict) else 0) + 1
+        count = int(previous.get("count", 0)) if isinstance(previous, dict) else 0
+        if key in _session_failures:
+            return count
+        _session_failures.add(key)
+        count += 1
         rows[key] = {"count": count, "reason": reason[:200], "at": int(time.time())}
         _write_failures(rows)
         return count
@@ -702,7 +704,15 @@ def _prepare_comparison(config: dict, backend, *, cancelled) -> bool:
     # A terminal shutdown (Quit) admits no server after it, a probe included.
     # Quit supersedes before it stops any child, so a job it cut short stays
     # superseded after a reopen too: its dead child is never counted.
+    try:
+        failure_key = _failure_key(cli, source_model)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        failure_key = None
+    # A Core ML failure recorded after this job was admitted (a server that
+    # died while idle is counted only when Metal replaces it) blocks it too,
+    # at every idle wait: it must not hand Core ML back this launch (Sol mac r5).
     cancelled = lambda: (superseded() or WhisperServerBackend._closed
+                         or failure_key in _session_failures
                          or not get_feature_gate().has_feature("gpu_acceleration"))
     blocked = comparison_blocked(cli, source_model)
     if blocked:

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+
+import pytest
 
 from wayfinder.utils import child_supervisor
 
@@ -141,3 +144,67 @@ def test_a_child_outside_its_own_group_is_still_stopped():
     proc = subprocess.Popen(["sleep", "30"])  # no supervised_popen_kwargs
     child_supervisor.stop_supervised(proc, term_wait=2, platform_name="darwin")
     assert proc.returncode is not None
+
+
+def test_a_dead_supervisors_group_names_only_its_helpers():
+    app = "/Applications/Wayfinder Aura.app/Contents/Frameworks/bin"
+    rows = [
+        "  901   901 /Applications/Wayfinder Aura.app/Contents/MacOS/Wayfinder Aura",
+        f"  950   900 {app}/whisper-server",
+        f"  953   900 {app}/whisper-coreml/whisper-server",
+        "  951   900 /usr/bin/caffeinate",
+        f"  952   901 {app}/whisper-server",
+        "garbage",
+    ]
+    assert child_supervisor.group_survivors(rows, 900) == [950, 953]
+    # A live leader: the group id was reused, so nothing in it is ours.
+    assert child_supervisor.group_survivors(rows + ["  900   900 /usr/bin/login"], 900) == []
+
+
+def test_only_macos_looks_for_what_a_reaped_supervisor_left(monkeypatch):
+    scanned = []
+    monkeypatch.setattr(child_supervisor, "_stop_group_survivors",
+                        lambda pgid, kill: scanned.append((pgid, kill)))
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    child_supervisor.signal_supervised(proc, platform_name="linux")
+    child_supervisor.stop_supervised(proc, platform_name="darwin")
+    assert scanned == [(proc.pid, False)]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="names the helper through a symlink, which Linux's comm reports")
+@pytest.mark.parametrize("ignores_term", [False, True])
+def test_a_server_whose_supervisor_died_first_is_still_stopped(tmp_path, ignores_term):
+    # Sol mac r5: the supervisor SIGKILLed while whisper-server lived on. Once
+    # the supervisor was reaped, stop_supervised returned at once, so recovery
+    # lost the server and Quit left it holding the model and port.
+    import signal
+    import time
+
+    link = tmp_path / "whisper-server"
+    link.symlink_to(sys.executable)
+    pid_file = tmp_path / "server.pid"
+    server = [str(link), "-c",
+              "import os, signal, time\n"
+              + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignores_term else "")
+              + f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+              "time.sleep(60)\n"]
+    command, env = child_supervisor.wrap_macos_child_command(server, dict(os.environ), platform_name="darwin")
+    proc = subprocess.Popen(command, env=env,
+                            **child_supervisor.supervised_popen_kwargs(platform_name="darwin"))
+    deadline = time.monotonic() + 10
+    while not (pid_file.exists() and pid_file.read_text()):
+        assert time.monotonic() < deadline, "the supervised server never started"
+        time.sleep(0.05)
+    server_pid = int(pid_file.read_text())
+    os.kill(proc.pid, signal.SIGKILL)
+    proc.wait()   # reaped: the supervisor's pid is free, its group lives on
+    assert _state(server_pid), "the server died with its supervisor"
+
+    child_supervisor.stop_supervised(proc, platform_name="darwin")
+
+    deadline = time.monotonic() + 3
+    while _state(server_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert _state(server_pid) == "", "the server outlived its dead supervisor"

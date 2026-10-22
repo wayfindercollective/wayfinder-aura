@@ -72,11 +72,78 @@ def supervised_popen_kwargs(*, platform_name: str | None = None) -> dict:
     return {"start_new_session": True} if (platform_name or sys.platform) == "darwin" else {}
 
 
+# The native helpers a supervisor runs; only these are stopped in the group of
+# a supervisor that is already gone.
+_SUPERVISED_HELPERS = frozenset(
+    {"whisper-server", "whisper-cli", "llama-server", "llama-simple", "coreml-compile"})
+
+
+def group_survivors(ps_rows: Sequence[str], pgid: int) -> list[int]:
+    """Helpers left in the group of a supervisor that died first (SIGKILL, a
+    crash), from ``ps -axo pid=,pgid=,comm=`` rows.
+
+    The supervisor is reaped, so its pid is free, but a process group id is
+    never reused while the group has a member. A live process leading the
+    group means the id was reused, and then nothing in it is ours."""
+    found = []
+    for row in ps_rows:
+        parts = row.split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid, group = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if group != pgid:
+            continue
+        if pid == pgid:
+            return []
+        if os.path.basename(parts[2].strip()) in _SUPERVISED_HELPERS:
+            found.append(pid)
+    return found
+
+
+def _group_survivors(pgid: int) -> list[int]:
+    try:
+        rows = subprocess.check_output(["ps", "-axo", "pid=,pgid=,comm="], text=True,
+                                       timeout=5).splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return group_survivors(rows, pgid)
+
+
+def _stop_group_survivors(pgid: int, *, kill: bool, grace: float = 1.0) -> list[int]:
+    """Stop what a dead supervisor left running: SIGTERM, then SIGKILL what a
+    fresh scan still finds after *grace*. Returns the PIDs signalled."""
+    pids = _group_survivors(pgid)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL if kill else signal.SIGTERM)
+        except OSError:
+            pass
+    if kill or not pids:
+        return pids
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and any(parent_process_alive(pid) for pid in pids):
+        time.sleep(0.05)
+    for pid in set(pids) & set(_group_survivors(pgid)):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return pids
+
+
 def signal_supervised(proc: subprocess.Popen, *, kill: bool = False,
                       platform_name: str | None = None) -> None:
     """Terminate (or kill) a supervised child: its whole group on macOS."""
     if proc.returncode is not None:
-        return  # reaped: its pid, and so its group id, may belong to someone else now
+        # Reaped: its pid may belong to someone else now, so it is never
+        # signalled. A supervisor that died before its child left the child
+        # running in its group, though, owning the model and port (Sol mac r5).
+        if (platform_name or sys.platform) == "darwin":
+            _stop_group_survivors(proc.pid, kill=kill)
+        return
     if (platform_name or sys.platform) == "darwin":
         try:
             os.killpg(proc.pid, signal.SIGKILL if kill else signal.SIGTERM)
@@ -93,6 +160,7 @@ def stop_supervised(proc: subprocess.Popen, term_wait: float = 5.0, kill_wait: f
                     platform_name: str | None = None) -> None:
     """SIGTERM, then SIGKILL after *term_wait*; on macOS to the whole group."""
     if proc.poll() is not None:
+        signal_supervised(proc, platform_name=platform_name)   # what it left behind
         return
     signal_supervised(proc, platform_name=platform_name)
     try:

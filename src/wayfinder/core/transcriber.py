@@ -100,6 +100,11 @@ class CoreMLNotLoaded(TranscriptionError):
     """A Core ML server serves only once it is loaded; see _ready_only_fallback."""
 
 
+class RequestAbandoned(TranscriptionError):
+    """The app retired this dictation (see WhisperServerBackend.abandon_requests):
+    nothing may start, stop, retry, salvage or count on its behalf."""
+
+
 def _expand_path(value: object) -> str:
     """Expand a config path without letting None/blank masquerade as cwd."""
     if value is None:
@@ -1099,7 +1104,8 @@ class WhisperServerBackend(TranscriptionBackend):
             )
         )
 
-    def _start_server(self, deadline: float = None, force: bool = False) -> None:
+    def _start_server(self, deadline: float = None, force: bool = False,
+                      abandoned_at: Optional[int] = None) -> None:
         """Start the whisper-server process if not already running.
 
         deadline: optional absolute time.monotonic() budget. When set (the recovery
@@ -1109,6 +1115,8 @@ class WhisperServerBackend(TranscriptionBackend):
         cannot push the caller past the PROCESSING watchdog. None = full, unbounded wait.
         force: restart even if a server appears to be running — recovery uses this to
         replace a wedged-but-listening server that would otherwise look healthy.
+        abandoned_at: a dictation's abandon token; once the app retires it, the
+        start raises RequestAbandoned before stopping or spawning anything.
         """
         if WhisperServerBackend._epoch != self._load_epoch:
             # Configured before a switch: what it finds missing is the old
@@ -1157,6 +1165,9 @@ class WhisperServerBackend(TranscriptionBackend):
             # a Quit must not spawn once the Quit's stop has run.
             if WhisperServerBackend._closed:
                 raise ServerStartSuperseded("whisper-server shutting down")
+            # Under the lock too: a reset that lands while this waited for it
+            # must not let a retired dictation replace the next one's server.
+            self._check_not_abandoned(abandoned_at)
             # Already running with the right model AND the right CPU/GPU mode?
             # Skipped when force=True so a wedged-but-alive server is replaced
             # instead of mistaken for healthy.
@@ -1309,6 +1320,11 @@ class WhisperServerBackend(TranscriptionBackend):
             raise TranscriptionError(f"whisper-server failed to start: {last_error}")
         finally:
             WhisperServerBackend._server_lock.release()
+
+    @classmethod
+    def _check_not_abandoned(cls, abandoned_at: Optional[int]) -> None:
+        if abandoned_at is not None and cls._abandoned != abandoned_at:
+            raise RequestAbandoned("dictation abandoned")
 
     @classmethod
     def abandon_requests(cls) -> None:
@@ -1576,12 +1592,15 @@ class WhisperServerBackend(TranscriptionBackend):
         except Exception as exc:
             print(f"[Whisper] Core ML success not recorded ({type(exc).__name__})")
 
-    def _serve_on_metal(self, audio_path: str, context: str) -> str:
+    def _serve_on_metal(self, audio_path: str, context: str, abandoned_at: Optional[int] = None) -> str:
+        # The twin's transcribe takes its own token on entry, right after this.
+        self._check_not_abandoned(abandoned_at)
         print("[Whisper] Core ML is not loaded; this dictation runs on Metal")
         try:
             return self._ready_only_fallback.transcribe(audio_path, context)
         finally:
-            self._schedule_coreml_hand_over()
+            if abandoned_at is None or WhisperServerBackend._abandoned == abandoned_at:
+                self._schedule_coreml_hand_over()
 
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """Transcribe audio via the whisper-server HTTP API."""
@@ -1595,16 +1614,17 @@ class WhisperServerBackend(TranscriptionBackend):
 
         # Ensure server is running
         try:
-            self._start_server()
+            self._start_server(abandoned_at=abandoned_at)
+        except RequestAbandoned:
+            raise
         except CoreMLNotLoaded:
-            return self._serve_on_metal(audio_path, context)
+            return self._serve_on_metal(audio_path, context, abandoned_at)
         except ServerStartSuperseded:
             if WhisperServerBackend._closed:
                 # Quit or restart: nothing starts after a terminal shutdown,
                 # whisper-cli included.
                 raise TranscriptionError("Aura is shutting down")
-            if WhisperServerBackend._abandoned != abandoned_at:
-                raise TranscriptionError("dictation abandoned")
+            self._check_not_abandoned(abandoned_at)
             # A CPU/GPU switch or model change cancelled the load mid-dictation.
             print("[Whisper Server] Startup cancelled by a settings change; "
                   "this dictation uses whisper-cli.")
@@ -1735,11 +1755,11 @@ class WhisperServerBackend(TranscriptionBackend):
                 # CLI salvage gets a separate, fixed window below: sharing this
                 # deadline starved salvage whenever the retry consumed the last
                 # second, producing a false "No speech detected" after valid audio.
-                if WhisperServerBackend._abandoned != abandoned_at:
-                    # Retired while in flight (sleep, Escape, the watchdog): no
-                    # restart and no Core ML failure for words nobody will type.
-                    # A restart here could replace the next dictation's server.
-                    raise TranscriptionError("dictation abandoned")
+                # Retired while in flight (sleep, Escape, the watchdog): no
+                # restart and no Core ML failure for words nobody will type. A
+                # restart could replace the next dictation's server, so every
+                # later stage checks again (Sol mac r4/r5).
+                self._check_not_abandoned(abandoned_at)
                 recovery_deadline = time.monotonic() + float(self.timeout)
                 print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
                 coreml = self._ready_only_fallback is not None
@@ -1756,14 +1776,16 @@ class WhisperServerBackend(TranscriptionBackend):
                     # does (Sol mac r3). The hand-over brings Core ML back unless
                     # this counted as its failure; then the next launch retries.
                     (self._ready_only_fallback or self)._start_server(
-                        deadline=recovery_deadline, force=True)
+                        deadline=recovery_deadline, force=True, abandoned_at=abandoned_at)
                     # Retry once on the fresh server (fresh port), clamped to the
                     # remaining budget. Skip entirely if the restart already spent it.
                     remaining = recovery_deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError("recovery budget exhausted before retry")
+                    self._check_not_abandoned(abandoned_at)
                     return _post(WhisperServerBackend._server_port, remaining)
                 except Exception as retry_err:
+                    self._check_not_abandoned(abandoned_at)
                     # Any recovery failure — still-dead server, _start_server() failure,
                     # malformed response, or exhausted budget — falls to the per-call
                     # whisper-cli salvage. Give it a FRESH bounded window: the server
@@ -1784,7 +1806,7 @@ class WhisperServerBackend(TranscriptionBackend):
                             f"whisper-server failed after restart ({retry_err}); "
                             f"whisper-cli salvage also failed: {cli_err}")
                 finally:
-                    if coreml:
+                    if coreml and WhisperServerBackend._abandoned == abandoned_at:
                         self._schedule_coreml_hand_over()
 
         except TranscriptionError:

@@ -652,8 +652,10 @@ def test_no_core_ml_preparation_starts_after_quit(monkeypatch):
 def _a_fresh_session():
     # Session failure guard: each test is its own launch.
     macos_coreml._session_failures.clear()
+    macos_coreml._runtime_proven.clear()
     yield
     macos_coreml._session_failures.clear()
+    macos_coreml._runtime_proven.clear()
 
 
 # Sol mac r1: a restart or Quit during a Core ML load or compile.
@@ -918,9 +920,9 @@ def test_a_switch_cancels_the_running_job_through_its_epoch(tmp_path, monkeypatc
 # Sol mac r1: failure memory that recovers.
 
 def _fail(rig, times):
-    for _ in range(times):
+    for _ in range(times):   # one launch each: a launch counts once
         macos_coreml.record_comparison_failure(str(rig.cli), str(rig.model), "TimeoutError")
-    macos_coreml._session_failures.clear()   # later launches
+        macos_coreml._session_failures.clear()
 
 
 def test_two_failures_wait_a_day_then_try_again(comparison_rig, monkeypatch):
@@ -1211,7 +1213,7 @@ def _metal_takes_over(monkeypatch, rig, clock=None):
     cls = transcriber.WhisperServerBackend
     starts = []
 
-    def start(deadline=None, force=False):
+    def start(deadline=None, force=False, abandoned_at=None):
         starts.append((deadline, force))
         if clock is not None:
             clock[0] = deadline - 1.0
@@ -1466,6 +1468,152 @@ def test_a_retired_dictation_whose_server_start_was_superseded_salvages_nothing(
         rig.backend.transcribe(rig.audio)
 
 
+class _ResetWhileWaiting:
+    """A server lock whose acquire is where the reset lands."""
+    def __init__(self, cls):
+        self.cls = cls
+
+    def acquire(self, blocking=True, timeout=-1):
+        self.cls.abandon_requests()
+        return True
+
+    def release(self):
+        pass
+
+
+@pytest.mark.parametrize("stage", ["first start waits for the lock", "recovery waits for the lock",
+                                   "after the restart", "during the retry"])
+def test_a_reset_at_any_stage_stops_the_retired_dictation(monkeypatch, tmp_path, stage):
+    # Sol mac r5: abandonment was checked only before the recovery, so a reset
+    # landing later let the retired request restart, retry and salvage. Its
+    # restart stopped the next dictation's server and spawned another.
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=True)
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+    _runtime_memory(monkeypatch)
+    posts = []
+    if stage.endswith("waits for the lock"):
+        # The real starts: nothing may be stopped or spawned (Popen fails the test).
+        monkeypatch.setattr(cls, "_stop_server_internal", classmethod(
+            lambda cls, deadline=None: pytest.fail("a retired dictation stopped a server")))
+    else:
+        starts = _metal_takes_over(monkeypatch, rig)
+    if stage == "first start waits for the lock":
+        monkeypatch.setattr(cls, "_server_lock", _ResetWhileWaiting(cls))
+    elif stage == "after the restart":
+        start = rig.twin._start_server
+
+        def start_then_reset(**kwargs):
+            start(**kwargs)
+            cls.abandon_requests()
+
+        rig.twin._start_server = start_then_reset
+    no_salvage = lambda: pytest.fail("a retired dictation salvaged on whisper-cli")
+    rig.backend._cli_fallback = rig.twin._cli_fallback = no_salvage
+
+    def post(req, timeout):
+        posts.append(req.full_url.split("/")[2])
+        if ":8178/" in req.full_url:
+            if stage == "recovery waits for the lock":
+                monkeypatch.setattr(cls, "_server_lock", _ResetWhileWaiting(cls))
+            raise ConnectionResetError("Core ML inference failed")
+        if stage == "during the retry":
+            cls.abandon_requests()
+            raise TimeoutError("the retry timed out after the reset")
+        return _Words("words nobody will type")
+
+    monkeypatch.setattr(transcriber, "urlopen_loopback", post)
+    with pytest.raises(transcriber.RequestAbandoned):
+        rig.backend.transcribe(rig.audio)
+    assert rig.scheduled == [], "a retired dictation scheduled the Core ML hand-over"
+    assert posts == {"first start waits for the lock": [],
+                     "recovery waits for the lock": ["127.0.0.1:8178"],
+                     "after the restart": ["127.0.0.1:8178"],
+                     "during the retry": ["127.0.0.1:8178", "127.0.0.1:8179"]}[stage]
+
+
+def test_a_reset_before_the_metal_fallback_runs_nothing(monkeypatch, tmp_path):
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=False)
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+
+    def refused(**_kwargs):
+        cls.abandon_requests()
+        raise transcriber.CoreMLNotLoaded("Core ML server not loaded")
+
+    rig.backend._start_server = refused
+    with pytest.raises(transcriber.RequestAbandoned):
+        rig.backend.transcribe(rig.audio)
+    assert rig.served == [] and rig.scheduled == []
+
+
+def test_a_reset_while_metal_serves_schedules_no_hand_over(monkeypatch, tmp_path):
+    from wayfinder.core import transcriber
+    cls = transcriber.WhisperServerBackend
+    rig = _resident_core_ml(monkeypatch, tmp_path, alive=False)
+    monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+
+    def reset_mid_dictation(audio, context=""):
+        cls.abandon_requests()
+        raise transcriber.RequestAbandoned("dictation abandoned")
+
+    rig.twin.transcribe = reset_mid_dictation
+    with pytest.raises(transcriber.RequestAbandoned):
+        rig.backend.transcribe(rig.audio)
+    assert rig.scheduled == []
+
+
+def test_a_preparation_failure_after_an_idle_death_counts_once(comparison_rig):
+    # Sol mac r5: get_backend scheduled the preparation before Metal's start
+    # recorded the death; the admitted preparation's own failure made it 2.
+    rig = comparison_rig
+    key = (str(rig.cli), str(rig.model))
+    assert macos_coreml.record_runtime_failure(key, "server exited (9)") == 1
+    assert macos_coreml.record_comparison_failure(*key, "RuntimeError: exited") == 1
+    assert macos_coreml.comparison_failures(*key) == 1
+
+
+def test_a_preparation_admitted_before_a_failure_stops_at_its_next_wait(comparison_rig, monkeypatch):
+    rig = comparison_rig
+    key = (str(rig.cli), str(rig.model))
+    monkeypatch.setattr(macos_coreml, "comparison", lambda c, m: {"preferred": True})
+    monkeypatch.setattr(macos_coreml, "coreml_twin", lambda c, m: "/twin/whisper-cli")
+    monkeypatch.setattr(macos_coreml, "coreml_resident", lambda *a: False)
+    seen = []
+
+    def hand_off(backend, cli, twin, model, cancelled):
+        seen.append(cancelled())
+        macos_coreml.record_runtime_failure(key, "server exited (9)")   # Metal replaced it meanwhile
+        seen.append(cancelled())
+        return False
+
+    monkeypatch.setattr(macos_coreml, "_hand_off", hand_off)
+    macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: False)
+    assert seen == [False, True]
+
+
+@pytest.mark.parametrize("late", ["dictation", "comparison"])
+def test_a_late_success_does_not_undo_this_launchs_failure(comparison_rig, late):
+    # Sol mac r5: one chunk failed (count 1, Metal for the launch); another,
+    # sent before the failure, succeeded and cleared both.
+    rig = comparison_rig
+    key = (str(rig.cli), str(rig.model))
+    macos_coreml.record_runtime_failure(key, "request failed (TimeoutError)")
+    if late == "dictation":
+        macos_coreml.record_runtime_success(key)
+    else:   # how record_comparison ends
+        assert macos_coreml.clear_comparison_failures(*key) is False
+    assert macos_coreml.comparison_failures(*key) == 1
+    assert "earlier this session" in macos_coreml.comparison_blocked(*key)
+    macos_coreml.reset_comparison_failures()   # the user's retry: GPU on
+    macos_coreml.record_runtime_failure(key, "request failed (TimeoutError)")
+    macos_coreml._session_failures.clear()      # the next launch
+    macos_coreml.record_runtime_success(key)
+    assert macos_coreml.comparison_failures(*key) == 0
+
+
 def test_two_chunks_failing_on_one_incident_count_once(comparison_rig):
     # Sol mac r4: both passed served_by before either recovery replaced the
     # process, and counted 1, 2: the whole allowance in one launch.
@@ -1657,6 +1805,49 @@ def test_a_model_picked_mid_dictation_waits_for_idle(monkeypatch, tmp_path, path
     assert os.path.expanduser(config["model_path"]) == str(model_b)
     assert events == ["retire", "warm-up"]
     assert app._pending_model_pick is None   # the next dictation's downloads apply again
+
+
+@pytest.mark.parametrize("cleanup_queued", [True, False])
+def test_a_pick_at_idle_before_the_flush_runs_is_not_replaced_by_the_queued_one(
+        monkeypatch, tmp_path, cleanup_queued):
+    # Sol mac r5: B picked mid-dictation; IDLE queues the flush; C is picked
+    # before it runs and applies at once; the flush then applied B over C.
+    import wayfinder.license as license_mod
+    import wayfinder_main
+    from wayfinder.state import AppState
+    model_b, model_c = tmp_path / "ggml-b.bin", tmp_path / "ggml-c.bin"
+    model_b.write_bytes(b"b")
+    model_c.write_bytes(b"c")
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: None)
+    monkeypatch.setattr(license_mod, "transcription_model_allowed", lambda path, gate: True)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    config = {"model_path": "~/models/a.bin"}
+    llm = (str(tmp_path / "cleanup.gguf"), None)
+    app = SimpleNamespace(
+        config=config, app_state=AppState.PROCESSING, log=lambda *a: None,
+        get_model_display=lambda: "C", _maybe_show_setup_cue=lambda: None,
+        feature_gate=SimpleNamespace(has_feature=lambda feature: True),
+        _warm_up_transcription=lambda *a, **k: None,
+        _pending_model_activations={"llm": llm} if cleanup_queued else {},
+    )
+    app._set_active_whisper_model = lambda p: wayfinder_main.WayfinderApp._set_active_whisper_model(app, p)
+    applied = []
+    app._apply_downloaded_model = lambda role, p, info=None: applied.append(role) or (
+        wayfinder_main.WayfinderApp._apply_downloaded_model(app, role, p, info) if role == "whisper" else True)
+    wayfinder_main.WayfinderApp._set_active_whisper_model(app, str(model_b))
+    app.app_state = AppState.IDLE   # the flush is queued, not yet run
+    wayfinder_main.WayfinderApp._set_active_whisper_model(app, str(model_c))
+    assert os.path.expanduser(config["model_path"]) == str(model_c)
+    wayfinder_main.WayfinderApp._flush_pending_model_activations(app)
+    assert os.path.expanduser(config["model_path"]) == str(model_c), "the queued pick replaced the newer one"
+    assert applied == (["llm"] if cleanup_queued else [])   # a queued cleanup model still applies
+    # With nothing left to flush, the next dictation's download is not
+    # mistaken for one racing a pick.
+    app.app_state = AppState.PROCESSING
+    later = tmp_path / "ggml-d.bin"
+    later.write_bytes(b"d")
+    assert wayfinder_main.WayfinderApp._activate_downloaded_model(app, "whisper", str(later)) == "deferred"
 
 
 def test_a_core_ml_backend_salvages_through_metal_cli(monkeypatch):

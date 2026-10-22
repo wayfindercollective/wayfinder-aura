@@ -96,8 +96,9 @@ or exits on its own, keeps Metal for the rest of that launch. A launch counts
 at most one failure, and a dictation cut short by sleep, Escape, Quit or a
 settings change counts none. Two failures for the same chip, files and model
 wait a day before the next try, doubling to at most a week. A finished comparison or a successful Core ML dictation clears
-the count (loading alone does not), and turning GPU acceleration on in
-Settings gives every model a fresh try.
+the count (loading alone does not, nor a success after a failure in the same
+launch), and turning GPU acceleration on in Settings gives every model a
+fresh try.
 Setting it to false and restarting is the advanced Metal-only escape hatch.
 Local weight population/package compilation took 6.6 seconds on a 24 GiB M4.
 First device specialization took another ~59 seconds there and about

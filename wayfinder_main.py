@@ -21134,6 +21134,13 @@ class WayfinderApp(ctk.CTk):
         download does: loading it reloads the server under the running
         request, whose recovery then brings the old model back (Sol mac r3)."""
         if getattr(self, "app_state", AppState.IDLE) == AppState.IDLE:
+            # It applies now: a choice still queued for the IDLE flush (picked
+            # mid-dictation, the flush not yet run) must not replace it later
+            # (Sol mac r5). A queued cleanup model is not a speech pick.
+            pending = getattr(self, "_pending_model_activations", None)
+            if pending:
+                pending.pop("whisper", None)
+            self._pending_model_pick = None
             return False
         pending = getattr(self, "_pending_model_activations", None)
         if pending is None:
