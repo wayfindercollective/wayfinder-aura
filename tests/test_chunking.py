@@ -150,16 +150,15 @@ def test_the_app_prompts_each_chunk_with_the_trimmed_context():
     # `text`/`retry` — the default config's own cleanup would otherwise
     # collapse the loop away before either check ever saw it (Sol loop r1).
     assert "raw_prompted_text = raw_prompted[0] if raw_prompted else text" in body
-    assert "chunk_text_looks_looped(raw_prompted_text, get_wav_duration_seconds(chunk_path))" in body
+    assert "chunk_text_looks_looped(raw_prompted_text)" in body
     assert "raw_retry[0] if raw_retry else retry" in body
     # The dictation's retirement is rechecked right after the retry returns,
-    # before any of its text is used (Sol loop r3, minor 4).
-    assert "WhisperServerBackend._check_not_abandoned(request_token)" in body
-    # An empty, still-looped, or too-short retry is discarded rather than
-    # trusted whole: rate alone is never enough, only the prompted text's own
-    # repetition evidence authorizes replacing it (Sol loop r3).
-    assert "evidence = chunk_loop_evidence(raw_prompted_text, get_wav_duration_seconds(chunk_path))" in body
-    assert "evidence.strong or len(retry.split()) >= evidence.kept_words" in body
+    # AND before the prompted text is salvaged on a retry failure (Sol loop
+    # r3, minor 4; Sol loop r4, finding 5) — both sides of the retry check.
+    assert body.count("WhisperServerBackend._check_not_abandoned(request_token)") == 2
+    # One bar, nothing else (Sol loop r4): a non-empty, non-looped retry
+    # always replaces the prompted text, with no word-count comparison.
+    assert "accepted = bool(retry.strip() and not retry_looped)" in body
 
 
 def test_a_collapsed_prompted_chunk_is_heard_again():
@@ -187,7 +186,8 @@ def test_a_sparse_chunk_keeps_its_words_over_a_longer_guess():
 # --- Sentence-length repetition loops ---------------------------------------
 # whisper-server runs with -nf (no temperature fallback), so a stuck decode
 # never retries a looping decode itself; the prompt from the previous chunk
-# can be exactly what tips it into looping a whole sentence.
+# can be exactly what tips it into looping a whole sentence. One bar
+# (LOOP_MIN_RUN FULL copies) both suspects and collapses a loop (Sol loop r4).
 
 def test_a_sentence_loop_collapses_to_its_first_sentence():
     from wayfinder.core.chunking import collapse_sentence_loops
@@ -198,7 +198,12 @@ def test_a_sentence_loop_collapses_to_its_first_sentence():
     loop_truncated = "If the player is level one."  # a late repeat cut short
     post = "That's the rule."
 
-    looped_text = " ".join([pre, loop, loop_other_case, loop, loop_truncated, loop, post])
+    # 5 full copies (loop_other_case counts as full: case/punctuation aside)
+    # before the trailing truncated repeat, which only rides along once the
+    # run has already earned the bar on full copies alone.
+    looped_text = " ".join(
+        [pre, loop, loop_other_case, loop, loop, loop, loop_truncated, post]
+    )
     assert collapse_sentence_loops(looped_text) == " ".join([pre, loop, post])
 
 
@@ -207,7 +212,7 @@ def test_two_loops_back_to_back_each_collapse():
 
     first = "The escort spawns at the north gate every morning."
     second = "The escort waits by the bridge until the player arrives."
-    text = " ".join([first] * 4 + [second] * 5 + ["Just for testing right now."])
+    text = " ".join([first] * 5 + [second] * 5 + ["Just for testing right now."])
     assert collapse_sentence_loops(text) == f"{first} {second} Just for testing right now."
 
 
@@ -224,7 +229,7 @@ def test_list_sentences_differing_in_one_word_all_survive():
         "stay level nine.",
     ):
         assert collapse_sentence_loops(text) == text
-        assert not chunk_text_looks_looped(text, 8.0)
+        assert not chunk_text_looks_looped(text)
 
 
 def test_text_without_a_loop_comes_back_exactly_as_given():
@@ -233,7 +238,7 @@ def test_text_without_a_loop_comes_back_exactly_as_given():
     # Whisper output often starts with a space; spacing alone is no loop.
     text = " Hello there my friend.  How are you doing today?\nI am fine thanks for asking."
     assert collapse_sentence_loops(text) is text
-    assert not chunk_text_looks_looped(text, 6.0)
+    assert not chunk_text_looks_looped(text)
 
 
 def test_distinct_complete_sentences_do_not_collapse_via_prefix_alone():
@@ -292,25 +297,26 @@ def test_an_unpunctuated_repeated_phrase_collapses():
     assert collapse_phrase_window_loops(" ".join([phrase] * 5)) == phrase
 
 
-def test_chunk_text_looks_looped_true_for_a_wordy_short_chunk():
+def test_chunk_text_looks_looped_true_for_heavy_single_word_repetition():
     from wayfinder.core.chunking import chunk_text_looks_looped
 
-    # ~170 words of a 15 s chunk: far more than dictation pace can hold.
-    assert chunk_text_looks_looped(" ".join(["word"] * 170), 15.0)
+    # The same word, well past LOOP_MIN_RUN consecutive copies: a genuine
+    # repetition loop, not a rate judgment (there is no rate check anymore).
+    assert chunk_text_looks_looped(" ".join(["word"] * 40))
 
 
-def test_chunk_text_looks_looped_true_for_a_sentence_run_regardless_of_duration():
+def test_chunk_text_looks_looped_true_for_a_sentence_run():
     from wayfinder.core.chunking import chunk_text_looks_looped
 
     loop = "If the player is level one they're going to be level one."
-    text = " ".join([loop, loop, loop])
-    assert chunk_text_looks_looped(text, None)
+    text = " ".join([loop] * 5)
+    assert chunk_text_looks_looped(text)
 
 
 def test_chunk_text_looks_looped_false_for_ordinary_dictation_pace():
     from wayfinder.core.chunking import chunk_text_looks_looped
 
-    # 40 varied, non-repeating words over 15 s — normal, unhurried dictation.
+    # 40 varied, non-repeating words — normal, unhurried dictation.
     text = (
         "We spent most of the afternoon going over the budget numbers for next "
         "quarter and the team seemed happy with where things landed after the "
@@ -318,7 +324,49 @@ def test_chunk_text_looks_looped_false_for_ordinary_dictation_pace():
         "the product launch"
     )
     assert len(text.split()) == 40
-    assert not chunk_text_looks_looped(text, 15.0)
+    assert not chunk_text_looks_looped(text)
+
+
+def test_chunk_text_looks_looped_takes_no_seconds_argument():
+    from wayfinder.core.chunking import chunk_text_looks_looped
+
+    # Sol loop r4: word rate is no longer part of loop detection at all;
+    # chunk_text_looks_looped is a one-argument function now.
+    import inspect
+
+    params = list(inspect.signature(chunk_text_looks_looped).parameters)
+    assert params == ["text"]
+
+
+def test_three_and_four_copies_of_a_short_sentence_are_not_looped():
+    from wayfinder.core.chunking import chunk_text_looks_looped, collapse_sentence_loops
+
+    # Below LOOP_MIN_RUN (5): nothing happens, no retry and no collapse,
+    # however many times someone says a short sentence on purpose.
+    sentence = "We need to go home."
+    for copies in (3, 4):
+        text = " ".join([sentence] * copies)
+        assert not chunk_text_looks_looped(text)
+        assert collapse_sentence_loops(text) == text
+
+
+def test_five_copies_of_a_short_sentence_are_looped_and_collapse():
+    from wayfinder.core.chunking import chunk_text_looks_looped, collapse_sentence_loops
+
+    sentence = "We need to go home."
+    text = " ".join([sentence] * 5)
+    assert chunk_text_looks_looped(text)
+    assert collapse_sentence_loops(text) == sentence
+
+
+def test_three_and_four_copies_of_an_unpunctuated_phrase_are_not_looped():
+    from wayfinder.core.chunking import chunk_text_looks_looped, collapse_phrase_window_loops
+
+    phrase = "we need to go home"
+    for copies in (3, 4):
+        text = " ".join([phrase] * copies)
+        assert not chunk_text_looks_looped(text)
+        assert collapse_phrase_window_loops(text) == text
 
 
 # --- Composite periods and punctuation-blind phrase loops -------------------
@@ -352,8 +400,8 @@ def test_a_phrase_loop_inside_one_sentence_is_caught_despite_terminal_punctuatio
     # repetition inside it. The old punctuation gate on
     # collapse_phrase_window_loops left this loop uncaught entirely.
     phrase = "we need to update the database before lunch"
-    text = " ".join([phrase] * 3) + "."
-    assert chunk_text_looks_looped(text, 17.0)
+    text = " ".join([phrase] * 5) + "."
+    assert chunk_text_looks_looped(text)
     collapsed = collapse_phrase_window_loops(collapse_sentence_loops(text))
     assert collapsed != text
     assert collapsed.rstrip(".") == phrase
@@ -383,17 +431,19 @@ def test_phrase_windows_do_not_erase_a_sentence_boundary():
         "We need to go home before dinner."
     )
     assert collapse_phrase_window_loops(text) is text
-    assert not chunk_text_looks_looped(text, 10.0)
+    assert not chunk_text_looks_looped(text)
 
 
 def test_a_collapse_exposes_a_smaller_loop_in_one_call_and_is_idempotent():
     from wayfinder.core.chunking import collapse_phrase_window_loops
 
     # Sol loop r2: collapsing the 6-word loop exposes a 5-word one, which a
-    # scan only upward from 6 never saw.
+    # scan only upward from 6 never saw. Scaled to clear LOOP_MIN_RUN (5) at
+    # both the outer (5 copies of q) and the exposed inner level (2 copies
+    # from the prefix+q collapse, plus 3 more copies of p) (Sol loop r4).
     p = "we need to go home"
     q = "home we need to go home"
-    text = " ".join(["we need to go", q, q, q, p])
+    text = " ".join(["we need to go"] + [q] * 5 + [p] * 3)
     once = collapse_phrase_window_loops(text)
     assert once == p
     assert collapse_phrase_window_loops(once) == once
@@ -412,7 +462,7 @@ def test_a_closing_quote_after_the_period_still_splits_the_sentence():
         '"We need to go home before dinner."'
     )
     assert collapse_sentence_loops(text) is text
-    assert not chunk_text_looks_looped(text, 10.0)
+    assert not chunk_text_looks_looped(text)
 
 
 def test_a_closing_quote_survives_the_full_default_cleanup_unchanged():
@@ -435,99 +485,100 @@ def test_other_closers_also_split_the_sentence(closer):
     assert collapse_sentence_loops(text) is text
 
 
-# --- min_run: the non-destructive "suspect" bar vs. the cleanup bar --------
-# LOOP_MIN_RUN (3) only suspects a loop; LOOP_CLEANUP_MIN_RUN (5) is what
-# unprompted cleanup (clean_whisper_artifacts) collapses at, so 3-4 copies of
-# intentional repetition survive it (Sol loop r3).
+# --- Sol loop r4, finding 2: truncated repeats never count toward the bar --
 
-def test_three_copies_suspect_a_loop_but_do_not_collapse_at_the_cleanup_bar():
+def test_two_distinct_prefix_sentences_do_not_inflate_three_full_copies():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    # Three full copies, then two shorter, DISTINCT sentences that happen to
+    # be prefixes of the anchor. Round-4 finding 2: the old cleanup bar let
+    # truncated repeats join the run's length even though full_copies alone
+    # (3) never reached it, inflating 3 full + 2 prefixes past the bar and
+    # collapsing all five to the first. Full copies alone decide now.
+    anchor = "We need to leave this building right now."
+    shorter = "We need to leave this building."
+    shortest = "We need to leave."
+    text = " ".join([anchor] * 3 + [shorter, shortest])
+    assert collapse_sentence_loops(text) == text
+
+
+def test_a_truncated_repeat_only_rides_a_run_that_already_has_five_full():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    # The mirror case: once full_copies reaches the bar on its own, a
+    # trailing truncated repeat is absorbed into the collapse rather than
+    # surviving as a leftover fragment.
+    anchor = "We need to leave this building right now."
+    shorter = "We need to leave this building."
+    text = " ".join([anchor] * 5 + [shorter])
+    assert collapse_sentence_loops(text) == anchor
+
+
+# --- Sol loop r4, finding 3: quoted list items are never crossed -----------
+
+def test_a_quoted_list_with_periods_survives_full_default_cleanup():
     from wayfinder.core.chunking import (
-        LOOP_CLEANUP_MIN_RUN,
-        LOOP_MIN_RUN,
+        chunk_text_looks_looped,
+        collapse_phrase_window_loops,
         collapse_sentence_loops,
     )
 
-    sentence = "We need to go home."
-    text = " ".join([sentence] * 3)
-    assert collapse_sentence_loops(text, min_run=LOOP_MIN_RUN) == sentence
-    assert collapse_sentence_loops(text, min_run=LOOP_CLEANUP_MIN_RUN) is text
+    item = '"We need to go home.",'
+    text = " ".join([item] * 4 + ['"We need to go home before dinner."'])
+    assert not chunk_text_looks_looped(text)
+    assert collapse_phrase_window_loops(collapse_sentence_loops(text)) == text
 
 
-def test_four_copies_still_survive_the_cleanup_bar():
-    from wayfinder.core.chunking import LOOP_CLEANUP_MIN_RUN, collapse_sentence_loops
-
-    sentence = "We need to go home."
-    text = " ".join([sentence] * 4)
-    assert collapse_sentence_loops(text, min_run=LOOP_CLEANUP_MIN_RUN) is text
-
-
-def test_five_copies_collapse_at_the_cleanup_bar():
-    from wayfinder.core.chunking import LOOP_CLEANUP_MIN_RUN, collapse_sentence_loops
-
-    sentence = "We need to go home."
-    text = " ".join([sentence] * 5)
-    assert collapse_sentence_loops(text, min_run=LOOP_CLEANUP_MIN_RUN) == sentence
-
-
-def test_an_unpunctuated_phrase_x3_survives_the_cleanup_bar_but_not_min_run():
+def test_a_quoted_list_with_no_periods_survives_full_default_cleanup():
     from wayfinder.core.chunking import (
-        LOOP_CLEANUP_MIN_RUN,
-        LOOP_MIN_RUN,
+        chunk_text_looks_looped,
         collapse_phrase_window_loops,
+        collapse_sentence_loops,
     )
 
-    phrase = "we need to go home"
-    text = " ".join([phrase] * 3)
-    assert collapse_phrase_window_loops(text, min_run=LOOP_MIN_RUN) == phrase
-    assert collapse_phrase_window_loops(text, min_run=LOOP_CLEANUP_MIN_RUN) == text
+    # Same list, no terminal periods at all: _SENTENCE_END can't split this
+    # (it needs [.!?]), so only the phrase-window span boundary — a closing
+    # quote/bracket alone, even without one — keeps the scan off the item.
+    item = '"we need to go home",'
+    text = " ".join([item] * 4 + ['"we need to go home before dinner"'])
+    assert not chunk_text_looks_looped(text)
+    assert collapse_phrase_window_loops(collapse_sentence_loops(text)) == text
 
 
-# --- chunk_loop_evidence: repetition required, rate alone is never enough --
+# --- Sol loop r4, finding 4: loop normalisation keeps numeric meaning ------
 
-def test_chunk_loop_evidence_is_none_for_a_fast_nonrepeating_chunk():
-    from wayfinder.core.chunking import chunk_loop_evidence
+def test_alternating_decimal_and_whole_number_sentences_all_survive():
+    from wayfinder.core.chunking import collapse_sentence_loops
 
-    # Sol loop r3: rate alone used to authorize a destructive replacement
-    # with no repetition at all.
-    text = (
-        "Pack my red bag with the clean socks then put that blue coat by "
-        "the front door and leave the keys on top so I can find them when "
-        "I leave."
-    )
-    assert len(text.split()) == 31
-    assert chunk_loop_evidence(text, 5.0) is None
+    # _norm (used by find_text_overlap) strips a leading "." too, which
+    # would wrongly equate ".5" and "5"; _loop_norm only strips trailing.
+    decimal = "Please set the scale to .5."
+    whole = "Please set the scale to 5."
+    text = " ".join([decimal, whole, decimal, whole, decimal])
+    assert collapse_sentence_loops(text) == text
 
 
-def test_chunk_loop_evidence_is_weak_for_three_ordinary_paced_copies():
-    from wayfinder.core.chunking import chunk_loop_evidence
+def test_five_identical_decimal_sentences_still_collapse():
+    from wayfinder.core.chunking import collapse_sentence_loops
 
-    sentence = "We need to go home."
-    text = " ".join([sentence] * 3)
-    evidence = chunk_loop_evidence(text, 17.0)
-    assert evidence is not None
-    assert evidence.strong is False
-    assert evidence.kept_words == len(sentence.split())
+    decimal = "Please set the scale to .5."
+    text = " ".join([decimal] * 5)
+    assert collapse_sentence_loops(text) == decimal
 
 
-def test_chunk_loop_evidence_is_strong_when_the_run_collapses_at_the_cleanup_bar():
-    from wayfinder.core.chunking import chunk_loop_evidence
+# --- The user's real case (Sol loop r4) -------------------------------------
 
-    sentence = "We need to go home."
-    text = " ".join([sentence] * 13)
-    evidence = chunk_loop_evidence(text, 17.0)
-    assert evidence is not None
-    assert evidence.strong is True
+def test_the_reported_shape_collapses_fully_except_the_intentional_copies():
+    from wayfinder.core.chunking import chunk_text_looks_looped, collapse_sentence_loops
 
-
-def test_chunk_loop_evidence_is_strong_by_rate_only_with_real_repetition_present():
-    from wayfinder.core.chunking import chunk_loop_evidence
-
-    # Three copies of a long sentence in a short chunk: too few to collapse
-    # at the cleanup bar, but the rate alone is implausible for speech. Rate
-    # only makes already-suspected repetition strong — it never conjures
-    # evidence out of nonrepeating text (see the "fast nonrepeating" test).
-    sentence = "we packed the car with every bag we could carry for the trip"
-    text = " ".join([sentence] * 3)
-    evidence = chunk_loop_evidence(text, 5.0)
-    assert evidence is not None
-    assert evidence.strong is True
+    # 3 intentional copies of a "level 5" sentence, then the stuck decode:
+    # 8 full copies of a "level 1" sentence, one cut short, then one more
+    # full copy. The level-5 sentences are a different anchor (only 3 full
+    # copies of THAT sentence) and must survive; the level-1 run clears the
+    # bar on its 9 full copies alone and the cut-short rides along.
+    level5 = "If the player is level 5 they're going to be level 1."
+    level1 = "If the player is level 1 they're going to be level 1."
+    level1_cut = "If the player is level 1."
+    text = " ".join([level5] * 3 + [level1] * 8 + [level1_cut, level1])
+    assert chunk_text_looks_looped(text)
+    assert collapse_sentence_loops(text) == " ".join([level5] * 3 + [level1])

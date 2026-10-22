@@ -25022,7 +25022,6 @@ class WayfinderApp(ctk.CTk):
                 # A prompt can make Whisper return a fragment for a whole chunk
                 # of speech; hear it once more without one and keep the fuller.
                 from wayfinder.core.chunking import (
-                    chunk_loop_evidence,
                     chunk_text_looks_looped,
                     chunk_text_looks_truncated,
                     prefer_fuller_chunk_text,
@@ -25042,7 +25041,7 @@ class WayfinderApp(ctk.CTk):
                 # non-looped retry wins.
                 raw_prompted_text = raw_prompted[0] if raw_prompted else text
 
-                if chunk_text_looks_looped(raw_prompted_text, get_wav_duration_seconds(chunk_path)):
+                if chunk_text_looks_looped(raw_prompted_text):
                     # The prompt made Whisper echo its own last chunk into a stuck
                     # loop; hear it again without one — same shape as the
                     # truncated-chunk retry below, same call shape.
@@ -25057,6 +25056,15 @@ class WayfinderApp(ctk.CTk):
                     except TranscriptionError as e:
                         # A failed retry keeps the cleaned prompted text
                         # rather than lose the chunk to [error] (Sol loop r2).
+                        # The retirement that can land between the prompted
+                        # decode and this failure is rechecked here too, same
+                        # as the success path below — the prompted text must
+                        # never be salvaged for a dictation that no longer
+                        # owns this chunk (Sol loop r4, finding 5).
+                        from wayfinder.core.transcriber import WhisperServerBackend
+
+                        WhisperServerBackend._check_not_abandoned(request_token)
+
                         self.log(f"🔁 Chunk {chunk_index + 1} loop retry failed "
                                  f"({type(e).__name__}); keeping prompted text")
                     else:
@@ -25067,32 +25075,24 @@ class WayfinderApp(ctk.CTk):
 
                         WhisperServerBackend._check_not_abandoned(request_token)
 
-                        retry_looped = chunk_text_looks_looped(
-                            raw_retry[0] if raw_retry else retry, get_wav_duration_seconds(chunk_path)
-                        )
-                        # Rate alone never authorizes replacement — evidence is
-                        # the prompted text's own repetition (Sol loop r3). A
-                        # weak run (ordinary-paced, intentional repetition)
-                        # only loses to a retry at least as long as what the
-                        # non-destructive collapse kept; a strong one (collapses
-                        # even at the cleanup bar, or paced faster than speech)
-                        # loses to any non-empty, non-looped retry.
-                        evidence = chunk_loop_evidence(raw_prompted_text, get_wav_duration_seconds(chunk_path))
-                        accepted = bool(
-                            retry.strip() and not retry_looped and evidence is not None
-                            and (evidence.strong or len(retry.split()) >= evidence.kept_words)
-                        )
+                        retry_looped = chunk_text_looks_looped(raw_retry[0] if raw_retry else retry)
+                        # One bar, nothing else (Sol loop r4): a non-empty,
+                        # non-looped retry always replaces the prompted text.
+                        # No word-count comparison — that used to let a
+                        # hypothetically-collapsed word count authorize
+                        # deleting intentional repeats a retry barely matched.
+                        accepted = bool(retry.strip() and not retry_looped)
                         if accepted:
                             self.log(f"🔁 Chunk {chunk_index + 1} looped with its prompt; "
                                      f"retry accepted ({len(text.split())} → {len(retry.split())} words)")
                             text = retry
                         else:
-                            # Rejected (empty, still looped, or too short to
-                            # trust): keep the prompted rendering as
-                            # transcribe_with_config already cleaned it under
-                            # the user's own config, rather than re-collapsing
-                            # it by hand and ignoring a
-                            # collapse_whisper_repetitions=False the user chose.
+                            # Rejected (empty or still looped): keep the
+                            # prompted rendering as transcribe_with_config
+                            # already cleaned it under the user's own config,
+                            # rather than re-collapsing it by hand and
+                            # ignoring a collapse_whisper_repetitions=False
+                            # the user chose.
                             self.log(f"🔁 Chunk {chunk_index + 1} looped with its prompt; "
                                      f"kept prompted text ({len(text.split())} words)")
                 elif chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
