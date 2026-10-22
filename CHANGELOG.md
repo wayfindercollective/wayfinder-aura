@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A chunk no longer repeats the same sentence over and over.** In Auto mode,
+  a chunk prompted with the previous chunk's text could get stuck echoing one
+  sentence many times instead of hearing the rest of the speech. A looping
+  chunk is now re-heard without that prompt, and any loop that still slips
+  through is collapsed down to the sentence it actually said.
+
 ## [1.3.0] — 2026-10-20
 
 ### Added

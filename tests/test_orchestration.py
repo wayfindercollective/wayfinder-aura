@@ -1336,6 +1336,52 @@ class TestChunkRetryAfterReset:
             assert store == ["[error]"]
 
 
+class TestLoopedChunkRetry:
+    def test_a_looped_prompted_chunk_is_heard_again_without_context(
+        self, app, monkeypatch, tmp_path
+    ):
+        # A chunk prompted with the previous chunk's text can make whisper-
+        # server's decode get stuck looping that prompt; same shape as the
+        # truncated-chunk retry, heard again without the prompt that caused it.
+        # collapse_whisper_repetitions is off here so the loop reaches this
+        # retry logic instead of being cleaned up first (the default path).
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(
+            WApp, "_asr_config_for_dictation",
+            lambda self: {"collapse_whisper_repetitions": False},
+        )
+        monkeypatch.setattr(wayfinder_main, "wav_has_speech_activity", lambda _p: True)
+        monkeypatch.setattr(wayfinder_main, "get_wav_peak_amplitude", lambda _p: 20000)
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        sentence = "if the player is level one they are going to be level one."
+        looped = " ".join([sentence] * 14)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return looped if context else sentence
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""   # first heard with the prompt, looped
+        assert contexts_heard[1] == ""   # retried without it
+        # Sentence-case capitalization is applied by post-processing; the
+        # words themselves are the single retried sentence, not 14 repeats.
+        assert store[1].lower() == sentence
+        assert any("looped" in message.lower() for message in app.logs)
+
+
 class TestChunkSilenceGuard:
     def test_silent_trailing_chunk_skips_whisper_and_completes_store(
         self, app, monkeypatch, tmp_path

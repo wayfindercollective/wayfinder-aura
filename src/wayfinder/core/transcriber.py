@@ -3261,6 +3261,15 @@ def clean_whisper_artifacts(
     # the other artifact/silence guards in this function.
     if collapse_repetitions:
         text = _collapse_whisper_repetitions(text)
+        # _collapse_whisper_repetitions only tries 2-4 word windows, so a stuck
+        # decode that loops a whole SENTENCE (whisper-server runs -nf, so it
+        # never retries a looping decode itself) passes through untouched.
+        # Shared with chunk_text_looks_looped (chunking.py), which decides
+        # whether to re-hear a prompted chunk unprompted in the first place.
+        from wayfinder.core.chunking import collapse_phrase_window_loops, collapse_sentence_loops
+
+        text = collapse_sentence_loops(text)
+        text = collapse_phrase_window_loops(text)
 
     # Clean up multiple spaces
     text = re.sub(r'\s+', ' ', text)

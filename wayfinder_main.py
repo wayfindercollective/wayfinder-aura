@@ -25020,7 +25020,10 @@ class WayfinderApp(ctk.CTk):
                 # A prompt can make Whisper return a fragment for a whole chunk
                 # of speech; hear it once more without one and keep the fuller.
                 from wayfinder.core.chunking import (
+                    chunk_text_looks_looped,
                     chunk_text_looks_truncated,
+                    collapse_phrase_window_loops,
+                    collapse_sentence_loops,
                     prefer_fuller_chunk_text,
                 )
 
@@ -25034,6 +25037,27 @@ class WayfinderApp(ctk.CTk):
                         self.log(f"↻ Chunk {chunk_index + 1} re-heard without context "
                                  f"({len(text.split())} → {len(fuller.split())} words)")
                     text = fuller
+                elif chunk_text_looks_looped(text, get_wav_duration_seconds(chunk_path)):
+                    # The prompt made Whisper echo its own last chunk into a stuck
+                    # loop; hear it again without one — same shape as the
+                    # truncated-chunk retry above, same call shape.
+                    retry = transcribe_with_config(
+                        chunk_path, asr_cfg, context="", skip_post_processing=True,
+                        request_token=request_token,
+                    )
+                    if chunk_text_looks_looped(retry, get_wav_duration_seconds(chunk_path)):
+                        # Loops even unprompted — keep whichever collapses shorter
+                        # rather than trust either rendering whole.
+                        collapsed_prompted = collapse_phrase_window_loops(collapse_sentence_loops(text))
+                        collapsed_retry = collapse_phrase_window_loops(collapse_sentence_loops(retry))
+                        text = (
+                            collapsed_retry
+                            if len(collapsed_retry.split()) < len(collapsed_prompted.split())
+                            else collapsed_prompted
+                        )
+                    else:
+                        text = retry
+                    self.log(f"🔁 Chunk {chunk_index + 1} looped with its prompt; retried without it")
             # Write into this session's private store — never touches a newer session's list.
             with self.chunk_transcription_lock:
                 while len(store) <= chunk_index:

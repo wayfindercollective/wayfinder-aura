@@ -145,6 +145,9 @@ def test_the_app_prompts_each_chunk_with_the_trimmed_context():
     # A collapsed prompted chunk is heard again without the prompt.
     assert "chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path))" in body
     assert "prefer_fuller_chunk_text(text, retry)" in body
+    # A chunk that loops with its prompt is heard again without one too.
+    assert "chunk_text_looks_looped(text, get_wav_duration_seconds(chunk_path))" in body
+    assert "chunk_text_looks_looped(retry, get_wav_duration_seconds(chunk_path))" in body
 
 
 def test_a_collapsed_prompted_chunk_is_heard_again():
@@ -167,3 +170,130 @@ def test_a_sparse_chunk_keeps_its_words_over_a_longer_guess():
     prompted = "okay let me think here"
     guess = "okay let me think here thank you for watching"
     assert prefer_fuller_chunk_text(prompted, guess) == prompted
+
+
+# --- Sentence-length repetition loops ---------------------------------------
+# whisper-server runs with -nf (no temperature fallback), so a stuck decode
+# never retries a looping decode itself; the prompt from the previous chunk
+# can be exactly what tips it into looping a whole sentence.
+
+def test_a_sentence_loop_collapses_to_its_first_sentence():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    pre = "Let's go over the plan first."
+    loop = "If the player is level one they're going to be level one."
+    loop_other_case = "if the player is level one, they're going to be level one!"
+    loop_truncated = "If the player is level one."  # a late repeat cut short
+    post = "That's the rule."
+
+    looped_text = " ".join([pre, loop, loop_other_case, loop, loop_truncated, loop, post])
+    assert collapse_sentence_loops(looped_text) == " ".join([pre, loop, post])
+
+
+def test_two_loops_back_to_back_each_collapse():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    first = "The escort spawns at the north gate every morning."
+    second = "The escort waits by the bridge until the player arrives."
+    text = " ".join([first] * 4 + [second] * 5 + ["Just for testing right now."])
+    assert collapse_sentence_loops(text) == f"{first} {second} Just for testing right now."
+
+
+def test_list_sentences_differing_in_one_word_all_survive():
+    from wayfinder.core.chunking import chunk_text_looks_looped, collapse_sentence_loops
+
+    # Similar is not a loop: a stuck decode repeats itself word for word.
+    for text in (
+        "Add eggs to the list. Add milk to the list. Add bread to the list.",
+        "I need eggs from the store. I need milk from the store. "
+        "I need bread from the store.",
+        "If the player is level one they stay level one. If the player is "
+        "level five they stay level five. If the player is level nine they "
+        "stay level nine.",
+    ):
+        assert collapse_sentence_loops(text) == text
+        assert not chunk_text_looks_looped(text, 8.0)
+
+
+def test_text_without_a_loop_comes_back_exactly_as_given():
+    from wayfinder.core.chunking import chunk_text_looks_looped, collapse_sentence_loops
+
+    # Whisper output often starts with a space; spacing alone is no loop.
+    text = " Hello there my friend.  How are you doing today?\nI am fine thanks for asking."
+    assert collapse_sentence_loops(text) is text
+    assert not chunk_text_looks_looped(text, 6.0)
+
+
+def test_a_short_fragment_does_not_extend_a_run():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    # "So." is a prefix of the sentence, but too short to be its cut-short repeat.
+    text = "So I went to the store today. So. So. So I went to the store today."
+    assert collapse_sentence_loops(text) == text
+
+
+def test_two_repeats_of_a_sentence_survive():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    # People do say a sentence twice; only 3+ in a row is a loop.
+    text = "Ship the full build to the team today. Ship the full build to the team today."
+    assert collapse_sentence_loops(text) == text
+
+
+def test_a_numbered_list_survives():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    # Shares "Step ... is to ..." structure across all three, which can push
+    # a naive similarity check too high — but not within LOOP_SIMILARITY_RATIO.
+    text = (
+        "Step one is to open the file. Step two is to edit the text. "
+        "Step three is to save your changes."
+    )
+    assert collapse_sentence_loops(text) == text
+
+
+def test_sentences_sharing_a_prefix_but_differing_in_meaning_survive():
+    from wayfinder.core.chunking import collapse_sentence_loops
+
+    # Twice, not three-in-a-row, and the second extends the first's meaning.
+    text = (
+        "I need to call the dentist tomorrow morning. "
+        "I need to call the dentist tomorrow morning and reschedule my cleaning."
+    )
+    assert collapse_sentence_loops(text) == text
+
+
+def test_an_unpunctuated_repeated_phrase_collapses():
+    from wayfinder.core.chunking import collapse_phrase_window_loops
+
+    phrase = "we need to update the database before lunch"
+    assert collapse_phrase_window_loops(" ".join([phrase] * 5)) == phrase
+
+
+def test_chunk_text_looks_looped_true_for_a_wordy_short_chunk():
+    from wayfinder.core.chunking import chunk_text_looks_looped
+
+    # ~170 words of a 15 s chunk: far more than dictation pace can hold.
+    assert chunk_text_looks_looped(" ".join(["word"] * 170), 15.0)
+
+
+def test_chunk_text_looks_looped_true_for_a_sentence_run_regardless_of_duration():
+    from wayfinder.core.chunking import chunk_text_looks_looped
+
+    loop = "If the player is level one they're going to be level one."
+    text = " ".join([loop, loop, loop])
+    assert chunk_text_looks_looped(text, None)
+
+
+def test_chunk_text_looks_looped_false_for_ordinary_dictation_pace():
+    from wayfinder.core.chunking import chunk_text_looks_looped
+
+    # 40 varied, non-repeating words over 15 s — normal, unhurried dictation.
+    text = (
+        "We spent most of the afternoon going over the budget numbers for next "
+        "quarter and the team seemed happy with where things landed after the "
+        "review meeting this morning before lunch so we moved on to planning "
+        "the product launch"
+    )
+    assert len(text.split()) == 40
+    assert not chunk_text_looks_looped(text, 15.0)

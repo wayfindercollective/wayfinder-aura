@@ -67,6 +67,140 @@ def _norm(word: str) -> str:
     return word.lower().strip(".,!?;:\"'`")
 
 
+# A prompted chunk can also come back the other way: whisper-server runs with
+# -nf (no temperature fallback), so a decode that starts looping a sentence
+# never gets retried internally and just keeps going for the rest of the
+# chunk. Dictation runs ~2-3 words/second (fast speech, ~4-5); well beyond
+# that for a chunk long enough to judge is almost always a stuck loop rather
+# than real speech.
+MAX_WORDS_PER_SECOND = 6.0
+_MIN_LOOP_SECONDS = 5.0
+
+# The loop shape itself, independent of word rate: a run of LOOP_MIN_RUN or
+# more consecutive sentences/phrases, each LOOP_PHRASE_MIN_WORDS to
+# LOOP_PHRASE_MAX_WORDS words, that repeat the run's first member word for
+# word. Shared with the post-processing collapse in transcriber.py's
+# clean_whisper_artifacts so a chunk flagged here is the same chunk that gets
+# cleaned up there.
+LOOP_PHRASE_MIN_WORDS = 5
+LOOP_PHRASE_MAX_WORDS = 40
+LOOP_MIN_RUN = 3
+# A repeat cut short still counts, from this many words.
+LOOP_TRUNCATED_MIN_WORDS = 3
+
+
+def _loop_words(phrase: str) -> list[str]:
+    """Normalised words for loop matching (see _norm) with empties dropped."""
+    return [w for w in (_norm(word) for word in phrase.split()) if w]
+
+
+def _is_loop_repeat(anchor_words: list[str], candidate_words: list[str]) -> bool:
+    """Whether ``candidate_words`` is the same looped phrase as ``anchor_words``.
+
+    The same words (case and punctuation aside), or the anchor cut short — a
+    late repeat in a loop sometimes ends early, e.g. "if the player is level
+    one." for the full sentence. Never merely similar: parallel sentences
+    differing in one word ("Add eggs to the list. Add milk to the list. Add
+    bread to the list.") are real dictation and must all survive.
+    """
+    if candidate_words == anchor_words:
+        return True
+    return (
+        LOOP_TRUNCATED_MIN_WORDS <= len(candidate_words) < len(anchor_words)
+        and candidate_words == anchor_words[: len(candidate_words)]
+    )
+
+
+def collapse_sentence_loops(text: str) -> str:
+    """Collapse a run of 3+ consecutive repeats of one sentence to the first.
+
+    Targets a stuck decode that loops a whole SENTENCE — _collapse_whisper_
+    repetitions (transcriber.py) only tries 2-4 word windows, so a loop built
+    from 5-40 word sentences passes it untouched. Two repeats are left alone
+    (people do say a sentence twice), and only word-for-word repeats (or one
+    cut short) join a run, so list-like sentences differing in a word all
+    survive. Text with no run comes back exactly as given.
+    """
+    if not any(mark in text for mark in ".!?"):
+        return text  # nothing to split on; collapse_phrase_window_loops covers this
+
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
+    if len(sentences) < LOOP_MIN_RUN:
+        return text
+
+    kept = []
+    changed = False
+    i = 0
+    while i < len(sentences):
+        anchor_words = _loop_words(sentences[i])
+        if not (LOOP_PHRASE_MIN_WORDS <= len(anchor_words) <= LOOP_PHRASE_MAX_WORDS):
+            kept.append(sentences[i])
+            i += 1
+            continue
+
+        j = i + 1
+        while j < len(sentences) and _is_loop_repeat(anchor_words, _loop_words(sentences[j])):
+            j += 1
+
+        kept.append(sentences[i])  # first member only, whether or not a run formed
+        if j - i >= LOOP_MIN_RUN:
+            changed = True
+            i = j
+        else:
+            i += 1
+
+    return " ".join(kept) if changed else text
+
+
+def collapse_phrase_window_loops(text: str) -> str:
+    """Same loop shape as collapse_sentence_loops, for speech with no sentence
+    punctuation to split on — scans fixed-size word windows instead."""
+    if any(mark in text for mark in ".!?"):
+        return text  # collapse_sentence_loops above already covers this text
+
+    words = text.split()
+    if len(words) < LOOP_MIN_RUN * LOOP_PHRASE_MIN_WORDS:
+        return text
+
+    max_window = min(LOOP_PHRASE_MAX_WORDS, len(words) // LOOP_MIN_RUN)
+    for window in range(max_window, LOOP_PHRASE_MIN_WORDS - 1, -1):
+        kept = []
+        i = 0
+        changed = False
+        while i < len(words):
+            if i + window > len(words):
+                kept.extend(words[i:])
+                break
+            anchor_words = [_norm(w) for w in words[i:i + window]]
+            j = i + window
+            while j + window <= len(words) and _is_loop_repeat(
+                anchor_words, [_norm(w) for w in words[j:j + window]]
+            ):
+                j += window
+            if (j - i) // window >= LOOP_MIN_RUN:
+                kept.extend(words[i:i + window])  # first occurrence only
+                i = j
+                changed = True
+            else:
+                kept.append(words[i])
+                i += 1
+        if changed:
+            return " ".join(kept)
+    return text
+
+
+def chunk_text_looks_looped(text: str, seconds: float | None) -> bool:
+    """Whether a prompted chunk's text is a Whisper repetition loop, not real speech."""
+    if not text:
+        return False
+    words = text.split()
+    if seconds and seconds >= _MIN_LOOP_SECONDS and len(words) > MAX_WORDS_PER_SECOND * seconds:
+        return True
+    return (
+        collapse_phrase_window_loops(collapse_sentence_loops(text)) != text
+    )
+
+
 def find_text_overlap(
     text1: str,
     text2: str,

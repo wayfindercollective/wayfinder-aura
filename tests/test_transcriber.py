@@ -1414,6 +1414,18 @@ class TestWhisperArtifactCleanup:
             "Hello [MUSIC] world.", collapse_repetitions=False
         ) == "Hello world."
 
+    def test_a_sentence_length_repetition_loop_is_collapsed(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # _collapse_whisper_repetitions alone only tries 2-4 word windows, so
+        # a stuck decode looping a whole sentence needs the sibling collapse
+        # that clean_whisper_artifacts also runs under the same switch.
+        pre = "Let's go over the plan first."
+        loop = "If the player is level one they're going to be level one."
+        looped_text = " ".join([pre, loop, loop, loop])
+        assert clean_whisper_artifacts(looped_text) == f"{pre} {loop}"
+        assert clean_whisper_artifacts(looped_text, collapse_repetitions=False) == looped_text
+
     @pytest.mark.parametrize("text", [
         "I'll see you next time.",
         "We'll see you next time.",
