@@ -706,6 +706,24 @@ def reopen_tracked() -> None:
         _tracked_closed = False
 
 
+def _polled_helper_exited(pid: int) -> bool:
+    """Whether a helper has exited when no kernel exit notification is usable.
+
+    kill(pid, 0) also succeeds for an unreaped Linux zombie. The watcher is
+    the helper's sibling and cannot reap it, so use procfs's state when
+    available; unreadable process metadata stays conservatively alive.
+    """
+    if not parent_process_alive(pid):
+        return True
+    if sys.platform.startswith("linux"):
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            return fields[0] in ("Z", "X")
+        except (OSError, IndexError):
+            pass
+    return False
+
+
 class _Watch:
     """Wakes on news from the app's pipe (a byte, or end of file) or on the
     helper's exit. kqueue on macOS; a pidfd and select() where only that
@@ -730,8 +748,9 @@ class _Watch:
             try:
                 self._pidfd = os.pidfd_open(child_pid)
             except OSError:
-                self.child_gone = True
-        elif not parent_process_alive(child_pid):
+                # An unavailable/denied pidfd is not evidence of exit.
+                self.child_gone = _polled_helper_exited(child_pid)
+        elif _polled_helper_exited(child_pid):
             self.child_gone = True
 
     def close_pipe(self) -> None:
@@ -766,7 +785,7 @@ class _Watch:
             ready = []
         if self._pidfd is not None and self._pidfd in ready:
             self.child_gone = True
-        if self._pidfd is None and not parent_process_alive(self.child_pid):
+        if self._pidfd is None and _polled_helper_exited(self.child_pid):
             self.child_gone = True
         return self.pipe_fd in ready
 

@@ -1827,8 +1827,7 @@ def test_quitting_flushes_a_pending_clipboard_restore(monkeypatch):
 # landing again, and log once -- never nothing -- if they never do.
 
 def test_a_restore_whose_writes_keep_failing_stays_pending_and_logs_once(monkeypatch):
-    fake, iw = _real_timer_rig(monkeypatch, "theirs")
-    monkeypatch.setattr(iw, "RESTORE_DEFERRED_RETRY_S", 0.02)
+    fake, iw, timers = _manual_restore_rig(monkeypatch, "theirs")
     lines = []
     monkeypatch.setattr(iw, "_paste_reporter", lines.append)
     text_writes = [0]
@@ -1845,22 +1844,20 @@ def test_a_restore_whose_writes_keep_failing_stays_pending_and_logs_once(monkeyp
     iw._pending_restore.schedule(
         iw._restore_job(previous, "dictation", mark, iw._NullDiagnostics()), delay=0.02)
 
-    deadline = time.monotonic() + 5
-    while not lines and time.monotonic() < deadline:
-        time.sleep(0.02)
+    for _ in range(1 + iw.RESTORE_DEFERRED_RETRIES):
+        timers[-1].fire()
     assert len(lines) == 1
     assert "repeated attempts" in lines[0] and "theirs" not in lines[0]
     # Still never restored -- the mark-only state the old code mistook for
     # "done" -- and nothing keeps running after the one log line.
     assert fake.clipboard != "theirs"
     assert iw._clipboard_mark() == mark
-    time.sleep(0.1)
+    assert len(timers) == 1 + iw.RESTORE_DEFERRED_RETRIES
     assert len(lines) == 1   # bounded: no further retries past the log
 
 
 def test_a_pending_restore_recovers_once_writes_succeed_again(monkeypatch):
-    fake, iw = _real_timer_rig(monkeypatch, "theirs")
-    monkeypatch.setattr(iw, "RESTORE_DEFERRED_RETRY_S", 0.02)
+    fake, iw, timers = _manual_restore_rig(monkeypatch, "theirs")
     lines = []
     monkeypatch.setattr(iw, "_paste_reporter", lines.append)
     refuse = [False]
@@ -1874,7 +1871,7 @@ def test_a_pending_restore_recovers_once_writes_succeed_again(monkeypatch):
     job = iw._restore_job(previous, "dictation", mark, iw._NullDiagnostics())
     iw._pending_restore.schedule(job, delay=0.02)
 
-    time.sleep(0.08)                 # at least one failed, deferred attempt
+    timers[-1].fire()               # one complete failed restore, clipboard released
     assert fake.clipboard != "theirs" and lines == []   # owed, not yet exhausted
     refuse[0] = False                # writes start landing again
     iw._pending_restore.flush()
@@ -1883,8 +1880,7 @@ def test_a_pending_restore_recovers_once_writes_succeed_again(monkeypatch):
 
 
 def test_a_copy_between_deferred_retries_drops_the_pending_restore(monkeypatch):
-    fake, iw = _real_timer_rig(monkeypatch, "theirs")
-    monkeypatch.setattr(iw, "RESTORE_DEFERRED_RETRY_S", 0.02)
+    fake, iw, timers = _manual_restore_rig(monkeypatch, "theirs")
     lines = []
     monkeypatch.setattr(iw, "_paste_reporter", lines.append)
     text_writes = [0]
@@ -1899,7 +1895,7 @@ def test_a_copy_between_deferred_retries_drops_the_pending_restore(monkeypatch):
     previous, mark = iw._paste_write_windows("dictation")
     job = iw._restore_job(previous, "dictation", mark, iw._NullDiagnostics())
     iw._pending_restore.schedule(job, delay=0.02)
-    time.sleep(0.08)                              # at least one failed attempt first
+    timers[-1].fire()                             # one complete failed restore first
     assert fake.copy("something the user just copied")
     iw._pending_restore.flush()
     assert fake.clipboard == "something the user just copied"   # kept, not overwritten
@@ -3378,11 +3374,11 @@ def test_the_cancel_restore_goes_out_under_a_retired_scope(monkeypatch):
 
 # Deferred restore recovery must preserve the user's snapshot across every
 # retry outcome, and a cancelled callback cannot act on a later paste.
-def _manual_restore_rig(monkeypatch):
+def _manual_restore_rig(monkeypatch, clipboard="original clipboard"):
     import threading
     from wayfinder.core import injector_windows as w
 
-    fake, w = _real_timer_rig(monkeypatch, "original clipboard")
+    fake, w = _real_timer_rig(monkeypatch, clipboard)
     timers = []
 
     class Timer:

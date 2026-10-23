@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1194,3 +1195,41 @@ def test_substantial_admission_delay_still_has_no_timeout_verdict(nominal, remai
     error = subprocess.TimeoutExpired(["helper"], nominal)
     error.execution_budget = remaining
     assert child_supervisor.helper_budget_shortened(error, nominal)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux polling fallback")
+def test_polled_watcher_ends_an_exited_leaders_worker(tmp_path, monkeypatch):
+    source = str(Path(child_supervisor.__file__).resolve())
+    bootstrap = ("import os,runpy; os.__dict__.pop('pidfd_open', None); "
+                 f"runpy.run_path({source!r}, run_name='__main__')")
+    monkeypatch.setattr(child_supervisor, "_watcher_command", lambda: [sys.executable, "-c", bootstrap])
+    test_the_watcher_ends_the_worker_of_a_leader_that_left_on_its_own(tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux polling fallback")
+def test_polled_watcher_does_not_wait_the_grace_after_helper_exit(monkeypatch):
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    test_a_watcher_whose_app_died_waits_only_for_the_helper_to_go(monkeypatch)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux pidfd fallback")
+def test_an_unavailable_pidfd_keeps_a_live_helper_then_observes_its_exit(monkeypatch):
+    def unavailable(_pid):
+        raise PermissionError("pidfds unavailable in this environment")
+
+    monkeypatch.setattr(os, "pidfd_open", unavailable, raising=False)
+    helper = subprocess.Popen(["sleep", "30"])
+    read_end, write_end = os.pipe()
+    try:
+        watch = child_supervisor._Watch(read_end, helper.pid)
+        assert not watch.child_gone
+        helper.terminate()
+        helper.wait(5)
+        watch.wait(0.3)
+        assert watch.child_gone
+    finally:
+        if helper.poll() is None:
+            helper.kill()
+            helper.wait()
+        os.close(read_end)
+        os.close(write_end)
