@@ -3284,7 +3284,7 @@ def _strip_non_speech_markers(text: str) -> str:
     for start, end in _symmetric_wrapper_spans(text, '*', unclosed=False):
         # Retain normal cleanup's established 40-character annotation limit.
         # Unmatched marks are stripped below without swallowing their text.
-        if end - start <= 42:
+        if len(text[start:end].strip('*')) <= 40:
             covered[start:end] = [True] * (end - start)
     text = ''.join(' ' if gone else ch for ch, gone in zip(text, covered))
     text = re.sub(r'\*+', '', text)

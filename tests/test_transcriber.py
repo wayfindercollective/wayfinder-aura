@@ -1510,6 +1510,16 @@ class TestWhisperArtifactCleanup:
         # paired unrelated widths and deleted "args and" as though wrapped.
         assert clean_whisper_artifacts("*args and **kwargs") == "args and kwargs"
 
+    @pytest.mark.parametrize("marks", ["*", "**", "***"])
+    @pytest.mark.parametrize("body_length", [40, 41])
+    def test_annotation_limit_counts_the_body_without_delimiters(self, marks, body_length):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        body = "loud sounds of somebody opening the door".ljust(body_length, "x")
+        assert len(body) == body_length
+        text = f"{marks}{body}{marks} please come inside"
+        expected = "please come inside" if body_length <= 40 else f"{body} please come inside"
+        assert clean_whisper_artifacts(text) == expected
+
     def test_normal_cleanup_retains_its_long_annotation_limit(self):
         from wayfinder.core.transcriber import clean_whisper_artifacts
         speech = "these are the longer spoken words that must remain in the transcript"
