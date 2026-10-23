@@ -127,6 +127,30 @@
   </supports>
 
   <releases>
+    <release version="1.3.1-beta.3" date="2026-10-23" type="development">
+      <description>
+        <p>Beta built from main on 2026-10-23. Changes since the last stable release:</p>
+        <ul>
+          <li>Mac: the first dictation after a relaunch no longer waits for Core ML.</li>
+          <li>Mac: Force Quit and crashes no longer leave Aura's helpers running.</li>
+          <li>Quitting or switching modes during a dictation is safe.</li>
+          <li>Windows: accents and curly quotes are typed correctly when Aura falls back to its command-line transcriber.</li>
+          <li>Windows: Aura holds on to your copied text when it can't put it back right away.</li>
+          <li>Windows: the dictation pill stays on top.</li>
+          <li>Basic Settings shows your hardware again.</li>
+          <li>Turning GPU off and on again keeps the GPU you chose.</li>
+          <li>A GPU check that was cut short no longer turns GPU acceleration off.</li>
+          <li>Dictations no longer vanish as "No speech detected" when the mic picks up steady background noise.</li>
+          <li>A chunk no longer repeats the same sentence over and over.</li>
+          <li>Linux: a typing tool that stops partway no longer gets the dictation typed twice.</li>
+          <li>Linux: wtype types dictations that start with a dash.</li>
+          <li>Linux: faster startup in CPU mode.</li>
+          <li>Turning GPU on starts loading the model onto the GPU right away.</li>
+          <li>Flatpak: the interface matches the other packages.</li>
+          <li>Aura no longer bundles SciPy.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.0" date="2026-10-20">
       <description>
         <p>Wayfinder Aura 1.3.0:</p>
