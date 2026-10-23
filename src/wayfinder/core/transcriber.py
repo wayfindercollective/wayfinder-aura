@@ -3238,6 +3238,37 @@ _NOISE_JOINER = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
 _NOISE_MARKER = r'\s*' + _NOISE_WORD + r'(?:' + _NOISE_JOINER + r'\s+' + _NOISE_WORD + r'){0,2}\s*'
 
 
+def _symmetric_wrapper_spans(text: str, symbols: str, *, unclosed: bool):
+    """Pair original delimiter runs without bridging separate annotations.
+
+    Asterisk run lengths distinguish nested single/double/triple wrappers;
+    music symbols share one kind. Only outer spans are yielded, so total
+    scanning and coverage work stays linear even with deep nesting.
+    """
+    stack = []
+    start = i = 0
+    while i < len(text):
+        if text[i] not in symbols:
+            i += 1
+            continue
+        end = i + 1
+        if symbols == '*':
+            while end < len(text) and text[end] == '*':
+                end += 1
+        kind = end - i if symbols == '*' else 1
+        if not stack:
+            start = i
+        if stack and stack[-1] == kind:
+            stack.pop()
+            if not stack:
+                yield start, end
+        else:
+            stack.append(kind)
+        i = end
+    if stack and unclosed:
+        yield start, len(text)
+
+
 def _strip_non_speech_markers(text: str) -> str:
     """Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
     [Music], (background noise), ♪, special-token leaks like <|endoftext|>
@@ -3249,7 +3280,13 @@ def _strip_non_speech_markers(text: str) -> str:
     """
     import re
 
-    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
+    covered = [False] * len(text)
+    for start, end in _symmetric_wrapper_spans(text, '*', unclosed=False):
+        # Retain normal cleanup's established 40-character annotation limit.
+        # Unmatched marks are stripped below without swallowing their text.
+        if end - start <= 42:
+            covered[start:end] = [True] * (end - start)
+    text = ''.join(' ' if gone else ch for ch, gone in zip(text, covered))
     text = re.sub(r'\*+', '', text)
     text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
@@ -3289,9 +3326,10 @@ def _noise_check_safety_copy(text: str) -> str:
     of every kind, and <| |> special tokens, count as one nesting depth, so
     a crossed or mismatched pair still covers everything between; an opener
     never closed covers to the end, a closer never opened, from the start.
-    Asterisks and music symbols open and close alike, so their nesting
-    can't be told apart (Sol pr67 r7): from the first of a kind to the last
-    is covered, or to the end when their count is odd. Whitespace is then
+    Symmetric wrappers are paired on their original delimiter runs. Equal
+    asterisk runs close their matching nesting level; all music symbols use
+    one delimiter kind. Separate annotations cannot swallow the speech
+    between them. An unclosed annotation still covers to the end. Whitespace is then
     canonicalised the same way normal cleanup does right before its own
     final hallucination check.
     """
@@ -3321,10 +3359,8 @@ def _noise_check_safety_copy(text: str) -> str:
         i += width
     covered[:cut_before] = [True] * cut_before
     for symbols in ('*', _MUSIC_SYMBOLS):
-        at = [k for k, ch in enumerate(text) if ch in symbols]
-        if at:
-            last = at[-1] if len(at) % 2 == 0 else len(text) - 1
-            covered[at[0]:last + 1] = [True] * (last + 1 - at[0])
+        for start, end in _symmetric_wrapper_spans(text, symbols, unclosed=True):
+            covered[start:end] = [True] * (end - start)
     kept = ''.join(' ' if gone else ch for ch, gone in zip(text, covered))
     return re.sub(r'\s+', ' ', kept).strip()
 
