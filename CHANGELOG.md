@@ -9,12 +9,45 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- GPU checks and benchmarks measure the helper's execution time separately
-  from waits to start it. A probe whose execution budget was cut short does
-  not permanently disable GPU acceleration or select a benchmark winner.
-- Windows retains the original clipboard after a failed or busy restore,
-  retries before later pastes, and ignores callbacks from an earlier paste.
-
+- **Mac: the first dictation after a relaunch no longer waits for Core ML.**
+  Core ML takes about 10 seconds to load on an M1, and the first dictation
+  waited for it. Aura now dictates on Metal until Core ML has loaded, then
+  switches over by itself. The one-time Core ML preparation (about 3 minutes
+  on an M1 Air) now has time to finish instead of failing at 2 minutes, and a
+  Mac where it keeps failing stays on Metal instead of retrying at every
+  launch.
+- **Mac: Force Quit and crashes no longer leave Aura's helpers running.**
+  Whisper and the AI cleanup now run in Aura's own process group with a
+  watcher, so they stop with the app, and the next launch clears any that a
+  crash left behind.
+- **Quitting or switching modes during a dictation is safe.** Quit and
+  changes to CPU/GPU, model, cleanup style, Save memory or license no longer
+  wait on, kill or strand a server, and Quit leaves no helper running. A
+  dictation cancelled or cut short before it types is not typed, and one
+  cancelled while typing stops instead of typing the rest.
+- **Windows: accents and curly quotes are typed correctly when Aura falls back
+  to its command-line transcriber.** That path read Whisper's output in the
+  wrong encoding, so "it’s café" came out as "itâ€™s cafÃ©", and a few
+  characters made it drop the whole dictation.
+- **Windows: Aura holds on to your copied text when it can't put it back
+  right away.** Aura pastes through the clipboard and puts your copy back
+  afterwards. A copy made during a dictation could be lost, and a restore
+  that failed or found the clipboard busy gave up on your copy. Aura now
+  keeps it and tries again before the next paste.
+- **Windows: the dictation pill stays on top.** It could stay marked "on top"
+  while other windows covered it. Aura now notices and puts it back on top
+  without taking focus. The activity log now also records hotkey freezes as
+  short as five seconds, with what Aura was doing as the freeze began.
+- **Basic Settings shows your hardware again.** In 1.3.0 its hardware readout
+  stayed on "Detecting…", and the Advanced Settings provider panes stopped
+  building halfway.
+- **Turning GPU off and on again keeps the GPU you chose.** It could switch to
+  the integrated GPU.
+- **A GPU check that was cut short no longer turns GPU acceleration off.**
+  Time spent waiting to start counted against a GPU check or the engine speed
+  test, so a check left with too little time could disable GPU acceleration
+  or pick the speed test's winner. Waiting no longer counts, and a check cut
+  well short decides nothing.
 - **Dictations no longer vanish as "No speech detected" when the mic picks up
   steady background noise.** A recording whose loudness barely varied was
   thrown away before transcription, even when it held real speech (six
@@ -26,11 +59,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 - **A chunk no longer repeats the same sentence over and over.** In Auto mode,
   a chunk prompted with the previous chunk's text could get stuck echoing one
   sentence or phrase many times instead of hearing the rest of the speech.
-  Five or more word-for-word copies of a sentence or phrase in one chunk now
-  count as a loop: that chunk is heard again without the prompt, and the loop
-  is collapsed to one copy if the retry doesn't help. Saying something three
-  or four times on purpose is left alone, and list items or numbers
-  such as ".5" and "5" are never mistaken for copies.
+  Five or more word-for-word copies in a row of a sentence or phrase of 5 to
+  40 words now count as a loop: that chunk is heard again without the
+  prompt, and the loop is collapsed to one copy if the retry doesn't help.
+- **Linux: a typing tool that stops partway no longer gets the dictation typed
+  twice.** When xdotool, wtype or ydotool timed out or failed in an unknown
+  way after typing part of a dictation, a fallback could type all of it
+  again. Aura now falls back only when it knows no key was typed.
+- **Linux: wtype types dictations that start with a dash.** It read a
+  dictation such as "-5 degrees" as one of its own options.
+
+### Changed
+
+- **Linux: faster startup in CPU mode.** Aura no longer loads a Whisper model
+  at startup to check the GPU while GPU acceleration is off.
+- **Turning GPU on starts loading the model onto the GPU right away.** On
+  Linux and Windows, loading now starts in the background once the GPU is
+  chosen, instead of at the next dictation.
+- **Flatpak: the interface matches the other packages.** The Flatpak carried
+  an older CustomTkinter (5.2.2), so some interface fixes worked only in the
+  other packages. Every package now uses 6.0.0.
+- **Aura no longer bundles SciPy.** Its audio filters now use NumPy alone.
 
 ## [1.3.0] — 2026-10-20
 
