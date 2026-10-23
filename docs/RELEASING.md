@@ -59,8 +59,8 @@ To pause betas, disable the Beta workflow in Actions (re-enable to resume).
 ## When nothing ships
 
 A green nightly Beta run does not mean a beta shipped. It only cuts the tag;
-the Release workflow builds it, and a failed build leaves the tag without a
-release. From 2026-10-09 to 2026-10-14 every Release run failed while the
+the Release workflow builds and publishes it. A failed build can leave the
+tag without a release, or a published release missing that platform's assets. From 2026-10-09 to 2026-10-14 every Release run failed while the
 nightly runs stayed green ("main is unchanged since v1.2.1-beta.4"), so the
 website kept offering v1.2.0 and beta.2. Check the builds, not the cuts:
 
