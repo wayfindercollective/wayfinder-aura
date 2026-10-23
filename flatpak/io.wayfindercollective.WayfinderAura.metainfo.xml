@@ -127,6 +127,17 @@
   </supports>
 
   <releases>
+    <release version="1.3.1-beta.2" date="2026-10-23" type="development">
+      <description>
+        <p>Beta built from main on 2026-10-23. Changes since the last stable release:</p>
+        <ul>
+          <li>GPU checks and benchmarks measure the helper's execution time separately from waits to start it. A probe whose execution budget was cut short does not permanently disable GPU acceleration or select a benchmark winner.</li>
+          <li>Windows retains the original clipboard after a failed or busy restore, retries before later pastes, and ignores callbacks from an earlier paste.</li>
+          <li>Dictations no longer vanish as "No speech detected" when the mic picks up steady background noise.</li>
+          <li>A chunk no longer repeats the same sentence over and over.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.0" date="2026-10-20">
       <description>
         <p>Wayfinder Aura 1.3.0:</p>
