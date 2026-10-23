@@ -1461,6 +1461,17 @@ class TestWhisperArtifactCleanup:
 
         assert clean_whisper_artifacts(text) == ""
 
+    def test_drop_print_never_includes_the_dropped_text(self, capsys):
+        """Finding 4 (Sol pr67 r2, scoped): the phrase-hallucination drop
+        print must say it happened without repeating what was heard."""
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        secret = "We'll be right back."
+        assert clean_whisper_artifacts(secret) == ""
+        out = capsys.readouterr().out
+        assert "Dropped" in out
+        assert secret not in out and "right back" not in out
+
     def test_keeps_known_phrase_inside_real_sentence(self):
         from wayfinder.core.transcriber import clean_whisper_artifacts
 
@@ -1474,6 +1485,150 @@ class TestWhisperArtifactCleanup:
         text = "Ship it today. Ship it today."
 
         assert clean_whisper_artifacts(text) == text
+
+    # Sol pr67 r3, finding 2's scope guard: the safety copy gets a
+    # stricter, SEPARATE asterisk rule precisely so normal cleanup's own
+    # output never has to change. These pin that down literally, and (when
+    # a `base` checkout of this review's starting commit is available as a
+    # sibling of this repo) also replay them against ITS clean_whisper_
+    # artifacts in a subprocess, so a future edit that drifts the two
+    # apart fails loudly instead of only matching a value written by hand.
+    _CLEANUP_PARITY_INPUTS = (
+        "<|endoftext|> Okay.",
+        "<|0.00|> So,",
+        "Thank you for watching…",
+        "Hello [MUSIC] world.",
+        "Ship it today. Ship it today.",
+        "I'll see you next time after the build finishes.",
+        "*laughing* Okay, let's go.",
+        "Hello *world*, this is *emphasis* right.",
+    )
+
+    def test_normal_cleanup_preserves_unclosed_code_arguments(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        # An unmatched run is not a completed annotation. The old regex
+        # paired unrelated widths and deleted "args and" as though wrapped.
+        assert clean_whisper_artifacts("*args and **kwargs") == "args and kwargs"
+
+    @pytest.mark.parametrize("marks", ["*", "**", "***"])
+    @pytest.mark.parametrize("body_length", [40, 41])
+    def test_annotation_limit_counts_the_body_without_delimiters(self, marks, body_length):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        body = "loud sounds of somebody opening the door".ljust(body_length, "x")
+        assert len(body) == body_length
+        text = f"{marks}{body}{marks} please come inside"
+        expected = "please come inside" if body_length <= 40 else f"{body} please come inside"
+        assert clean_whisper_artifacts(text) == expected
+
+    def test_normal_cleanup_retains_its_long_annotation_limit(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        speech = "these are the longer spoken words that must remain in the transcript"
+        assert clean_whisper_artifacts(f"*{speech}*") == speech
+
+    def test_normal_cleanup_output_is_unchanged_for_safety_copy_fix_inputs(self):
+        """These inputs exercise findings 2, 4 and 5's machinery
+        (asterisk handling, special-token stripping, punctuation folding),
+        all of which had to change the SAFETY COPY without changing what
+        normal cleanup returns -- pinned here so a future refactor that
+        merges the two paths can't silently do so."""
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        expected = {
+            "<|endoftext|> Okay.": "Okay.",
+            "<|0.00|> So,": "So,",
+            "Thank you for watching…": "",
+            "Hello [MUSIC] world.": "Hello world.",
+            "Ship it today. Ship it today.": "Ship it today. Ship it today.",
+            "I'll see you next time after the build finishes.":
+                "I'll see you next time after the build finishes.",
+            "*laughing* Okay, let's go.": "Okay, let's go.",
+            "Hello *world*, this is *emphasis* right.": "Hello , this is right.",
+        }
+        for text in self._CLEANUP_PARITY_INPUTS:
+            assert clean_whisper_artifacts(text) == expected[text], text
+
+    def test_normal_cleanup_matches_the_pre_fix_base_commit(self):
+        """Best-effort cross-check against this review round's starting
+        commit (base/, a sibling of this checkout under the same pr67-r3
+        scratch work dir) -- skipped where that sibling doesn't exist, e.g.
+        once this patch has landed and base/ is gone."""
+        import json
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        base_root = Path(__file__).resolve().parents[2] / "base"
+        if not (base_root / "src" / "wayfinder" / "core" / "transcriber.py").exists():
+            pytest.skip("no sibling base/ checkout for this review round")
+
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1] + '/src')\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from wayfinder.core.transcriber import clean_whisper_artifacts\n"
+            "texts = json.loads(sys.argv[2])\n"
+            "print(json.dumps([clean_whisper_artifacts(t) for t in texts], ensure_ascii=False))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(base_root),
+             json.dumps(list(self._CLEANUP_PARITY_INPUTS))],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        base_outputs = json.loads(result.stdout.strip().splitlines()[-1])
+        tree_outputs = [clean_whisper_artifacts(t) for t in self._CLEANUP_PARITY_INPUTS]
+        assert tree_outputs == base_outputs
+
+    # Sol pr67 r4, finding 1: the noise path's new punctuation/quote fold
+    # and generic-repeat rejection leaked into normal cleanup. Normal
+    # cleanup's SPEECH-verdict output must match 2dad2af (orig/) exactly
+    # for each of these, including the two it used to wrongly drop.
+    _SPEECH_PATH_PARITY_INPUTS = (
+        "“Thank you”",             # “Thank you” -- curly quotes
+        "Please subscribe",
+        "We’ll be right back.",          # curly apostrophe
+        "Thank you for watching…",       # trailing ellipsis
+        "*args and **kwargs",
+        "*loud noise* Okay.",
+        "Thank you. Thank you, 李明。",         # mixed CJK name
+        "谢谢观看。谢谢观看。",  # mixed CJK repeat
+    )
+
+    def test_normal_cleanup_matches_orig_for_the_noise_check_scope_guard(self):
+        """Finding 1 (Sol pr67 r4): replayed against orig/ (2dad2af, this
+        review round's starting commit) in a subprocess, the same way the
+        base/ parity check above runs; skipped where that sibling doesn't
+        exist, e.g. once this patch has landed and orig/ is gone."""
+        import json
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        orig_root = Path(__file__).resolve().parents[2] / "orig"
+        if not (orig_root / "src" / "wayfinder" / "core" / "transcriber.py").exists():
+            pytest.skip("no sibling orig/ checkout for this review round")
+
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1] + '/src')\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from wayfinder.core.transcriber import clean_whisper_artifacts\n"
+            "texts = json.loads(sys.argv[2])\n"
+            "print(json.dumps([clean_whisper_artifacts(t) for t in texts], ensure_ascii=False))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(orig_root),
+             json.dumps(list(self._SPEECH_PATH_PARITY_INPUTS))],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        orig_outputs = json.loads(result.stdout.strip().splitlines()[-1])
+        tree_outputs = [clean_whisper_artifacts(t) for t in self._SPEECH_PATH_PARITY_INPUTS]
+        assert tree_outputs == orig_outputs
 
     def test_drops_observed_vocabulary_prompt_leak_when_hints_are_active(self):
         from wayfinder.core.transcriber import drop_whisper_prompt_leak
@@ -3249,3 +3404,471 @@ def test_normal_gpu_timeout_still_tries_and_remembers_cpu_fallback(tmp_path, mon
     assert "spoken words" in backend.transcribe(str(audio))
     assert attempts == [str(binary), str(cpu)]
     assert str(binary) in transcriber._CPU_FALLBACK_ACTIVE
+
+class TestUnpromptedTranscription:
+    """Noise-verdict audio is heard with no prompt: primed with the dictation
+    prompt, large-v3-turbo turned fan/hum/hiss into invented sentences (2026-10-13)."""
+
+    @pytest.fixture
+    def prompts(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        import wayfinder.license as lic
+        from wayfinder.core import transcriber as T
+
+        gate = SimpleNamespace(is_premium=True, has_feature=lambda f: True)
+        monkeypatch.setattr(lic, "get_feature_gate", lambda *a, **k: gate)
+        heard = []
+
+        def transcribe(backend, audio_path, context="", deadline=None):
+            heard.append(backend._build_prompt(context))
+            return "hello there"
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
+        model = tmp_path / "ggml-base.en.bin"
+        model.write_bytes(b"\0")
+        self.config = {"transcription_backend": "whisper_cpp", "model_path": str(model),
+                       "whisper_server_mode": False, "post_processing_enabled": False,
+                       "output_tone": "professional", "custom_vocabulary": ["Wayfinder"]}
+        self.audio = str(tmp_path / "a.wav")
+        return heard
+
+    def test_dictation_is_primed_with_prompt_vocabulary_and_context(self, prompts):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        transcribe_with_config(self.audio, self.config)
+        transcribe_with_config(self.audio, self.config, context="earlier words")
+        assert "Use proper punctuation" in prompts[0] and "Wayfinder" in prompts[0]
+        assert prompts[1].startswith("earlier words")
+
+    def test_unprompted_reaches_the_core_ml_servers_metal_stand_in(self, prompts, monkeypatch):
+        from types import SimpleNamespace
+
+        from wayfinder.core import transcriber as T
+
+        heard = []
+        stand_in = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"])
+        stand_in.transcribe = lambda audio_path, context="": heard.append(
+            (stand_in.prompt, stand_in.custom_vocabulary, context)) or "hello there"
+        server = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"],
+                                 _ready_only_fallback=stand_in)
+        # Core ML not loaded yet: the dictation goes to the Metal stand-in.
+        server.transcribe = lambda audio_path, context="": stand_in.transcribe(audio_path, context)
+        monkeypatch.setattr(T, "get_backend", lambda config: server)
+        T.transcribe_with_config(self.audio, self.config, context="earlier words", unprompted=True)
+        assert heard == [("", [], "")]
+
+    def test_unprompted_sends_no_prompt_vocabulary_or_context(self, prompts):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        text = transcribe_with_config(self.audio, self.config, context="earlier words",
+                                      unprompted=True)
+        assert prompts == [""]
+        assert text == "Hello there."
+
+    # -- Sol review of the PR #67 port: the two-word rule must run on the
+    # recognizer's OWN words, before vocabulary replacement or LLM cleanup can
+    # rewrite them, and a known hallucination phrase must be rejected even
+    # under Raw Transcript (whose early return used to skip that check). --
+
+    def test_unprompted_two_word_rule_precedes_vocabulary_correction(self, prompts, monkeypatch):
+        """A one-word noise artifact ("Okay.") must stay rejected even though a
+        configured correction would turn it into two words ("Sounds good."):
+        the rule has to see what the recognizer actually said."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: "Okay.")
+        self.config["vocabulary_replacements"] = [["okay", "sounds good"]]
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_unprompted_raw_transcription_still_rejects_a_hallucination_phrase(
+        self, prompts, monkeypatch
+    ):
+        """Raw Transcript's early return happens AFTER the noise checks now: a
+        known Whisper silence/noise catch-phrase has enough words to pass the
+        two-word rule, so it needs its own rejection — matching what normal
+        (non-raw) mode already does via clean_whisper_artifacts."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None: "Thank you for watching.")
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r2: the two-word rule counted a bracketed
+        # annotation Whisper itself emits as a "word", so noise output with
+        # exactly one real word behind an annotation passed it; normal
+        # cleanup then strips the annotation and leaves the lone filler word
+        # for Aura to type.
+        "[Music] Okay.",
+        "[BLANK_AUDIO] So,",
+        "*music* Okay.",
+    ])
+    def test_unprompted_two_word_rule_ignores_non_speech_annotations(
+        self, prompts, monkeypatch, heard
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_unprompted_two_word_rule_still_keeps_real_speech_behind_an_annotation(
+        self, prompts, monkeypatch
+    ):
+        """A real two-word phrase must still survive once the annotation in
+        front of it is set aside — the fix must not reject on sight of any
+        annotation."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None:
+                "[Music] Thanks for the update.")
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == "Thanks for the update."
+
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r2: the early phrase match lacked the whitespace
+        # canonicalisation normal cleanup does before its own final
+        # hallucination check, so repeated whitespace defeated it.
+        "Thank  you for watching.",
+        # ... and surrounding non-speech markers must not defeat it either.
+        "[Music] Thank you  for watching.",
+        "Thank you for watching.  [Applause]",
+    ])
+    def test_unprompted_hallucination_match_normalizes_whitespace_and_markers(
+        self, prompts, monkeypatch, heard
+    ):
+        """Raw Transcript on, so the EARLY phrase match is the only thing
+        standing between this and typing the hallucinated phrase — normal
+        cleanup's own (already whitespace-safe) check never runs."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_unprompted_hallucination_match_is_never_a_substring_match(
+        self, prompts, monkeypatch
+    ):
+        """A real sentence that merely CONTAINS a known catch-phrase must be
+        kept — only the entire (whitespace-canonicalised) text is compared."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None:
+                "I want to thank you for watching the show")
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text != ""
+
+    # -- Sol pr67 r3: six more findings against the safety copy itself. --
+
+    def test_unprompted_raw_transcription_returns_accepted_text_untouched(
+        self, prompts, monkeypatch
+    ):
+        """Finding 2, redone (Sol pr67 r6): wrapped text never counts towards
+        the two-word rule, but it only decides accept or reject. An accepted
+        recording comes back from Raw Transcript exactly as heard, wrappers
+        included."""
+        from wayfinder.core import transcriber as T
+
+        heard = "*Really* we need **two** more chairs (for later)."
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == heard
+
+    def test_unprompted_raw_transcription_keeps_mixed_script_sentences_distinct(
+        self, prompts, monkeypatch
+    ):
+        """Finding 3: the repetition helper's ASCII-only key
+        discarded "李明", so "Thank you." and "Thank you, 李明。" hashed to
+        the SAME key, were wrongly treated as one repeated sentence, and
+        collapsed down to "Thank you." -- a blacklisted phrase -- throwing
+        away the real sentence (with the name) along with it. A Unicode-
+        aware key must keep these two different sentences different."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None:
+                "Thank you. Thank you, 李明。")
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == "Thank you. Thank you, 李明。"
+
+    @pytest.mark.parametrize("heard", [
+        # Finding 4: the special-token leak regex lived only in
+        # clean_whisper_artifacts, AFTER the point where normal mode's own
+        # cleanup runs, so the safety copy's two-word rule counted the
+        # token itself as a word and let a single real filler word
+        # ("Okay.") through. Once the token is stripped before counting,
+        # "Okay." alone is one word and must be rejected -- in BOTH modes,
+        # since the early check runs before Raw Transcript's return.
+        "<|endoftext|> Okay.",
+        "<|0.00|> So,",   # a timestamp token, not just <|endoftext|>
+    ])
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_unprompted_two_word_rule_ignores_special_tokens(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("heard", [
+        # Finding 5: the early phrase match strips ASCII punctuation
+        # only; normal cleanup folds a Unicode ellipsis down to a plain "."
+        # well before its OWN hallucination check, so it correctly rejects
+        # this, but the early safety-copy check (the only thing standing
+        # between this and Raw Transcript) did not and let it through.
+        "Thank you for watching…",
+        # Curly quotes and full-width CJK punctuation render the same marks
+        # and must canonicalise the same way, in the comparison copy only.
+        "“Thank you for watching”",
+        "Thank you for watching。",
+    ])
+    def test_unprompted_raw_transcription_rejects_punctuation_variant_hallucinations(
+        self, prompts, monkeypatch, heard
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    # -- Sol pr67 r4: three more findings, all noise-path only. --
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Finding 2: a descriptive annotation built from a noise word and
+        # plain filler words ("loud", "soft") still describes non-speech
+        # audio even though those filler words aren't noise vocabulary.
+        "*loud noise* Okay.",
+        "*soft music* So,",
+        # Sol pr67 r5: a closing mark inside, and the bracketed shapes.
+        "*loud noise.* Okay.",
+        "*loud noise!* Okay.",
+        "(loud music) Okay.",
+        "[soft music] So,",
+    ])
+    def test_unprompted_noise_rejects_descriptive_sound_annotations(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r6: nothing Whisper wrapped counts as a spoken word on the
+        # noise path, whatever it says inside. Telling an annotation from
+        # emphasis or code by its words failed both ways ("*a loud noise*
+        # Okay." passed, "Turn **music**" lost a word). A wrong rejection
+        # drops the recording as 1.3.0 already did; a wrong acceptance types
+        # something never said.
+        "*a loud noise* Okay.",
+        "*loud crashing noise* Okay.",
+        "Close *the door*",
+        "Turn **music**",
+        "`*phone rings*` twice",
+        "(door opens) Alice",
+        "*door and **kwargs",
+        "*args and **kwargs",
+        # An opener left unmatched runs to the end, a closer from the start.
+        "Okay [Music",
+        "loud noise] Okay.",
+        "♪ la la la",
+        # Sol pr67 r7: nested asterisks can't expose an inner word, every
+        # one of Whisper's music symbols counts, and the other bracket kinds.
+        "*a loud **crashing** noise* Okay.",
+        "**loud *crashing* noise** Okay.",
+        "♫ la la ♫ Okay.",
+        "♬ la la ♪ Okay.",
+        "Okay ♫ la la",
+        "{noise} Okay.",
+        "（music） Okay.",
+        "[loud (crashing] noise) Okay.",
+        # Sol pr67 r8: what is wrapped is decided on the original text, so
+        # removing one bracket kind can't expose another's contents.
+        "[noise (] loud crashing [) noise] Okay.",
+        "(noise [) loud crashing (] noise) Okay.",
+        "<|nospeech|> [Music (] loud [|>] Okay.",
+        "*a* Okay *crashing",
+    ])
+    def test_unprompted_noise_never_counts_wrapped_words(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r7: a repeat with no space after the stop is still one
+        # known phrase said twice.
+        "Thank you.Thank you.",
+        "Thanks for watching!Thanks for watching!",
+        # Sol pr67 r8: a text made of catch-phrases and nothing else, however
+        # they are punctuated or spaced.
+        "Subtitles by the Amara.org community. Subtitles by the Amara.org community.",
+        "Thank you, thank you.",
+        "Thank you Thank you",
+        "Thank you. Thanks for watching!",
+    ])
+    def test_unprompted_noise_rejects_repeats_with_no_space_between(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        "Close *the door* behind you please.",
+        "(door opens) Alice, come in.",
+        "We need [two] more chairs.",
+    ])
+    def test_unprompted_noise_keeps_two_words_outside_any_wrapper(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        """Two spoken words outside every wrapper still pass, Raw Transcript
+        on or off; Raw returns them exactly as heard."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == heard if raw else text.strip()
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Finding 3: repetition matching ran before punctuation folding, so
+        # a repeated catch-phrase separated by an ellipsis, a closing
+        # quote, or a full-width stop evaded the noise check.
+        "Thank you for watching… Thank you for watching…",
+        '"Thank you." "Thank you."',
+        "Thank you for watching。Thank you for watching。",
+        # Sol pr67 r5: bracketed repeats, mixed wrappers too.
+        "(Thank you.) (Thank you.)",
+        "[Thank you.] [Thank you.]",
+        "(Thank you.) [Thank you.]",
+    ])
+    def test_unprompted_noise_rejects_repeats_across_punctuation_variants(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", ["Turn it down. Turn it down.", "谢谢你。谢谢你。"])
+    def test_unprompted_noise_keeps_a_repeated_sentence_that_is_no_catch_phrase(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        # A sentence said twice over a fan is speech: only a repeated
+        # catch-phrase is the hallucination.
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text.strip()
+
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_unprompted_noise_rejects_curly_quoted_known_phrase(
+        self, prompts, monkeypatch, raw
+    ):
+        """The noise path's own quote fold (finding 1 scopes it OUT of
+        normal cleanup, not out of the noise check) must still catch a
+        curly-quoted catch-phrase on its own, no repeat involved."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None:
+                "“Thank you”")
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        "*cough* please open the door *cough*",
+        "♫ la la ♫ please open the door ♬ la la ♬",
+        "**loud *crashing* noise** please open the door *cough*",
+    ])
+    def test_separate_annotations_never_erase_the_speech_between_them(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == heard if raw else "please open the door" in text.casefold()
+
+    def test_symmetric_wrapper_runs_preserve_every_outside_word(self):
+        from wayfinder.core.transcriber import _noise_check_safety_copy
+        annotations = ["*cough*", "**noise**", "*a **loud** noise*",
+                       "**loud *crashing* noise**", "♫ la la ♬"]
+        for annotation in annotations:
+            for count in (2, 3, 5, 20, 100):
+                outside = [f"spoken{n}" for n in range(count)]
+                text = " ".join(f"{annotation} {word}" for word in outside) + " " + annotation
+                assert _noise_check_safety_copy(text).split() == outside
+
+    def test_unprompted_rejection_never_logs_the_recognized_text(
+        self, prompts, monkeypatch, capsys
+    ):
+        """Finding 4 (Sol pr67 r2, scoped): the speech-guard's own
+        diagnostics must say a transcript was dropped without printing what
+        it said, on every rejection path this change touches."""
+        from wayfinder.core import transcriber as T
+
+        for heard in ("Secretword.", "[Music] Secretword.", "Thank  you for watching."):
+            monkeypatch.setattr(
+                T.WhisperCppBackend, "transcribe",
+                lambda backend, audio_path, context="", deadline=None, heard=heard: heard)
+            text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+            assert text == ""
+
+        out = capsys.readouterr().out
+        assert "Secretword" not in out
+        assert "Thank" not in out and "watching" not in out

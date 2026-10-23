@@ -112,12 +112,61 @@ Try these before filing an issue — they cover the most common problems.
 - The app stores your mic **by name**, so it survives PipeWire device
   renumbering. If you recently changed audio hardware, re-select it.
 
+### A recording typed nothing
+
+Open `activity.log` (paths above) and find the lines for that recording:
+
+- `⏱ Duration: 2.7s` is measured from the captured audio, so it is the real
+  length of the recording. The time in front of each line is when Aura wrote
+  it, which can lag by seconds on a busy computer, so don't time a recording
+  from those.
+- `🔇 Speech check: silence (…)` (versions after 1.3.0; `(…)` stands for the
+  measured levels, e.g. `peak -68 dBFS, floor -71 dBFS, loud/floor ×1.2`): the
+  mic delivered almost nothing. Check the mute switch, the gain and the
+  selected device.
+- `🔇 Speech check: noise (…)` (versions after 1.3.0): the loudness barely
+  varied, as with a fan or a hum, or speech that is quiet under one. Aura
+  still transcribes it, without its usual prompt, and keeps the result only
+  if it has two or more words — or, for a script written without spaces such
+  as Chinese or Japanese, enough letters — and isn't one of the stock phrases
+  Whisper is known to invent from noise, such as "Thank you for watching". If
+  your speech keeps landing here, move closer to the mic or away from the
+  noise.
+- `🔇 Chunk N: noise-like audio produced 0 usable words, dropped` (versions
+  after 1.3.0; `N` is the chunk's number): in a longer dictation, one part
+  sounded like noise and no usable text survived transcription and
+  filtering, for example too few words or only a phrase Whisper invents from
+  noise. Aura leaves that part out; the dictation's other, usable parts can
+  still be typed.
+- `sent no sound at all`: the device delivered exact silence, as a muted or
+  switched-off headset does.
+- `⚠ No speech detected` with none of the above: no usable text remained once
+  cleanup ran — the same noise and hallucination filtering above can empty a
+  transcript even when Whisper did produce some words.
+
+The levels in brackets are peak and floor in dBFS, plus their loud/floor
+ratio (a plain number, not dBFS) — include all of them in a bug report.
+
 ### Hotkey does nothing
 
 - **macOS:** use **Fn+Space**. Enable the Applications copy of Aura under
   Privacy & Security → Accessibility and Input Monitoring. Input Monitoring
   may require clicking **+** and selecting
   `/Applications/Wayfinder Aura.app`; quit and reopen Aura afterward.
+  - The activity log names what is missing, for example
+    `macOS permissions: Accessibility on, Input Monitoring off, microphone ok, hotkey tap deaf`.
+  - A self-built app (not a release download) only becomes a new app to macOS
+    — making the switches that were on for the release stop applying — when
+    its signing identity differs from before, or the build is unsigned or
+    ad-hoc signed; an unsigned/ad-hoc build gets a new identity on every
+    build, so this can repeat each time you rebuild. If it happens, turn each
+    switch off and on again, or remove the app with **–** and add it with
+    **+**, then choose **Quit & Reopen**.
+  - `⚠ macOS Secure Input is on (held by NAME)` (the app, if macOS reports
+    one) means a password field, or an app's Secure Keyboard Entry option —
+    Terminal has one, in its app menu — is hiding keystrokes from every app.
+    Leave the password field, or turn Secure Keyboard Entry off in Terminal
+    (or whichever app is holding it), and the hotkey works again.
 - **Windows:** the default is **Right Alt** (Alt Gr): tap to start/stop, hold
   to talk. If another app already owns your shortcut, pick a different one in
   Settings. Hotkeys and typing do not
@@ -166,6 +215,17 @@ Try these before filing an issue — they cover the most common problems.
   unexpectedly slow.
 - GPU acceleration and every speech model beyond Base/Base.en are Ultra
   features; the free tier runs Base/Base.en on CPU.
+- **macOS:** Ultra transcribes on the GPU with Metal; the activity log shows
+  `🍎 GPU: Apple M1 (Metal)` (your chip's name) at startup. On the CPU the
+  same model is noticeably slower. As an example from our own testing on an
+  M1 MacBook Air, a short dictation on Large v3 Turbo took about 2 seconds on
+  Metal once the model was loaded; your numbers will differ. In versions
+  after 1.3.0, with Large v3 Turbo and GPU acceleration on, Aura also
+  compares Core ML with Metal once, in the background (the Mac app includes
+  the Core ML files). The first Core ML load took about 2.5 minutes in that
+  same test. If Core ML gives the same words and is clearly faster, Aura
+  switches to it by itself; that test dictation then took about 0.8 seconds.
+  Otherwise Aura keeps using Metal.
 
 ### UI is too small (e.g. 4K)
 

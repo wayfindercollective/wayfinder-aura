@@ -3166,6 +3166,205 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
 })
 
 
+def _noise_phrase_words(text: str) -> tuple:
+    """Lowercased words, every run of punctuation or whitespace a single
+    break, for the noise path's phrase check only (Sol pr67 r8)."""
+    import re
+
+    return tuple(re.sub(r'[\W_]+', ' ', (text or '').lower()).split())
+
+
+_NOISE_PHRASE_WORDS = frozenset(
+    _noise_phrase_words(phrase) for phrase in _WHISPER_PHRASE_HALLUCINATIONS)
+_NOISE_PHRASE_MAX_WORDS = max(len(words) for words in _NOISE_PHRASE_WORDS)
+
+
+def _made_of_known_phrases(words: tuple) -> bool:
+    """Whether *words* split, end to end, into known catch-phrases only."""
+    ends = [True] + [False] * len(words)
+    for end in range(1, len(words) + 1):
+        for size in range(1, min(_NOISE_PHRASE_MAX_WORDS, end) + 1):
+            if ends[end - size] and words[end - size:end] in _NOISE_PHRASE_WORDS:
+                ends[end] = True
+                break
+    return bool(words) and ends[-1]
+
+
+def _is_whisper_phrase_hallucination(text: str, *, noise_check: bool = False) -> bool:
+    """Whether *text* is, in full, one of Whisper's known silence/noise
+    catch-phrases — matched the same way :func:`clean_whisper_artifacts`
+    matches it at the end of its cleanup (repeated sentences collapsed,
+    trailing punctuation stripped). Never a mid-sentence substring match.
+
+    *noise_check* (Sol pr67 r8): the noise path's own check ignores every
+    mark and space between words, then asks whether the whole text is made
+    of catch-phrases and nothing else: "Thank you, thank you", "Thank
+    you.Thank you." and a repeated "Subtitles by the Amara.org community."
+    all are, while "Turn it down. Turn it down." over a fan is speech.
+    Splitting into sentences first kept missing a repeat written some new
+    way. Normal cleanup (noise_check=False) keeps 2dad2af's exact
+    behaviour: trailing punctuation only.
+    """
+    stripped = (text or "").strip()
+    if not noise_check:
+        candidate = _collapse_repeated_sentences_for_phrase_match(stripped)
+        key = candidate.lower().rstrip('.!?,;: ').strip()
+        return key in _WHISPER_PHRASE_HALLUCINATIONS
+
+    return _made_of_known_phrases(_noise_phrase_words(stripped))
+
+
+# Whisper's bracketed/parenthesized non-speech annotations ("[audience noise]",
+# "(sound of the rain)") built only from known noise vocabulary. Shared by
+# clean_whisper_artifacts and _strip_non_speech_markers below (Sol pr67 r2) so
+# the speech-guard's own safety copy strips exactly what normal cleanup does,
+# instead of a second, drifting copy of the same pattern.
+_NOISE_WORD = (
+    r'(?:audience|background|street|wind|static|noise|noises|sound|sounds|'
+    r'music|applause|laughter|laughing|laughs|coughing|coughs?|typing|'
+    r'keyboard|clicking|clicks|silence|silent|inaudible|unintelligible|'
+    r'indistinct|chatter|murmuring|breathing|sighs?|sighing|sniffs?|'
+    r'sniffing|beeping|buzzing|humming|rustling|footsteps|door|engine|'
+    r'clapping|claps|cheering|cheers|whistling|whistles|ringing|phone|'
+    r'camera|shutter|snapping|snaps|tapping|taps|knocking|knocks|'
+    r'banging|thud|thumping|crowd|birds?|chirping|barking|dog|rain|'
+    r'thunder|water|waves|crackling|scraping|shuffling|whispering|'
+    r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
+    r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
+)
+# Short joiners ("[sound of wind]", "(sound of the rain)") may sit between
+# noise words; the annotation must still start and end with one.
+_NOISE_JOINER = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
+_NOISE_MARKER = r'\s*' + _NOISE_WORD + r'(?:' + _NOISE_JOINER + r'\s+' + _NOISE_WORD + r'){0,2}\s*'
+
+
+def _symmetric_wrapper_spans(text: str, symbols: str, *, unclosed: bool):
+    """Pair original delimiter runs without bridging separate annotations.
+
+    Asterisk run lengths distinguish nested single/double/triple wrappers;
+    music symbols share one kind. Only outer spans are yielded, so total
+    scanning and coverage work stays linear even with deep nesting.
+    """
+    stack = []
+    start = i = 0
+    while i < len(text):
+        if text[i] not in symbols:
+            i += 1
+            continue
+        end = i + 1
+        if symbols == '*':
+            while end < len(text) and text[end] == '*':
+                end += 1
+        kind = end - i if symbols == '*' else 1
+        if not stack:
+            start = i
+        if stack and stack[-1] == kind:
+            stack.pop()
+            if not stack:
+                yield start, end
+        else:
+            stack.append(kind)
+        i = end
+    if stack and unclosed:
+        yield start, len(text)
+
+
+def _strip_non_speech_markers(text: str) -> str:
+    """Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
+    [Music], (background noise), ♪, special-token leaks like <|endoftext|>
+    or a <|0.00|> timestamp ... — the exact patterns
+    :func:`clean_whisper_artifacts` strips during normal cleanup, reused here
+    (Sol pr67 r2) to build a safety copy for the speech-guard's own checks,
+    which must never read one of Whisper's own annotations, or a leaked
+    special token like <|endoftext|>, as a transcribed word (Sol pr67 r3).
+    """
+    import re
+
+    covered = [False] * len(text)
+    for start, end in _symmetric_wrapper_spans(text, '*', unclosed=False):
+        # Retain normal cleanup's established 40-character annotation limit.
+        # Unmatched marks are stripped below without swallowing their text.
+        if len(text[start:end].strip('*')) <= 40:
+            covered[start:end] = [True] * (end - start)
+    text = ''.join(' ' if gone else ch for ch, gone in zip(text, covered))
+    text = re.sub(r'\*+', '', text)
+    text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[' + _NOISE_MARKER + r'\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\(' + _NOISE_MARKER + r'\)', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'♪+', ' ', text)
+    # Whisper special-token leaks: <|endoftext|>, a <|0.00|> timestamp, etc.
+    text = re.sub(r'<\|[^|]*\|>', ' ', text)
+    return text
+
+
+# Anything Whisper wrapped, whatever it says inside: [Music], (door opens),
+# {noise}, full-width and CJK brackets, <|endoftext|>.
+_WRAP_OPENERS = '[({（【「『'
+_WRAP_CLOSERS = '])}）】」』'
+# Whisper's own music symbols (its tokenizer's non-speech set), all one kind.
+_MUSIC_SYMBOLS = '♩♪♫♬♭♮♯'
+
+
+def _noise_check_safety_copy(text: str) -> str:
+    """A safety copy of *text* for the noise-verdict speech-guard's own two
+    checks ONLY (Sol pr67 r2) — never what Raw Transcript, or anything else
+    downstream, sees: an accepted recording's text is returned unchanged.
+
+    Nothing Whisper wrapped counts as a spoken word here, whatever is
+    inside (Sol pr67 r6). Erring towards removal is safe on this path only:
+    these are recordings 1.3.0 dropped outright as having no speech
+    activity, so a wrongly rejected one is dropped exactly as it was
+    before, while annotation text wrongly counted as speech would type
+    something that was never said.
+
+    What is wrapped is worked out on the original text in one pass, then
+    removed together (Sol pr67 r8): removing one kind of bracket first
+    exposed another kind's contents ("[noise (] loud [) noise]"). Brackets
+    of every kind, and <| |> special tokens, count as one nesting depth, so
+    a crossed or mismatched pair still covers everything between; an opener
+    never closed covers to the end, a closer never opened, from the start.
+    Symmetric wrappers are paired on their original delimiter runs. Equal
+    asterisk runs close their matching nesting level; all music symbols use
+    one delimiter kind. Separate annotations cannot swallow the speech
+    between them. An unclosed annotation still covers to the end. Whitespace is then
+    canonicalised the same way normal cleanup does right before its own
+    final hallucination check.
+    """
+    import re
+
+    text = text or ""
+    covered = [False] * len(text)
+    depth = 0
+    cut_before = 0
+    i = 0
+    while i < len(text):
+        if text.startswith('<|', i) or text[i] in _WRAP_OPENERS:
+            width = 2 if text.startswith('<|', i) else 1
+            depth += 1
+            covered[i:i + width] = [True] * width
+        elif text.startswith('|>', i) or text[i] in _WRAP_CLOSERS:
+            width = 2 if text.startswith('|>', i) else 1
+            covered[i:i + width] = [True] * width
+            if depth:
+                depth -= 1
+            else:
+                cut_before = i + width
+        else:
+            width = 1
+            if depth:
+                covered[i] = True
+        i += width
+    covered[:cut_before] = [True] * cut_before
+    for symbols in ('*', _MUSIC_SYMBOLS):
+        for start, end in _symmetric_wrapper_spans(text, symbols, unclosed=True):
+            covered[start:end] = [True] * (end - start)
+    kept = ''.join(' ' if gone else ch for ch, gone in zip(text, covered))
+    return re.sub(r'\s+', ' ', kept).strip()
+
+
 # whisper.cpp refuses more than 8 decoders ("too many decoders requested"),
 # which made a hand-edited beam_size of 9+ fail every dictation.
 WHISPER_MAX_DECODERS = 8
@@ -3217,49 +3416,12 @@ def clean_whisper_artifacts(
     # Also handle "ll, "re, "ve (two-letter suffixes)
     text = re.sub(r'(\w)"(ll|re|ve)\b', r"\1'\2", text, flags=re.IGNORECASE)
 
-    # Remove asterisk-wrapped non-speech markers (Whisper uses *text* for sounds/music)
-    # e.g., *loud noise*, *bird music*, *laughing* → removed
-    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
-    # Clean orphaned/stray asterisks
-    text = re.sub(r'\*+', '', text)
-
-    # Remove [BLANK_AUDIO] and similar markers (case insensitive)
-    # Replace with space to preserve word boundaries (will be normalized later)
-    text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
-
-    # Generalized noise annotations. Whisper emits many bracketed/parenthesized
-    # variants beyond the exact markers above — "[audience noise]" was typed
+    # Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
+    # [Music], (background noise), ♪ ... — "[audience noise]" was typed
     # verbatim into a user's document when they dictated near-silence (launch
-    # feedback). Strip short annotations built ONLY from known noise vocabulary
-    # so legitimately dictated bracket text survives.
-    _noise_word = (
-        r'(?:audience|background|street|wind|static|noise|noises|sound|sounds|'
-        r'music|applause|laughter|laughing|laughs|coughing|coughs?|typing|'
-        r'keyboard|clicking|clicks|silence|silent|inaudible|unintelligible|'
-        r'indistinct|chatter|murmuring|breathing|sighs?|sighing|sniffs?|'
-        r'sniffing|beeping|buzzing|humming|rustling|footsteps|door|engine|'
-        r'clapping|claps|cheering|cheers|whistling|whistles|ringing|phone|'
-        r'camera|shutter|snapping|snaps|tapping|taps|knocking|knocks|'
-        r'banging|thud|thumping|crowd|birds?|chirping|barking|dog|rain|'
-        r'thunder|water|waves|crackling|scraping|shuffling|whispering|'
-        r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
-        r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
-    )
-    # Short joiners ("[sound of wind]", "(sound of the rain)") may sit between
-    # noise words; the annotation must still start and end with one.
-    _joiner = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
-    _noise_marker = r'\s*' + _noise_word + r'(?:' + _joiner + r'\s+' + _noise_word + r'){0,2}\s*'
-    text = re.sub(r'\[' + _noise_marker + r'\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\(' + _noise_marker + r'\)', ' ', text, flags=re.IGNORECASE)
-
-    # Remove music note symbols (replace with space to preserve word boundaries)
-    text = re.sub(r'♪+', ' ', text)
-
-    # Remove Whisper special token leaks: <|...|> patterns (timestamps, end-of-text, etc.)
-    text = re.sub(r'<\|[^|]*\|>', ' ', text)
+    # feedback). Shared with the speech-guard's safety copy (Sol pr67 r2) so
+    # both strip exactly the same patterns.
+    text = _strip_non_speech_markers(text)
 
     # Fix angle brackets that Whisper inserts instead of punctuation
     # < often replaces commas, > often replaces periods
@@ -3307,10 +3469,10 @@ def clean_whisper_artifacts(
     # Drop the whole thing if the entire cleaned output is a known Whisper
     # phrase-hallucination (the stock YouTube-caption strings it emits on silence).
     # Only the ENTIRE output is checked — never a mid-sentence substring.
-    _phrase_candidate = _collapse_repeated_sentences_for_phrase_match(text)
-    _phrase_key = _phrase_candidate.lower().rstrip('.!?,;: ').strip()
-    if _phrase_key in _WHISPER_PHRASE_HALLUCINATIONS:
-        print(f"[Transcription] Dropped Whisper phrase-hallucination: {text!r}")
+    if _is_whisper_phrase_hallucination(text):
+        # Say it was dropped, never what it said (Sol pr67 r2) — the speech-
+        # guard's own diagnostics must not leak recognized text either.
+        print("[Transcription] Dropped Whisper phrase-hallucination")
         return ""
 
     # Log if we cleaned something
@@ -3757,6 +3919,7 @@ def transcribe_with_config(
     context: str = "",
     skip_post_processing: bool = False,
     request_token: Optional[int] = None,
+    unprompted: bool = False,
 ) -> str:
     """
     Transcribe using settings from config dictionary.
@@ -3770,6 +3933,13 @@ def transcribe_with_config(
             where post-processing should happen on the final combined text)
         request_token: The dictation's WhisperServerBackend.request_token(),
             taken when it began; a retirement since raises RequestAbandoned
+        unprompted: Send Whisper no prompt, vocabulary or context. For audio the
+            speech check calls steady noise: primed with the dictation prompt,
+            large-v3-turbo turned 9 of 36 fan/hum/hiss recordings into invented
+            sentences; unprompted, 90 of 90 came back as "." or one word. The
+            recognizer's own output is then held to the two-word rule (and
+            checked for a known hallucination phrase) before anything else —
+            including Raw Transcript's early return — can touch it.
 
     Returns:
         Transcribed text string
@@ -3798,7 +3968,37 @@ def transcribe_with_config(
         WhisperServerBackend._check_not_abandoned(request_token)
         backend = get_backend(config)
         WhisperServerBackend._check_not_abandoned(request_token)
+        if unprompted:
+            # A Core ML server not yet loaded hands the audio to its Metal
+            # stand-in, which would otherwise prime Whisper with its own prompt.
+            for heard_by in (backend, getattr(backend, "_ready_only_fallback", None)):
+                if heard_by is not None:
+                    heard_by.prompt = ""
+                    heard_by.custom_vocabulary = []
+            context = ""
         text = backend.transcribe(audio_path, context=context)
+
+    if unprompted:
+        # Evaluate the RECOGNIZER's own words here, before vocabulary
+        # replacement or LLM cleanup get a chance to rewrite them: those ran
+        # AFTER the two-word rule below and could turn a one-word noise
+        # artifact into something that reads like two words ("Okay." ->
+        # "Sounds good.", wrongly kept) or collapse real two-word speech into
+        # one corrected term ("open ai" -> "OpenAI", wrongly dropped). A known
+        # Whisper hallucination phrase is rejected here too — unlike the
+        # two-word rule, a phrase like "Thank you for watching." has enough
+        # words to pass it, so Raw Transcript must not let it through either.
+        # Both checks run on a SAFETY COPY only (Sol pr67 r2): stripped of
+        # Whisper's own non-speech annotations and whitespace-canonicalised,
+        # so "[Music] Okay." can't pass as two words and repeated whitespace
+        # inside a known hallucination phrase can't dodge the match. The text
+        # returned below, including to Raw Transcript, is still the raw text.
+        from wayfinder.core.recorder import noise_transcript_has_speech
+        safety_text = _noise_check_safety_copy(text)
+        if (_is_whisper_phrase_hallucination(safety_text, noise_check=True)
+                or not noise_transcript_has_speech(safety_text)):
+            # Say the recording was rejected, never what was heard.
+            return ""
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep
     # entitlement checks in get_backend(), but bypass every Aura text rewrite

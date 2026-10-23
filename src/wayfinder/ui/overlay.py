@@ -50,6 +50,14 @@ try:
 except ImportError:  # standalone script — its own directory is on sys.path
     from stdin_reader import StdinCommandReader
 
+# Cloaked-window probe for the Windows topmost keeper's pill-hwnd lookup
+# below (_pill_hwnd_for). Reports False (never cloaked) off Windows, so this
+# import is safe on macOS/Linux too.
+try:
+    from wayfinder.ui.windows_topmost import _cloaked
+except ImportError:  # standalone script — its own directory is on sys.path
+    from windows_topmost import _cloaked
+
 # Force native Wayland path for PyQt6 if running on Wayland
 # This ensures proper transparency and always-on-top behavior
 if os.environ.get("XDG_SESSION_TYPE") == "wayland":
@@ -409,7 +417,7 @@ def _try_kde_always_on_top(window_title: str) -> bool:
     return True
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import (
     QAbstractAnimation,
@@ -466,6 +474,12 @@ class OverlayState(Enum):
     LISTENING = auto()
     PROCESSING = auto()
     ERROR = auto()
+
+
+# A dictation is in progress in exactly these two states (Sol pill r4) — used
+# by set_state() to drive GlassmorphicOverlay._on_active_changed, which
+# run_overlay() wires to the Windows topmost keeper's set_active().
+ACTIVE_OVERLAY_STATES = (OverlayState.LISTENING, OverlayState.PROCESSING)
 
 
 # === Color Palettes ===
@@ -1184,6 +1198,24 @@ class GlassmorphicOverlay(QWidget):
         
         # State
         self._state = OverlayState.HIDDEN
+        # Fires exactly when self._state actually crosses into/out of HIDDEN
+        # (set_state() below is the one place that happens, regardless of
+        # which command or automatic transition — show/hide, a transient
+        # overlay's READY->HIDDEN remap, the idle watchdog, error
+        # auto-return — triggered it). run_overlay() wires this to the
+        # Windows topmost keeper so suspend/resume always matches where the
+        # pill actually ends up, not just whichever handler ran. None off
+        # Windows / in tray_only mode, where nothing wires it.
+        self._on_hidden_changed: Optional[Callable[[bool], None]] = None
+        # Same idea, for whether a dictation is actually in progress: fires
+        # exactly when self._state crosses into/out of ACTIVE_OVERLAY_STATES
+        # (LISTENING, PROCESSING), from the same one place as
+        # _on_hidden_changed above. run_overlay() wires this to the Windows
+        # topmost keeper's set_active() (Sol pill r4), so the pill can never
+        # stay buried for a whole back-off during a recording, whatever
+        # command or automatic transition got it there. None off Windows /
+        # in tray_only mode.
+        self._on_active_changed: Optional[Callable[[bool], None]] = None
         self._target_width = 200
         self._current_width = 200.0
         
@@ -1919,7 +1951,35 @@ class GlassmorphicOverlay(QWidget):
         
         old_state = self._state
         self._state = state
-        
+
+        # Tell the Windows topmost keeper exactly when the pill actually
+        # becomes invisible or visible again — from the one place self._state
+        # really changes, not from whichever command handler happened to
+        # trigger this call. Round 2 left this split across "show"/"hide"
+        # command handlers, so a transient overlay's "show ready" (remapped
+        # to HIDDEN just above) kept resuming the keeper anyway, and an
+        # automatic hide (idle watchdog, or an error auto-return landing on
+        # HIDDEN the same way) never suspended it at all.
+        if self._on_hidden_changed is not None:
+            if state == OverlayState.HIDDEN and old_state != OverlayState.HIDDEN:
+                self._on_hidden_changed(True)
+            elif old_state == OverlayState.HIDDEN and state != OverlayState.HIDDEN:
+                self._on_hidden_changed(False)
+
+        # Same idea for whether a dictation is actually in progress
+        # (LISTENING through PROCESSING) — keeper.set_active() (Sol pill r4)
+        # uses this to cap how long it can leave the pill buried while
+        # recording continues, from the one place self._state really
+        # changes rather than the "show" command handler alone, so every
+        # path here (a plain "show", the transient remap above, the idle
+        # watchdog, an error auto-return) is covered the same way
+        # _on_hidden_changed already is.
+        if self._on_active_changed is not None:
+            old_active = old_state in ACTIVE_OVERLAY_STATES
+            new_active = state in ACTIVE_OVERLAY_STATES
+            if new_active != old_active:
+                self._on_active_changed(new_active)
+
         # Track when we entered PROCESSING state
         if state == OverlayState.PROCESSING:
             import time
@@ -2686,6 +2746,22 @@ class GlassmorphicOverlay(QWidget):
 
 # === IPC Command Handler ===
 
+def _pill_hwnd_for(overlay: "GlassmorphicOverlay") -> Optional[int]:
+    """The pill's hwnd for the Windows topmost keeper (ui/windows_topmost.py),
+    or None while it isn't actually on screen.
+
+    20 Oct: persistent mode never calls hide() — _finish_hide() parks the
+    pill off-screen instead, so isVisible() stays True while HIDDEN, and the
+    keeper kept scanning/repairing a window nobody can see. A minimized or
+    cloaked (parked on another virtual desktop) pill reports isVisible()
+    True too, for the same reason: the keeper must leave all three alone.
+    """
+    if overlay._state == OverlayState.HIDDEN or overlay.isMinimized() or not overlay.isVisible():
+        return None
+    hwnd = int(overlay.winId())
+    return None if _cloaked(hwnd) else hwnd
+
+
 def run_overlay():
     """Run the overlay as a standalone application with stdin command handling."""
     import signal
@@ -3074,6 +3150,13 @@ def run_overlay():
                     # Drive tray icon/tooltip only — never map the floating pill.
                     _update_tray(state)
                 else:
+                    # set_state() itself resumes the topmost keeper's hook and
+                    # timer, exactly when the pill actually leaves HIDDEN — a
+                    # transient overlay's "show ready" can remap straight back
+                    # to HIDDEN (see set_state()) and must NOT resume them.
+                    # It also drives the keeper's set_active() the same way,
+                    # through overlay._on_active_changed (Sol pill r4) — no
+                    # separate call needed here for LISTENING.
                     overlay.set_state(state)
                     _update_tray(state)
                 _emit_cmd_ack(cmd, ok=True, state_name=state_name)
@@ -3097,6 +3180,11 @@ def run_overlay():
             if tray_only:
                 _update_tray(OverlayState.READY)
             else:
+                # set_state() itself suspends the topmost keeper's hook and
+                # stops its timer, exactly when the pill actually becomes
+                # HIDDEN — _pill_hwnd_for() already keeps the keeper from
+                # restoring a parked-offscreen pill, but there's no point
+                # even polling for one while hidden.
                 overlay.set_state(OverlayState.HIDDEN)
                 _update_tray(OverlayState.READY)
         
@@ -3227,6 +3315,11 @@ def run_overlay():
     cmd_timer.timeout.connect(process_commands)
     cmd_timer.start(50)  # Check every 50ms (20Hz - responsive enough for state changes)
 
+    # None on macOS/Linux and in tray_only mode (the block below never runs
+    # there); handle_command()'s hide/show branches check these before use.
+    _topmost_timer = None
+    _topmost_keeper = None
+
     if sys.platform == "win32" and not tray_only:
         # Pill diagnostics: report display changes (added/removed/resized/DPI)
         # to the main process, which logs them beside the pill state lines.
@@ -3256,6 +3349,72 @@ def run_overlay():
             app.primaryScreenChanged.connect(lambda s: _emit_screen_event("primary", s))
         except Exception as e:
             _debug_log(f"screen watch setup failed: {e}")
+
+        # Keep the pill above ordinary windows. 20 Oct: Windows ranked it below
+        # VS Code, Explorer and Slack while it was still flagged topmost, so it
+        # vanished behind them (ui/windows_topmost.py). Check on every
+        # foreground change and once a second; restores are reported to the
+        # main process (batched by the keeper, at most every 30 s).
+        try:
+            from wayfinder.ui.windows_topmost import TopmostKeeper
+
+            def _pill_hwnd():
+                return _pill_hwnd_for(overlay)
+
+            def _report_restore(info: dict) -> None:
+                print(json.dumps({"event": "topmost", **info}), flush=True)
+
+            _topmost_keeper = TopmostKeeper(
+                _pill_hwnd, _report_restore,
+                # The foreground event arrives before Windows finishes
+                # reordering; check on a later Qt turn.
+                schedule=lambda fn: QTimer.singleShot(50, fn),
+            )
+            _topmost_timer = QTimer()
+            _topmost_timer.timeout.connect(_topmost_keeper.check)
+
+            def _sync_topmost_with_hidden_state(hidden: bool) -> None:
+                # Wired to overlay._on_hidden_changed below: the single place
+                # set_state() calls this is exactly when self._state actually
+                # crosses into/out of HIDDEN, covering "show"/"hide", a
+                # transient overlay's READY->HIDDEN remap, the idle watchdog
+                # and an error auto-return alike — not just the two command
+                # handlers that used to duplicate this (and could fall out
+                # of sync with where the state actually landed).
+                if hidden:
+                    _topmost_timer.stop()
+                    _topmost_keeper.suspend()
+                else:
+                    _topmost_keeper.resume()
+                    if not _topmost_timer.isActive():
+                        _topmost_timer.start(1000)
+
+            overlay._on_hidden_changed = _sync_topmost_with_hidden_state
+
+            def _sync_topmost_active_with_state(active: bool) -> None:
+                # Wired to overlay._on_active_changed below, driven from the
+                # same one place in set_state() as _sync_topmost_with_hidden_
+                # state above — every path that changes overlay._state
+                # (show, the transient remap, the idle watchdog, an error
+                # auto-return) is covered, not just the "show" command
+                # handler (ui/windows_topmost.py set_active(), Sol pill r4;
+                # replaces note_recording_started()).
+                _topmost_keeper.set_active(active)
+
+            overlay._on_active_changed = _sync_topmost_active_with_state
+            # Match whatever overlay._state already is at construction time —
+            # "transient" mode starts HIDDEN (mapped offscreen, no set_state()
+            # call yet; see run_overlay() above), so the keeper must start
+            # suspended too rather than polling a pill nobody can see until
+            # the first "show".
+            if overlay._state == OverlayState.HIDDEN:
+                _topmost_keeper.suspend()
+            else:
+                _topmost_keeper.install_foreground_hook()
+                _topmost_timer.start(1000)
+            _topmost_keeper.set_active(overlay._state in ACTIVE_OVERLAY_STATES)
+        except Exception as e:
+            _debug_log(f"topmost keeper setup failed: {e}")
 
     # Send ready signal. Report tray availability so the main app's hide-to-tray guard
     # never withdraws the window when there is no tray to restore it from.
