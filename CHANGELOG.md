@@ -7,6 +7,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-10-23
+
 ### Fixed
 
 - **Mac: the first dictation after a relaunch no longer waits for Core ML.**
