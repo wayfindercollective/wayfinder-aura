@@ -44,6 +44,11 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+            .github/workflows/release.yml
 
       - name: Create isolated Python environment
         run: python scripts/ci/prepare-python.py
@@ -104,6 +109,11 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+            .github/workflows/release.yml
 
       - name: Create isolated Python environment
         run: python scripts/ci/prepare-python.py
@@ -276,7 +286,7 @@ jobs:
           XDG_CONFIG_HOME="$AUDIO_HOME" \
             squashfs-root/AppRun --audio-input-self-test | tee /tmp/audio-input-self-test.log
           grep -Fq "AUDIO_INPUT_SELF_TEST_OK" /tmp/audio-input-self-test.log
-          # Medium depends on a dynamically imported scipy.signal module, and
+          # Medium's rumble filter must really run in the bundle, and
           # preprocessing's stationary-noise guard is a release-critical defense
           # against confident Whisper hallucinations. Exercise the packaged path.
           XDG_CONFIG_HOME=$(mktemp -d) squashfs-root/AppRun \
@@ -350,6 +360,8 @@ jobs:
     needs: [quality, release-readiness]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.artifacts == 'windows' || inputs.artifacts == 'all'))
     uses: ./.github/workflows/windows-build.yml
+    with:
+      run-tests: false  # quality (ci.yml) ran the Windows suite for this commit
 
   # macOS: Apple Silicon DMG, built with the same commands as macos-build.yml.
   # When ALL signing secrets exist it is Developer ID signed, notarized and

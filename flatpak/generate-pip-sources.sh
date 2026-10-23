@@ -18,10 +18,9 @@ echo "Generating Python package sources for Flatpak..."
 echo "Project directory: $PROJECT_DIR"
 
 runtime_requirements=$(mktemp)
-scipy_build_requirements=$(mktemp)
 constraints=$(mktemp)
 cleanup() {
-    rm -f -- "$runtime_requirements" "$scipy_build_requirements" "$constraints"
+    rm -f -- "$runtime_requirements" "$constraints"
 }
 trap cleanup EXIT
 
@@ -33,10 +32,6 @@ cp "$SCRIPT_DIR/flatpak-constraints.txt" "$constraints"
     cat "$SCRIPT_DIR/flatpak-requirements.txt"
     printf '%s\n' "-c $constraints"
 } > "$runtime_requirements"
-{
-    cat "$SCRIPT_DIR/scipy-build-requirements.txt"
-    printf '%s\n' "-c $constraints"
-} > "$scipy_build_requirements"
 
 GENERATOR=()
 if python3 -c "import flatpak_pip_generator" &> /dev/null; then
@@ -73,15 +68,9 @@ echo "Using ${GENERATOR[*]} (source archives for compiled packages)..."
     --output="$SCRIPT_DIR/python-numpy-build-tools" \
     --runtime='org.kde.Sdk//6.11'
 
-"${GENERATOR[@]}" \
-    --requirements-file="$scipy_build_requirements" \
-    --output="$SCRIPT_DIR/python-scipy-build-tools" \
-    --runtime='org.kde.Sdk//6.11'
-
 if rg -n '(manylinux|musllinux)[^" ]*\.whl' \
     "$SCRIPT_DIR/python-deps.json" \
-    "$SCRIPT_DIR/python-numpy-build-tools.json" \
-    "$SCRIPT_DIR/python-scipy-build-tools.json"; then
+    "$SCRIPT_DIR/python-numpy-build-tools.json"; then
     echo "ERROR: generated dependency manifests contain a platform wheel" >&2
     exit 1
 fi
@@ -89,7 +78,6 @@ fi
 echo "Generated source-only Python manifests:"
 echo "  $SCRIPT_DIR/python-deps.json"
 echo "  $SCRIPT_DIR/python-numpy-build-tools.json"
-echo "  $SCRIPT_DIR/python-scipy-build-tools.json"
 
 echo ""
 echo "Done. Regenerate Cargo source manifests separately whenever a pinned"

@@ -39,25 +39,35 @@ class TestSettingTooltips:
             assert isinstance(val, str), f"SETTING_TOOLTIPS[{key!r}] value is not a string"
             assert len(val.strip()) > 0, f"SETTING_TOOLTIPS[{key!r}] is empty"
 
-    def test_known_setting_keys_present(self):
-        """Important setting keys referenced in the UI should have tooltips."""
+    def test_every_key_the_ui_looks_up_exists(self):
+        """SETTING_TOOLTIPS["x"] in a pane builder raises KeyError and the pane
+        stops building, so every subscripted key must exist."""
+        import re
+        from pathlib import Path
+
         from wayfinder.ui.components import SETTING_TOOLTIPS
 
-        expected_keys = [
-            "hotkey", "microphone", "typing_speed",
-            "backend", "gpu_acceleration",
-            "post_processing", "output_tone",
-        ]
-        for key in expected_keys:
-            assert key in SETTING_TOOLTIPS, f"Missing tooltip for setting: {key}"
+        repo = Path(__file__).resolve().parent.parent
+        sources = [repo / "wayfinder_main.py", *sorted((repo / "src" / "wayfinder" / "ui").glob("*.py"))]
+        looked_up = set()
+        for path in sources:
+            looked_up |= set(re.findall(r'SETTING_TOOLTIPS\["([a-z_]+)"\]', path.read_text(encoding="utf-8")))
+        assert {"hotkey", "microphone", "language", "gpu_device"} <= looked_up
+        missing = sorted(looked_up - set(SETTING_TOOLTIPS))
+        assert not missing, f"Missing tooltips for: {missing}"
 
-    def test_backend_and_processing_tooltips_disclose_free_ultra_boundary(self):
+    def test_hints_are_plain_text(self):
+        """Rule 11: no emoji in setting hints (the retired copy was full of them)."""
         from wayfinder.ui.components import SETTING_TOOLTIPS
 
-        assert "Free: Base on CPU" in SETTING_TOOLTIPS["backend"]
+        for key, text in SETTING_TOOLTIPS.items():
+            assert all(ord(ch) < 0x2600 or ch in "—–…→·•" for ch in text), key
+
+    def test_backend_tooltip_discloses_free_ultra_boundary(self):
+        from wayfinder.ui.components import SETTING_TOOLTIPS
+
+        assert "Free uses Base on the CPU" in SETTING_TOOLTIPS["backend"]
         assert "Ultra" in SETTING_TOOLTIPS["backend"]
-        assert "Free includes minimal" in SETTING_TOOLTIPS["post_processing"]
-        assert "Ultra" in SETTING_TOOLTIPS["post_processing"]
 
 
 class TestModelRecommendations:
@@ -86,16 +96,15 @@ class TestGetDynamicTooltip:
         """get_dynamic_tooltip should always return a string."""
         from wayfinder.ui.components import get_dynamic_tooltip
 
-        result = get_dynamic_tooltip("typing_speed", {})
+        result = get_dynamic_tooltip("hotkey", {})
         assert isinstance(result, str)
 
     def test_falls_back_to_static_tooltip(self):
         """With empty config (no benchmarks), should fall back to static tooltip text."""
         from wayfinder.ui.components import get_dynamic_tooltip, SETTING_TOOLTIPS
 
-        result = get_dynamic_tooltip("typing_speed", {})
-        expected = SETTING_TOOLTIPS.get("typing_speed", "")
-        assert result == expected
+        result = get_dynamic_tooltip("hotkey", {})
+        assert result == SETTING_TOOLTIPS["hotkey"] and result
 
     def test_whisper_model_without_benchmarks(self):
         """whisper_model tooltip without benchmarks should prompt user to run benchmark."""
@@ -134,7 +143,7 @@ class TestGetDynamicTooltip:
         }
         result = get_dynamic_tooltip("whisper_model", config)
         assert "0.8" not in result and "0.6" not in result
-        assert "Run benchmark" in result
+        assert "run benchmark" in result.lower()
 
     def test_unknown_key_returns_empty_string(self):
         """get_dynamic_tooltip for an unknown key should return empty string."""

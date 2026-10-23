@@ -4,7 +4,7 @@ something is happening (pure PIL, no Tk).
 Design (80-unit canvas, disc radius 24 units):
 
 - **Ready**: a raised chip (card + 5% white) with a hairline rim, like the rim
-  on every pane, a faint glass highlight across the upper arc, and the Lucide
+  on every pane, and the Lucide
   ``mic`` as a 2 px line glyph, the same icon language as the sidebar.
   Hover: the rim takes the state colour and the glyph goes white.
 - **Recording**: a solid state-colour disc with a white rounded stop square;
@@ -102,9 +102,6 @@ def render_mic_button(phys: int, color: str, *, card: str, ink: str, light: str,
         chip = _mix(card_rgb, _WHITE, 0.08 if hover else 0.05)
         rim = _mix(card_rgb, state, 0.75) if hover else _mix(card_rgb, _WHITE, 0.16)
         draw.ellipse([c - r, c - r, c + r, c + r], fill=chip, outline=rim, width=int(round(hair)))
-        hr = r - hair * 1.5
-        draw.arc([c - hr, c - hr, c + hr, c + hr], start=210, end=330,
-                 fill=_mix(chip, _WHITE, 0.10), width=max(1, int(round(k))))
         _lucide_mic(draw, c, c, GLYPH * k, _WHITE if hover else light_rgb)
 
     return img.resize((phys, phys), Image.LANCZOS)

@@ -1,12 +1,11 @@
 # Flatpak runtime dependency lock. Keep these exact: unlike a developer venv,
 # a published Flatpak must be reproducible and dependency upgrades should land
 # as reviewed changes with a fresh candidate build.
-customtkinter==5.2.2
+customtkinter==6.0.0
 requests==2.34.2
 cryptography==49.0.0
 sounddevice==0.5.5
 numpy==2.5.1
-scipy==1.18.0
 pynput==1.8.2
 pystray==0.19.5
 Pillow==12.3.0

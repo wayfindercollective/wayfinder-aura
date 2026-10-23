@@ -14,6 +14,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from wayfinder.core.transcriber import RequestAbandoned, _dictation_cancelled, _retired_dictation
+from wayfinder.utils.child_supervisor import (
+    HelperNotStarted, HelpersClosed, helper_budget_shortened, helper_elapsed, run_tracked,
+)
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.platform import (
     get_user_llm_models_dir,
@@ -24,6 +28,14 @@ from wayfinder.utils.platform import (
 # Hide the child console window on Windows (empty on POSIX); splatted into each
 # llama subprocess spawn so no stray terminal appears.
 _NO_WINDOW = subprocess_no_window_kwargs()
+
+def _check_dictation() -> None:
+    """A cleanup for a dictation the app retired starts, restarts, retries and
+    counts nothing: its text is discarded, and a restart could stop the server
+    the next dictation is using (Sol mac r8)."""
+    if _retired_dictation():
+        raise RequestAbandoned("dictation abandoned")
+
 
 
 class PostProcessingError(Exception):
@@ -202,7 +214,7 @@ MODEL_TIERS = {
 }
 
 # Cloud backend identifiers - these always use large/capable models
-CLOUD_BACKENDS = {"openai", "anthropic"}
+CLOUD_BACKENDS = {"openai", "anthropic", "groq"}
 
 # Known model-specific issues
 MODEL_QUIRKS: Dict[str, Dict[str, Any]] = {
@@ -1908,7 +1920,9 @@ class LlamaCppBackend(PostProcessorBackend):
         
         try:
             from llama_cpp import Llama
-            
+            # Not for a dictation retired meanwhile, during the quarantine
+            # check above or the import included (Sol mac r11).
+            _check_dictation()
             self._model = Llama(
                 model_path=self.model_path,
                 n_ctx=self.n_ctx,
@@ -1920,6 +1934,8 @@ class LlamaCppBackend(PostProcessorBackend):
             LlamaCppBackend._model_cache[cache_key] = self._model
             return self._model
             
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"Failed to load llama.cpp model: {e}")
     
@@ -1951,8 +1967,10 @@ class LlamaCppBackend(PostProcessorBackend):
           # hold can span the whole inference — the same trade the resident
           # CLI path makes; the RLock keeps nested acquisition safe.
           with LlamaCppCliBackend._residency_lock:
+            _check_dictation()   # the lock wait can span another inference
             load_started = time.monotonic()
             model = self._get_model()
+            _check_dictation()   # retired during the load
 
             # Format the full prompt
             full_prompt = format_prompt(prompt_template, text)
@@ -2018,6 +2036,8 @@ class LlamaCppBackend(PostProcessorBackend):
 
             return result if result else text
             
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"llama.cpp processing failed: {e}")
     
@@ -2404,6 +2424,13 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # llama_cpp_residency). force_subprocess still wins over all of it — the
         # eval harness relies on that to pin the deterministic one-shot path.
         self.residency = str(residency or "auto").strip().lower()
+        # The switch this configuration was read under: a llama-server start
+        # for it after a CPU/GPU or model switch would load the wrong mode.
+        try:
+            from wayfinder.core.llama_server import LlamaServerManager
+            self._llama_load_epoch = LlamaServerManager.load_epoch()
+        except Exception:
+            self._llama_load_epoch = None
         # Derived from the app's PROCESSING watchdog when the caller knows it,
         # so the ceiling tracks a user who has changed processing_timeout_secs
         # instead of silently staying at a constant that no longer fits.
@@ -2478,6 +2505,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 # weights; reloading would wedge again and pin another copy.
                 return None
         if model is None:
+            # Not for a dictation retired meanwhile, during the lock wait
+            # above included (Sol mac r10).
+            _check_dictation()
             try:
                 model = Llama(
                     model_path=self.model_path, n_ctx=self.n_ctx,
@@ -2547,12 +2577,16 @@ class LlamaCppCliBackend(PostProcessorBackend):
         cand = self.llama_binary.replace("llama-simple", "llama-simple-cpu")
         return cand if cand != self.llama_binary and Path(cand).exists() else None
 
-    def _probe_gpu_ok(self, ngl: int, budget: Optional[float] = None) -> bool:
+    def _probe_gpu_ok(self, ngl: int, budget: Optional[float] = None) -> Optional[bool]:
         """One tiny GPU generation. False if Vulkan crashes (rc != 0) or degrades to
         ~1 tok/s (times out) — the 60s-hang case the Flatpak used to dodge by staying
         CPU-only. Isolated in a subprocess so a Vulkan-init crash can't take us down.
         budget clamps the probe's subprocess timeout to the caller's remaining
-        cleanup budget so a first-ever probe cannot blow the dictation's ceiling."""
+        cleanup budget so a first-ever probe cannot blow the dictation's ceiling.
+
+        None means no verdict: admission either expired before spawn or left
+        too little execution time to judge the GPU after a timeout.
+        """
         if not self.model_path or not Path(self.model_path).exists():
             return False
         import time as _t
@@ -2560,17 +2594,29 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # clamp here never exceeds what the dictation actually has left.
         limit = _GPU_PROBE_TIMEOUT if budget is None \
             else min(_GPU_PROBE_TIMEOUT, budget)
+        t0 = _t.monotonic()
+        wall_start = _t.time()
         try:
-            t0 = _t.time()
-            r = subprocess.run(
+            r = run_tracked(
                 [self.llama_binary, "-m", self.model_path, "-ngl", str(ngl), "-n", "16", "warm up"],
                 capture_output=True, text=True, timeout=limit,
                 env=bundle_binary_env(),
                 **_NO_WINDOW,
             )
+        except HelpersClosed:
+            raise   # Quit, not the GPU: _subprocess_target caches no verdict
+        except HelperNotStarted:
+            return None   # nothing ran: no verdict either way (Sol mac r20)
+        except subprocess.TimeoutExpired as exc:
+            if helper_budget_shortened(exc, _GPU_PROBE_MAX_SECONDS, deadline=t0 + limit):
+                return None
+            return False
         except Exception:
             return False
-        return r.returncode == 0 and (_t.time() - t0) < _GPU_PROBE_MAX_SECONDS
+        spawned_at = getattr(r, "spawned_at", None)
+        fallback = (_t.monotonic() - spawned_at if isinstance(spawned_at, (int, float))
+                    else _t.time() - wall_start)
+        return r.returncode == 0 and helper_elapsed(r, fallback) < _GPU_PROBE_MAX_SECONDS
 
     def _subprocess_target(self, deadline: Optional[float] = None) -> tuple:
         """Return ``(binary, ngl)`` for the subprocess cleanup, with a cached one-time
@@ -2607,6 +2653,15 @@ class LlamaCppCliBackend(PostProcessorBackend):
                     # settles the verdict.
                     return (self._cpu_sibling() or self.llama_binary), 0
             ok = self._probe_gpu_ok(requested, budget=budget)
+            # A retirement during the probe may have stopped it: no verdict.
+            _check_dictation()
+            if ok is None:
+                # The deadline passed before the probe helper was ever
+                # spawned (HelperNotStarted): no verdict, not a GPU failure.
+                # CPU for THIS call only — nothing cached, and not counted
+                # as a clamped probe, so an unhurried call still probes
+                # fresh (Sol mac r20).
+                return (self._cpu_sibling() or self.llama_binary), 0
             if not ok and budget is not None and budget < _GPU_PROBE_TIMEOUT:
                 # A budget-clamped failure may be the clamp, not the GPU.
                 # Don't poison the cache — but remember the burn, so this key
@@ -2621,6 +2676,12 @@ class LlamaCppCliBackend(PostProcessorBackend):
         if cache[key]:
             return self.llama_binary, requested
         return (self._cpu_sibling() or self.llama_binary), 0
+
+    def bind_to_epoch(self, epoch: Optional[int]) -> None:
+        """Tie llama-server starts to the epoch the config was read under, for
+        a backend built later than that (see llama_server.LOAD_EPOCH_KEY)."""
+        if epoch is not None:
+            self._llama_load_epoch = epoch
 
     def warm_up(self) -> None:
         """Load the resident model + build the compute graph so the first real
@@ -2813,7 +2874,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
         import socket
         try:
             from wayfinder.core.llama_server import (
-                LlamaServerError, LlamaServerManager, resolve_server_binary,
+                LlamaServerError, LlamaServerManager, LlamaServerSuperseded,
+                resolve_server_binary,
             )
         except Exception:
             return None
@@ -2825,6 +2887,8 @@ class LlamaCppCliBackend(PostProcessorBackend):
         binary = resolve_server_binary(self.llama_binary, use_gpu=requested_ngl != 0)
         if not binary:
             return None  # server not bundled in this build
+        served = None   # the child this request reached, for a bound restart
+        _check_dictation()
         try:
             # Pass the port ensure() returned rather than letting complete()
             # re-read the class attribute: a concurrent shutdown (Quit, GPU
@@ -2834,7 +2898,11 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 binary=binary, model_path=self.model_path, n_ctx=self.n_ctx,
                 n_threads=self.n_threads, n_gpu_layers=requested_ngl,
                 deadline=deadline,
+                load_epoch=getattr(self, "_llama_load_epoch", None),
+                retired=_retired_dictation,
             )
+            served = LlamaServerManager.serving()
+            _check_dictation()   # retired during the start: no request for it
             # `deadline` bounds only STARTUP. The generation itself is bounded
             # by the shared cleanup budget, so a server that accepts the socket
             # and then stalls cannot spend the fallback ladder's whole allowance.
@@ -2846,32 +2914,73 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 req_timeout = min(LlamaServerManager.REQUEST_TIMEOUT, req_remaining)
             # Ownership is re-proved per request: the startup check cannot speak
             # for a connection opened later. Cheap next to the request itself.
-            if not LlamaServerManager.still_ours(port):
+            # Bound to the child ensure() handed out, and sent with that child's
+            # key: a replacement on the same port refuses it rather than
+            # answering a request another child's failure would be pinned to.
+            if not LlamaServerManager.still_ours(port, served):
                 raise LlamaServerError(
                     f"port {port} is no longer proven to be our server")
+            _check_dictation()   # the proof can wait on the server: no prompt then
             out = LlamaServerManager.complete(
                 prompt=prompt, n_predict=n_predict, port=port,
-                timeout=req_timeout,
+                timeout=req_timeout, child=served,
                 **self._sampling_profile(),
             )
             # Label from what the server was ACTUALLY spawned with, so a GPU
             # request that degraded to a CPU rung does not report as GPU.
             out["_spawned_ngl"] = LlamaServerManager.spawned_gpu_layers()
-            LlamaServerManager.note_success()
+            # Retired during the request: its late answer ends no failure
+            # streak either (Sol mac r11).
+            _check_dictation()
+            LlamaServerManager.note_success(served)
             return out
+        except LlamaServerSuperseded:
+            # A switch or shutdown cancelled the start: not a failure, so it
+            # must not count toward the restart that would stop the new mode.
+            # A retirement cancelled it: nothing to fall back to either.
+            _check_dictation()
+            if LlamaServerManager._closed:
+                print("[Post-processing] llama-server start refused: Aura is shutting down")
+            else:
+                print("[Post-processing] llama-server start cancelled by a settings "
+                      "change - this cleanup uses the per-call CLI")
+            return None
         except Exception as e:
+            # Retired meanwhile: no restart, no failure counted, no fallback.
+            _check_dictation()
+            if served is not None:
+                # Attributed by the child the request reached, not by the
+                # switch count: a switch whose new mode reused that child left
+                # it published, so its failure is still its own to recover.
+                if LlamaServerManager.replaced(served):
+                    # Stopped or replaced while the request ran: that stop
+                    # failed the request, and the replacement is not the
+                    # server that failed.
+                    print("[Post-processing] llama-server replaced during the "
+                          "request - this cleanup uses the per-call CLI")
+                    return None
+            else:
+                load_epoch = getattr(self, "_llama_load_epoch", None)
+                if load_epoch is not None and LlamaServerManager.load_epoch() != load_epoch:
+                    # No child reached, and a switch landed after the start: the
+                    # stop that came with it is what failed this request, and
+                    # counting it would count against the new mode's server.
+                    print("[Post-processing] llama-server request cut off by a "
+                          "settings change - this cleanup uses the per-call CLI")
+                    return None
             # A server that accepted the connection but never answered is wedged;
             # leaving it up means every future dictation pays the same timeout.
             # Drop it so the next one respawns, and serve THIS one from the CLI.
             if isinstance(e, (socket.timeout, TimeoutError)) or \
                     isinstance(getattr(e, "reason", None), (socket.timeout, TimeoutError)):
                 print("[Post-processing] llama-server timed out - restarting it")
-                # Off this thread: shutdown() can wait ~5s for the lock plus
+                # Off this thread: restart() can wait ~5s for the lock plus
                 # ~10s terminating a wedged child, and this path already sits
-                # deep inside the caller's budget. The epoch machinery makes a
-                # concurrent shutdown-vs-respawn race safe by construction.
+                # deep inside the caller's budget. It stops only the child that
+                # timed out, never a replacement a switch started meanwhile.
                 threading.Thread(
-                    target=LlamaServerManager.shutdown, daemon=True,
+                    target=LlamaServerManager.restart,
+                    args=(served, _dictation_cancelled()), daemon=True,
                     name="llama-server-restart",
                 ).start()
             else:
@@ -2879,7 +2988,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
                 # passes the poll()+identity reuse check forever, so every later
                 # dictation would pay the failure before falling back. Bounded so
                 # a one-off blip does not thrash a multi-GB model reload either.
-                restarted = LlamaServerManager.note_failure()
+                restarted = LlamaServerManager.note_failure(served, _dictation_cancelled())
                 print(f"[Post-processing] llama-server unavailable "
                       f"({type(e).__name__}: {e}) - falling back to per-call CLI"
                       + (" (restarting it)" if restarted else ""))
@@ -3089,6 +3198,7 @@ Cleaned text:"""
             # The resident wheel call cannot be interrupted once entered — there
             # is no timeout on llama-cpp-python's __call__ — so the only honest
             # bound is refusing to start it with the budget already gone.
+            _check_dictation()   # no model load for a retired dictation
             resident = (self._resident_model()
                         if time.monotonic() < overall_deadline else None)
             served = None if resident is not None else self._server_generate(
@@ -3111,6 +3221,8 @@ Cleaned text:"""
                 # the wheel. Freeing weights mid-inference is a native-crash risk,
                 # not merely a Python exception.
                 with LlamaCppCliBackend._residency_lock:
+                    # The lock wait can span another dictation's inference.
+                    _check_dictation()
                     # Lookup-to-lock window: release may have closed THIS object
                     # between _resident_model() above and acquiring the lock.
                     # close() only ever runs under the lock, so "still the
@@ -3176,6 +3288,12 @@ Cleaned text:"""
                 mode = ("server-GPU" if spawned else "server-CPU") if spawned is not None \
                     else "server"
             else:
+                from wayfinder.core.llama_server import LlamaServerManager
+                if LlamaServerManager._closed:
+                    # Quit or restart: nothing starts after a terminal shutdown,
+                    # llama-simple and its GPU probe included.
+                    raise PostProcessingError("Aura is shutting down")
+                _check_dictation()
                 # Fallback: spawn llama-simple. The prompt is POSITIONAL (llama-simple's
                 # documented usage is `llama-simple -m model [-n N] [-ngl N] [prompt]`),
                 # and -ngl must precede it so the model never sees the flag in context.
@@ -3200,7 +3318,8 @@ Cleaned text:"""
                     raise PostProcessingError(
                         "cleanup budget exhausted before the CLI fallback")
                 cli_timeout = min(float(self.timeout), cli_remaining)
-                result = subprocess.run(
+                _check_dictation()   # retired during the GPU probe
+                result = run_tracked(
                     cmd, capture_output=True, text=True, errors="replace",
                     timeout=cli_timeout,
                     env=bundle_binary_env(),
@@ -3246,6 +3365,10 @@ Cleaned text:"""
             raise PostProcessingError(f"llama timed out after {self.timeout}s")
         except FileNotFoundError:
             raise PostProcessingError(f"Could not execute: {self.llama_binary}")
+        except RequestAbandoned:   # a refused helper included: not a shutdown
+            raise
+        except HelpersClosed:
+            raise PostProcessingError("Aura is shutting down")
         except Exception as e:
             raise PostProcessingError(f"llama processing failed: {e}")
 
@@ -3474,7 +3597,9 @@ class AnthropicBackend(PostProcessorBackend):
             is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
             gen_temperature = max(self.temperature, 0.8) if is_caricature else self.temperature
 
-            # Call Claude API
+            # Call Claude API, unless the dictation was retired meanwhile,
+            # during the client's setup included (Sol mac r10).
+            _check_dictation()
             message = client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
@@ -3508,6 +3633,8 @@ class AnthropicBackend(PostProcessorBackend):
 
             return result if result else text
 
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"Anthropic API call failed: {e}")
 
@@ -3544,6 +3671,8 @@ class OpenAIBackend(PostProcessorBackend):
     
     def get_name(self) -> str:
         if self.base_url:
+            if "groq.com" in self.base_url:
+                return "Groq (Cloud)"
             if "x.ai" in self.base_url:
                 return "xAI Grok (Cloud)"
             elif "azure" in self.base_url.lower():
@@ -3553,11 +3682,19 @@ class OpenAIBackend(PostProcessorBackend):
         return "OpenAI (Cloud)"
     
     def is_available(self) -> bool:
-        """Check if openai is installed and API key is set."""
+        """Check if openai (or groq for Groq URLs) is installed and API key is set."""
+        if not self.api_key:
+            return False
         try:
-            import openai
-            return bool(self.api_key)
+            import openai  # noqa: F401
+            return True
         except ImportError:
+            if "groq.com" in (self.base_url or ""):
+                try:
+                    import groq  # noqa: F401
+                    return True
+                except ImportError:
+                    pass
             return False
     
     def _get_client(self):
@@ -3567,19 +3704,23 @@ class OpenAIBackend(PostProcessorBackend):
         
         if not self.api_key:
             raise PostProcessingError(
-                "OpenAI API key not set. "
-                "Set OPENAI_API_KEY environment variable or configure in settings."
+                "API key not set. Configure your API key in Settings."
             )
         
         try:
             import openai
-            # Use custom base_url if provided (for xAI Grok, Azure, etc.)
+            # Use custom base_url if provided (for Groq, xAI Grok, Azure, etc.)
             if self.base_url:
                 self._client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
             else:
                 self._client = openai.OpenAI(api_key=self.api_key)
             return self._client
-            
+        except ImportError:
+            if "groq.com" in (self.base_url or ""):
+                import groq
+                self._client = groq.Groq(api_key=self.api_key)
+                return self._client
+            raise
         except Exception as e:
             raise PostProcessingError(f"Failed to initialize OpenAI client: {e}")
     
@@ -3615,7 +3756,9 @@ class OpenAIBackend(PostProcessorBackend):
             is_caricature = "SILLY" in full_prompt and "EXAGGERATED" in full_prompt
             gen_temperature = max(self.temperature, 0.8) if is_caricature else self.temperature
 
-            # Call OpenAI API
+            # Call OpenAI API, unless the dictation was retired meanwhile,
+            # during the client's setup included (Sol mac r10).
+            _check_dictation()
             response = client.chat.completions.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
@@ -3674,6 +3817,8 @@ class OpenAIBackend(PostProcessorBackend):
 
             return result if result else text
 
+        except RequestAbandoned:
+            raise
         except Exception as e:
             raise PostProcessingError(f"OpenAI API call failed: {e}")
 
@@ -3746,6 +3891,15 @@ def get_backend(config: dict) -> PostProcessorBackend:
     Returns:
         A PostProcessorBackend instance
     """
+    # Read before any setting: a switch landing between the two reads then
+    # cancels this backend's llama-server start rather than mislabelling it.
+    try:
+        from wayfinder.core.llama_server import LOAD_EPOCH_KEY, LlamaServerManager
+        load_epoch = config.get(LOAD_EPOCH_KEY)
+        if load_epoch is None:
+            load_epoch = LlamaServerManager.load_epoch()
+    except Exception:
+        load_epoch = None
     backend_type = config.get("post_processing_backend", "llama_cpp")
     output_tone = config.get("output_tone", "professional")
     _gpu_unlocked = False
@@ -3829,6 +3983,18 @@ def get_backend(config: dict) -> PostProcessorBackend:
             max_tokens=config.get("post_processing_max_tokens", 1024),
             temperature=config.get("post_processing_temperature", 0.1),
         )
+    elif backend_type == "groq":
+        _api_key = (
+            config.get("groq_api_key", "")
+            or os.environ.get("GROQ_API_KEY", "")
+        )
+        return OpenAIBackend(
+            api_key=_api_key,
+            model=config.get("groq_llm_model", "llama-3.3-70b-versatile"),
+            max_tokens=config.get("post_processing_max_tokens", 1024),
+            temperature=config.get("post_processing_temperature", 0.1),
+            base_url="https://api.groq.com/openai/v1",
+        )
     elif backend_type == "openai":
         # API key: prefer config value, then env var, then "lm-studio" for local servers
         _base_url = config.get("openai_base_url", "")
@@ -3868,7 +4034,7 @@ def get_backend(config: dict) -> PostProcessorBackend:
 
         # Use CLI backend if enabled and a usable binary exists
         if use_cli and _cli_present:
-            return LlamaCppCliBackend(
+            backend = LlamaCppCliBackend(
                 llama_binary=llama_binary,
                 model_path=_effective_model_path,
                 n_ctx=config.get("llama_cpp_n_ctx", 2048),
@@ -3885,6 +4051,8 @@ def get_backend(config: dict) -> PostProcessorBackend:
                 custom_vocabulary=_effective_custom_vocabulary,
                 chat_template=config.get("llama_cpp_chat_template", "auto"),
             )
+            backend.bind_to_epoch(load_epoch)
+            return backend
         
         # Fall back to Python bindings (llama-cpp-python)
         return LlamaCppBackend(
@@ -4251,7 +4419,10 @@ def _process_with_config(text: str, config: dict) -> str:
         
         print(f"[Post-processing] 🎯 Style: {tone} | Model: {model_name} | Input: {input_words} words")
         
-        # Process with the built prompt (prompt already includes the text)
+        # Process with the built prompt (prompt already includes the text).
+        # Not for a dictation retired while the backend was built: a cloud
+        # request or a model load on its behalf (Sol mac r9).
+        _check_dictation()
         start_time = time.time()
         result = backend.process(text, prompt)
         elapsed = time.time() - start_time
@@ -4276,6 +4447,8 @@ def _process_with_config(text: str, config: dict) -> str:
 
         return result
         
+    except RequestAbandoned:
+        raise   # nobody will type it: not the original text either
     except PostProcessingError as e:
         # If post-processing fails, return original text
         print(f"[Post-processing] ✗ Error: {e}")

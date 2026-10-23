@@ -42,8 +42,10 @@ from .macos_game_chat import (  # noqa: F401 - re-exported: same interface as th
     GameEntry,
     GameProfile,
     INFO_ONLY as _MAC_INFO_ONLY,
+    filter_games,
     gamer_asr_overlay,
     gamer_vocabulary,
+    merge_game_entries,
     profile_entry,
     send_to_chat,
     split_for_chat,
@@ -119,19 +121,12 @@ def _researched() -> list[GameEntry]:
 def game_list() -> list[GameEntry]:
     """Every game the Games tab shows (Windows notes), sorted by name. As on
     the Mac, profiles and hand-written entries win over researched ones."""
-    entries = [profile_entry(p) for p in PROFILES] + list(INFO_ONLY)
-    names = {e.name.lower() for e in entries}
-    entries += [e for e in _researched() if e.name.lower() not in names]
-    return sorted(entries, key=lambda e: e.name.lower())
+    return merge_game_entries([profile_entry(p) for p in PROFILES] + list(INFO_ONLY), _researched())
 
 
 def search_games(query: str) -> list[GameEntry]:
     """Case-insensitive match on the name or an alias; empty query = all."""
-    q = " ".join((query or "").lower().split())
-    if not q:
-        return game_list()
-    return [e for e in game_list()
-            if q in e.name.lower() or any(q in a for a in e.aliases)]
+    return filter_games(game_list(), query)
 
 
 def match_profile(exe_name: Optional[str], window_title: Optional[str]) -> Optional[GameProfile]:

@@ -116,7 +116,7 @@ def _linux_app(monkeypatch, frontmost):
 
     monkeypatch.setattr(gc, "paste_clipboard", fake_paste)
     monkeypatch.setattr(injector, "inject_text", lambda *a, **k: calls.append(("typed",) + a))
-    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
     monkeypatch.setattr(gc, "_STEAM_WINDOWS", {})
     app = SimpleNamespace(config={}, session_generation=1, log=logs.append)
     app._set_clipboard_from_worker = (
@@ -198,6 +198,74 @@ def test_xdotool_failures_never_carry_the_dictated_text(monkeypatch):
     assert "secret" not in str(exc.value)
 
 
+# -- Codex review finding 3: _xdotool's own refusals, piece zero included --
+# (type_text's per-piece use of _piece_of_a_typing is covered end-to-end in
+# test_injector.py's TestFirstPieceProvenPreDelivery; these test _xdotool's
+# OWN classification of a failure as proven-pre-delivery or not, straight
+# from the MagicMock result it got.)
+
+def test_xdotool_missing_binary_is_proven_pre_delivery(monkeypatch):
+    monkeypatch.setattr(gc.subprocess, "run",
+                        lambda argv, **k: (_ for _ in ()).throw(FileNotFoundError(argv[0])))
+    try:
+        gc._xdotool("type", "--", "words")
+    except Exception as exc:
+        assert getattr(exc, "proven_pre_delivery", False) is True
+    else:
+        pytest.fail("expected an InjectionError")
+
+
+def test_xdotool_that_cannot_start_is_proven_pre_delivery(monkeypatch):
+    monkeypatch.setattr(gc.subprocess, "run",
+                        lambda argv, **k: (_ for _ in ()).throw(PermissionError(argv[0])))
+    with pytest.raises(Exception) as caught:
+        gc._xdotool("type", "--", "words")
+    assert getattr(caught.value, "proven_pre_delivery", False) is True
+    assert "words" not in str(caught.value)
+
+def test_xdotool_timeout_is_not_proven_pre_delivery(monkeypatch):
+    import subprocess
+
+    def slow(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(gc.subprocess, "run", slow)
+    try:
+        gc._xdotool("type", "--", "words")
+    except Exception as exc:
+        assert getattr(exc, "proven_pre_delivery", False) is False
+    else:
+        pytest.fail("expected an InjectionError")
+
+
+@pytest.mark.parametrize("detail", [
+    "X connection refused",
+    "Error: Can't open display: (null)",
+])
+def test_xdotool_display_refusal_is_proven_pre_delivery(monkeypatch, detail):
+    from types import SimpleNamespace
+    failed = SimpleNamespace(returncode=1, stdout="", stderr=detail)
+    monkeypatch.setattr(gc.subprocess, "run", lambda argv, **k: failed)
+    try:
+        gc._xdotool("type", "--", "words")
+    except Exception as exc:
+        assert getattr(exc, "proven_pre_delivery", False) is True
+    else:
+        pytest.fail("expected an InjectionError")
+
+
+def test_xdotool_unrecognised_exit_is_not_proven_pre_delivery(monkeypatch):
+    from types import SimpleNamespace
+    failed = SimpleNamespace(returncode=1, stdout="", stderr="BadWindow")
+    monkeypatch.setattr(gc.subprocess, "run", lambda argv, **k: failed)
+    try:
+        gc._xdotool("type", "--", "words")
+    except Exception as exc:
+        assert getattr(exc, "proven_pre_delivery", False) is False
+    else:
+        pytest.fail("expected an InjectionError")
+
+
 def test_xdotool_runs_with_the_host_environment(monkeypatch):
     from wayfinder.utils import hostexec
 
@@ -213,7 +281,7 @@ def test_press_held_releases_the_key_when_the_first_keyup_fails(monkeypatch):
 
     from wayfinder.core import injector
 
-    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
     monkeypatch.setattr(gc, "_portal", lambda: None)
     monkeypatch.setattr(gc.time, "sleep", lambda _s: None)
     calls = []
@@ -232,7 +300,7 @@ def test_press_held_releases_the_key_when_the_first_keyup_fails(monkeypatch):
 def test_type_text_without_the_portal_uses_the_hardened_xdotool_command(monkeypatch):
     from wayfinder.core import injector
 
-    monkeypatch.setattr(injector, "_require_modifier_release", lambda: None)
+    monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
     monkeypatch.setattr(injector, "_running_under_xwayland", lambda: True)
     monkeypatch.setattr(gc, "_portal", lambda: None)
     seen = []
@@ -240,14 +308,23 @@ def test_type_text_without_the_portal_uses_the_hardened_xdotool_command(monkeypa
                         lambda argv, **k: seen.append((argv, k["timeout"])) or _ok())
     text = "RvR “inc” at Emain… GO"
     gc.type_text(text)
-    argv, timeout = seen[0]
     folded = injector.fold_typography_for_typing(text)
-    assert argv == injector.build_xdotool_type_command(folded, gc.TYPE_DELAY_MS, warmup=True)
-    assert timeout >= 10
+
+    def command(piece):
+        return injector.build_xdotool_type_command(piece, gc.TYPE_DELAY_MS, warmup=True)
+
+    # Its gaps and Shift sweeps put it past one piece's half second.
+    pieces = injector.typing_chunks(
+        folded, lambda p: injector.xdotool_scheduled_seconds(command(p)))
+    assert "".join(pieces) == folded and len(pieces) == 2
+    assert [argv for argv, _ in seen] == [command(p) for p in pieces]
+    assert all(timeout >= 10 for _, timeout in seen)
 
     seen.clear()
-    gc.type_text("x" * 2000)  # ~24 s of typing at 12 ms per key
-    assert seen[0][1] > 2000 * gc.TYPE_DELAY_MS / 1000
+    gc.type_text("x" * 2000)  # ~24 s of typing at 12 ms per key, in pieces
+    pieces = [(argv[argv.index("--") + 1], timeout) for argv, timeout in seen]
+    assert "".join(piece for piece, _ in pieces) == "x" * 2000 and len(pieces) > 1
+    assert all(timeout > len(piece) * gc.TYPE_DELAY_MS / 1000 for piece, timeout in pieces)
 
 
 
@@ -263,7 +340,7 @@ def test_game_paste_rechecks_after_waiting_for_held_keys(monkeypatch):
     front = {"now": (5, "steam_app_1091500", "Cyberpunk 2077")}
     monkeypatch.setattr(gc, "frontmost_app", lambda: front["now"])
     monkeypatch.setattr(injector, "_require_modifier_release",
-                        lambda: front.update(now=(9, "firefox", "Mail")))
+                        lambda *_a: front.update(now=(9, "firefox", "Mail")))
     with pytest.raises(wm.InjectionError, match="left the front"):
         wm.WayfinderApp._inject_into_game_chat(app, "secret plan", 1)
     assert sent == []                     # no keydown went out
@@ -376,3 +453,78 @@ def test_the_front_window_refreshes_the_steam_tag(monkeypatch, next_window):
     disp.windows[6] = _XWindow(disp, 6, parent=disp.root, **next_window)
     wid, cls, _title = gc.frontmost_app()
     assert wid == 6 and not gc.is_steam_game(wid, cls)
+
+
+
+def test_game_chat_xdotool_presses_nothing_for_a_retired_dictation(monkeypatch):
+    # Sol mac r12: under do_inject's scope, no key down and no typing for a
+    # retired dictation; a release always goes out.
+    from types import SimpleNamespace
+    from wayfinder.core import injector
+    runs = []
+    monkeypatch.setattr(gc.subprocess, "run",
+                        lambda argv, **k: runs.append(argv) or SimpleNamespace(
+                            returncode=0, stdout="", stderr=""))
+    with injector.cancellable(lambda: True):
+        for args in (("keydown", "Return"), ("type", "--", "gg")):
+            with pytest.raises(injector.InjectionCancelled):
+                gc._xdotool(*args)
+        assert runs == []
+        gc._xdotool("keyup", "Return")
+    assert runs == [["xdotool", "keyup", "Return"]]
+
+
+def _tk_clipboard_app(run):
+    """An app whose after(0, fn) hands fn to *run*, as the Tk loop would; the
+    clipboard it writes is in *app.clip*."""
+    from types import SimpleNamespace
+    app = SimpleNamespace(clip=["theirs"])
+    app.after = lambda _ms, fn: run(fn)
+    app.clipboard_clear = lambda: app.clip.clear()
+    app.clipboard_append = lambda text: app.clip.append(text)
+    app.update_idletasks = lambda: None
+    return app
+
+
+def test_the_tk_clipboard_write_asks_the_workers_dictation_on_the_tk_thread():
+    # Sol mac r13: the portal paste and Linux game chat queue the write on
+    # Tk and wait; a reset before Tk ran it still wrote the retired text. The
+    # worker's scope does not reach the Tk thread, so the write carries it.
+    import threading
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+    retired = [False]
+
+    def tk_later(fn):
+        def run():
+            retired[0] = True                     # Escape before Tk got to it
+            fn()
+        threading.Thread(target=run).start()
+
+    app = _tk_clipboard_app(tk_later)
+    with injector.cancellable(lambda: retired[0]):
+        with pytest.raises(injector.InjectionCancelled):
+            wm.WayfinderApp._set_clipboard_from_worker(app, "retired words", 2.0)
+    assert app.clip == ["theirs"]
+
+
+def test_a_tk_clipboard_write_the_worker_gave_up_on_never_runs_late():
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+    queued = []
+    app = _tk_clipboard_app(queued.append)        # Tk is busy
+    with injector.cancellable(lambda: False):
+        assert wm.WayfinderApp._set_clipboard_from_worker(app, "late words", 0.05) is False
+    queued[0]()                                   # Tk gets to it after all
+    assert app.clip == ["theirs"]
+
+
+def test_a_live_tk_clipboard_write_goes_out():
+    import wayfinder_main as wm
+    from wayfinder.core import injector
+    app = _tk_clipboard_app(lambda fn: fn())
+    with injector.cancellable(lambda: False):
+        assert wm.WayfinderApp._set_clipboard_from_worker(app, "live words", 2.0) is True
+    assert app.clip == ["live words"]
+    assert wm.WayfinderApp._set_clipboard_from_worker(app, "no scope", 2.0) is True
+    assert app.clip == ["no scope"]

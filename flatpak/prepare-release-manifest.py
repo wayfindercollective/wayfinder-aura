@@ -26,7 +26,6 @@ PROD_LICENSE_API_URL = "https://shiny-goshawk-432.convex.site/activate"
 SUBMISSION_FILES = (
     "python-deps.json",
     "python-numpy-build-tools.json",
-    "python-scipy-build-tools.json",
     "cargo-sources-maturin.json",
     "cargo-sources-cryptography.json",
     "cargo-sources-jiter.json",

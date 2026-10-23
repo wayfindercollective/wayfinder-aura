@@ -21,6 +21,10 @@ COLORS: dict[str, str] = {
     "bg_hover_strong": "#1B2D48",   # Hover = 25% accent glow — obvious selection (dropdown rows)
     "bg_elevated": "#2D333B",       # Pressed/elevated elements
     "bg_input": "#13171D",          # Input fields - slightly recessed
+
+    # Scroll controls stay visible against both standard and glass panels.
+    "scrollbar_thumb": "#647084",
+    "scrollbar_thumb_hover": "#8795AA",
     
     # Accent - brand blue (matches tray / app icon arrow)
     "accent": "#4682DC",            # Primary accent — same family as assets/icon.png
@@ -64,9 +68,11 @@ COLORS: dict[str, str] = {
 
 # Mirrored in wayfinder_main.py (RADIUS) — keep both in sync.
 RADIUS: dict[str, int] = {
+    "none": 0,  # Flat pages within a shared panel have no separate edge.
     "xs": 6,    # Chips, progress bars, tight inline elements
     "sm": 8,    # Small elements (toggles, chips, badges)
     "md": 12,   # Buttons, inputs, dropdowns
+    "pane": 18, # Secondary panes: 12px cards + the existing 6px page inset.
     "lg": 24,   # Bento tiles - 24px for squircle feel
     "xl": 28,   # Hero sections, modals
 }
@@ -144,7 +150,4 @@ def get_font_size(size_name: str = "body") -> int:
 def scaled_font_size(base_size: int, scale: float = 1.0) -> int:
     """Return a scaled font size."""
     return int(base_size * scale)
-
-
-
 

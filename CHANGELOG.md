@@ -7,7 +7,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- GPU checks and benchmarks measure the helper's execution time separately
+  from waits to start it. A probe whose execution budget was cut short does
+  not permanently disable GPU acceleration or select a benchmark winner.
+- Windows retains the original clipboard after a failed or busy restore,
+  retries before later pastes, and ignores callbacks from an earlier paste.
+
+## [1.3.0] — 2026-10-20
+
 ### Added
+
+- **A simple workspace, on by default.** Dictate and Settings share one clean
+  panel. Basic settings cover the hotkey, microphone, English or multilingual
+  speech, Premium model, GPU acceleration, Raw Transcript, and an Always on /
+  Disappearing / Off indicator control. Show advanced settings restores the
+  complete workspace; both views edit the same saved preferences and retain
+  the existing Free/Ultra gates and one-time Ultra defaults. Free users have a
+  persistent Upgrade to Ultra button with purchase and key activation; Ultra
+  adds a Style tab when Raw Transcript is off. Raw Transcript remains off by
+  default; turning it on skips filler-word cleanup and AI rewriting.
 
 - **Windows: Aura offers a restart when it stops answering the hotkey.** If
   Aura stops handling key presses (seen once after the laptop woke from sleep),
@@ -25,6 +45,19 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   Choosing **Disappearing** in Settings shows the same glassmorphic pill (`Raw`,
   live waveform, `Shift+Esc` cancel hint, and `Processing…`) during dictation
   and hides it completely when idle, with live switching in Settings.
+- **Consistent panels across Linux, Windows, and macOS.** Outer panes share a
+  surface and rim; inset cards use one smaller radius and hairline. The native
+  glass backdrop and live audio rendering are unchanged. The recording area
+  keeps its status and a compact hotkey chip without an instructional footer;
+  the basic Dictate view opens its microphone test only when requested. The
+  recording controls and tab positions stay fixed between pages; unboxed
+  content has one side inset. First-time advanced settings show a loading
+  view while controls are built in responsive batches. The advanced-mode
+  simple footer keeps the advanced toggle and version/tier; advanced mode
+  keeps its toggle inside Settings without a duplicated footer. Scrollbars
+  throughout the app share a visible resting thumb and brighter hover, and
+  hide the thumb when the content fits.
+
 - **Settings shows only what most people need.** Microphone, audio ducking,
   speech model, GPU, language, cleanup, hotkey and the overlay switch stay up
   front. Backend, Chunk Processing, hotkey devices, UI scale, update channel,
@@ -48,6 +81,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   updates directly inside Aura (**Install Update**) instead of handing the
   bundle to external software centers, and **Check for Updates** is available
   in **Settings → Advanced → System** as well as the Linux tray menu.
+- **Vocabulary editors no longer trap page scrolling.** Text fields hand
+  vertical scrolling to the containing page when their contents fit or they
+  reach the top/bottom; longer lists and horizontal text scrolling still work.
+- **The macOS mic button stays sharp on Retina screens.** A native image
+  layer presents the shared button artwork at the display's backing resolution;
+  the Tk canvas remains its click target. The extra inner highlight arc is gone.
+- **Mic Test and Gamer Mode card borders stay continuous.** Bottom spacing no
+  longer uses transparent spacer widgets that paint over the card's hairline.
+- **Advanced panes keep their rounded edges and matching background.** The
+  cached simple page is retired only after its replacement is mapped, so it
+  cannot cover the panel's corners. Secondary pane curves fit the existing
+  page inset without adding side padding.
+- **macOS waveform placement follows the layout.** Height-only window resizes
+  and moved containers no longer leave the native wave over the record button.
+  Layout events update its bounds without adding an idle polling loop.
+- **Simple settings use the app's shared state.** Removing the legacy duplicate
+  state definition keeps model and microphone controls available while idle
+  and correctly defers their changes during a dictation.
 - **macOS permissions and Ultra setup flow.** Activating Ultra now shows live
   download progress for the recommended Large v3 Turbo Q5 speech model, skips
   the permissions checklist when hotkeys are already live, auto-closes the

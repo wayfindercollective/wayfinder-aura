@@ -144,7 +144,8 @@ def build_audio_corpus(audio_dir: Path, voices: list[str]) -> list[dict]:
                       "voice": "golden"})
     have = voices_available()
     for voice in voices:
-        if voice not in have:
+        # macOS 26 lists "Samantha", older releases "Samantha (English (US))".
+        if voice not in have and voice.split(" (")[0] not in have:
             log(f"voice {voice!r} not installed - skipped")
             continue
         for sample in CORPUS:

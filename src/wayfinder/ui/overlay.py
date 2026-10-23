@@ -1253,9 +1253,9 @@ class GlassmorphicOverlay(QWidget):
                          self._glow_color, self._wave_color, self._style_badge_color]:
             animator.colorChanged.connect(lambda _: self.update())
         
-        # Setup window
-        self._setup_window()
+        # Setup fonts before window sizing so font metrics are ready
         self._setup_fonts()
+        self._setup_window()
         self._setup_timers()
         
         # Position at bottom center
@@ -1400,8 +1400,11 @@ class GlassmorphicOverlay(QWidget):
         # Recalculate target width for current state's text (width depends on scale)
         label = STATE_LABELS.get(self._state, "")
         new_target_width = self._calculate_target_width(label)
+        if self._width_animator._animation:
+            self._width_animator._animation.stop()
         self._current_width = float(new_target_width)
         self._target_width = new_target_width
+        self._width_animator._value = float(new_target_width)
         
         # Update both width AND height (height changes with scale)
         self._update_size_full()
@@ -2240,6 +2243,18 @@ class GlassmorphicOverlay(QWidget):
         
         duration = 200 if animate else 0
         self._style_badge_color.animate_to(QColor(palette.color), duration)
+        if self._state != OverlayState.HIDDEN:
+            try:
+                label = STATE_LABELS.get(self._state, "")
+                width_duration = 0 if (not animate or self._backend == "kwin") else duration
+                target_width = self._calculate_target_width(label)
+                self._target_width = target_width
+                self._width_animator.animate_to(float(target_width), width_duration)
+                self._idle_frozen = False
+                if not self._render_timer.isActive():
+                    self._render_timer.start()
+            except Exception:
+                pass
         self.update()
     
     def get_style_indicator(self) -> str:
@@ -2901,6 +2916,10 @@ def run_overlay():
         overlay._boot_hold_reveal = True
         overlay.setWindowOpacity(0.0)
         overlay._opacity._value = 0.0
+        ready_width = overlay._calculate_target_width("")
+        overlay._current_width = float(ready_width)
+        overlay._target_width = ready_width
+        overlay._width_animator._value = float(ready_width)
         overlay.show()
         overlay.set_state(OverlayState.READY, animate=False)
 

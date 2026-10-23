@@ -649,12 +649,6 @@ class TestLazyImportsAvailabilityChecks:
         result = is_faster_whisper_available()
         assert isinstance(result, bool)
 
-    def test_is_scipy_available_no_crash(self):
-        """is_scipy_available should return a bool without crashing."""
-        from wayfinder.utils.lazy_imports import is_scipy_available
-        result = is_scipy_available()
-        assert isinstance(result, bool)
-
     def test_is_anthropic_available_no_crash(self):
         """is_anthropic_available should return a bool without crashing."""
         from wayfinder.utils.lazy_imports import is_anthropic_available

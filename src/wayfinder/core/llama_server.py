@@ -30,10 +30,14 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+import weakref
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from wayfinder.utils.child_supervisor import (
+    release_supervised, signal_supervised, spawn_supervised, wait_supervised,
+)
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 
@@ -44,6 +48,19 @@ _PORT_SCAN = 5
 
 class LlamaServerError(RuntimeError):
     """Server could not be started or did not answer."""
+
+
+# The config key a snapshot stamps LlamaServerManager.load_epoch() under
+# (see transcriber.LOAD_EPOCH_KEY).
+LOAD_EPOCH_KEY = "_llama_load_epoch"
+
+
+class LlamaServerSuperseded(LlamaServerError):
+    """A start cancelled by a CPU/GPU switch, model change or shutdown.
+
+    Not a server failure: callers fall back without counting it, so cancelled
+    starts never add up to a restart that kills the new mode's server.
+    """
 
 
 def resolve_server_binary(llama_binary: str, use_gpu: bool = True) -> Optional[str]:
@@ -102,11 +119,30 @@ class LlamaServerManager:
     # Bumped by every shutdown. A startup that finishes after a shutdown began
     # must not publish its child, or Quit leaves a multi-GB process behind.
     _epoch: int = 0
+    # The switch the published server's configuration was validated under,
+    # by the start that published it or by the latest request that reused it
+    # (see supersede() and shutdown(before_epoch=...)).
+    _process_switch: int = 0
+    # Bumped only by supersede(), never by a stop: the switch a configuration
+    # was read under (see load_epoch()). _epoch also moves on every internal
+    # stop, so it cannot say whether a configuration is still current.
+    _switch_epoch: int = 0
     _log_tail: Optional[deque] = None
     _log_thread: Optional[threading.Thread] = None
     # Set when every startup ladder rung failed. The caller then goes straight
     # to the per-call CLI instead of paying a failed startup on every dictation.
     _disabled: bool = False
+    # The switch the failed start was configured under (None: unscoped). The
+    # failure belongs to that mode: after a switch the new mode gets its own
+    # try, and a start the switch cancelled cannot disable the mode after it.
+    _disabled_switch: Optional[int] = None
+    # Per thread: the child the last ensure() on this thread handed out, set
+    # under the lock, so a failure is pinned to the child that request reached
+    # even if another thread replaces it before the caller reads it.
+    _served = threading.local()
+    # Set by close() (Quit, exit): no start is admitted after it, so a request
+    # that read its settings just before cannot leave a child behind.
+    _closed: bool = False
     _atexit_registered: bool = False
     # Consecutive request failures that were NOT timeouts. A server that stays
     # alive but always answers HTTP 500 / malformed JSON passes the poll()+
@@ -114,12 +150,19 @@ class LlamaServerManager:
     # before falling back. Restarting on the FIRST such error would instead
     # thrash a multi-GB model load on a one-off blip; this bounds both.
     _consecutive_failures: int = 0
+    # The child those failures came from: a count belongs to one child, so an
+    # old child's failures never bring a restart of its replacement closer.
+    _failing_child: Optional[subprocess.Popen] = None
     MAX_CONSECUTIVE_FAILURES = 3
     # macOS and Linux: a fresh random key per spawn, handed to the child through
     # its environment (not argv, which any local process can read with ps). The
     # server accepts CORS from every origin, so without a key any web page could
     # drive the resident model over loopback. /health stays public.
     _api_key: Optional[str] = None
+    # Each child's own key, so a request keeps using the key of the child it
+    # reached: a replacement on the same port then refuses it (HTTP 401)
+    # instead of answering it.
+    _child_keys: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
     STARTUP_TIMEOUT = 90.0   # cold load of a 4B GGUF from disk
     # A WARM server answers in ~0.15s (GPU) and ~3.6s (CPU caricature, measured).
@@ -128,6 +171,9 @@ class LlamaServerManager:
     # minute. On timeout the caller restarts the server and falls back to the
     # CLI, which is the recovery WhisperServerBackend gets from its deadline.
     REQUEST_TIMEOUT = 30.0
+    # How often a request waiting on _lock re-checks that its configuration
+    # is still current, so a switch during the wait cancels it promptly.
+    _LOCK_POLL_S = 0.25
 
     # ---------------- identity / health ----------------
 
@@ -148,9 +194,11 @@ class LlamaServerManager:
         return cls._process is not None and cls._process.poll() is None
 
     @classmethod
-    def _auth_headers(cls) -> dict:
-        """Authorization for a keyed (macOS/Linux) server; empty on Windows."""
-        key = cls._api_key
+    def _auth_headers(cls, child: Optional[subprocess.Popen] = None) -> dict:
+        """Authorization for a keyed (macOS/Linux) server; empty on Windows.
+
+        child: use that child's key rather than the published server's."""
+        key = cls._api_key if child is None else cls._child_keys.get(child)
         return {"Authorization": f"Bearer {key}"} if key else {}
 
     @classmethod
@@ -375,10 +423,14 @@ class LlamaServerManager:
         return env
 
     @classmethod
-    def _wait_ready(cls, proc: subprocess.Popen, port: int, deadline: float) -> bool:
-        """Poll /health until the model is loaded, or the child dies."""
+    def _wait_ready(cls, proc: subprocess.Popen, port: int, deadline: float,
+                    epoch: Optional[int] = None) -> bool:
+        """Poll /health until the model is loaded, the child dies, or a shutdown
+        or supersede() moves the epoch away from ``epoch``."""
         import time
         while time.monotonic() < deadline:
+            if epoch is not None and cls._epoch != epoch:
+                return False  # no longer wanted; the caller stops the child
             if proc.poll() is not None:
                 return False  # died during load
             try:
@@ -397,7 +449,9 @@ class LlamaServerManager:
     @classmethod
     def ensure(cls, binary: str, model_path: str, n_ctx: int = 2048,
                n_threads: int = 4, n_gpu_layers: int = 99,
-               deadline: Optional[float] = None) -> int:
+               deadline: Optional[float] = None,
+               load_epoch: Optional[int] = None,
+               retired: Optional[Callable[[], bool]] = None) -> int:
         """Return a port serving `model_path`, starting the server if needed.
 
         deadline: absolute time.monotonic() budget covering EVERY blocking step —
@@ -407,6 +461,14 @@ class LlamaServerManager:
         bumped the session generation and DISCARDED the eventual output. The
         background warm-up passes None (nobody is waiting); a live dictation
         passes a real budget. Same shape as WhisperServerBackend's deadline.
+
+        load_epoch: the load_epoch() the request's configuration was read
+        under. Once a supersede() has moved it, the request is for a mode the
+        user has left: it starts nothing and leaves the running server alone.
+
+        retired: whether the app has retired the dictation this request cleans
+        up for. Checked after every wait, as a switch is: once it says so, the
+        request stops, spawns and disables nothing (Sol mac r9).
         """
         import atexit
         import time
@@ -414,7 +476,24 @@ class LlamaServerManager:
         def _left() -> float:
             return float("inf") if deadline is None else deadline - time.monotonic()
 
-        if cls._disabled:
+        def _superseded() -> bool:
+            return load_epoch is not None and cls._switch_epoch != load_epoch
+
+        def _unwanted() -> None:
+            # A request for a mode the user has left, or for a dictation the
+            # app retired, is cancelled, never counted as a server failure.
+            if _superseded():
+                raise LlamaServerSuperseded("configuration superseded by a switch")
+            if retired is not None and retired():
+                raise LlamaServerSuperseded("the dictation was retired")
+
+        cls._served.proc = None   # this request has reached no child yet
+        # First, before anything that can fail or wait.
+        _unwanted()
+        if cls._closed:
+            raise LlamaServerSuperseded("shutting down")
+        configured = cls._switch_epoch if load_epoch is None else load_epoch
+        if cls._disabled and cls._disabled_switch in (None, cls._switch_epoch):
             raise LlamaServerError("llama-server disabled after a previous failure")
         if not binary or not Path(binary).exists():
             raise LlamaServerError(f"llama-server binary not found: {binary or '<empty>'}")
@@ -425,14 +504,29 @@ class LlamaServerManager:
 
         # Bounded lock acquisition: a competing startup can hold this for its
         # whole readiness wait, so a deadline must clamp the wait for it too.
-        if deadline is None:
-            cls._lock.acquire()
-        else:
+        # Taken in slices: the holder is often the NEW mode's start, and a
+        # stale request timing out behind it would count as a server failure
+        # (three of those restart the new mode's server).
+        while True:
             rem = _left()
-            if rem <= 0 or not cls._lock.acquire(timeout=rem):
+            _unwanted()
+            if rem <= 0:
                 raise LlamaServerError("deadline hit acquiring the server lock")
+            if cls._lock.acquire(timeout=min(rem, cls._LOCK_POLL_S)):
+                break
         try:
+            _unwanted()
+            # Again under the lock: a request that passed the entry check
+            # before a Quit must not start a child once the Quit's stop ran.
+            if cls._closed:
+                raise LlamaServerSuperseded("shutting down")
             if cls._alive() and cls._requested == want:
+                # Validated for this request's switch, so it is that mode's
+                # server now: a teardown from an earlier switch (GPU off then
+                # on again before it ran) must not stop it under the request.
+                if load_epoch is not None:
+                    cls._process_switch = max(cls._process_switch, load_epoch)
+                cls._served.proc = cls._process
                 return cls._port
 
             # Stopping a stale server can wait ~10s in _kill() for a child
@@ -446,9 +540,19 @@ class LlamaServerManager:
             # Captured AFTER our own stop, which bumps the epoch itself —
             # otherwise a startup would always invalidate itself.
             epoch = cls._epoch
+            # A supersede() before the capture moved _switch_epoch first; one
+            # after it moves _epoch past ours, which every check below sees.
+            _unwanted()
+            # A close() that ran while our own stop was terminating the old
+            # child (its lock wait can run out first) already moved _epoch,
+            # so the capture cannot see it; its flag can, since close() sets
+            # it before superseding. One landing after the capture moves
+            # _epoch past ours, which the checks below see.
+            if cls._closed:
+                raise LlamaServerSuperseded("shutting down")
 
             if not cls._atexit_registered:
-                atexit.register(cls.shutdown)
+                atexit.register(cls.close)
                 cls._atexit_registered = True
 
             port = cls._find_port()
@@ -464,20 +568,41 @@ class LlamaServerManager:
                     # shutdown partway down the ladder would otherwise keep spawning
                     # fresh children it has already been told to stop wanting.
                     if cls._epoch != epoch:
-                        raise LlamaServerError("shut down while starting")
+                        raise LlamaServerSuperseded("shut down while starting")
+                    # A retirement during the port scan, or during the last
+                    # rung's readiness wait or reap: no spawn on its behalf.
+                    _unwanted()
                     # ...and the caller's deadline binds the LADDER, not just each
                     # rung: checking only per-attempt let a ladder that had already
                     # overrun start yet another multi-GB spawn.
                     if _left() <= 0:
                         raise LlamaServerError("deadline hit before the next rung")
+                    def _still_wanted() -> None:
+                        # The same again after macOS's crash-watcher wait,
+                        # right before the rung starts (Sol mac r18).
+                        if cls._epoch != epoch:
+                            raise LlamaServerSuperseded("shut down while starting")
+                        _unwanted()
+                        if _left() <= 0:
+                            raise LlamaServerError("deadline hit before the next rung")
                     try:
-                        proc = subprocess.Popen(
+                        # macOS: its own group, with a watcher for a Force
+                        # Quit (Sol mac r8); a plain Popen elsewhere.
+                        proc = spawn_supervised(
                             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=bundle_binary_env(cls._spawn_env_overrides()),
+                            before_helper=_still_wanted, ready_within=_left(),
                         )
+                    except LlamaServerError:
+                        raise             # _still_wanted refused: not a failed rung
                     except Exception as e:
                         errors.append(f"{Path(cmd[0]).name}: {type(e).__name__}: {e}")
                         continue
+                    if cls._api_key is not None:
+                        try:
+                            cls._child_keys[proc] = cls._api_key
+                        except TypeError:   # a handle that takes no weak reference
+                            pass
                     # Publish the handle FIRST so a concurrent shutdown can kill it.
                     cls._starting = proc
                     # ...then re-check, because a shutdown could have run in the
@@ -490,13 +615,19 @@ class LlamaServerManager:
                     if cls._epoch != epoch:
                         cls._starting = None
                         cls._kill(proc)
-                        raise LlamaServerError("shut down while starting")
+                        raise LlamaServerSuperseded("shut down while starting")
                     cls._start_drain(proc)
                     # Readiness waits inside the caller's budget, never past it.
                     attempt_deadline = time.monotonic() + cls.STARTUP_TIMEOUT
                     if deadline is not None:
                         attempt_deadline = min(attempt_deadline, deadline)
-                    if cls._wait_ready(proc, port, attempt_deadline):
+                    ready = cls._wait_ready(proc, port, attempt_deadline, epoch)
+                    if cls._epoch != epoch:
+                        # Cancelled mid-load: not a failed rung, so the ladder must
+                        # not run on into _disabled.
+                        cls._kill(proc)
+                        raise LlamaServerSuperseded("shut down while starting")
+                    if ready:
                         # Confirm the child actually loaded the file we named. A
                         # mismatch means silently cleaning every dictation with the
                         # wrong model, which is invisible in the output.
@@ -520,16 +651,18 @@ class LlamaServerManager:
                             errors.append(
                                 f"{Path(cmd[0]).name}: the listener on port {port} {why}")
                             try:
-                                proc.kill()
+                                cls._signal(proc, kill=True)
                                 proc.wait(timeout=5)
+                                release_supervised(proc)
                             except Exception:
                                 pass
                             continue
                         if not cls._serving_model(port, model_path):
                             errors.append(f"{Path(cmd[0]).name}: serving an unexpected model")
                             try:
-                                proc.kill()
+                                cls._signal(proc, kill=True)
                                 proc.wait(timeout=5)
+                                release_supervised(proc)
                             except Exception:
                                 pass
                             continue
@@ -538,7 +671,8 @@ class LlamaServerManager:
                         # child: shutdown had already returned, having seen no process.
                         if cls._epoch != epoch:
                             cls._kill(proc)
-                            raise LlamaServerError("shut down while starting")
+                            raise LlamaServerSuperseded("shut down while starting")
+                        cls._process_switch = configured
                         cls._process = proc
                         cls._port = port
                         # Reuse keys off the REQUEST; the label keys off the spawn.
@@ -550,16 +684,37 @@ class LlamaServerManager:
                         spawned_ngl = int(cmd[cmd.index("-ngl") + 1])
                         cls._identity = cls._identity_of(
                             cmd[0], model_path, n_ctx, n_threads, spawned_ngl)
+                        cls._served.proc = proc
                         return port
                     errors.append(f"{Path(cmd[0]).name}: not ready "
                                   f"(rc={proc.poll()}) {cls.log_tail()[-300:]}")
                     try:
-                        proc.kill()
+                        cls._signal(proc, kill=True)
                         proc.wait(timeout=5)
+                        release_supervised(proc)
                     except Exception:
                         pass
 
+                # A switch or shutdown during the last rung's reap (or behind
+                # spawn errors) is a cancellation, not a machine that cannot
+                # run the server.
+                if cls._epoch != epoch or _superseded():
+                    raise LlamaServerSuperseded("shut down while starting")
+                # Nor does a retired request's failure disable the server.
+                _unwanted()
+                if deadline is not None and _left() <= 0:
+                    # The ladder ran out of the CALLER's time, not its own: a
+                    # rung's readiness wait — the CPU-only or final fallback
+                    # rung included — can have been cut short by this deadline
+                    # while the model was still loading. That is a budget
+                    # exit, not proof the binary is broken, so it must not
+                    # disable the server for a later call with time to spare
+                    # (Sol mac r20).
+                    raise LlamaServerError(
+                        "every llama-server start attempt ran out of time: "
+                        + " | ".join(errors))
                 cls._disabled = True
+                cls._disabled_switch = configured
                 raise LlamaServerError("every llama-server start attempt failed: "
                                        + " | ".join(errors))
             finally:
@@ -572,7 +727,7 @@ class LlamaServerManager:
             cls._lock.release()
 
     @classmethod
-    def still_ours(cls, port: int) -> bool:
+    def still_ours(cls, port: int, child: Optional[subprocess.Popen] = None) -> bool:
         """Re-prove, right before we hand over a prompt, that the port is ours.
 
         Startup-time proof is not enough: the verified child can exit after
@@ -581,9 +736,15 @@ class LlamaServerManager:
         Ownership is a property of the moment you use it, not of the moment you
         checked it — so it is checked again per request. Cost is one read of
         /proc/net/tcp plus a directory scan, against a request that takes ~1s.
+
+        child: the child the request reached (serving()); it must still be the
+        published server, so a replacement on the same port is never mistaken
+        for it.
         """
         proc = cls._process
         if proc is None or proc.poll() is not None:
+            return False
+        if child is not None and proc is not child:
             return False
         return cls._owns_listener(proc, port) is True
 
@@ -592,8 +753,12 @@ class LlamaServerManager:
                  repeat_penalty: float = 1.1, repeat_last_n: int = 64,
                  top_p: float = 0.95, seed: Optional[int] = None,
                  cache_prompt: bool = True, stop: Optional[list] = None,
-                 timeout: Optional[float] = None, port: Optional[int] = None) -> dict:
+                 timeout: Optional[float] = None, port: Optional[int] = None,
+                 child: Optional[subprocess.Popen] = None) -> dict:
         """POST /completion and return the parsed response.
+
+        child: send that child's key (see _child_keys), so the request can be
+        answered only by the child it was bound to.
 
         The response carries `content` ALREADY STRIPPED of the prompt, so the
         CLI extractor's prompt-splitting is unnecessary here — but control-atom
@@ -618,7 +783,7 @@ class LlamaServerManager:
         req = urllib.request.Request(
             f"http://127.0.0.1:{use_port}/completion",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", **cls._auth_headers()},
+            headers={"Content-Type": "application/json", **cls._auth_headers(child)},
         )
         resp = urlopen_loopback(
             req, timeout=cls.REQUEST_TIMEOUT if timeout is None else timeout)
@@ -643,30 +808,108 @@ class LlamaServerManager:
         cls._kill(starting)
 
     @classmethod
-    def note_success(cls) -> None:
+    def note_success(cls, child: Optional[subprocess.Popen] = None) -> None:
+        """A request *child* answered. It ends that child's failure streak, not
+        another's: a late answer from a child already replaced proves nothing
+        about the one failing now (Sol mac r11)."""
+        if child is not None and cls._failing_child not in (None, child):
+            return
         cls._consecutive_failures = 0
+        cls._failing_child = None
 
     @classmethod
-    def note_failure(cls) -> bool:
+    def note_failure(cls, failed: Optional[subprocess.Popen] = None,
+                     cancelled: Optional[Callable[[], bool]] = None) -> bool:
         """Record a non-timeout request failure. True when a restart was begun.
 
-        The restart runs on its own daemon thread: shutdown() can wait ~5s for
+        failed: the child the request reached (serving()), None if it never
+        reached one; the restart stops only that child (see restart()).
+        The restart runs on its own daemon thread: stopping can wait ~5s for
         the lock plus ~10s terminating a wedged child, and note_failure() is
-        called from inside a dictation's cleanup budget. The epoch machinery
-        makes a concurrent shutdown-vs-respawn race safe by construction."""
+        called from inside a dictation's cleanup budget; *cancelled* goes
+        with it (see restart())."""
+        if failed is not cls._failing_child:
+            cls._consecutive_failures = 0
+            cls._failing_child = failed
         cls._consecutive_failures += 1
         if cls._consecutive_failures >= cls.MAX_CONSECUTIVE_FAILURES:
             cls._consecutive_failures = 0
+            cls._failing_child = None
             threading.Thread(
-                target=cls.shutdown, daemon=True,
+                target=cls.restart, args=(failed, cancelled), daemon=True,
                 name="llama-server-failure-restart",
             ).start()
             return True
         return False
 
     @classmethod
-    def shutdown(cls) -> None:
+    def serving(cls) -> Optional[subprocess.Popen]:
+        """The child the last successful ensure() on this thread handed out."""
+        return getattr(cls._served, "proc", None)
+
+    @classmethod
+    def replaced(cls, child: Optional[subprocess.Popen]) -> bool:
+        """Whether `child` was stopped or replaced since a request reached it.
+
+        Its request's failure is then the stop's doing, not the server's: it
+        counts toward no restart, and the replacement is left alone.
+        """
+        return child is not None and cls._process is not child
+
+    @classmethod
+    def restart(cls, failed: Optional[subprocess.Popen],
+                cancelled: Optional[Callable[[], bool]] = None) -> None:
+        """Stop `failed` if it is still the published server; the next request
+        starts a fresh one.
+
+        For the failure and timeout restarts, which run later on their own
+        thread: by then a switch may have published a replacement, which is
+        not the server that failed. Leaves _switch_epoch alone, so pending
+        configurations stay current. If the lock is held, a start owns the
+        state and has already stopped or replaced this child itself.
+
+        *cancelled*, asked under the lock: the app retired the dictation the
+        restart is for while it waited, and the child may now serve a newer
+        one. Then nothing is stopped; a child still wedged fails that
+        dictation's request, which restarts it itself (Sol mac r11).
+        """
+        if failed is None or not cls._lock.acquire(timeout=5):
+            return
+        try:
+            if cls._process is failed and not (cancelled is not None and cancelled()):
+                cls._stop_locked()
+        finally:
+            cls._lock.release()
+
+    @classmethod
+    def supersede(cls) -> int:
+        """Cancel any startup in flight without waiting; returns the new switch.
+
+        Lock-free, for the Tk thread. Pass the result to
+        shutdown(before_epoch=...) to stop only a server whose configuration
+        was last validated before it.
+        """
+        # _switch_epoch first: see the ordering note in ensure().
+        cls._switch_epoch += 1
+        switch = cls._switch_epoch
+        cls._epoch += 1
+        return switch
+
+    @classmethod
+    def load_epoch(cls) -> int:
+        """The epoch to read a configuration under; pass it to ensure()."""
+        return cls._switch_epoch
+
+    @classmethod
+    def shutdown(cls, before_epoch: Optional[int] = None) -> None:
         """Stop the resident server (atexit, GPU toggle, model switch).
+
+        before_epoch: stop it only if its configuration was last validated
+        (started, or reused by a request) before that supersede(), so a server
+        a request in the new mode started or reused survives the old mode's
+        cleanup. A startup holding the lock then either predates the supersede
+        (it stops its own child on seeing the new epoch) or follows it (new
+        mode), so neither needs us.
 
         Bounded lock acquisition, because a startup can hold _lock for its whole
         readiness wait and atexit must not hang the app on exit. If the lock is
@@ -678,7 +921,10 @@ class LlamaServerManager:
         """
         acquired = cls._lock.acquire(timeout=5)
         try:
-            if acquired:
+            if before_epoch is not None:
+                if acquired and cls._process is not None and cls._process_switch < before_epoch:
+                    cls._stop_locked()
+            elif acquired:
                 cls._stop_locked()
             else:
                 # Could not take the lock: another thread owns the shared state,
@@ -696,26 +942,61 @@ class LlamaServerManager:
             if acquired:
                 cls._lock.release()
 
+    @classmethod
+    def close(cls) -> None:
+        """Terminal stop for Quit and exit: refuse every later start, then
+        supersede and stop everything, a start in flight too."""
+        cls._closed = True   # before the supersede: see ensure()
+        cls.supersede()
+        # The per-call CLI (llama-simple, its GPU probe) too: a cleanup that
+        # fell back just before this must not outlive the app.
+        from wayfinder.utils.child_supervisor import close_tracked
+        close_tracked()
+        cls.shutdown()
+
+    @classmethod
+    def reopen(cls) -> None:
+        """Admit starts again after a close() that did not exit."""
+        from wayfinder.utils.child_supervisor import reopen_tracked
+        cls._closed = False
+        reopen_tracked()
+
     @staticmethod
     def _kill(proc: Optional[subprocess.Popen]) -> None:
         """Terminate, then kill, a child that ignores SIGTERM."""
-        if proc is None or proc.poll() is not None:
+        if proc is None:
             return
         try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+            if proc.poll() is None:
+                LlamaServerManager._signal(proc)
+                # wait_supervised: on macOS, what it forked into its group
+                # goes with it even if it ignored SIGTERM (Sol mac r13).
+                if not wait_supervised(proc, 5):
+                    LlamaServerManager._signal(proc, kill=True)
+                    wait_supervised(proc, 5)
+            release_supervised(proc)
         except Exception:
             pass
+
+    @staticmethod
+    def _signal(proc: subprocess.Popen, kill: bool = False) -> None:
+        """SIGTERM or SIGKILL: on macOS to its whole group (spawn_supervised)."""
+        if getattr(proc, "_aura_group", False) is True:
+            signal_supervised(proc, kill=kill)
+        elif kill:
+            proc.kill()
+        else:
+            proc.terminate()
 
     @classmethod
     def reset_for_tests(cls) -> None:
         cls.shutdown()
         cls._disabled = False
+        cls._disabled_switch = None
+        cls._served = threading.local()
+        cls._closed = False
         cls._requested = None
         cls._consecutive_failures = 0
+        cls._failing_child = None
         cls._log_tail = None
         cls._log_thread = None

@@ -17,9 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-import requests
-
 from ..config import IS_APPIMAGE, IS_FLATPAK, APPDIR
+from ..utils.child_supervisor import run_tracked
 from ..utils.hostexec import host_env
 from ..utils.platform import get_user_whisper_models_dir
 
@@ -584,7 +583,7 @@ def check_whisper_cpp(config: dict) -> DependencyStatus:
 
     if Path(binary_path).exists():
         try:
-            result = subprocess.run([binary_path, "--help"], capture_output=True, text=True, timeout=5)
+            result = run_tracked([binary_path, "--help"], capture_output=True, text=True, timeout=5)
             help_text = result.stdout + result.stderr
             has_gpu = "--no-gpu" in help_text or "-ngl" in help_text
             gpu_note = " (GPU enabled)" if has_gpu else " (CPU only)"
@@ -1148,6 +1147,8 @@ def _download_model_file_impl(
         log(f"Downloading {target.name} ({size_label})...")
         log(f"From: {url}")
         log("")
+
+        import requests  # here, not at module top: the setup pane imports this module on every launch
 
         from wayfinder.core.download_guard import (
             DownloadBounds,

@@ -63,44 +63,27 @@ except (ImportError, OSError) as _sounddevice_error:
     sd = _MissingSoundDevice()
     sys.modules.setdefault("sounddevice", sd)
 
-# SciPy's signal package pulls in a large statistics/interpolation stack. Importing it at
-# module scope added roughly a second to every launch even though it is only needed after a
-# recording is complete. Resolve and cache the three functions on first audio-processing use.
-_SCIPY_SIGNAL_FUNCTIONS = None
-_SCIPY_IMPORT_ATTEMPTED = False
-_SCIPY_IMPORT_LOCK = threading.Lock()
+# Resampling and the rumble filter are NumPy (core.audio_dsp), checked against
+# scipy.signal by tests/test_audio_dsp.py. SciPy itself is no longer bundled:
+# it was ~100 MB of the Flatpak and cost ~0.4-1 s to import on the first
+# dictation, for three functions.
+from wayfinder.core.audio_dsp import butter, filtfilt, resample_poly  # noqa: E402
 
-
-def _get_scipy_signal_functions():
-    """Return ``(butter, filtfilt, resample_poly)``: SciPy's, or the NumPy twins.
-
-    The import is deliberately lazy so microphone discovery and recorder construction stay
-    fast. Without SciPy (the Windows bundle leaves it out) the same algorithms come from
-    ``core.audio_dsp``, checked against SciPy by tests/test_audio_dsp.py. The result is
-    cached, so repeated dictations never probe the import again.
-    """
-    global _SCIPY_SIGNAL_FUNCTIONS, _SCIPY_IMPORT_ATTEMPTED
-    if _SCIPY_IMPORT_ATTEMPTED:
-        return _SCIPY_SIGNAL_FUNCTIONS
-    with _SCIPY_IMPORT_LOCK:
-        if _SCIPY_IMPORT_ATTEMPTED:
-            return _SCIPY_SIGNAL_FUNCTIONS
-        try:
-            from scipy.signal import butter, filtfilt, resample_poly
-        except ImportError:
-            from wayfinder.core.audio_dsp import butter, filtfilt, resample_poly
-        _SCIPY_SIGNAL_FUNCTIONS = (butter, filtfilt, resample_poly)
-        _SCIPY_IMPORT_ATTEMPTED = True
-    return _SCIPY_SIGNAL_FUNCTIONS
+# Medium and Heavy preprocessing high-pass corner.
+RUMBLE_CUTOFF_HZ = 80
 
 
 def preload_audio_processing() -> None:
-    """Warm optional audio processing after first paint.
+    """Warm the rumble filter after first paint.
 
-    This is a one-shot import, not a resident worker. It keeps SciPy off the click-to-visible
-    path without making the first completed dictation absorb the import cost.
+    A one-shot, not a resident worker: the filter caches its impulse response,
+    so computing it here keeps the first Medium/Heavy dictation from paying.
     """
-    _get_scipy_signal_functions()
+    try:
+        b, a = butter(2, RUMBLE_CUTOFF_HZ / (WHISPER_SAMPLE_RATE / 2), btype="high")
+        filtfilt(b, a, np.zeros(64))
+    except Exception:
+        pass
 
 
 # Target sample rate for Whisper
@@ -913,20 +896,8 @@ def resample_audio(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.nd
     if orig_rate == target_rate:
         return audio
     
-    scipy_signal = _get_scipy_signal_functions()
-    if scipy_signal is not None:
-        # Use scipy's polyphase resampling for high quality
-        _, _, resample_poly = scipy_signal
-        g = gcd(orig_rate, target_rate)
-        up = target_rate // g
-        down = orig_rate // g
-        return resample_poly(audio, up, down).astype(np.float32)
-    else:
-        # Simple linear interpolation fallback
-        duration = len(audio) / orig_rate
-        target_length = int(duration * target_rate)
-        indices = np.linspace(0, len(audio) - 1, target_length)
-        return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
+    g = gcd(orig_rate, target_rate)
+    return resample_poly(audio, target_rate // g, orig_rate // g).astype(np.float32)
 
 
 def preprocess_audio(
@@ -952,7 +923,7 @@ def preprocess_audio(
         Preprocessed audio data
     """
     # Work with a finite float copy. PortAudio should never emit NaN/Inf, but a
-    # malformed buffer must not become undefined int16 samples or poison SciPy.
+    # malformed buffer must not become undefined int16 samples or poison the filters.
     audio = np.asarray(audio_data, dtype=np.float32).copy()
     if audio.size == 0:
         return audio
@@ -975,17 +946,13 @@ def preprocess_audio(
     
     # Medium and Heavy: High-pass filter at 80Hz (remove rumble/noise)
     if level in ("medium", "heavy"):
-        scipy_signal = _get_scipy_signal_functions()
-        if scipy_signal is not None:
-            butter, filtfilt, _ = scipy_signal
-            try:
-                nyquist = sample_rate / 2
-                cutoff = 80 / nyquist
-                if cutoff < 1:
-                    b, a = butter(2, cutoff, btype='high')
-                    audio = filtfilt(b, a, audio).astype(np.float32)
-            except Exception:
-                pass
+        try:
+            cutoff = RUMBLE_CUTOFF_HZ / (sample_rate / 2)
+            if cutoff < 1:
+                b, a = butter(2, cutoff, btype='high')
+                audio = filtfilt(b, a, audio).astype(np.float32)
+        except Exception:
+            pass
     
     # Heavy only: frame-based soft noise gate. A sample-by-sample gate changes
     # gain at every waveform zero crossing, adding distortion while barely

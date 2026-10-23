@@ -58,6 +58,19 @@ class TestColors:
         for key in ["state_ready", "state_recording", "state_processing", "state_typing"]:
             assert HEX_COLOR_RE.match(COLORS[key]), f"Bad hex for {key}: {COLORS[key]}"
 
+    def test_scrollbar_is_visible_at_rest_on_standard_and_glass_panels(self):
+        from wayfinder.ui.macos_window import GLASS_PALETTE
+
+        def luminance(color):
+            channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+            return sum(c * weight for c, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+        resting = luminance(COLORS["scrollbar_thumb"])
+        assert luminance(COLORS["scrollbar_thumb_hover"]) > resting
+        for background in ("#1E1E1F", GLASS_PALETTE["bg_card"]):
+            assert (resting + 0.05) / (luminance(background) + 0.05) >= 3
+
 
 # =============================================================================
 # STATE_COLORS Mapping
@@ -218,8 +231,13 @@ class TestRadius:
         assert RADIUS["lg"] == 24
         assert RADIUS["xl"] == 28
 
-    def test_all_values_are_positive_ints(self):
+    def test_flat_pages_have_no_corner_radius(self):
+        assert RADIUS["none"] == 0
+
+    def test_all_rounded_values_are_positive_ints(self):
         for key, value in RADIUS.items():
+            if key == "none":
+                continue
             assert isinstance(value, int) and value > 0, f"Bad RADIUS['{key}']: {value}"
 
 
