@@ -9,6 +9,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- GPU checks and benchmarks measure the helper's execution time separately
+  from waits to start it. A probe whose execution budget was cut short does
+  not permanently disable GPU acceleration or select a benchmark winner.
+- Windows retains the original clipboard after a failed or busy restore,
+  retries before later pastes, and ignores callbacks from an earlier paste.
+
+- **Dictations no longer vanish as "No speech detected" when the mic picks up
+  steady background noise.** A recording whose loudness barely varied was
+  thrown away before transcription, even when it held real speech (six
+  dictations in one afternoon on a MacBook Air). Such recordings are now
+  transcribed without the dictation prompt, which kept Whisper from inventing
+  sentences out of fan, hum or hiss noise in testing; the result is used only
+  if Whisper hears at least two words. Only near-silent recordings are still
+  rejected, and the activity log records the levels behind every rejection.
 - **A chunk no longer repeats the same sentence over and over.** In Auto mode,
   a chunk prompted with the previous chunk's text could get stuck echoing one
   sentence or phrase many times instead of hearing the rest of the speech.
@@ -72,6 +86,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Windows: the dictation pill no longer disappears behind other windows.**
+  Windows sometimes ranked the always-on-top pill below the app you were in,
+  hiding it. The pill now puts itself back on top within about two seconds,
+  without taking focus, and the activity log notes each time it happened.
+- **Windows: hotkey freezes are logged with their cause.** A press that
+  keeps Aura busy for 5 seconds or more is recorded with what Aura was doing
+  from the start, not only at the end.
 - **Linux Flatpak updates install in place and Settings includes a Check for Updates button.**
   Standalone GitHub Release Flatpak installs now download, verify, and install
   updates directly inside Aura (**Install Update**) instead of handing the

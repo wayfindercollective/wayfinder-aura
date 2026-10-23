@@ -1538,10 +1538,25 @@ def _xdotool_commands(argv):
     own single running index, so the oracle built on it below cannot
     retrace that loop and inherit the same mistake (Codex review finding
     4b: the previous "independent" model was a byte-for-byte copy of the
-    estimator's parser)."""
+    estimator's parser).
+
+    Finding 6 (Sol mac r17): the boundary scan used to match a command word
+    anywhere in the list, including a dictated "type", "sleep" or "key"
+    sitting in a `type` command's own text argument — the one token that
+    always follows a "--" terminator (build_xdotool_type_command never
+    emits `type`'s text any other way). That token is data, never a new
+    command, so it is skipped here regardless of its value."""
     words = argv[1:]
-    starts = [i for i, w in enumerate(words)
-              if w in ("sleep", "type", "key", "keyup", "keydown")]
+    starts = []
+    data_next = False
+    for i, w in enumerate(words):
+        if data_next:
+            data_next = False
+            continue
+        if w in ("sleep", "type", "key", "keyup", "keydown"):
+            starts.append(i)
+        elif w == "--":
+            data_next = True   # the very next token is an argument value
     ends = starts[1:] + [len(words)]
     return [(words[s], words[s + 1:e]) for s, e in zip(starts, ends)]
 
@@ -1702,6 +1717,43 @@ class TestXdotoolPieceBudgetIndependentModel:
         argv = ["xdotool", "key", "--delay", "20", "shift+a", "b"]
         # chord "shift+a" (2 keys) + "b" (1 key) = 3 keys x (20+1)ms
         expected = 3 * 0.021
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    # -- Finding 6 (Sol mac r17): dictating one of the oracle's own boundary
+    # words must not be mistaken for a second command. Each is typed plain
+    # (lowercase, no Shift segment), so build_xdotool_type_command emits one
+    # `type` run and nothing else; the only correct accounting is that run's
+    # own char count at its own --delay. -------------------------------
+
+    def test_a_dictated_type_is_data_not_a_command_boundary(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("type", 12)
+        # one plain `type` run: 4 chars x (12+1)ms. The old oracle matched
+        # the typed word "type" itself as a second `type` command with no
+        # text argument left, and raised IndexError reading it.
+        expected = 4 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_a_dictated_sleep_is_data_not_a_command_boundary(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("sleep", 12)
+        # one plain `type` run: 5 chars x (12+1)ms. The old oracle matched
+        # the typed word "sleep" as a second, argument-less `sleep` command
+        # and raised IndexError reading its duration.
+        expected = 5 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_a_dictated_key_is_data_not_a_command_boundary(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("key", 12)
+        # one plain `type` run: 3 chars x (12+1)ms = 0.039s. The old oracle
+        # cut the real `type` run short at the "--" before the typed word
+        # "key" (costing its "--" token as 2 "chars") and then matched "key"
+        # itself as a third, key-less command — 0.026s total instead.
+        expected = 3 * 0.013
         assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
         assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
 

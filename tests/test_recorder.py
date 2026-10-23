@@ -417,10 +417,10 @@ class TestSilenceDetection:
         recorder._audio_callback(np.full(100, 0.3, dtype=np.float32), 100, None, None)
         assert recorder.get_peak_amplitude() == pytest.approx(0.3)
 
-    def test_saved_wav_peak_distinguishes_silence_from_speech(self, tmp_path):
+    def test_saved_wav_analysis_distinguishes_silence_from_speech(self, tmp_path):
         import wave
         import numpy as np
-        from wayfinder.core.recorder import get_wav_peak_amplitude
+        from wayfinder.core.recorder import analyze_wav_speech_activity
 
         silent = tmp_path / "silent.wav"
         voiced = tmp_path / "voiced.wav"
@@ -434,15 +434,141 @@ class TestSilenceDetection:
                 wav_file.setframerate(16000)
                 wav_file.writeframes(samples.tobytes())
 
-        assert get_wav_peak_amplitude(silent) == 0.0
-        assert get_wav_peak_amplitude(voiced) == pytest.approx(0.25)
+        silence = analyze_wav_speech_activity(silent)
+        assert silence.verdict == "silence" and silence.peak == 0.0
+        assert analyze_wav_speech_activity(voiced).peak == pytest.approx(0.25)
 
-    def test_saved_wav_peak_fails_open_for_invalid_input(self, tmp_path):
-        from wayfinder.core.recorder import get_wav_peak_amplitude
+    def test_saved_wav_analysis_fails_open_for_invalid_input(self, tmp_path):
+        from wayfinder.core.recorder import analyze_wav_speech_activity
 
         invalid = tmp_path / "not-a-wav.wav"
         invalid.write_text("not audio")
-        assert get_wav_peak_amplitude(invalid) is None
+        assert analyze_wav_speech_activity(invalid) is None
+
+    def test_speech_check_reports_verdict_and_levels(self):
+        """The verdict carries the levels behind it, so a rejected dictation
+        leaves numbers in activity.log instead of only "No speech detected"."""
+        import numpy as np
+        from wayfinder.core.recorder import analyze_speech_activity
+
+        rng = np.random.default_rng(3)
+        hiss = rng.normal(0, 0.01, 32000).astype(np.float32)
+        noise = analyze_speech_activity(hiss, 16000)
+        assert noise.verdict == "noise" and not noise.has_speech
+        assert noise.floor == pytest.approx(0.01, rel=0.2)
+        assert "dBFS" in noise.describe() and "×1." in noise.describe()
+
+        assert analyze_speech_activity(hiss * 0.01, 16000).verdict == "silence"
+        assert analyze_speech_activity(np.empty(0, np.float32), 16000).verdict == "silence"
+        # Under 0.5s only the peak is judged: fail open.
+        assert analyze_speech_activity(hiss[:4000], 16000).verdict == "speech"
+
+    @pytest.mark.parametrize("text, kept", [
+        ("", False), (".", False), ("So,", False), ("Okay.", False),
+        ("Okay, sounds good.", True), ("It's crazy that Nico", True),
+        # Sol review: a bare \w+ scan split an apostrophe or a dotted
+        # abbreviation into separate "words" and let a single filler word
+        # through the two-word rule. Each of these is exactly one word.
+        ("I'm.", False), ("Let's.", False), ("O.K.", False),
+        # A real two-word case must still pass once words are counted properly.
+        ("Hey there.", True),
+    ])
+    def test_noise_transcript_needs_two_words(self, text, kept):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is kept
+
+    @pytest.mark.parametrize("text, kept", [
+        ("。", False),              # a single, bare punctuation character
+        ("嗯", False),              # one filler character — no real content
+        ("我需要一个技术经理来管理这个项目", True),  # a real sentence, no spaces at all
+    ])
+    def test_noise_transcript_counts_characters_for_scripts_without_spaces(self, text, kept):
+        """Sol review: a CJK transcript has no whitespace to split on,
+        so whitespace word-counting would see the WHOLE thing as one "word"
+        and silently drop a real, long dictation. Such scripts are counted by
+        character instead."""
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is kept
+
+    @pytest.mark.parametrize("text, kept", [
+        # Sol pr67 r2: the old check required EVERY letter in the
+        # transcript to be from a no-space script, so a digit, a Latin word
+        # or trailing CJK punctuation mixed into a real no-space sentence
+        # fell through to whitespace word-counting, which sees the whole
+        # no-space run as one giant "word" and drops it as noise.
+        ("今日は10時に会議を始めます。", True),       # Japanese + Latin digits
+        ("GitHubの問題を修正してください。", True),   # Japanese + a Latin word
+        # Thai combining marks (U+0E31, U+0E34-U+0E3A, U+0E47-U+0E4E) sit in
+        # the same Unicode block as their base consonants but are not \w
+        # (str.isalnum() is False for them) — they must not break the count.
+        ("วันนี้อากาศดีมาก", True),
+        # Numerals alone are not speech: no no-space-script letters, and a
+        # single whitespace-delimited digit run is exactly one "word".
+        ("12345", False),
+        ("3 4 5", True),               # three separate whitespace words
+        ("Room 42", True),             # a real two-word phrase with a digit
+        # Existing one-word rejections (finding 1 must not weaken these).
+        ("I'm.", False), ("O.K.", False), ("嗯", False), ("。", False),
+    ])
+    def test_noise_transcript_counts_no_space_script_letters_through_mixed_content(
+        self, text, kept
+    ):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is kept
+
+    @pytest.mark.parametrize("text", [
+        # Sol pr67 r3: these scripts fell outside the four ranges
+        # that used to be here, so the whole sentence read as one giant
+        # "word" under whitespace-counting and was dropped as noise no
+        # matter how much was actually said.
+        "សូមបិទទ្វារ",             # Khmer
+        "ມື້ນີ້ອາກາດດີ",             # Lao
+        "ကျွန်တော်နေကောင်းပါတယ်",   # Burmese (Myanmar)
+        # Added alongside them since the blocks are just as cheap to list.
+        "བཀྲ་ཤིས་བདེ་ལེགས",          # Tibetan
+        "ꦱꦸꦒꦼꦁꦫꦲꦪꦸ",                # Javanese
+        "ᬅᬓ᭄ᬱᬭᬩᬮᬶ",                  # Balinese
+    ])
+    def test_noise_transcript_counts_additional_no_space_scripts(self, text):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is True
+
+    @pytest.mark.parametrize("text, kept", [
+        # Sol pr67 r3: range membership alone also counted a
+        # no-space script's OWN digits and punctuation as speech content.
+        # Four Katakana middle dots ("・") reached the no-space-char floor
+        # purely as punctuation, and Thai numerals did the same.
+        ("・・・・", False),
+        ("๑๒๓๔", False),          # Thai digits, four of them
+        ("๑๒๓๔๕", False),         # five Thai digits: still not letters
+        # A real no-space-script sentence must still pass once its own
+        # digits/punctuation are excluded from the count.
+        ("我需要一个技术经理来管理这个项目", True),
+    ])
+    def test_noise_transcript_no_space_script_excludes_digits_and_punctuation(
+        self, text, kept
+    ):
+        from wayfinder.core.recorder import noise_transcript_has_speech
+
+        assert noise_transcript_has_speech(text) is kept
+
+    def test_recorders_report_the_same_verdict_as_the_bool_check(self):
+        import numpy as np
+        from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder
+
+        rng = np.random.default_rng(4)
+        hiss = rng.normal(0, 0.01, 32000).astype(np.float32).reshape(-1, 1)
+        for cls in (AudioRecorder, ChunkedRecorder):
+            with patch("wayfinder.core.recorder.sd"):
+                recorder = cls()
+            assert recorder.speech_activity().verdict == "silence"  # nothing captured
+            recorder._audio_callback(hiss, hiss.shape[0], None, None)
+            assert recorder.speech_activity().verdict == "noise"
+            assert recorder.has_speech_activity() is False
 
     @staticmethod
     def _feed_wav(recorder, path, block=512):

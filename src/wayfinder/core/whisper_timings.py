@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
+from wayfinder.utils.child_supervisor import HelpersClosed, helper_elapsed, run_tracked
 
 # whisper.cpp v1.9.x prints (to stderr):
 #   whisper_print_timings:     load time =    73.08 ms
@@ -167,7 +167,7 @@ def measure_transcription(
             env=env,
             **no_window,
         )
-        wall = time.perf_counter() - start
+        wall = helper_elapsed(result, time.perf_counter() - start)
     except subprocess.TimeoutExpired:
         return MeasureResult(ok=False, stderr_tail=f"timed out after {timeout}s")
     except HelpersClosed:

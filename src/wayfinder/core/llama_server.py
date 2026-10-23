@@ -577,13 +577,24 @@ class LlamaServerManager:
                     # overrun start yet another multi-GB spawn.
                     if _left() <= 0:
                         raise LlamaServerError("deadline hit before the next rung")
+                    def _still_wanted() -> None:
+                        # The same again after macOS's crash-watcher wait,
+                        # right before the rung starts (Sol mac r18).
+                        if cls._epoch != epoch:
+                            raise LlamaServerSuperseded("shut down while starting")
+                        _unwanted()
+                        if _left() <= 0:
+                            raise LlamaServerError("deadline hit before the next rung")
                     try:
                         # macOS: its own group, with a watcher for a Force
                         # Quit (Sol mac r8); a plain Popen elsewhere.
                         proc = spawn_supervised(
                             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=bundle_binary_env(cls._spawn_env_overrides()),
+                            before_helper=_still_wanted, ready_within=_left(),
                         )
+                    except LlamaServerError:
+                        raise             # _still_wanted refused: not a failed rung
                     except Exception as e:
                         errors.append(f"{Path(cmd[0]).name}: {type(e).__name__}: {e}")
                         continue
@@ -691,6 +702,17 @@ class LlamaServerManager:
                     raise LlamaServerSuperseded("shut down while starting")
                 # Nor does a retired request's failure disable the server.
                 _unwanted()
+                if deadline is not None and _left() <= 0:
+                    # The ladder ran out of the CALLER's time, not its own: a
+                    # rung's readiness wait — the CPU-only or final fallback
+                    # rung included — can have been cut short by this deadline
+                    # while the model was still loading. That is a budget
+                    # exit, not proof the binary is broken, so it must not
+                    # disable the server for a later call with time to spare
+                    # (Sol mac r20).
+                    raise LlamaServerError(
+                        "every llama-server start attempt ran out of time: "
+                        + " | ".join(errors))
                 cls._disabled = True
                 cls._disabled_switch = configured
                 raise LlamaServerError("every llama-server start attempt failed: "

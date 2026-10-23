@@ -190,7 +190,7 @@ from wayfinder.utils.platform import (
     get_whisper_model_search_dirs,
 )
 from wayfinder.core.injector import inject_text, InjectionError
-from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, get_wav_duration_seconds, wav_has_speech_activity
+from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_duration_seconds, analyze_wav_speech_activity
 from wayfinder.core.transcriber import (
     RequestAbandoned, TranscriptionError, dictation_requests, transcribe_with_config,
 )
@@ -4473,6 +4473,18 @@ class OverlayController:
                         f"🖥 Pill sees a display change: {data.get('kind')} "
                         f"{data.get('name') or ''} {data.get('rect') or ''} "
                         f"scale {data.get('dpr') or '?'}".rstrip()
+                    )
+                if data.get("event") == "topmost":
+                    count = int(data.get("restores") or 1)
+                    fronts = ", ".join(data.get("fronts") or []) or "unknown"
+                    pause = round(float(data.get("pause_s") or 60))
+                    waits = "a minute" if pause == 60 else f"{pause} seconds"
+                    self._log(
+                        f"🫧 Pill was pushed behind {data.get('above')} window(s) — put back on "
+                        f"top (in front: {fronts}"
+                        + (f"; {count} times since the last report" if count > 1 else "")
+                        + (")" if data.get("held", True) else
+                           f"; it keeps being pushed down, trying again in {waits})")
                     )
         except Exception:
             pass
@@ -24957,17 +24969,20 @@ class WayfinderApp(ctk.CTk):
             if gen is not None and gen != self.session_generation:
                 return
 
-            # The session-level peak guard cannot catch a silent tail after an earlier
+            # The session-level speech check cannot catch a silent tail after an earlier
             # spoken chunk.  Whisper is especially prone to echoing its prompt and
-            # inventing prose for such chunks, so mark this one empty without invoking
-            # ASR.  Fail open when the WAV cannot be measured to avoid dropping speech.
-            chunk_peak = get_wav_peak_amplitude(chunk_path)
-            chunk_has_speech = wav_has_speech_activity(chunk_path)
-            if (
-                chunk_has_speech is False
-                or (chunk_has_speech is None and chunk_peak is not None
-                    and chunk_peak < SILENCE_PEAK_THRESHOLD)
-            ):
+            # inventing prose for such chunks, so a silent one is marked empty without
+            # invoking ASR, and a noise-like one is heard without a prompt or context
+            # (see _speech_check).  Fail open when the WAV cannot be measured.
+            activity = analyze_wav_speech_activity(chunk_path)
+            noise = activity is not None and activity.verdict == "noise"
+            if activity is not None and activity.verdict != "speech":
+                # Log every non-speech verdict's levels before branching — an
+                # accepted noise chunk used to log nothing, and a silent one
+                # only the generic skip message below, leaving nothing in the
+                # activity log to tell which check fired or how close it was.
+                self.log(f"🔇 Speech check: {activity.verdict} ({activity.describe()})")
+            if activity is not None and activity.verdict == "silence":
                 with self.chunk_transcription_lock:
                     while len(store) <= chunk_index:
                         store.append("")
@@ -24983,7 +24998,7 @@ class WayfinderApp(ctk.CTk):
             # chunking. On GPU the previous chunk is almost always done already; on a
             # slow CPU we proceed without context rather than stalling for many seconds.
             context = ""
-            if chunk_index > 0:
+            if chunk_index > 0 and not noise:
                 deadline = time.time() + 1.5
                 while True:
                     if gen is not None and gen != self.session_generation:
@@ -25015,8 +25030,16 @@ class WayfinderApp(ctk.CTk):
                 context=context,
                 skip_post_processing=True,
                 request_token=request_token,
+                unprompted=noise,
                 raw_out=raw_prompted,
             )
+            if noise and not text.strip():
+                # transcribe_with_config already held the recognizer's own words to
+                # the two-word rule (and checked for a known hallucination phrase)
+                # before any vocabulary/LLM rewrite could see them. Log only that
+                # outcome here — never the words themselves, even on rejection.
+                self.log(f"🔇 Chunk {chunk_index + 1}: noise-like audio produced "
+                         f"0 usable words, dropped")
             raw_session = WayfinderApp._raw_session_enabled(self)
             if context and not raw_session:
                 # A prompt can make Whisper return a fragment for a whole chunk
@@ -25191,18 +25214,30 @@ class WayfinderApp(ctk.CTk):
         # Silence guard: a muted/disconnected/wrong mic yields near-zero samples, and
         # whisper hallucinates text on silence. Tell the user what's actually wrong
         # instead of injecting junk or showing "no output".
-        speech_probe = getattr(self.recorder, "has_speech_activity", None)
-        has_speech = (
-            bool(speech_probe()) if callable(speech_probe)
-            else self.recorder.get_peak_amplitude() >= SILENCE_PEAK_THRESHOLD
-        )
-        if not has_speech:
+        verdict = self._speech_check(self.recorder)
+        if verdict == "silence":
             self.recorder.cleanup()
             self.on_error(self._silence_error_message(self.recorder), gen)
             return
 
         self._maybe_show_gpu_nudge(duration)
-        self.executor.submit(self.transcribe_and_inject, audio_path, gen)
+        self.executor.submit(self.transcribe_and_inject, audio_path, gen, verdict == "noise")
+
+    def _speech_check(self, recorder) -> str:
+        """Classify the recording as "speech", "noise" or "silence", logging the levels.
+
+        Only silence is rejected before Whisper. Noise (loudness that barely varies,
+        like a fan or hum) is transcribed without a prompt and kept only if Whisper
+        hears 2+ words: rejecting it outright deleted real dictations (MacBook Air,
+        2026-10-13) and logged nothing to tell which check fired.
+        """
+        probe = getattr(recorder, "speech_activity", None)
+        if not callable(probe):
+            return "speech" if recorder.get_peak_amplitude() >= SILENCE_PEAK_THRESHOLD else "silence"
+        activity = probe()
+        if activity.verdict != "speech":
+            self.log(f"🔇 Speech check: {activity.verdict} ({activity.describe()})")
+        return activity.verdict
 
     def _silence_error_message(self, recorder=None) -> str:
         """Actionable 'no audio' message that NAMES the selected mic.
@@ -25310,13 +25345,9 @@ class WayfinderApp(ctk.CTk):
             self.on_error("Too short - speak longer", gen)
             return
 
-        # Silence guard — same rationale as the simple-recording path.
-        speech_probe = getattr(recorder, "has_speech_activity", None)
-        has_speech = (
-            bool(speech_probe()) if callable(speech_probe)
-            else recorder.get_peak_amplitude() >= SILENCE_PEAK_THRESHOLD
-        )
-        if not has_speech:
+        # Silence guard — same rationale as the simple-recording path. Noise goes on
+        # to the chunks, which each get the same speech check in _transcribe_chunk.
+        if self._speech_check(recorder) == "silence":
             recorder.cleanup()
             if self.chunked_recorder is recorder:
                 self.chunked_recorder = None
@@ -25494,7 +25525,8 @@ class WayfinderApp(ctk.CTk):
 
         return find_text_overlap(text1, text2, min_words=min_words, max_words=max_words)
 
-    def transcribe_and_inject(self, audio_path, gen=None):
+    def transcribe_and_inject(self, audio_path, gen=None, noise=False):
+        """Transcribe one recording; *noise* is the speech check's "noise" verdict."""
         import time as time_module
         try:
             self.log("🔄 Transcribing...")
@@ -25504,8 +25536,12 @@ class WayfinderApp(ctk.CTk):
             asr_cfg = WayfinderApp._asr_config_for_dictation(self)
             text = transcribe_with_config(
                 audio_path, asr_cfg,
-                request_token=WayfinderApp._dictation_request_token(self, gen))
+                request_token=WayfinderApp._dictation_request_token(self, gen),
+                unprompted=noise)
             trans_elapsed = time_module.perf_counter() - trans_start
+            # transcribe_with_config already held a noise-verdict recording's own
+            # recognizer words to the two-word rule before this point, so a rejected
+            # one comes back as "" here — never logged as recognized text.
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
             self.event_queue.put((EventType.TRANSCRIPTION_DONE, (text, gen)))
         except Exception as e:

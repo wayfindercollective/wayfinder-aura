@@ -947,3 +947,26 @@ def test_a_reset_before_the_spawn_starts_nothing(tmp_path, monkeypatch, stage):
     with pytest.raises(transcriber.RequestAbandoned):
         backend.transcribe(str(audio))   # the dictation's own token reaches the start
     assert WhisperServerBackend._server_disabled is False
+
+
+def test_a_reset_during_the_watchers_readiness_starts_nothing(tmp_path, monkeypatch):
+    # Sol mac r18: macOS waits for the crash watcher before the server
+    # starts, seconds on a busy Mac; a reset meanwhile went unseen.
+    from wayfinder.core import transcriber
+    backend = _one_attempt_backend(tmp_path, "import time\ntime.sleep(60)")
+    monkeypatch.setattr(WhisperServerBackend, "_abandoned", WhisperServerBackend._abandoned)
+
+    def spawn(cmd, before_helper=None, ready_within=None, **kwargs):
+        assert ready_within is not None and ready_within > 0
+        WhisperServerBackend.abandon_requests()       # while the watcher got ready
+        before_helper()
+        pytest.fail("a retired dictation spawned a server")
+
+    monkeypatch.setattr(transcriber, "spawn_supervised", spawn)
+    monkeypatch.setattr(backend, "_cli_fallback",
+                        lambda: pytest.fail("a retired dictation ran whisper-cli"))
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"RIFF")
+    with pytest.raises(transcriber.RequestAbandoned):
+        backend.transcribe(str(audio))
+    assert WhisperServerBackend._server_disabled is False

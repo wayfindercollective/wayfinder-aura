@@ -1241,6 +1241,122 @@ class TestLlamaGpuCpuFallback:
             b.warm_up()
         probe.assert_called_once()  # first dictation lands on the right binary
 
+    # Sol mac r20/r21 (Finding 1): a pre-spawn deadline expiry (HelperNotStarted)
+    # during the probe is no verdict, not a GPU failure — _probe_gpu_ok(None) must
+    # not get cached or counted as a clamp, and a later, unhurried call must still
+    # probe for real.
+
+    def test_probe_returns_none_on_helper_not_started(self, tmp_path):
+        from wayfinder.utils.child_supervisor import HelperNotStarted
+        b = self._backend(tmp_path)
+        with patch("wayfinder.core.postprocessor.run_tracked",
+                   side_effect=HelperNotStarted(["x"], 8.0)):
+            assert b._probe_gpu_ok(99) is None
+
+    def test_subprocess_target_caches_nothing_on_helper_not_started(self, tmp_path):
+        import time
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        b = self._backend(tmp_path, ngl=-1, cpu_sibling=True)
+        key = (b.llama_binary, b.model_path, 99)
+        with patch.object(b, "_probe_gpu_ok", return_value=None) as probe:
+            binary, ngl = b._subprocess_target(deadline=time.monotonic() + 5)
+        # CPU for this call only (no verdict to act on), nothing cached either way.
+        assert ngl == 0 and binary.endswith("llama-simple-cpu")
+        probe.assert_called_once()
+        assert key not in LlamaCppCliBackend._gpu_probe
+        assert key not in LlamaCppCliBackend._gpu_probe_clamped
+        # An unhurried later call still probes fresh instead of staying condemned.
+        with patch.object(b, "_probe_gpu_ok", return_value=True) as probe2:
+            binary, ngl = b._subprocess_target()
+        probe2.assert_called_once()
+        assert ngl == 99 and binary == b.llama_binary
+        assert LlamaCppCliBackend._gpu_probe[key] is True
+
+    # Sol mac r22 (Finding 1): admission (the _tracked_lock wait, the
+    # watcher's readiness wait) is not GPU execution time. The old code
+    # measured elapsed time from before run_tracked() was even called, so a
+    # helper that was slow to ADMIT but fast to RUN read as a slow GPU and
+    # poisoned the cache with False.
+
+    def test_probe_ok_when_admission_delay_precedes_a_fast_success(self, tmp_path):
+        """Reproduced: 5.2s stuck on _tracked_lock, then a successful
+        0.001s helper. Only the time after run_tracked's spawned_at (the
+        helper's own execution) counts toward the verdict."""
+        b = self._backend(tmp_path)
+        # t0 (before run_tracked), spawned_at (after ~5.2s of admission),
+        # then the final check ~0.001s after spawned_at.
+        clock = [0.0]
+
+        def fake_run_tracked(*a, **k):
+            completed = subprocess.CompletedProcess(a[0], 0, "", "")
+            completed.spawned_at = 5.201
+            clock[0] = 5.202
+            return completed
+
+        with patch("wayfinder.core.postprocessor.run_tracked", side_effect=fake_run_tracked), \
+             patch("time.monotonic", side_effect=lambda: clock[0]), \
+             patch("time.time", side_effect=lambda: clock[0]):
+            assert b._probe_gpu_ok(99) is True
+
+    def test_probe_none_when_admission_truncates_the_timeout_budget(self, tmp_path):
+        """The helper WAS spawned (unlike HelperNotStarted) but admission left
+        it less than the normal 5s verdict window before the overall 8s
+        limit killed it. That proves nothing about the GPU -- not even a
+        confirmed-slow verdict -- so it must stay uncached, same as
+        HelperNotStarted (Sol mac r20's rule, extended to this case)."""
+        import itertools
+        b = self._backend(tmp_path)
+        clock = itertools.chain([0.0], itertools.repeat(100.0))   # just t0
+
+        def fake_run_tracked(*a, **k):
+            exc = subprocess.TimeoutExpired(a[0], k.get("timeout"))
+            exc.spawned_at = 7.9   # spawned with only 0.1s left before the 8s deadline
+            raise exc
+
+        with patch("wayfinder.core.postprocessor.run_tracked", side_effect=fake_run_tracked), \
+             patch("time.monotonic", side_effect=clock):
+            assert b._probe_gpu_ok(99) is None
+
+    def test_probe_false_when_a_fair_shot_still_times_out(self, tmp_path):
+        """Contrast with the admission-truncated case above: admission barely
+        ate into the budget, so the helper got (near enough) its full normal
+        verdict window and still did not finish -- a real, confirmable
+        degraded/hung GPU, same as the old test_probe_false_on_timeout."""
+        import itertools
+        b = self._backend(tmp_path)
+        clock = itertools.chain([0.0], itertools.repeat(100.0))
+
+        def fake_run_tracked(*a, **k):
+            exc = subprocess.TimeoutExpired(a[0], k.get("timeout"))
+            exc.spawned_at = 0.01   # admission took almost nothing
+            raise exc
+
+        with patch("wayfinder.core.postprocessor.run_tracked", side_effect=fake_run_tracked), \
+             patch("time.monotonic", side_effect=clock):
+            assert b._probe_gpu_ok(99) is False
+
+    def test_subprocess_target_caches_the_fast_verdict_after_a_slow_admission(self, tmp_path):
+        """End to end through _subprocess_target(): the delayed-admission,
+        fast-success probe must cache True (GPU good), not poison the cache
+        with False the way the old elapsed-time formula did."""
+        from wayfinder.core.postprocessor import LlamaCppCliBackend
+        b = self._backend(tmp_path, ngl=-1, cpu_sibling=True)
+        key = (b.llama_binary, b.model_path, 99)
+        clock = [0.0]
+
+        def fake_run_tracked(*a, **k):
+            completed = subprocess.CompletedProcess(a[0], 0, "", "")
+            completed.spawned_at = 5.201
+            clock[0] = 5.202
+            return completed
+
+        with patch("wayfinder.core.postprocessor.run_tracked", side_effect=fake_run_tracked), \
+             patch("time.monotonic", side_effect=lambda: clock[0]), \
+             patch("time.time", side_effect=lambda: clock[0]):
+            binary, ngl = b._subprocess_target()
+        assert ngl == 99 and binary == b.llama_binary
+        assert LlamaCppCliBackend._gpu_probe[key] is True
+
 
 # =============================================================================
 # GGUF stem tier detection (quirk keys are ollama-style; configs carry stems)
