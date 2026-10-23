@@ -544,6 +544,7 @@ def test_real_foreground_hook_installs_and_uninstalls(wt):
 
 
 @windows_only
+@pytest.mark.ui
 def test_real_z_order_walk_finds_a_real_window(wt):
     import tkinter as tk
 
@@ -552,6 +553,8 @@ def test_real_z_order_walk_finds_a_real_window(wt):
         root.attributes("-topmost", True)
         root.update()
         hwnd = int(root.wm_frame(), 16)
+        # An invisible service-session window cannot qualify this UI check.
+        assert wt._user32.IsWindowVisible(hwnd)
         assert wt.normal_windows_above(hwnd) == 0
     finally:
         root.destroy()
@@ -570,6 +573,7 @@ def _z_order_index(wt, hwnd):
 
 
 @windows_only
+@pytest.mark.ui
 def test_a_demoted_pill_is_restored_into_a_real_anchors_band(wt):
     """Finding 3 (Sol pill r4), MAJOR: the previous version of this fixture
     put the pill behind a real ordinary window via SetWindowPos and then
@@ -602,6 +606,11 @@ def test_a_demoted_pill_is_restored_into_a_real_anchors_band(wt):
         ordinary = tk.Toplevel(anchor)
         ordinary.update()
         try:
+            # Requires a real interactive desktop. Session 0 service windows
+            # can have z-order/style flags while remaining invisible, so the
+            # fixture cannot establish the normal-window-above precondition.
+            assert all(wt._user32.IsWindowVisible(hwnd) for hwnd in (
+                anchor_hwnd, pill_hwnd, int(ordinary.wm_frame(), 16)))
             assert wt.normal_windows_above(pill_hwnd) >= 1
 
             before_fg = wt._user32.GetForegroundWindow()
