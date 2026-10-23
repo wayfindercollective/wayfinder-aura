@@ -24,7 +24,8 @@ from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
 from wayfinder.utils.child_supervisor import (
-    HelperNotStarted, HelpersClosed, bind_to_app_lifetime, refuse_spawns_when, run_tracked,
+    HelperNotStarted, HelpersClosed, bind_to_app_lifetime, helper_budget_shortened,
+    refuse_spawns_when, run_tracked,
     signal_supervised, spawn_supervised, wait_supervised,
 )
 from wayfinder.utils.platform import subprocess_no_window_kwargs
@@ -737,12 +738,13 @@ class WhisperCppBackend(TranscriptionBackend):
                 # _activate_fallback's memoized CPU fallback (Sol mac r21).
                 raise TranscriptionError(
                     f"whisper-cli attempt {attempt_idx + 1} never started within its budget")
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 # A deadline-CLAMPED timeout means the caller's salvage budget ran
                 # out, NOT that the GPU hung — so it must NOT memoize CPU fallback
                 # (that would poison GPU health for every future dictation). Bail
                 # cleanly instead of degrading global state on a false signal.
-                if deadline is not None and attempt_timeout < self.timeout:
+                if (deadline is not None and attempt_timeout < self.timeout
+                        or helper_budget_shortened(exc, float(self.timeout))):
                     raise TranscriptionError(
                         f"whisper-cli salvage attempt exceeded its {attempt_timeout:.0f}s budget")
                 if is_last:
@@ -893,6 +895,8 @@ class WhisperCppBackend(TranscriptionBackend):
             raise   # Quit, not the GPU: _probe_gpu_recovery leaves its state alone
         except HelperNotStarted:
             return None
+        except subprocess.TimeoutExpired as exc:
+            return None if helper_budget_shortened(exc, 60.0) else False
         except Exception:
             return False
         finally:

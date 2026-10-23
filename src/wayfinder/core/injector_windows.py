@@ -808,98 +808,111 @@ RESTORE_DEFERRED_RETRY_S = 3.0
 
 
 class _DeferredRestore:
-    """One pending clipboard restore, run on a timer or flushed early
-    (Windows twin of macos_paste.DeferredRestore).
+    """Serialize restores and retain a snapshot until its outcome is known.
 
-    *restore* must return True once it is done — restored, or no longer
-    ours to restore (the user copied or cleared it) — or False to mean the
-    clipboard is still ours but the write did not land, so it is worth
-    trying again (Sol mac r21: a restore whose text writes were refused
-    throughout used to be dropped here, silently, the moment the mark
-    write alone happened to succeed). schedule()'s signature is unchanged
-    from before r21 — existing callers/tests replace it wholesale with a
-    single-arg fake — so the bounded retry count lives in here, not in a
-    parameter."""
+    A failed write or an unavailable clipboard stays pending after automatic
+    retries stop. Only a successful restore or a verified user copy retires
+    it. Each timer belongs to one generation, including callbacks that were
+    already queued when flush() cancelled their timer.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # Held while a restore runs, by the timer and by flush(): a paste that
-        # starts while the timer is mid-restore waits for it to finish, instead
-        # of racing it on the clipboard (game chat pastes parts ~0.85 s apart).
         self._run = threading.Lock()
         self._timer: threading.Timer | None = None
         self._job = None
         self._retries_left = 0
+        self._generation = 0
+        self._warned = False
+
+    def _start_timer(self, delay, generation):
+        timer = threading.Timer(delay, self._fire, args=(generation,))
+        timer.daemon = True
+        self._timer = timer
+        try:
+            timer.start()
+        except Exception:
+            self._timer = None
+            return False
+        return True
 
     def schedule(self, restore, delay: float = RESTORE_DELAY_S) -> None:
         self.flush()
-        try:
-            with self._lock:
-                self._job = restore
-                self._retries_left = RESTORE_DEFERRED_RETRIES
-                self._timer = threading.Timer(delay, self._fire)
-                self._timer.daemon = True
-                self._timer.start()
-        except Exception:
-            # No thread (resource pressure): restore now rather than never,
-            # so the user's clipboard is not left holding the dictation.
-            with self._lock:
-                self._timer = self._job = None
-                self._retries_left = 0
-            try:
-                restore()
-            except Exception:
-                pass
-
-    def flush(self) -> None:
-        """Run the pending restore now (before a new paste snapshots the
-        clipboard), or wait for one the timer is already running. No
-        further retries after this one: a new paste is about to own the
-        clipboard either way, so a restore still owed at this point is
-        logged instead of kept pending behind it (Sol mac r21)."""
         with self._run:
             with self._lock:
+                self._generation += 1
+                self._job = restore
+                self._warned = False
+                self._retries_left = RESTORE_DEFERRED_RETRIES
+                started = self._start_timer(delay, self._generation)
+            if not started:
+                # No timer thread: try once now, retaining an unresolved job.
+                self._run_job(restore, final=True)
+
+    def flush(self) -> None:
+        """Try now, keeping an unresolved snapshot for a later recovery."""
+        with self._run:
+            with self._lock:
+                self._generation += 1
                 timer, job = self._timer, self._job
-                self._timer = self._job = None
+                self._timer = None
                 self._retries_left = 0
             if timer is not None:
                 timer.cancel()
             if job is not None:
                 self._run_job(job, final=True)
 
-    def _fire(self) -> None:
+    def snapshot_for_paste(self, current):
+        """Carry the user's original text across another Aura-owned paste.
+
+        Called while the clipboard is held by our owner window. Matching the
+        private mark and text proves that a failed flush left Aura's own
+        contents here. A user copy, even of the same text, removes the mark.
+        """
+        with self._lock:
+            job = self._job
+            mark = _clipboard_mark() if job is not None else None
+            if (job is not None and mark is not None
+                    and getattr(job, "mark", None) == mark
+                    and current in (None, getattr(job, "text", None))):
+                return job.previous
+        return current
+
+    def _fire(self, generation) -> None:
         with self._run:
             with self._lock:
+                if generation != self._generation:
+                    return
                 job = self._job
                 retries = self._retries_left
-            if job is None:
+                self._timer = None
+            if job is None or self._run_job(job, final=retries <= 0):
                 return
-            if self._run_job(job, final=retries <= 0):
+            if retries > 0:
                 with self._lock:
-                    self._job = None
-                return
-            if retries <= 0:
-                with self._lock:
-                    self._job = None
-                return
-            with self._lock:
-                self._retries_left = retries - 1
-                self._timer = threading.Timer(RESTORE_DEFERRED_RETRY_S, self._fire)
-                self._timer.daemon = True
-                self._timer.start()
+                    self._retries_left = retries - 1
+                    started = self._start_timer(RESTORE_DEFERRED_RETRY_S, generation)
+                if not started:
+                    self._warn_once()
 
-    @staticmethod
-    def _run_job(job, *, final: bool) -> bool:
+    def _warn_once(self):
+        with self._lock:
+            if self._warned:
+                return
+            self._warned = True
+        _log_restore_exhausted()
+
+    def _run_job(self, job, *, final: bool) -> bool:
         try:
             done = bool(job())
         except Exception:
-            return True   # a job that raised is as done as one that ran
-        if not done and final:
-            # Still ours, still unrestored, and this was the last try
-            # (timer retries exhausted, or a flush() cut it short): say so
-            # once, rather than discarding the saved text with no sign it
-            # ever happened (Sol mac r21).
-            _log_restore_exhausted()
+            done = False  # unknown outcome cannot discard the user's snapshot
+        if done:
+            with self._lock:
+                if self._job is job:
+                    self._job = None
+        elif final:
+            self._warn_once()
         return done
 
 
@@ -1064,7 +1077,7 @@ RESTORE_RETRIES = 2      # further attempts after a failed restore write
 RESTORE_RETRY_S = 0.1
 
 
-def _restore_with_retry(previous: str, text: str, mark: bytes) -> tuple[bool, bool]:
+def _restore_with_retry(previous: str, text: str, mark: bytes) -> tuple[bool | None, bool]:
     """_restore_clipboard, tried again a bounded number of times while the
     clipboard is still Aura's but the write failed (Finding 3: keep the
     snapshot for a bounded recovery instead of dropping it on the first
@@ -1075,7 +1088,7 @@ def _restore_with_retry(previous: str, text: str, mark: bytes) -> tuple[bool, bo
     (Sol mac r18, redone with the mark instead of a sequence number r19)."""
     untouched, restored = _restore_clipboard(previous, text, mark)
     for _ in range(RESTORE_RETRIES):
-        if restored or not untouched:
+        if restored or untouched is False:
             break
         time.sleep(RESTORE_RETRY_S)
         untouched, restored = _restore_clipboard(previous, text, mark)
@@ -1089,26 +1102,31 @@ def _restore_job(previous: str, text: str, mark: bytes, diag):
     inside it re-reads the clipboard fresh each time."""
     def restore() -> bool:
         untouched, restored = _restore_with_retry(previous, text, mark)
-        diag.at_restore(untouched)
+        if untouched is not None:
+            diag.at_restore(untouched)
         if restored:
             diag.mark("restored")
             return True
-        return not untouched   # done (no longer ours) iff NOT still owed
+        return untouched is False  # only a verified change retires the snapshot
+    restore.previous = previous
+    restore.text = text
+    restore.mark = mark
     return restore
 
 
-def _restore_clipboard(previous: str, text: str, mark: bytes) -> tuple[bool, bool]:
+def _restore_clipboard(previous: str, text: str, mark: bytes) -> tuple[bool | None, bool]:
     """Put *previous* back if the clipboard is as Aura left it, with the check
     and the write under one OpenClipboard: a copy made during the check
     (even of the same words) stays (Sol mac r13). Requires Aura's own owner
     window (Finding 5): an ownerless hold would not exclude another ownerless
     opener's copy landing between the check and the write, so without one
     this does not restore at all — the clipboard, dictated text included, is
-    left exactly as it is. Returns (untouched, restored)."""
+    left exactly as it is. Returns (untouched, restored), with untouched=None
+    when the clipboard could not be inspected safely."""
     with _clipboard_held(require_owner=True) as held:
         if not held:
             _log_no_owner_at_restore()
-            return False, False
+            return None, False  # could not inspect; ownership is still unknown
         if not (_clipboard_untouched(text, mark) or _clipboard_emptied_by_us(mark)):
             return False, False
         restored = _restore_open_clipboard(previous, text, mark)
@@ -1151,7 +1169,7 @@ def _paste_write_windows(text: str) -> tuple[str | None, bytes]:
             # window, another ownerless opener is not excluded, so the write
             # is refused through the same path as any other write failure.
             raise InjectionError("Could not write to the Windows clipboard for paste.")
-        previous = _snapshot_clipboard_text()
+        previous = _pending_restore.snapshot_for_paste(_snapshot_clipboard_text())
 
         text_block = _global_text(text)
         mark = os.urandom(_OWNER_MARK_BYTES)
@@ -1268,7 +1286,7 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
             # something meanwhile.
             if previous is not None:
                 untouched, restored = _restore_with_retry(previous, text, mark)
-                if untouched and not restored:
+                if untouched is not False and not restored:
                     # Every write was refused, the mark alone landing each
                     # time: still ours, so the restore stays owed instead of
                     # being dropped here (Sol mac r21 — same gap the Ctrl+V

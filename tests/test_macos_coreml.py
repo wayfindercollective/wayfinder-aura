@@ -838,7 +838,11 @@ def test_a_compile_superseded_in_its_accounting_counts_nothing(tmp_path, monkeyp
     if failure == "timed-out":
         real, calls = time.monotonic, [0]
 
-        def monotonic():   # the 180 s deadline passes after the first look
+        def monotonic():
+            # Advance the compiler's wait clock, after helper admission. The
+            # helper registry also reads the clock to record the spawn time.
+            if not child_supervisor._tracked:
+                return real()
             calls[0] += 1
             return real() + (0 if calls[0] == 1 else 1000)
 

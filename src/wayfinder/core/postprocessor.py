@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from wayfinder.core.transcriber import RequestAbandoned, _dictation_cancelled, _retired_dictation
-from wayfinder.utils.child_supervisor import HelperNotStarted, HelpersClosed, run_tracked
+from wayfinder.utils.child_supervisor import (
+    HelperNotStarted, HelpersClosed, helper_budget_shortened, helper_elapsed, run_tracked,
+)
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.platform import (
     get_user_llm_models_dir,
@@ -2582,9 +2584,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
         budget clamps the probe's subprocess timeout to the caller's remaining
         cleanup budget so a first-ever probe cannot blow the dictation's ceiling.
 
-        None means no verdict: the deadline passed before the probe helper was
-        even spawned (HelperNotStarted), so nothing about the GPU was learned
-        (Sol mac r20)."""
+        None means no verdict: admission either expired before spawn or left
+        too little execution time to judge the GPU after a timeout.
+        """
         if not self.model_path or not Path(self.model_path).exists():
             return False
         import time as _t
@@ -2592,8 +2594,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # clamp here never exceeds what the dictation actually has left.
         limit = _GPU_PROBE_TIMEOUT if budget is None \
             else min(_GPU_PROBE_TIMEOUT, budget)
+        t0 = _t.monotonic()
+        wall_start = _t.time()
         try:
-            t0 = _t.time()
             r = run_tracked(
                 [self.llama_binary, "-m", self.model_path, "-ngl", str(ngl), "-n", "16", "warm up"],
                 capture_output=True, text=True, timeout=limit,
@@ -2604,9 +2607,19 @@ class LlamaCppCliBackend(PostProcessorBackend):
             raise   # Quit, not the GPU: _subprocess_target caches no verdict
         except HelperNotStarted:
             return None   # nothing ran: no verdict either way (Sol mac r20)
+        except subprocess.TimeoutExpired as exc:
+            spawned_at = getattr(exc, "spawned_at", None)
+            if (helper_budget_shortened(exc, _GPU_PROBE_MAX_SECONDS)
+                    or isinstance(spawned_at, (int, float))
+                    and t0 + limit - spawned_at < _GPU_PROBE_MAX_SECONDS):
+                return None
+            return False
         except Exception:
             return False
-        return r.returncode == 0 and (_t.time() - t0) < _GPU_PROBE_MAX_SECONDS
+        spawned_at = getattr(r, "spawned_at", None)
+        fallback = (_t.monotonic() - spawned_at if isinstance(spawned_at, (int, float))
+                    else _t.time() - wall_start)
+        return r.returncode == 0 and helper_elapsed(r, fallback) < _GPU_PROBE_MAX_SECONDS
 
     def _subprocess_target(self, deadline: Optional[float] = None) -> tuple:
         """Return ``(binary, ngl)`` for the subprocess cleanup, with a cached one-time

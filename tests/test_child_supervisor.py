@@ -1114,3 +1114,69 @@ def test_llama_servers_stop_ends_what_its_helper_forked(tmp_path, monkeypatch):
             os.kill(worker, signal.SIGKILL)
         except OSError:
             pass
+
+
+@pytest.mark.parametrize("admission", [0.0, 0.5, 1.5])
+def test_run_tracked_reports_only_execution_time_after_admission(monkeypatch, admission):
+    from types import SimpleNamespace
+    from wayfinder.utils import child_supervisor as cs
+    clock = [0.0]
+
+    class Process:
+        args, returncode = ["helper"], 0
+        spawned_at = admission
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def communicate(self, _input, timeout):
+            assert timeout == pytest.approx(2.0 - admission)
+            clock[0] += 0.125
+            return "ok", ""
+
+    def spawn(*_args, **_kwargs):
+        clock[0] = admission
+        return Process()
+
+    monkeypatch.setattr(cs, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(cs, "spawn_tracked", spawn)
+    monkeypatch.setattr(cs, "release_supervised", lambda _proc: None)
+    result = cs.run_tracked(["helper"], timeout=2.0)
+    assert result.execution_seconds == pytest.approx(0.125)
+    assert result.execution_budget == pytest.approx(2.0 - admission)
+
+
+def test_timeout_reports_the_execution_budget_left_after_admission(monkeypatch):
+    from types import SimpleNamespace
+    from wayfinder.utils import child_supervisor as cs
+    clock = [0.0]
+
+    class Process:
+        args, returncode, spawned_at = ["helper"], -9, 1.75
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def communicate(self, _input, timeout):
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+        def wait(self):
+            return self.returncode
+
+    def spawn(*_args, **_kwargs):
+        clock[0] = 1.75
+        return Process()
+
+    monkeypatch.setattr(cs, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(cs, "spawn_tracked", spawn)
+    monkeypatch.setattr(cs, "_kill_helper", lambda _proc: None)
+    monkeypatch.setattr(cs, "release_supervised", lambda _proc: None)
+    with pytest.raises(subprocess.TimeoutExpired) as info:
+        cs.run_tracked(["helper"], timeout=2.0)
+    assert info.value.execution_budget == pytest.approx(0.25)

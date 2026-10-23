@@ -129,6 +129,7 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
         if not ready:
             raise OSError(f"no crash watcher for {Path(str(command[0])).name}")
         proc = _POPEN(command, env=env, process_group=watcher.pid, **popen_kwargs)
+        proc.spawned_at = time.monotonic()
     except BaseException:
         _drop_watcher(watcher)
         raise
@@ -556,6 +557,9 @@ def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
                 popen_kwargs["ready_within"] = left if given is None else min(given, left)
         _refuse_past(command, deadline)
         proc = (popen or subprocess.Popen)(command, **popen_kwargs)
+        # Supervised spawns record this before their watcher handshake.
+        if not isinstance(getattr(proc, "spawned_at", None), (int, float)):
+            proc.spawned_at = time.monotonic()
         if stop is None:
             stop = _stop_helper_group if _is_helper_group(proc) else _terminate_child
         _tracked[proc] = stop
@@ -597,7 +601,16 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
                 check: bool = False, **kwargs) -> subprocess.CompletedProcess:
     """subprocess.run() through spawn_tracked(): the same arguments and errors.
     *timeout* counts from this call, the wait for the lock and the watcher
-    included, so a deadline's time left really bounds the helper (Sol mac r19)."""
+    included, so a deadline's time left really bounds the helper (Sol mac r19).
+
+    The returned CompletedProcess carries ``spawned_at`` (time.monotonic(),
+    the moment the helper actually started, past admission) when it was
+    spawned at all; a subprocess.TimeoutExpired raised after that point
+    carries the same attribute, so a caller whose verdict depends on how
+    long the helper ran can measure from there instead of from this call's
+    own start, which would count admission as the helper's own time (Sol mac
+    r21, Finding 1). HelperNotStarted (admission itself timed out, nothing
+    ever spawned) carries no such attribute: there is nothing to measure."""
     deadline = None if timeout is None else time.monotonic() + timeout
     if kwargs.pop("capture_output", False):
         kwargs["stdout"] = kwargs["stderr"] = subprocess.PIPE
@@ -614,11 +627,14 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
             try:
                 left = None if deadline is None else max(0.0, deadline - time.monotonic())
                 stdout, stderr = proc.communicate(input, timeout=left)
-            except subprocess.TimeoutExpired:
+                finished_at = time.monotonic()
+            except subprocess.TimeoutExpired as exc:
                 _kill_helper(proc)
                 proc.wait()
                 if cut_short(proc):
                     raise HelperStopped("stopped by a terminal shutdown") from None
+                exc.spawned_at = getattr(proc, "spawned_at", None)
+                exc.execution_budget = left
                 raise
             except BaseException as exc:
                 _kill_helper(proc)
@@ -634,7 +650,23 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
         raise HelperStopped("stopped by a terminal shutdown")
     if check and proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, stdout, stderr)
-    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    result = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    result.spawned_at = getattr(proc, "spawned_at", None)
+    result.execution_seconds = max(0.0, finished_at - result.spawned_at)
+    result.execution_budget = left
+    return result
+
+
+def helper_elapsed(result, fallback: float) -> float:
+    """Helper runtime excluding admission, or a legacy runner's measurement."""
+    elapsed = getattr(result, "execution_seconds", None)
+    return elapsed if isinstance(elapsed, (int, float)) else fallback
+
+
+def helper_budget_shortened(error, required: float) -> bool:
+    """Whether admission left a timed-out helper less than its verdict window."""
+    budget = getattr(error, "execution_budget", None)
+    return isinstance(budget, (int, float)) and budget < required
 
 
 def close_tracked(timeout: float = 6.0) -> None:

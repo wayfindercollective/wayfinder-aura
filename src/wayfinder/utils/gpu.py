@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
 
-from wayfinder.utils.child_supervisor import HelperNotStarted, HelpersClosed, run_tracked
+from wayfinder.utils.child_supervisor import (
+    HelperNotStarted, HelpersClosed, helper_budget_shortened, helper_elapsed, run_tracked,
+)
 
 
 @dataclass
@@ -594,17 +596,16 @@ def benchmark_gpu_devices(
                     timeout=timeout,
                     env=env,
                 )
-                elapsed = time.perf_counter() - start
+                elapsed = helper_elapsed(result, time.perf_counter() - start)
                 
                 if result.returncode == 0:
                     results[device_idx_str] = round(elapsed, 3)
             except HelperNotStarted:
-                # The deadline passed before this device's probe was ever
-                # spawned: no measurement, not a slow one — skip it rather
-                # than cache a timing nothing ran to produce (Sol mac r21).
-                pass
-            except subprocess.TimeoutExpired:
-                results[device_idx_str] = float(timeout)  # Timed out = slow
+                return {"error": "GPU benchmark could not start a device probe", "fastest": "error"}
+            except subprocess.TimeoutExpired as exc:
+                if helper_budget_shortened(exc, float(timeout)):
+                    return {"error": "GPU benchmark ran out of execution time", "fastest": "error"}
+                results[device_idx_str] = float(timeout)
             except HelpersClosed:
                 # Quit stopped or refused a device: the rest are no measurement,
                 # and the "fastest" left standing must never be cached.

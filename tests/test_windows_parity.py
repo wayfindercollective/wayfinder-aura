@@ -3374,3 +3374,138 @@ def test_the_cancel_restore_goes_out_under_a_retired_scope(monkeypatch):
         with pytest.raises(injector.InjectionCancelled):
             w.inject_text_paste_windows("retired words")
     assert rig.fake.writes == ["retired words", "theirs"] and rig.sent == []
+
+
+# Deferred restore recovery must preserve the user's snapshot across every
+# retry outcome, and a cancelled callback cannot act on a later paste.
+def _manual_restore_rig(monkeypatch):
+    import threading
+    from wayfinder.core import injector_windows as w
+
+    fake, w = _real_timer_rig(monkeypatch, "original clipboard")
+    timers = []
+
+    class Timer:
+        def __init__(self, delay, target, args=(), kwargs=None):
+            self.delay, self.target = delay, target
+            self.args, self.kwargs = args, kwargs or {}
+            self.cancelled = False
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.cancelled = True
+
+        def fire(self):
+            # Deliberately allow a callback queued before cancel() to run.
+            self.target(*self.args, **self.kwargs)
+
+    thread_api = dict(vars(threading))
+    thread_api["Timer"] = Timer
+    monkeypatch.setattr(w, "threading", SimpleNamespace(**thread_api))
+    monkeypatch.setattr(w, "_pending_restore", w._DeferredRestore())
+    monkeypatch.setattr(w, "RESTORE_RETRIES", 0)
+    monkeypatch.setattr(w, "WRITE_ATTEMPTS", 1)
+    return fake, w, timers
+
+
+def _schedule_manual_paste(w, text):
+    previous, mark = w._paste_write_windows(text)
+    job = w._restore_job(previous, text, mark, w._NullDiagnostics())
+    w._pending_restore.schedule(job)
+    return previous, mark
+
+
+def test_exhausted_restore_retains_snapshot_for_a_later_flush(monkeypatch):
+    fake, w, timers = _manual_restore_rig(monkeypatch)
+    _schedule_manual_paste(w, "first dictation")
+    fake.on_set = lambda fmt, _handle: fmt == w._CF_UNICODETEXT
+    for _ in range(1 + w.RESTORE_DEFERRED_RETRIES):
+        timers[-1].fire()
+    count = len(timers)
+    fake.on_set = None
+    w._pending_restore.flush()
+    assert fake.clipboard == "original clipboard"
+    assert len(timers) == count  # recovery does not start an unbounded retry loop
+
+
+def test_failed_flush_retains_snapshot_for_the_next_flush(monkeypatch):
+    fake, w, _timers = _manual_restore_rig(monkeypatch)
+    _schedule_manual_paste(w, "first dictation")
+    fake.on_set = lambda fmt, _handle: fmt == w._CF_UNICODETEXT
+    w._pending_restore.flush()
+    fake.on_set = None
+    w._pending_restore.flush()
+    assert fake.clipboard == "original clipboard"
+
+
+def test_busy_clipboard_does_not_lose_the_pending_snapshot(monkeypatch):
+    fake, w, timers = _manual_restore_rig(monkeypatch)
+    _schedule_manual_paste(w, "first dictation")
+    fake.on_open = lambda: False
+    timers[-1].fire()
+    fake.on_open = None
+    w._pending_restore.flush()
+    assert fake.clipboard == "original clipboard"
+
+
+def test_new_paste_keeps_original_after_an_unresolved_restore(monkeypatch):
+    fake, w, _timers = _manual_restore_rig(monkeypatch)
+    _schedule_manual_paste(w, "first dictation")
+    fake.on_set = lambda fmt, _handle: fmt == w._CF_UNICODETEXT
+    w._pending_restore.flush()
+    fake.on_set = None
+    previous, _mark = _schedule_manual_paste(w, "second dictation")
+    assert previous == "original clipboard"
+    w._pending_restore.flush()
+    assert fake.clipboard == "original clipboard"
+
+
+def test_new_user_copy_supersedes_an_unresolved_restore(monkeypatch):
+    fake, w, _timers = _manual_restore_rig(monkeypatch)
+    _schedule_manual_paste(w, "first dictation")
+    fake.on_set = lambda fmt, _handle: fmt == w._CF_UNICODETEXT
+    w._pending_restore.flush()
+    fake.on_set = None
+    assert fake.copy("fresh copy from the user")
+    previous, _mark = _schedule_manual_paste(w, "second dictation")
+    assert previous == "fresh copy from the user"
+    w._pending_restore.flush()
+    assert fake.clipboard == "fresh copy from the user"
+
+
+def test_cancelled_old_callback_cannot_restore_a_new_paste_early(monkeypatch):
+    fake, w, timers = _manual_restore_rig(monkeypatch)
+    _schedule_manual_paste(w, "first dictation")
+    old = timers[-1]
+    import threading
+    entered, resume = threading.Event(), threading.Event()
+    real_lock = w._pending_restore._run
+
+    class Gate:
+        def __enter__(self):
+            if threading.current_thread().name == "stale-restore":
+                entered.set()
+                assert resume.wait(5)
+            real_lock.acquire()
+
+        def __exit__(self, *_):
+            real_lock.release()
+
+    monkeypatch.setattr(w._pending_restore, "_run", Gate())
+    worker = threading.Thread(target=old.fire, name="stale-restore")
+    worker.start()
+    assert entered.wait(5)
+    w._pending_restore.flush()
+    _schedule_manual_paste(w, "second dictation")
+    current = timers[-1]
+    assert old.cancelled
+    resume.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert fake.clipboard == "second dictation"
+    assert current.delay == w.RESTORE_DELAY_S
+    current.fire()
+    assert fake.clipboard == "original clipboard"

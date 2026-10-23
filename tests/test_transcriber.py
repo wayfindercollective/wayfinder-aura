@@ -3,6 +3,7 @@ Tests for the transcription module.
 """
 
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -3176,3 +3177,37 @@ class TestARetiredDictationsActions:
 def threading_enumerate(name):
     import threading
     return [t for t in threading.enumerate() if t.name == name]
+
+
+def test_recovery_probe_does_not_condemn_gpu_after_shortened_admission(monkeypatch):
+    from types import SimpleNamespace
+    from wayfinder.core import transcriber
+    error = subprocess.TimeoutExpired(["whisper-cli"], 0.25)
+    error.execution_budget = 0.25
+    monkeypatch.setattr(transcriber, "run_tracked", MagicMock(side_effect=error))
+    backend = SimpleNamespace(whisper_binary="unused", model_path="unused")
+    assert transcriber.WhisperCppBackend._gpu_probe_succeeds(backend) is None
+
+
+def test_cli_admission_timeout_never_memoizes_cpu_fallback(tmp_path, monkeypatch):
+    from wayfinder.core import transcriber
+    binary, cpu, model, audio = [tmp_path / name for name in
+                                ("whisper-cli", "whisper-cli-cpu", "model.bin", "audio.wav")]
+    for path in (binary, cpu, model, audio):
+        path.touch()
+    monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+    backend = transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                            use_gpu=True, timeout=30)
+
+    def run(cmd, **kwargs):
+        if "--help" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        assert cmd[0] != str(cpu), "admission delay must not select the CPU fallback"
+        error = subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        error.execution_budget = 0.25
+        raise error
+
+    monkeypatch.setattr(transcriber, "run_tracked", run)
+    with pytest.raises(transcriber.TranscriptionError):
+        backend.transcribe(str(audio))
+    assert str(binary) not in transcriber._CPU_FALLBACK_ACTIVE
