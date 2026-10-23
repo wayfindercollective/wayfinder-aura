@@ -40,6 +40,15 @@ class TestShowPermissionsSetup:
             "microphone": True, "accessibility": True, "input_monitoring": True})
         assert WayfinderApp.show_permissions_setup(_ns()) is False
 
+    def test_mac_with_relaunch_flag_stays_quiet_when_hotkey_is_live(self, monkeypatch):
+        import wayfinder.utils.macos_permissions as mp
+
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
+        monkeypatch.setattr(mp, "permission_snapshot", lambda: {
+            "microphone": True, "accessibility": True, "input_monitoring": True})
+        ns = _ns(_macos_input_relaunch_required=True, _macos_hotkey_health="live")
+        assert WayfinderApp.show_permissions_setup(ns) is False
+
     def test_mac_forced_menu_entry_opens_checklist_even_when_ready(self, monkeypatch):
         import wayfinder.utils.macos_permissions as mp
 

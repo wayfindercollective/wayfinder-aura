@@ -380,7 +380,7 @@ class TestSetupGpuEnvironment:
         monkeypatch.setattr("wayfinder.utils.gpu_simple.sys.platform", "linux")
 
         with patch("wayfinder.utils.gpu_simple.get_discrete_gpu", return_value=1):
-            env_set = setup_gpu_environment({"gpu_device": "auto"})
+            env_set = setup_gpu_environment({"gpu_device": "auto", "use_gpu": True})
 
         assert env_set.get("GGML_VK_VISIBLE_DEVICES") == "1"
 
@@ -400,7 +400,7 @@ class TestSetupGpuEnvironment:
         monkeypatch.setattr("wayfinder.utils.gpu_simple.sys.platform", "linux")
 
         with patch("wayfinder.utils.gpu_simple.get_discrete_gpu", return_value=0):
-            env_set = setup_gpu_environment({"gpu_device": "notanumber"})
+            env_set = setup_gpu_environment({"gpu_device": "notanumber", "use_gpu": True})
 
         # Should fall through to auto-detect
         assert env_set.get("GGML_VK_VISIBLE_DEVICES") == "0"
@@ -482,3 +482,41 @@ class TestGetGpuInfoSimple:
         assert "devices" in info
         assert "recommended_device" in info
         assert "current_device" in info
+
+
+def test_gpu_benchmark_times_execution_instead_of_admission(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from wayfinder.utils import gpu
+    binary, model = tmp_path / "whisper-cli", tmp_path / "model.bin"
+    binary.touch()
+    model.touch()
+    monkeypatch.setattr(gpu, "detect_ggml_devices", lambda: [SimpleNamespace(index=0)])
+    monkeypatch.setattr(gpu, "run_tracked", lambda *_a, **_k:
+                        SimpleNamespace(returncode=0, execution_seconds=0.125))
+    result = gpu.benchmark_gpu_devices(str(binary), str(model))
+    assert result["0"] == pytest.approx(0.125)
+
+
+@pytest.mark.parametrize("remaining,winner", [(0.05, "error"), (29.99, "0")])
+def test_gpu_benchmark_cannot_choose_a_winner_with_an_unmeasured_device(tmp_path, monkeypatch, remaining, winner):
+    from types import SimpleNamespace
+    import subprocess
+    from wayfinder.utils import gpu
+    binary, model = tmp_path / "whisper-cli", tmp_path / "model.bin"
+    binary.touch()
+    model.touch()
+    monkeypatch.setattr(gpu, "detect_ggml_devices", lambda: [SimpleNamespace(index=0), SimpleNamespace(index=1)])
+    calls = []
+
+    def probe(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=0, execution_seconds=0.125)
+        error = subprocess.TimeoutExpired(["whisper-cli"], 0.05)
+        error.execution_budget = remaining
+        raise error
+
+    monkeypatch.setattr(gpu, "run_tracked", probe)
+    result = gpu.benchmark_gpu_devices(str(binary), str(model), timeout=30)
+    assert result["fastest"] == winner
+    assert ("error" in result) == (winner == "error")

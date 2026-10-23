@@ -85,8 +85,8 @@ Keys activate online once and keep working offline.
 Every download, for each platform and for both channels, is on
 **[wayfindercollective.io/aura/download](https://wayfindercollective.io/aura/download)**.
 **Stable** is the default. **Beta** builds are newer, released as often as
-daily, and may have bugs; switch channels any time in Settings → System →
-Updates. All builds are also on the
+daily, and may have bugs; switch channels any time in Settings → Advanced →
+System → Updates. All builds are also on the
 [Releases page](https://github.com/wayfindercollective/wayfinder-aura/releases)
 (betas are marked Pre-release).
 
@@ -171,7 +171,7 @@ the next Stable release, that's a Beta, marked Pre-release). For Windows 10 and
    protected your PC": click **More info → Run anyway**.
 2. Tap **Right Alt** (Alt Gr) to start and stop dictating, or hold it while you
    talk. You can change it in Settings.
-3. Updates install from inside the app (Settings → System → Updates).
+3. Updates install from inside the app (Settings → Advanced → System → Updates).
 
 Building the installer yourself: see
 [packaging/windows/README.md](packaging/windows/README.md).
@@ -298,14 +298,14 @@ macOS uses `~/Library/Application Support/wayfinder-aura/config.json`.
   expected to work, not yet verified) Aura types through the desktop's
   RemoteDesktop portal. Approve the remote-control prompt (the activity log
   says "Your desktop is asking whether Aura may type in every app"); if you
-  declined, Aura says so and turns **Settings → System → Type into every app**
+  declined, Aura says so and turns **Settings → Advanced → System → Type into every app**
   off; turn it back on to be asked again. Text goes to whatever window has keyboard focus. X11 sessions
   and SteamOS Game Mode use xdotool; `ydotool` and `wtype` are only fallbacks
   for AppImage and from-source installs when the portal is unavailable.
 - **"No input devices found" (AppImage and from-source installs)** —
   `sudo usermod -aG input $USER`, then log out and back in. This is for the
   hotkey listener (evdev), not for typing.
-- **UI too small on 4K** — Ctrl+Plus, or Settings → UI Scale.
+- **UI too small on 4K** — Ctrl+Plus, or Settings → Advanced → System → UI Scale.
 
 ## For developers
 

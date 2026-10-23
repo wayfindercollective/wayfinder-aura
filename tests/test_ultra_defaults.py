@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -247,9 +249,9 @@ def test_windows_first_dictation_uses_base_cpu_until_gpu_selection_finishes(monk
         lambda config: prepared.append(config),
     )
     monkeypatch.setattr(
-        "wayfinder.core.transcriber.WhisperServerBackend.shutdown", lambda: None
+        "wayfinder.core.transcriber.WhisperServerBackend.shutdown", lambda **_: None
     )
-    monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency", lambda: None)
+    monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency", lambda **_: None)
     monkeypatch.setattr(
         wayfinder_main, "_resolve_whisper_model",
         lambda name: Path("C:/models") / name if name == "ggml-base.en.bin" else None,
@@ -259,18 +261,270 @@ def test_windows_first_dictation_uses_base_cpu_until_gpu_selection_finishes(monk
 
     wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, True)
 
-    assert len(workers) == 1
-    assert not app._windows_gpu_setup_done.is_set()
+    assert len(workers) == 2  # the GPU device selection, then the old mode's teardown
+    assert not app._gpu_setup_done.is_set()
     first = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
     assert first["use_gpu"] is False
     assert first["model_path"] == str(Path("C:/models/ggml-base.en.bin"))
     assert config["use_gpu"] is True and config["model_path"] == TURBO
 
     workers[0]()
-    assert app._windows_gpu_setup_done.is_set()
+    assert app._gpu_setup_done.is_set()
     assert prepared == [config]
     later = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
     assert later["use_gpu"] is True and later["model_path"] == TURBO
+
+
+def test_linux_gpu_turned_on_probes_off_the_tk_thread(monkeypatch):
+    # Startup skips the Linux probe in CPU mode, so switching GPU on must pick
+    # the device first; dictations wait on CPU until it has.
+    workers = []
+    prepared = []
+
+    class DeferredThread:
+        def __init__(self, target, **_kwargs):
+            workers.append(target)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+    monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+    monkeypatch.setattr(wayfinder_main.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(
+        "wayfinder.utils.gpu_simple.setup_gpu_environment",
+        lambda config: prepared.append(config),
+    )
+    monkeypatch.setattr(
+        "wayfinder.core.transcriber.WhisperServerBackend.shutdown", lambda **_: None
+    )
+    monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency", lambda **_: None)
+    monkeypatch.setattr(
+        wayfinder_main, "_resolve_whisper_model",
+        lambda name: Path("/models") / name if name == "ggml-base.en.bin" else None,
+    )
+    config = _free_config(use_gpu=True, model_path=TURBO)
+    app = SimpleNamespace(config=config, log=lambda _message: None)
+
+    wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, True)
+
+    assert len(workers) == 2  # the GPU device selection, then the old mode's teardown
+    first = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
+    assert first["use_gpu"] is False
+    assert first["model_path"] == str(Path("/models/ggml-base.en.bin"))
+
+    workers[0]()
+    assert app._gpu_setup_done.is_set() and prepared == [config]
+    later = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
+    assert later["use_gpu"] is True and later["model_path"] == TURBO
+
+
+class _WarmUpRig:
+    """Linux CPU install: startup warm-up and GPU device selection on threads
+    the test runs by hand, so their ordering is explicit."""
+
+    def __init__(self, monkeypatch, *, setup_fails=False):
+        import os
+
+        self.workers = {}
+        self.warmed = []
+        self.post_warmed = []
+        self.pre_armed = []
+        self.stopped = []
+        # Set to hold the warm-up between its speech and cleanup models.
+        self.asr_gate = None
+        rig = self
+
+        class DeferredThread:
+            def __init__(self, target, name=None, **_kwargs):
+                rig.workers[name] = target
+
+            def start(self):
+                pass
+
+        def select_device(_config):
+            if setup_fails:
+                raise RuntimeError("probe crashed")
+            monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "1")
+
+        monkeypatch.delenv("GGML_VK_VISIBLE_DEVICES", raising=False)
+        monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
+        monkeypatch.setattr(wayfinder_main, "IS_MACOS", False)
+        monkeypatch.setattr(wayfinder_main, "_GPU_SETUP_WARM_UP_WAIT_S", 5.0)
+        self.real_thread = wayfinder_main.threading.Thread
+        monkeypatch.setattr(wayfinder_main.threading, "Thread", DeferredThread)
+        monkeypatch.setattr("wayfinder.utils.gpu_simple.setup_gpu_environment", select_device)
+        monkeypatch.setattr(
+            "wayfinder.core.transcriber.WhisperServerBackend.shutdown",
+            lambda before_epoch=None: self.stopped.append("whisper"))
+        monkeypatch.setattr(
+            wayfinder_main, "_release_cleanup_residency",
+            lambda llama_before_epoch=None: self.stopped.append("cleanup"))
+
+        def warm_asr(config):
+            self.warmed.append((config["use_gpu"], os.environ.get("GGML_VK_VISIBLE_DEVICES")))
+            if self.asr_gate is not None:
+                self.asr_gate.wait(5)
+            return True
+
+        monkeypatch.setattr("wayfinder.core.transcriber.warm_up_transcription", warm_asr)
+        monkeypatch.setattr(
+            "wayfinder.core.postprocessor.warm_up_postprocessing",
+            lambda config: self.post_warmed.append(
+                (config["use_gpu"], os.environ.get("GGML_VK_VISIBLE_DEVICES"))),
+        )
+        self.config = _free_config(model_path=TURBO, whisper_server_mode=True)
+        app = SimpleNamespace(config=self.config, log=lambda _m: None,
+                              _portal_typing_in_play=lambda: self.pre_armed.append(1) or True)
+        app._warm_up_transcription = (
+            lambda startup=True: wayfinder_main.WayfinderApp._warm_up_transcription(app, startup))
+        self.app = app
+
+    def warm_up(self):
+        wayfinder_main.WayfinderApp._warm_up_transcription(self.app)
+        return self.workers.pop("wayfinder-model-warmup")
+
+    def queued_warm_up(self):
+        """The warm-up a CPU/GPU switch queued, if any."""
+        return self.workers.pop("wayfinder-model-warmup", None)
+
+    def switch_gpu(self, on, *, run_teardown=True):
+        self.config["use_gpu"] = on
+        wayfinder_main.WayfinderApp._apply_transcription_hardware_change(self.app, on)
+        teardown = self.workers.pop("wayfinder-model-teardown")
+        if not run_teardown:
+            return teardown
+        teardown()
+        return None
+
+
+def test_turning_gpu_on_during_the_startup_warm_up_warms_the_chosen_gpu(monkeypatch):
+    # The one-time Ultra setup turns GPU on while the CPU startup warm-up is
+    # still queued. Reading the live config there would start a Vulkan server
+    # before the device is chosen, on device 0, and keep it; a CPU server is
+    # wasted work, and without a second warm-up the first GPU dictation is cold.
+    rig = _WarmUpRig(monkeypatch)
+    startup = rig.warm_up()
+    rig.switch_gpu(True)
+    after_switch = rig.queued_warm_up()
+    assert after_switch is not None
+    startup()
+    assert rig.warmed == [] and rig.post_warmed == []
+    assert rig.pre_armed == [1]  # the startup-only injection pre-arm still runs
+    rig.workers.pop("wayfinder-gpu-setup")()
+    after_switch()
+    assert rig.warmed == [(True, "1")] and rig.post_warmed == [(True, "1")]
+    assert rig.pre_armed == [1]  # a switch reloads the models only
+
+
+def test_a_switch_warm_up_waits_for_the_device_selection(monkeypatch):
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(True)
+    waiter = rig.real_thread(target=rig.queued_warm_up(), daemon=True)
+    waiter.start()
+    waiter.join(0.2)
+    assert waiter.is_alive() and rig.warmed == [] and rig.post_warmed == []
+    rig.workers["wayfinder-gpu-setup"]()
+    waiter.join(5)
+    assert not waiter.is_alive()
+    assert rig.warmed == [(True, "1")] and rig.post_warmed == [(True, "1")]
+
+
+def test_switching_off_between_the_two_model_stages_starts_no_gpu_cleanup(monkeypatch):
+    # Sol PR 2 r1: the GPU warm-up had loaded its speech model; CPU-off then
+    # left the generation alone, so the warm-up went on to load the cleanup
+    # model on the GPU anyway.
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(True)
+    rig.workers.pop("wayfinder-gpu-setup")()
+    rig.asr_gate = gate = threading.Event()
+    warm = rig.real_thread(target=rig.queued_warm_up(), daemon=True)
+    warm.start()
+    deadline = time.monotonic() + 5
+    while not rig.warmed:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    rig.stopped.clear()  # the GPU-on switch's own teardown
+
+    teardown = rig.real_thread(target=rig.switch_gpu(False, run_teardown=False), daemon=True)
+    teardown.start()
+    teardown.join(0.2)
+    # Waits for the warm-up's loads, so it stops whatever they started.
+    assert teardown.is_alive() and rig.stopped == []
+    gate.set()
+    warm.join(5)
+    teardown.join(5)
+    assert not warm.is_alive() and not teardown.is_alive()
+    assert rig.warmed == [(True, "1")]
+    assert rig.post_warmed == []
+    assert rig.stopped == ["whisper", "cleanup"]
+
+
+def test_every_switch_supersedes_the_running_warm_up(monkeypatch):
+    rig = _WarmUpRig(monkeypatch)
+    before = rig.app.__dict__.get("_warm_up_generation", 0)
+    rig.switch_gpu(False)
+    assert rig.app._warm_up_generation == before + 1
+
+
+def test_a_cpu_switch_queues_no_warm_up_on_linux(monkeypatch):
+    # As before: only GPU-on reloads here (macOS reloads on every switch).
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(False)
+    assert rig.queued_warm_up() is None
+
+
+def test_a_gpu_warm_up_waits_for_the_device_selection(monkeypatch):
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(True)
+    warm = rig.warm_up()
+    waiter = rig.real_thread(target=warm, daemon=True)
+    waiter.start()
+    waiter.join(0.2)
+    assert waiter.is_alive() and rig.warmed == []
+    rig.workers["wayfinder-gpu-setup"]()
+    waiter.join(5)
+    assert rig.warmed == [(True, "1")]
+
+
+def test_a_gpu_warm_up_is_dropped_when_gpu_is_switched_off_meanwhile(monkeypatch):
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(True)
+    after_switch = rig.queued_warm_up()
+    warm = rig.warm_up()
+    select = rig.workers.pop("wayfinder-gpu-setup")
+    rig.switch_gpu(False)
+    select()
+    warm()
+    after_switch()
+    assert rig.warmed == [] and rig.post_warmed == []
+
+
+def test_a_gpu_warm_up_is_dropped_when_the_device_selection_fails(monkeypatch):
+    # Dictation runs Base on the CPU then; a GPU llama-server on the default
+    # device would only be thrown away.
+    rig = _WarmUpRig(monkeypatch, setup_fails=True)
+    rig.switch_gpu(True)
+    after_switch = rig.queued_warm_up()
+    rig.workers["wayfinder-gpu-setup"]()
+    after_switch()
+    assert rig.warmed == [] and rig.post_warmed == []
+
+
+def test_off_and_on_again_warms_once_on_the_second_selection(monkeypatch):
+    rig = _WarmUpRig(monkeypatch)
+    rig.switch_gpu(True)
+    first = rig.queued_warm_up()
+    first_select = rig.workers.pop("wayfinder-gpu-setup")
+    rig.switch_gpu(False)
+    rig.switch_gpu(True)
+    second = rig.queued_warm_up()
+    first_select()
+    first()
+    assert rig.warmed == []
+    rig.workers.pop("wayfinder-gpu-setup")()
+    second()
+    assert rig.warmed == [(True, "1")] and rig.post_warmed == [(True, "1")]
 
 
 def test_windows_gpu_setup_failure_keeps_dictation_on_cpu(monkeypatch):
@@ -293,9 +547,9 @@ def test_windows_gpu_setup_failure_keeps_dictation_on_cpu(monkeypatch):
         "wayfinder.utils.gpu_simple.setup_gpu_environment", fail_setup
     )
     monkeypatch.setattr(
-        "wayfinder.core.transcriber.WhisperServerBackend.shutdown", lambda: None
+        "wayfinder.core.transcriber.WhisperServerBackend.shutdown", lambda **_: None
     )
-    monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency", lambda: None)
+    monkeypatch.setattr(wayfinder_main, "_release_cleanup_residency", lambda **_: None)
     monkeypatch.setattr(
         wayfinder_main, "_resolve_whisper_model",
         lambda name: Path("C:/models") / name if name == "ggml-base.en.bin" else None,
@@ -303,14 +557,14 @@ def test_windows_gpu_setup_failure_keeps_dictation_on_cpu(monkeypatch):
     app = SimpleNamespace(
         config=_free_config(use_gpu=True, model_path=TURBO),
         log=lambda _message: None,
-        _windows_gpu_cpu_for_session=False,
+        _gpu_cpu_for_session=False,
     )
 
     wayfinder_main.WayfinderApp._apply_transcription_hardware_change(app, True)
     workers[0]()
 
-    assert app._windows_gpu_setup_done.is_set()
-    assert app._windows_gpu_setup_failed is True
+    assert app._gpu_setup_done.is_set()
+    assert app._gpu_setup_failed is True
     fallback = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
     assert fallback["use_gpu"] is False
     assert fallback["model_path"] == str(Path("C:/models/ggml-base.en.bin"))
@@ -324,8 +578,8 @@ def test_windows_gpu_handoff_does_not_change_other_transcription_backends(monkey
     )
     app = SimpleNamespace(
         config=config,
-        _windows_gpu_setup_done=SimpleNamespace(is_set=lambda: False),
-        _windows_gpu_cpu_for_session=True,
+        _gpu_setup_done=SimpleNamespace(is_set=lambda: False),
+        _gpu_cpu_for_session=True,
     )
 
     selected = wayfinder_main.WayfinderApp._asr_config_for_dictation(app)
@@ -481,5 +735,82 @@ def test_raw_controls_follow_chunk_processing_and_precede_llm_cleanup():
     local = source[source.index("def _build_local_mode_settings"):]
     local = local[: local.index("def _build_remote_mode_settings")]
     assert (local.index('"Chunk Processing"')
-            < local.index("self._build_raw_transcription_controls(parent)")
+            < local.index("self._build_raw_transcription_controls")
             < local.index('"Post-Processing (LLM Cleanup)"'))
+
+
+def test_license_removal_resets_ultra_defaults_applied(monkeypatch):
+    saved = []
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: saved.append(dict(cfg)))
+    gate = _gate(premium=False)
+    app = SimpleNamespace(
+        config=_free_config(**{ULTRA_DEFAULTS_KEY: True}),
+        feature_gate=gate,
+        log=lambda _msg: None,
+        _rebuild_header=lambda: None,
+        _refresh_entitlement_ui=lambda: None,
+        _render_license_tile=lambda: None,
+        _write_status_breadcrumb=lambda: None,
+    )
+    with patch("wayfinder.license.get_feature_gate", return_value=gate):
+        wayfinder_main.WayfinderApp._finish_license_removal(
+            app, SimpleNamespace(released=True, status="ok")
+        )
+
+    assert app.config[ULTRA_DEFAULTS_KEY] is False
+    assert saved and saved[-1][ULTRA_DEFAULTS_KEY] is False
+
+
+def test_ultra_model_progress_updates_button_and_banner():
+    btn_updates = []
+    banner_updates = []
+    app = SimpleNamespace(
+        _destroyed=False,
+        _ultra_model_downloading=True,
+        model_btn=SimpleNamespace(
+            winfo_exists=lambda: True,
+            configure=lambda **kw: btn_updates.append(kw),
+        ),
+        _ultra_banner_label=SimpleNamespace(
+            winfo_exists=lambda: True,
+            configure=lambda **kw: banner_updates.append(kw),
+        ),
+    )
+    wayfinder_main.WayfinderApp._update_ultra_model_progress(app, 42)
+    assert any("42%" in kw.get("text", "") for kw in btn_updates)
+    assert any("42%" in kw.get("text", "") for kw in banner_updates)
+
+
+def test_ultra_defaults_enables_cleanup_when_raw_transcription_was_on(monkeypatch):
+    cfg = _free_config(raw_transcription=True, post_processing_enabled=False)
+    changed = apply_ultra_defaults(
+        cfg,
+        _gate(),
+        gpu_capable=True,
+        recommended_model_path="~/models/" + RECOMMENDED_SPEECH_MODEL,
+        activated_now=True,
+    )
+    assert cfg["raw_transcription"] is False
+    assert cfg["post_processing_enabled"] is True
+    assert cfg["use_gpu"] is True
+    assert cfg["chunked_mode"] == "auto"
+    assert "raw_transcription" in changed
+    assert "post_processing_enabled" in changed
+
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    gate = _gate()
+    gate.refresh_pending = False
+    app, events = _app(
+        gate,
+        _free_config(raw_transcription=True, post_processing_enabled=False),
+    )
+    app._recommended_speech_model_on_disk = lambda: "~/models/" + RECOMMENDED_SPEECH_MODEL
+    refreshed = []
+    app._refresh_basic_settings = lambda: refreshed.append(True)
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app, activated_now=True)
+    assert app.config["raw_transcription"] is False
+    assert app.config["post_processing_enabled"] is True
+    assert refreshed == [True]
+
+
+

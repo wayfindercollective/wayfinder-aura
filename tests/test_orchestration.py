@@ -181,6 +181,7 @@ class FakeApp:
     _finalize_chunked_transcription = WApp._finalize_chunked_transcription
     _deduplicate_overlap_text = WApp._deduplicate_overlap_text
     _find_text_overlap = WApp._find_text_overlap
+    _speech_check = WApp._speech_check
     _silence_error_message = WApp._silence_error_message
     _maybe_show_gpu_nudge = WApp._maybe_show_gpu_nudge
     _has_visual_pyqt_overlay = WApp._has_visual_pyqt_overlay
@@ -193,7 +194,13 @@ class FakeApp:
     _error_guidance = WApp._error_guidance
     on_error = WApp.on_error
     handle_event = WApp.handle_event
+    _restart_for_overlay_change = WApp._restart_for_overlay_change
+    _do_force_reset = WApp._do_force_reset
+    _cleanup_overlay = WApp._cleanup_overlay
     _split_gen = staticmethod(WApp._split_gen)  # real code: it's a @staticmethod
+
+    def _close_audio_ducking(self):
+        """Ducking is off in these tests."""
 
     def _macos_follow_default_input(self):
         """Real behaviour is covered in tests/test_macos_audio_input.py."""
@@ -769,7 +776,7 @@ class TestHappyPath:
         )
         import wayfinder.core.injector as injector
         monkeypatch.setattr(injector, "get_active_window", lambda: "window-42")
-        monkeypatch.setattr(injector, "press_enter", lambda: events.append(("enter", None)))
+        monkeypatch.setattr(injector, "press_enter", lambda **_k: events.append(("enter", None)))
         monkeypatch.setattr(
             "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
         )
@@ -810,7 +817,7 @@ class TestHappyPath:
         monkeypatch.setattr(time_module, "sleep", lambda _seconds: None)
         import wayfinder.core.injector as injector
         monkeypatch.setattr(injector, "get_active_window", lambda: "window-42")
-        monkeypatch.setattr(injector, "press_enter", lambda: events.append("enter"))
+        monkeypatch.setattr(injector, "press_enter", lambda **_k: events.append("enter"))
         monkeypatch.setattr(
             "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
         )
@@ -837,7 +844,7 @@ class TestHappyPath:
         monkeypatch.setattr(time_module, "sleep", lambda _seconds: None)
         import wayfinder.core.injector as injector
         monkeypatch.setattr(injector, "get_active_window", lambda: next(windows))
-        monkeypatch.setattr(injector, "press_enter", lambda: entered.append(True))
+        monkeypatch.setattr(injector, "press_enter", lambda **_k: entered.append(True))
         monkeypatch.setattr(
             "wayfinder.utils.platform.get_text_injector", lambda: "ydotool"
         )
@@ -846,6 +853,80 @@ class TestHappyPath:
 
         assert entered == []
         assert any("focus changed" in message for message in app.logs)
+
+    @pytest.mark.parametrize("at", ["paste", "enter"])
+    def test_a_reset_during_the_injectors_wait_injects_and_emits_nothing(
+            self, app, monkeypatch, at):
+        # Sol mac r11: do_inject checked the generation before the injector,
+        # which then waited for the hotkey's modifiers and pasted anyway.
+        import queue
+        import time as time_module
+        import wayfinder.core.injector as injector
+        app.config["press_enter_after_dictation"] = True
+        pasted, entered = [], []
+
+        def reset():   # Escape, while the injector waits
+            app.session_generation += 1
+
+        def inject(text, cancelled=None, **_kwargs):
+            if at == "paste":
+                reset()
+            if cancelled():
+                raise injector.InjectionCancelled("the dictation was retired: nothing injected")
+            pasted.append(text)
+
+        def enter(cancelled=None):
+            reset()
+            if cancelled():
+                raise injector.InjectionCancelled("the dictation was retired: nothing injected")
+            entered.append(True)
+
+        monkeypatch.setattr(wayfinder_main, "inject_text", inject)
+        monkeypatch.setattr(time_module, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(injector, "get_active_window", lambda: "window-42")
+        monkeypatch.setattr(injector, "press_enter", enter)
+        monkeypatch.setattr("wayfinder.utils.platform.get_text_injector", lambda: "ydotool")
+        app.do_inject("retired words", app.session_generation)
+        emitted = []
+        while True:
+            try:
+                emitted.append(app.event_queue.get_nowait()[0])
+            except queue.Empty:
+                break
+        assert pasted == ([] if at == "paste" else ["retired words"])
+        assert entered == []
+        assert wayfinder_main.EventType.INJECTION_ERROR not in emitted
+        assert wayfinder_main.EventType.INJECTION_DONE not in emitted
+        assert not any("Auto-Enter failed" in message for message in app.logs)
+
+    def test_a_reset_during_a_game_chat_send_pastes_nothing(self, app, monkeypatch):
+        # Sol mac r11: a game chat opens the chat box, then pastes and sends;
+        # each of those asks the dictation's generation through the scope.
+        import queue
+        import wayfinder.core.injector as injector
+        app.config["gamer_mode"] = True
+        pasted = []
+
+        def game_chat(text, gen):
+            app.session_generation += 1     # Escape, while the chat box opened
+            injector._refuse_if_cancelled()  # the paste's own check
+            pasted.append(text)
+            return True
+
+        app._inject_into_game_chat = game_chat
+        monkeypatch.setattr(wayfinder_main, "inject_text", lambda *a, **k: pytest.fail("typed"))
+        monkeypatch.setattr("wayfinder.utils.platform.get_text_injector", lambda: "ydotool")
+        app.do_inject("retired words", app.session_generation)
+        emitted = []
+        while True:
+            try:
+                emitted.append(app.event_queue.get_nowait()[0])
+            except queue.Empty:
+                break
+        assert pasted == []
+        assert wayfinder_main.EventType.INJECTION_ERROR not in emitted
+        assert wayfinder_main.EventType.INJECTION_DONE not in emitted
+        assert getattr(injector._injection, "cancelled", None) is None
 
     def test_personal_tone_feeds_voice_learning(self, app, monkeypatch):
         monkeypatch.setattr(wayfinder_main, "inject_text", lambda *a, **k: None)
@@ -1189,6 +1270,75 @@ class TestChunkedFinalize:
         assert sleeps == [0.05]
 
 
+class TestChunkRetryAfterReset:
+    def test_a_chunk_re_heard_after_a_reset_builds_no_backend(self, app, monkeypatch, tmp_path):
+        # Sol mac r6: a prompted chunk came back short as the reset landed,
+        # and its re-hear took a fresh abandonment token, so the retired
+        # dictation started, recovered and counted all over again.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        from wayfinder.core.recorder import SpeechActivity
+        monkeypatch.setattr(wayfinder_main, "analyze_wav_speech_activity",
+                            lambda _p: SpeechActivity("speech", 20000, 2000, 20000))
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 17.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+        built = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                cls.abandon_requests()   # Escape while the chunk is heard
+                return "a"
+
+        def get_backend(_config):
+            built.append(True)
+            return Backend()
+
+        monkeypatch.setattr(transcriber, "get_backend", get_backend)
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the words of the first chunk"]
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+        assert built == [True], "the re-hear of a retired dictation built a backend"
+        assert store[1] == "[error]"
+
+
+    @pytest.mark.parametrize("call", ["single shot", "first chunk"])
+    def test_a_reset_before_the_request_builds_no_backend(self, app, monkeypatch, tmp_path, call):
+        # The dictation's token, not one taken when the request starts.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        from wayfinder.core.recorder import SpeechActivity
+        monkeypatch.setattr(wayfinder_main, "analyze_wav_speech_activity",
+                            lambda _p: SpeechActivity("speech", 20000, 2000, 20000))
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+        monkeypatch.setattr(transcriber, "get_backend",
+                            lambda _config: pytest.fail("a retired dictation built a backend"))
+
+        def reset_as_the_config_is_read(self):
+            cls.abandon_requests()
+            return {}
+
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", reset_as_the_config_is_read)
+        app.start_recording()
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"\x00")
+        if call == "single shot":
+            app.transcribe_and_inject(str(audio), app.session_generation)
+            event_type, (message, _gen) = app.event_queue.get_nowait()
+            assert event_type == wayfinder_main.EventType.TRANSCRIPTION_ERROR
+            assert "abandoned" in message
+        else:
+            store = []
+            app._transcribe_chunk(str(audio), 0, app.session_generation, store)
+            assert store == ["[error]"]
+
+
 class TestChunkSilenceGuard:
     def test_silent_trailing_chunk_skips_whisper_and_completes_store(
         self, app, monkeypatch, tmp_path
@@ -1249,6 +1399,29 @@ def _quiet_noise_wav(tmp_path):
     return path
 
 
+def _steady_noise_wav(tmp_path):
+    """Audible hiss whose loudness barely varies: the speech check's "noise"."""
+    import numpy as np
+
+    path = tmp_path / "fan.wav"
+    rng = np.random.default_rng(9)
+    _write_wav(path, np.clip(rng.normal(0, 300, 48000), -32768, 32767).astype(np.int16))
+    return path
+
+
+def _speech_like_wav(tmp_path):
+    """Alternating loud/quiet 20ms bursts: a high loud/floor ratio, like real
+    speech's pauses between words, so the speech check's verdict is "speech"."""
+    import numpy as np
+
+    path = tmp_path / "speech.wav"
+    rng = np.random.default_rng(11)
+    frame = 320  # 20ms at 16kHz
+    bursts = [rng.normal(0, 9000 if i % 2 == 0 else 50, frame) for i in range(50)]
+    _write_wav(path, np.clip(np.concatenate(bursts), -32768, 32767).astype(np.int16))
+    return path
+
+
 class TestSilentMicMessage:
     """Field report 2026-10-01: a muted USB headset recorded pure zeros and the
     banner said "try again, a bit closer to the mic", so the owner blamed paste.
@@ -1296,9 +1469,13 @@ class TestSilentMicMessage:
                                                close=lambda: None)
         return recorder
 
-    def _stop(self, app, recorder, chunked):
+    def _stop(self, app, recorder, chunked, mode="on"):
+        """*mode* (Sol pr67 r2 MINOR) is the configured chunked_mode ("on" or
+        "auto") for a chunked *recorder* — plain ``chunked=True`` callers keep
+        the old "on" behaviour; noise-path tests pass "auto" explicitly so
+        Auto is actually exercised instead of always forced to "on"."""
         if chunked:
-            app.config["chunked_mode"] = "on"
+            app.config["chunked_mode"] = mode
             app.chunked_recorder = recorder
         else:
             app.recorder = recorder
@@ -1327,8 +1504,181 @@ class TestSilentMicMessage:
         assert self.transcribed == []
         assert any(m.startswith("⚠ No speech detected from “Wireless Stereo Headset”")
                    for m in app.logs)
+        assert any(m.startswith("🔇 Speech check: silence (peak ") for m in app.logs)
         assert not any("sent no sound" in m for m in app.logs)
         assert self.banners == ["No speech detected — try again, a bit closer to the mic."]
+
+    def _outcome(self, app):
+        """(texts the recording produced, errors it raised) from the event queue."""
+        events = wayfinder_main.EventType
+        texts, errors = [], []
+        while not app.event_queue.empty():
+            event_type, data = app.event_queue.get_nowait()
+            payload, _gen = app._split_gen(data)
+            if event_type in (events.TRANSCRIPTION_DONE, events.CHUNKED_TRANSCRIPTION_DONE):
+                texts.append(payload)
+            elif event_type == events.TRANSCRIPTION_ERROR:
+                errors.append(payload)
+        return [t for t in texts if t], errors
+
+    class _FakeRecognizer:
+        """Stands in for the whisper backend's own ``transcribe()`` only — the
+        rest of transcribe_with_config (prompt handling, the two-word rule,
+        vocabulary/LLM cleanup) is the real production code. Sol review of PR
+        #67 found the previous tests mocked transcribe_with_config itself, so
+        the old wrapper-level noise gate (since removed — it ran on
+        vocabulary/LLM-corrected text, never the recognizer's own words) was
+        the only thing exercised."""
+
+        def __init__(self, text):
+            self.prompt = "unused prompt"
+            self.custom_vocabulary = ["unused"]
+            self.contexts = []
+            self._text = text
+
+        def transcribe(self, audio_path, context=""):
+            self.contexts.append(context)
+            return self._text
+
+    def _real_transcription(self, monkeypatch, text):
+        """Undo the class-level transcribe_with_config mock and fake only the
+        recognizer, so chunked ("on"/"auto") and one-shot ("off") dictation
+        both run the real two-word/hallucination rejection in
+        transcribe_with_config."""
+        from wayfinder.core import transcriber
+
+        recognizer = self._FakeRecognizer(text)
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config",
+                            transcriber.transcribe_with_config)
+        monkeypatch.setattr(transcriber, "get_backend", lambda cfg: recognizer)
+        return recognizer
+
+    # Sol pr67 r2 (MINOR): _stop used to force every chunked case to "on", so
+    # these noise tests never exercised Auto. Off/On/Auto are now all three
+    # driven through the SAME recorder/audio — a 3s clip, well under any
+    # chunk boundary — so "auto" always stops before its first chunk
+    # boundary, the scenario the finding calls out by name.
+    MODES = ["off", "on", "auto"]
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_steady_noise_is_heard_unprompted_and_its_stray_word_dropped(
+        self, app, tmp_path, monkeypatch, mode
+    ):
+        """Field report 2026-10-13: six real MacBook Air dictations got the noise
+        verdict and were deleted unheard. Noise now reaches Whisper without a
+        prompt (primed, it invents sentences), and its lone "So," is no speech."""
+        chunked = mode != "off"
+        recognizer = self._real_transcription(monkeypatch, "So,")
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked),
+                   chunked, mode=mode)
+
+        assert recognizer.contexts == [""]  # unprompted: no prompt, vocabulary or context
+        assert any(m.startswith("🔇 Speech check: noise (peak ") for m in app.logs)
+        # Field report 2026-10-13 rejected "Secret" into the activity log; the
+        # rejection must say only that it happened, never what was heard.
+        assert not any("So," in m for m in app.logs)
+        if mode == "auto":
+            # Confirms Auto's own branch actually ran, not just "on"'s.
+            assert any("Auto stayed one-shot" in m for m in app.logs)
+        texts, errors = self._outcome(app)
+        assert texts == []
+        assert errors == (["No speech detected"] if chunked else [])
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_speech_the_check_calls_noise_is_kept(self, app, tmp_path, monkeypatch, mode):
+        chunked = mode != "off"
+        spoken = "I need a technical manager who can run this"
+        self._real_transcription(monkeypatch, spoken)
+        app.config["post_processing_enabled"] = False
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked),
+                   chunked, mode=mode)
+
+        assert self._outcome(app) == ([spoken], [])
+        assert self.banners == []
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_speech_verdict_one_word_output_is_accepted(self, app, tmp_path, monkeypatch, mode):
+        """Finding 5 (Sol pr67 r2): speech-verdict audio is never subject to
+        the noise path's two-word rule, so a short, real one-word utterance
+        must survive regardless of chunked mode."""
+        chunked = mode != "off"
+        self._real_transcription(monkeypatch, "Yes.")
+        app.config["post_processing_enabled"] = False
+        self._stop(app, self._recorder_from_wav(_speech_like_wav(tmp_path), chunked),
+                   chunked, mode=mode)
+
+        assert self._outcome(app) == (["Yes."], [])
+        assert self.banners == []
+
+    @staticmethod
+    def _license_vocabulary(monkeypatch):
+        """Custom Vocabulary (heard -> write corrections) is a licensed
+        feature; grant it so app.config["vocabulary_replacements"] takes
+        effect in these two tests."""
+        import wayfinder.license as lic
+
+        monkeypatch.setattr(lic, "get_feature_gate",
+                            lambda *a, **k: SimpleNamespace(has_feature=lambda f: True))
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_noise_two_word_rule_runs_before_vocabulary_correction(
+        self, app, tmp_path, monkeypatch, mode
+    ):
+        """Sol review (MAJOR): the removed wrapper-level check ran AFTER
+        vocabulary correction — a one-word noise artifact ("Okay.") corrected
+        up to two words ("Sounds good.") was wrongly kept. The rule now runs
+        inside transcribe_with_config, on the recognizer's own word."""
+        chunked = mode != "off"
+        self._license_vocabulary(monkeypatch)
+        app.config["vocabulary_replacements"] = [["okay", "sounds good"]]
+        self._real_transcription(monkeypatch, "Okay.")
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked),
+                   chunked, mode=mode)
+
+        texts, errors = self._outcome(app)
+        assert texts == []
+        assert errors == (["No speech detected"] if chunked else [])
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_noise_two_word_rule_survives_a_correction_that_collapses_real_speech(
+        self, app, tmp_path, monkeypatch, mode
+    ):
+        """Sol review (MAJOR): real two-word speech ("open ai") corrected down
+        to one word ("OpenAI") was wrongly discarded, because the removed
+        wrapper-level check ran on the corrected text instead of what the
+        recognizer actually heard."""
+        chunked = mode != "off"
+        self._license_vocabulary(monkeypatch)
+        app.config["vocabulary_replacements"] = [["open ai", "OpenAI"]]
+        app.config["post_processing_enabled"] = False
+        self._real_transcription(monkeypatch, "open ai")
+        self._stop(app, self._recorder_from_wav(_steady_noise_wav(tmp_path), chunked),
+                   chunked, mode=mode)
+
+        texts, errors = self._outcome(app)
+        assert texts == ["OpenAI"]
+        assert errors == []
+
+    @pytest.mark.parametrize("trailing", ["noise", "silence"])
+    def test_speech_session_logs_a_trailing_non_speech_chunks_levels(
+        self, app, tmp_path, trailing
+    ):
+        """Sol review MINOR: a session can open with real speech and still end
+        on a noise-like or silent tail chunk (the mic kept running into a quiet
+        room, a fan kicking in). Every non-speech per-chunk verdict must now be
+        logged with its levels before branching — an accepted noise chunk used
+        to log nothing at all, and a silent one only the generic skip message,
+        neither carrying a single number."""
+        trailing_wav = (_steady_noise_wav(tmp_path) if trailing == "noise"
+                        else _all_zero_wav(tmp_path))
+        store = []
+        app._transcribe_chunk(str(_speech_like_wav(tmp_path)), 0, app.session_generation, store)
+        app._transcribe_chunk(str(trailing_wav), 1, app.session_generation, store)
+
+        verdict_logs = [m for m in app.logs if m.startswith("🔇 Speech check:")]
+        # Exactly one: the leading speech chunk never logs a verdict at all.
+        assert len(verdict_logs) == 1
+        assert verdict_logs[0].startswith(f"🔇 Speech check: {trailing} (peak ")
 
     def test_all_zero_recording_without_a_device_name(self, app, tmp_path):
         app.config["audio_device_name"] = None
@@ -1707,3 +2057,253 @@ class TestMacPreemptFinishTail:
         before = app.app_state
         app.on_hotkey()
         assert app.app_state == before
+
+
+# ===========================================================================
+# Overlay restart: a dictation it cut short is never typed
+# ===========================================================================
+
+class TestARestartCutShortDictationIsNeverTyped:
+    """Sol PR 2 r12: the overlay restart stopped a chunk's helper, the exec
+    failed and helpers reopened. The chunk counted as failed, so the
+    finalizer typed the chunks that had finished, or reported silence."""
+
+    @pytest.fixture
+    def restart(self, app, monkeypatch, tmp_path):
+        import os
+        from wayfinder.core.llama_server import LlamaServerManager
+        from wayfinder.core.transcriber import WhisperServerBackend
+        import sys
+        from wayfinder.utils import child_supervisor
+
+        def no_exec(*_args):
+            raise OSError("exec failed")
+
+        monkeypatch.setattr(os, "execv", no_exec)
+        if sys.platform != "win32":   # POSIX only: the app's import of it fails there
+            from wayfinder.utils import overlay_process
+            monkeypatch.setattr(overlay_process, "kill_stale_overlay_from_pidfile", lambda: None)
+        # Every chunk carries speech, so each one reaches its transcription.
+        from wayfinder.core.recorder import SpeechActivity
+        monkeypatch.setattr(wayfinder_main, "analyze_wav_speech_activity",
+                            lambda _path: SpeechActivity("speech", 0.5, 0.05, 0.5))
+        app.warm_mic = SimpleNamespace(device=7, close=lambda: None)
+        typed = []
+        monkeypatch.setattr(wayfinder_main, "inject_text", lambda text, *_a, **_k: typed.append(text))
+        child_supervisor.reopen_tracked()
+        yield SimpleNamespace(typed=typed, chunk=str(tmp_path / "chunk.wav"))
+        WhisperServerBackend.reopen()
+        LlamaServerManager.reopen()
+
+    @staticmethod
+    def _helper_transcription(monkeypatch, tmp_path, text, hold):
+        """transcribe_with_config running a real tracked helper; `hold` keeps
+        it running until something stops it."""
+        import sys
+        from wayfinder.utils import child_supervisor
+
+        running = tmp_path / f"running-{text or 'held'}"
+
+        def transcribe(*_args, **_kwargs):
+            child_supervisor.run_tracked(
+                [sys.executable, "-c",
+                 f"import time; open({str(running)!r}, 'w').close(); time.sleep({30 if hold else 0})"],
+                timeout=60,
+            )
+            return text
+
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config", transcribe)
+        return running
+
+    @pytest.mark.parametrize("store,index", [
+        (["chunk one words", ""], 1),
+        ([""], 0),
+    ], ids=["after a finished chunk", "the only chunk"])
+    def test_a_failed_restart_types_nothing_and_returns_to_idle(
+            self, app, restart, monkeypatch, tmp_path, store, index):
+        import time
+
+        running = self._helper_transcription(monkeypatch, tmp_path, "never typed", hold=True)
+        app.app_state = AppState.PROCESSING
+        gen = app.session_generation
+        worker = threading.Thread(target=app._transcribe_chunk,
+                                  args=(restart.chunk, index, gen, store), daemon=True)
+        # The finalizer waits on its own thread, as stop_recording leaves it.
+        finalizer = threading.Thread(target=app._finalize_chunked_transcription,
+                                     args=(len(store), gen, store, FakeChunkedRecorder()),
+                                     daemon=True)
+        worker.start()
+        finalizer.start()
+        deadline = time.time() + 10
+        while not running.exists():
+            assert time.time() < deadline, "the chunk's helper never started"
+            time.sleep(0.02)
+
+        def the_dictation_finishes_during_cleanup(*_args):
+            # After the helper stop, before the reopen, as an exec would.
+            worker.join(10)
+            finalizer.join(10)
+            raise OSError("exec failed")
+
+        import os
+        monkeypatch.setattr(os, "execv", the_dictation_finishes_during_cleanup)
+        app._restart_for_overlay_change()   # stops the helper; the exec fails
+        assert not worker.is_alive(), "the restart did not stop the chunk's helper"
+        assert not finalizer.is_alive()
+        assert store[index] in ("[error]", "")   # failed, or skipped as superseded
+
+        events = []
+        while not app.event_queue.empty():
+            events.append(app.event_queue.get_nowait())
+        terminal = {wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE,
+                    wayfinder_main.EventType.TRANSCRIPTION_ERROR}
+        assert not [e for e in events if e[0] in terminal], "a retired dictation reported a result"
+        for event_type, data in events:
+            app.handle_event(event_type, data)
+        assert restart.typed == []
+        assert app.app_state == AppState.IDLE
+
+    def test_dictation_works_after_a_failed_restart(self, app, restart, monkeypatch, tmp_path):
+        # The reopen gives helpers back: the next dictation is typed.
+        app._restart_for_overlay_change()
+        assert app.app_state == AppState.IDLE
+        self._helper_transcription(monkeypatch, tmp_path, "fresh words", hold=False)
+        app.session_generation += 1   # start_recording's new session
+        app.app_state = AppState.PROCESSING
+        gen = app.session_generation
+        store = [""]
+        app._transcribe_chunk(restart.chunk, 0, gen, store)
+        assert store == ["fresh words"]
+        app._finalize_chunked_transcription(1, gen, store, FakeChunkedRecorder())
+        app.pump_events()
+        assert restart.typed == ["fresh words"]
+
+
+class TestCleanupAfterAReset:
+    """Sol mac r8: a reset while the llama-server cleanup runs retires the
+    dictation there too. The request that then times out restarts no server
+    (it could be the next dictation's), counts no failure and starts no CLI
+    fallback, in single-shot and chunked dictation alike."""
+
+    TEXT = "um so this is the dictation that the reset threw away just now okay"
+    CLEANUP = {
+        "output_tone": "minimal", "post_processing_enabled": True,
+        "normal_llm_cleanup": True, "fast_filler_removal": False,
+        "post_processing_backend": "llama_cpp",
+    }
+
+    @pytest.fixture
+    def cleanup(self, app, monkeypatch, tmp_path):
+        """The real llama cleanup ladder up to the server request, which a
+        reset interrupts (when asked) before it times out."""
+        import socket
+        import subprocess
+        import wayfinder.license as license_module
+        from wayfinder.core import postprocessor, transcriber
+        from wayfinder.core.llama_server import LlamaServerManager as M, LlamaServerSuperseded
+
+        gate = SimpleNamespace(has_feature=lambda _feature: True)
+        monkeypatch.setattr(license_module, "get_feature_gate", lambda: gate)
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        for name in ("llama-simple", "llama-server", "m.gguf"):
+            (tmp_path / name).touch()
+        backend = postprocessor.LlamaCppCliBackend(
+            llama_binary=str(tmp_path / "llama-simple"),
+            model_path=str(tmp_path / "m.gguf"), residency="auto")
+        monkeypatch.setattr(backend, "_resident_model", lambda: None)
+        monkeypatch.setattr(postprocessor, "get_backend", lambda _config: backend)
+        app.config.update(self.CLEANUP, llama_cpp_model_path=str(tmp_path / "m.gguf"))
+        seen = SimpleNamespace(reset=None, requests=0, restarts=[], failures=[], cli=[])
+
+        def escape():
+            cls.abandon_requests()
+            if seen.reset != "token":   # "token": a retirement alone (Sol mac r9)
+                app.session_generation += 1
+
+        def ensure(**_kwargs):
+            if seen.reset == "start":   # Escape, and the start is cancelled
+                escape()
+                raise LlamaServerSuperseded("cancelled")
+            return 8179
+
+        def complete(**_kwargs):
+            seen.requests += 1
+            if seen.reset in ("request", "token"):   # Escape, as the request runs
+                escape()
+            raise socket.timeout()
+
+        def run_cli(cmd, **_kwargs):
+            seen.cli.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(M, "_closed", False)
+        monkeypatch.setattr(M, "ensure", ensure)
+        monkeypatch.setattr(M, "serving", lambda: None)
+        monkeypatch.setattr(M, "still_ours", lambda *_a: True)
+        monkeypatch.setattr(M, "complete", complete)
+        monkeypatch.setattr(M, "restart", lambda *a: seen.restarts.append(a))
+        monkeypatch.setattr(M, "note_failure", lambda *a: seen.failures.append(a) or False)
+        monkeypatch.setattr(backend, "_subprocess_target", lambda deadline=None: ("llama-simple", 0))
+        monkeypatch.setattr(postprocessor, "run_tracked", run_cli)
+
+        text = self.TEXT
+
+        class Asr:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                return text
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Asr())
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda _self: dict(app.config))
+        gen = app.session_generation
+        app._request_tokens = {gen: cls.request_token()}
+        return seen, gen
+
+    @staticmethod
+    def _events(app):
+        events = []
+        while not app.event_queue.empty():
+            events.append(app.event_queue.get_nowait()[0])
+        return events
+
+    @staticmethod
+    def _settle(seen):
+        import time as _time
+        deadline = _time.monotonic() + 2   # the restart runs on its own thread
+        while not seen.restarts and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+
+    @pytest.mark.parametrize("reset", ["request", "start", None])
+    def test_single_shot(self, app, cleanup, tmp_path, reset):
+        seen, gen = cleanup
+        seen.reset = reset
+        audio = tmp_path / "dictation.wav"
+        audio.write_bytes(b"\x00")
+        app.transcribe_and_inject(str(audio), gen)
+        self._settle(seen)
+        events = self._events(app)
+        assert seen.requests == (0 if reset == "start" else 1)
+        if reset:
+            assert (seen.restarts, seen.failures, seen.cli) == ([], [], [])
+            assert wayfinder_main.EventType.TRANSCRIPTION_DONE not in events
+        else:   # the same failure, unretired: restarted and served by the CLI
+            assert len(seen.restarts) == 1 and len(seen.cli) == 1
+            assert wayfinder_main.EventType.TRANSCRIPTION_DONE in events
+
+    @pytest.mark.parametrize("reset", ["request", "token", None])
+    def test_chunked(self, app, cleanup, reset):
+        seen, gen = cleanup
+        seen.reset = reset
+        store = [self.TEXT]
+        app.chunk_transcriptions = store
+        app._finalize_chunked_transcription(1, gen, store, FakeChunkedRecorder())
+        self._settle(seen)
+        events = self._events(app)
+        assert seen.requests == 1
+        if reset:
+            assert (seen.restarts, seen.failures, seen.cli) == ([], [], [])
+            assert events == []
+        else:
+            assert len(seen.restarts) == 1 and len(seen.cli) == 1
+            assert events == [wayfinder_main.EventType.CHUNKED_TRANSCRIPTION_DONE]

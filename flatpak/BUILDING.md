@@ -59,9 +59,9 @@ python -m pip install flatpak-pip-generator
 ```
 
 This creates the SHA256-pinned `python-deps.json`,
-`python-numpy-build-tools.json`, and `python-scipy-build-tools.json` manifests.
+and `python-numpy-build-tools.json` manifests.
 The compiled runtime dependencies are built offline from source by the main
-manifest: OpenBLAS, CFFI, Cryptography, NumPy, SciPy, Pillow, Jiter, and
+manifest: OpenBLAS, CFFI, Cryptography, NumPy, Pillow, Jiter, and
 Pydantic Core. The Cargo source manifests vendor every locked Rust crate for
 Maturin and the Rust-backed packages. PyQt6 itself is provided by
 `com.riverbankcomputing.PyQt.BaseApp`.
@@ -81,7 +81,7 @@ flatpak/
 ├── wayfinder-aura-launcher.sh            # Launch script
 ├── flatpak-requirements.txt              # Exact Python runtime lock
 ├── flatpak-constraints.txt               # Exact transitive lock
-├── *-build-requirements.txt              # NumPy/SciPy build inputs
+├── *-build-requirements.txt              # NumPy build inputs
 ├── python-deps.json                      # Generated runtime sources
 ├── python-*-build-tools.json             # Generated PEP 517 tools
 ├── cargo-sources-*.json                  # Vendored locked Rust crates

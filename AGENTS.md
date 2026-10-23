@@ -62,7 +62,7 @@ It:
 |-------|------------|-------|
 | UI Framework | CustomTkinter | Dark theme, modern widgets |
 | Status Overlay | PyQt6 | Glassmorphic floating indicator |
-| Audio Recording | sounddevice + scipy | 16kHz resampling for Whisper |
+| Audio Recording | sounddevice + NumPy (`core/audio_dsp.py`) | 16kHz resampling for Whisper |
 | Transcription | whisper.cpp / Faster-Whisper | GPU acceleration via Vulkan/ROCm |
 | Post-Processing | llama.cpp | Local LLM cleanup |
 | Text Injection | xdotool / wtype / ydotool / macOS paste | Selected by runtime platform/session |

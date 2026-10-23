@@ -2,9 +2,8 @@
 
 ``butter`` (2nd order), ``filtfilt`` and ``resample_poly`` reproduce SciPy's
 algorithms and defaults exactly (tests/test_audio_dsp.py checks them against
-SciPy on every device rate the recorder resamples). The recorder prefers SciPy
-when it is installed, so Linux and macOS are unchanged; the Windows bundle
-leaves SciPy out (~72 MB) and runs these instead.
+SciPy on every device rate the recorder resamples). They are the recorder's
+only implementation: no bundle ships SciPy (~72-100 MB for these three calls).
 
 The IIR filter avoids a per-sample Python loop: its response is the zero-state
 part (an FFT convolution with the impulse response, cut once it has decayed
@@ -15,12 +14,14 @@ rounding for a stable filter.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from math import gcd, pi, sqrt, tan
 
 import numpy as np
 
 _DECAY_TOL = 1e-13
 _MAX_RESPONSE = 1 << 18
+_BLOCK = 1 << 16  # overlap-add transform size floor
 
 
 def butter(order: int, wn: float, btype: str = "low"):
@@ -89,6 +90,8 @@ def _decay_length(b, a) -> int:
         z[order - 1] = b[order] * x - a[order] * yn
         x = 0.0
         n += 1
+        if not np.isfinite(yn):
+            break  # overflowed: inf <= tol * inf would otherwise read as decayed
         peak = max(peak, abs(yn))
         quiet = quiet + 1 if abs(yn) <= _DECAY_TOL * peak and np.all(np.abs(z) <= _DECAY_TOL * peak) else 0
         if quiet >= 8:
@@ -96,16 +99,44 @@ def _decay_length(b, a) -> int:
     raise ValueError("filter does not decay (unstable or too narrow)")
 
 
+@lru_cache(maxsize=8)
+def _impulse_response(b: tuple, a: tuple) -> np.ndarray:
+    """The filter's impulse response up to its decay length (cached: the
+    recorder runs the same 80 Hz high-pass on every dictation, twice)."""
+    b_arr, a_arr = np.array(b), np.array(a)
+    length = _decay_length(b_arr, a_arr)
+    impulse = np.zeros(length)
+    impulse[0] = 1.0
+    h = _recurse(b_arr, a_arr, impulse, np.zeros(len(a_arr) - 1), length)
+    h.setflags(write=False)
+    return h
+
+
+def _convolve_head(x: np.ndarray, h: np.ndarray) -> np.ndarray:
+    """``np.convolve(x, h)[:len(x)]`` by FFT overlap-add.
+
+    Blocks keep the transforms small: one transform the size of a 5-minute
+    recording made the 80 Hz high-pass ~15x slower than SciPy's.
+    """
+    n, m = len(x), len(h)
+    size = 1 << int(max(4 * m, _BLOCK) - 1).bit_length()
+    step = size - m + 1
+    spectrum = np.fft.rfft(h, size)
+    y = np.zeros(n + m - 1)
+    for start in range(0, n, step):
+        block = x[start:start + step]
+        part = np.fft.irfft(np.fft.rfft(block, size) * spectrum, size)[: len(block) + m - 1]
+        y[start:start + len(part)] += part
+    return y[:n]
+
+
 def lfilter(b, a, x, zi=None) -> np.ndarray:
     """scipy.signal.lfilter(b, a, x, zi=zi)[0] for a stable IIR filter."""
     b, a = _normalize(b, a)
     x = np.asarray(x, dtype=np.float64)
-    length = _decay_length(b, a)
-    impulse = np.zeros(length)
-    impulse[0] = 1.0
-    h = _recurse(b, a, impulse, np.zeros(len(a) - 1), length)
-    size = 1 << int(len(x) + length - 1).bit_length()
-    y = np.fft.irfft(np.fft.rfft(x, size) * np.fft.rfft(h, size), size)[: len(x)]
+    h = _impulse_response(tuple(b), tuple(a))
+    length = len(h)
+    y = _convolve_head(x, h)
     if zi is not None:
         tail = min(len(x), length)
         y[:tail] += _recurse(b, a, np.zeros(0), zi, tail)

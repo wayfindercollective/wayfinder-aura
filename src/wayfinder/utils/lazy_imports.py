@@ -24,10 +24,10 @@ class LazyModule:
     A lazy module loader that defers import until first attribute access.
     
     Usage:
-        scipy = LazyModule("scipy")
-        # scipy is not imported yet
-        
-        scipy.signal.resample(...)  # Now scipy is imported
+        qt = LazyModule("PyQt6")
+        # PyQt6 is not imported yet
+
+        qt.QtCore  # Now PyQt6 is imported
     """
     
     def __init__(self, module_name: str, submodule: Optional[str] = None):
@@ -109,33 +109,6 @@ def is_faster_whisper_available() -> bool:
     return importlib.util.find_spec("faster_whisper") is not None
 
 
-# === SciPy Lazy Loading ===
-
-@lru_cache(maxsize=1)
-def get_scipy():
-    """
-    Lazy load scipy modules.
-    
-    Returns:
-        A namespace object with signal, io submodules, or None if not available.
-    """
-    try:
-        from scipy import signal, io
-        
-        class SciPyNamespace:
-            signal = signal
-            io = io
-        
-        return SciPyNamespace
-    except ImportError:
-        return None
-
-
-def is_scipy_available() -> bool:
-    """Check if scipy is available without fully importing it."""
-    return importlib.util.find_spec("scipy") is not None
-
-
 # === Anthropic Lazy Loading ===
 
 @lru_cache(maxsize=1)
@@ -192,7 +165,6 @@ def get_optional_dependencies_status() -> dict:
     return {
         "PyQt6": is_pyqt6_available(),
         "faster-whisper": is_faster_whisper_available(),
-        "scipy": is_scipy_available(),
         "anthropic": is_anthropic_available(),
         "llama-cpp-python": is_llama_cpp_available(),
     }

@@ -23,8 +23,13 @@ from wayfinder.config import IS_FLATPAK
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.loopback_http import urlopen_loopback
 from wayfinder.utils.macos_ggml_env import whisper_metal_env
-from wayfinder.utils.child_supervisor import bind_to_app_lifetime, wrap_macos_child_command
+from wayfinder.utils.child_supervisor import (
+    HelperNotStarted, HelpersClosed, bind_to_app_lifetime, helper_budget_shortened,
+    refuse_spawns_when, run_tracked,
+    signal_supervised, spawn_supervised, wait_supervised,
+)
 from wayfinder.utils.platform import subprocess_no_window_kwargs
+from wayfinder.utils.timeout import carry_into_workers
 
 # subprocess kwargs that hide the child console window on Windows (empty on
 # POSIX). Every whisper-cli / whisper-server spawn below splats it so no stray
@@ -87,6 +92,95 @@ CASUAL_VOCABULARY = [
 class TranscriptionError(Exception):
     """Raised when transcription fails."""
     pass
+
+
+class ServerStartSuperseded(TranscriptionError):
+    """A whisper-server startup was cancelled by a later shutdown or switch."""
+
+
+class CoreMLNotLoaded(TranscriptionError):
+    """A Core ML server serves only once it is loaded; see _ready_only_fallback."""
+
+
+# The token of the dictation this thread's requests belong to: see
+# dictation_requests().
+_dictation = threading.local()
+
+
+@contextlib.contextmanager
+def dictation_requests(token: Optional[int]):
+    """Run a dictation's requests under *token*, the abandonment count taken
+    when the dictation began (WhisperServerBackend.request_token()). A
+    retirement after that stops every one of them: a re-heard chunk, the
+    Metal twin, whisper-cli and its CPU retry included (Sol mac r6). An
+    enclosing scope keeps its own token."""
+    if token is None or getattr(_dictation, "token", None) is not None:
+        yield
+        return
+    _dictation.token = token
+    try:
+        yield
+    finally:
+        _dictation.token = None
+
+
+def _retired_dictation() -> bool:
+    """Whether this thread runs the requests of a dictation the app retired."""
+    token = getattr(_dictation, "token", None)
+    return token is not None and token != WhisperServerBackend._abandoned
+
+
+def _check_dictation() -> None:
+    """Right before a load, an inference or a request: none for a retired dictation."""
+    if _retired_dictation():
+        raise RequestAbandoned("the dictation was retired")
+
+
+class RequestAbandoned(TranscriptionError):
+    """The app retired this dictation (see WhisperServerBackend.abandon_requests):
+    nothing may start, stop, retry, salvage or count on its behalf."""
+
+
+class HelperRefused(RequestAbandoned, HelpersClosed):
+    """A tracked helper refused because its dictation was retired. To the
+    dictation it is RequestAbandoned; to a probe it is HelpersClosed, which
+    learns and caches nothing, as for a helper Quit refused (Sol mac r10)."""
+
+
+def _refuse_a_retired_helper() -> None:
+    """No tracked helper (whisper-cli, llama-simple, a GPU or flag probe)
+    starts for a retired dictation, whatever its caller waited on after its
+    own check."""
+    if _retired_dictation():
+        raise HelperRefused("the dictation was retired: no helper for it")
+
+
+refuse_spawns_when(_refuse_a_retired_helper)
+
+
+def _carry_dictation(fn):
+    """*fn*, to run on another thread under this thread's dictation, with a
+    check first: a retirement while that thread waited to run stops it there,
+    and its own helpers and checks see the dictation (Sol mac r11)."""
+    token = getattr(_dictation, "token", None)
+    if token is None:
+        return fn
+
+    def carried(*args, **kwargs):
+        with dictation_requests(token):
+            _check_dictation()
+            return fn(*args, **kwargs)
+    return carried
+
+
+def _dictation_cancelled():
+    """For a step another thread runs later on this dictation's behalf (a
+    restart): whether the app has retired the dictation since."""
+    token = getattr(_dictation, "token", None)
+    return lambda: token is not None and token != WhisperServerBackend._abandoned
+
+
+carry_into_workers(_carry_dictation)
 
 
 def _expand_path(value: object) -> str:
@@ -237,9 +331,16 @@ def _fmt_delay(seconds: float) -> str:
     return f"{int(seconds)}s" if seconds < 120 else f"{int(seconds // 60)}m"
 
 
-def _schedule_gpu_retry(binary: str) -> float:
-    """Record a GPU failure and compute the next retry time. Returns the delay."""
+def _schedule_gpu_retry(binary: str, cancelled=None, cpu_binary=None) -> Optional[float]:
+    """Record a GPU failure and compute the next retry time. Returns the delay,
+    or None, changing nothing, when *cancelled* says so under the lock: a
+    retired dictation's failure, its wait for this lock included (Sol mac
+    r12). With *cpu_binary*, the CPU fallback is memoized in the same step."""
     with _gpu_state_lock:
+        if cancelled is not None and cancelled():
+            return None
+        if cpu_binary is not None:
+            _CPU_FALLBACK_ACTIVE[binary] = cpu_binary
         state = _gpu_retry_state.setdefault(binary, {"failures": 0, "next_retry": 0.0})
         state["failures"] += 1
         # Clamp the exponent: the delay saturates at _GPU_RETRY_CAP_SECONDS by ~6
@@ -368,7 +469,7 @@ class WhisperCppBackend(TranscriptionBackend):
             return False
         
         try:
-            result = subprocess.run(
+            result = run_tracked(
                 [self.whisper_binary, "--help"],
                 capture_output=True,
                 text=True,
@@ -386,6 +487,12 @@ class WhisperCppBackend(TranscriptionBackend):
                 "--gpu-layers" in help_text
             )
             return self._gpu_supported
+        except HelpersClosed:
+            return False  # refused or cut short by Quit: learned nothing, cache nothing
+        except subprocess.TimeoutExpired:
+            # Its time counts the helper's watcher start too: a slow start
+            # says nothing about the binary, so a later call asks again.
+            return False
         except Exception:
             self._gpu_supported = False
             return False
@@ -408,7 +515,7 @@ class WhisperCppBackend(TranscriptionBackend):
         flags = set()
         try:
             import re
-            h = subprocess.run(
+            h = run_tracked(
                 [binary or self.whisper_binary, "--help"],
                 capture_output=True, text=True, timeout=probe_timeout,
                 env=bundle_binary_env(whisper_metal_env(gpu=False)),
@@ -419,6 +526,10 @@ class WhisperCppBackend(TranscriptionBackend):
             # A deadline-truncated probe learned nothing — return empty for THIS call
             # but do NOT cache it, so a later unhurried call can still introspect.
             return set()
+        except HelpersClosed:
+            # Refused or cut short by Quit: no answer. Not an empty set, which
+            # would fail open and run the CLI with flags it may not have.
+            raise
         except Exception:
             pass
         self._supported_flags_cache = flags
@@ -442,6 +553,15 @@ class WhisperCppBackend(TranscriptionBackend):
         Raises:
             TranscriptionError: If transcription fails
         """
+        if WhisperServerBackend._closed:
+            # Quit or restart: nothing starts after a terminal shutdown, its
+            # --help probe included.
+            raise TranscriptionError("Aura is shutting down")
+        # A retired dictation runs no probe or attempt, and moves nothing to
+        # the CPU (Sol mac r6).
+        abandoned_at = WhisperServerBackend.request_token()
+        WhisperServerBackend._check_not_abandoned(abandoned_at)
+
         # Validate paths
         if not _existing_file(self.whisper_binary):
             raise TranscriptionError(f"whisper.cpp binary not found: {self.whisper_binary}")
@@ -478,9 +598,17 @@ class WhisperCppBackend(TranscriptionBackend):
         # lacks --no-speech-thold / --suppress-nst, and whisper-cli aborts (transcribing nothing)
         # on the first unknown flag. Emit version-fragile flags only when --help advertises them;
         # _flag_ok fails OPEN (empty set => no filtering) so an un-introspectable binary is safe.
-        _sup = self._supported_flags(
-            probe_timeout=probe_timeout, binary=active_binary
-        )
+        try:
+            _sup = self._supported_flags(
+                probe_timeout=probe_timeout, binary=active_binary
+            )
+        except RequestAbandoned:
+            raise
+        except HelpersClosed:
+            raise TranscriptionError("Aura is shutting down")
+        # Retired while the probe ran: no GPU re-test and no attempt (Sol mac
+        # r7). A failed attempt checks again before the next (_activate_fallback).
+        WhisperServerBackend._check_not_abandoned(abandoned_at)
         # Under a salvage DEADLINE the --help probe may have been truncated to empty, so
         # do NOT fail OPEN on the version-fragile flags (v1.7.2 aborts on them → silent
         # empty transcription — the very failure this filtering prevents). Emit those
@@ -559,8 +687,15 @@ class WhisperCppBackend(TranscriptionBackend):
                 attempts.append(_fb)
 
         def _activate_fallback(reason: str) -> None:
-            _CPU_FALLBACK_ACTIVE[self.whisper_binary] = attempts[-1]
-            delay = _schedule_gpu_retry(self.whisper_binary)
+            # Retired mid-attempt: the failure may be the reset's (sleep), so
+            # neither the CPU retry nor the memo; asked under the lock, after
+            # its wait (Sol mac r12).
+            delay = _schedule_gpu_retry(
+                self.whisper_binary, cpu_binary=attempts[-1],
+                cancelled=lambda: (abandoned_at is not None
+                                   and WhisperServerBackend._abandoned != abandoned_at))
+            if delay is None:
+                raise RequestAbandoned("dictation abandoned")
             _log_gpu_event(
                 f"⚠️ GPU transcription {reason} — switched to CPU "
                 f"(will retry GPU in {_fmt_delay(delay)})"
@@ -581,10 +716,14 @@ class WhisperCppBackend(TranscriptionBackend):
                     raise TranscriptionError(
                         f"whisper-cli salvage budget exhausted after {attempt_idx} attempt(s)")
             try:
-                result = subprocess.run(
+                result = run_tracked(
                     cmd,
                     capture_output=True,
-                    text=True,
+                    # whisper.cpp prints UTF-8 whatever the code page: the
+                    # locale default (cp1252 on Windows) garbled or dropped
+                    # non-ASCII text.
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=attempt_timeout,
                     # Preserve Vulkan selection while dropping PyInstaller's
                     # private library directory from native GPU children.
@@ -592,12 +731,20 @@ class WhisperCppBackend(TranscriptionBackend):
                     env=bundle_binary_env(whisper_metal_env(cmd)),
                     **_NO_WINDOW,
                 )
-            except subprocess.TimeoutExpired:
+            except HelperNotStarted:
+                # The deadline passed before this attempt's helper was ever
+                # spawned: nothing ran, so this is not a GPU hang either —
+                # same bail as the deadline-clamped branch just below, never
+                # _activate_fallback's memoized CPU fallback (Sol mac r21).
+                raise TranscriptionError(
+                    f"whisper-cli attempt {attempt_idx + 1} never started within its budget")
+            except subprocess.TimeoutExpired as exc:
                 # A deadline-CLAMPED timeout means the caller's salvage budget ran
                 # out, NOT that the GPU hung — so it must NOT memoize CPU fallback
                 # (that would poison GPU health for every future dictation). Bail
                 # cleanly instead of degrading global state on a false signal.
-                if deadline is not None and attempt_timeout < self.timeout:
+                if (deadline is not None and attempt_timeout < self.timeout
+                        or helper_budget_shortened(exc, float(self.timeout))):
                     raise TranscriptionError(
                         f"whisper-cli salvage attempt exceeded its {attempt_timeout:.0f}s budget")
                 if is_last:
@@ -606,6 +753,10 @@ class WhisperCppBackend(TranscriptionBackend):
                 continue
             except FileNotFoundError:
                 raise TranscriptionError(f"Could not execute whisper.cpp: {binary}")
+            except RequestAbandoned:
+                raise
+            except HelpersClosed:
+                raise TranscriptionError("Aura is shutting down")
 
             if not is_last:
                 from wayfinder.utils.windows_whisper import crashed
@@ -667,35 +818,61 @@ class WhisperCppBackend(TranscriptionBackend):
             return
         global _gpu_probe_inflight
         with _gpu_probe_lock:
-            if _gpu_probe_inflight:
+            # Not for a dictation retired meanwhile, during the lock wait
+            # included (Sol mac r11).
+            if _gpu_probe_inflight or _retired_dictation():
                 return
             _gpu_probe_inflight = True
         threading.Thread(
-            target=self._probe_gpu_recovery, daemon=True, name="wayfinder-gpu-probe",
+            target=self._probe_gpu_recovery, args=(getattr(_dictation, "token", None),),
+            daemon=True, name="wayfinder-gpu-probe",
         ).start()
 
-    def _probe_gpu_recovery(self) -> None:
-        """Test the GPU binary on silence; restore it on success, back off on failure."""
+    def _probe_gpu_recovery(self, token: Optional[int] = None) -> None:
+        """Test the GPU binary on silence; restore it on success, back off on failure.
+
+        Under the dictation that started it (*token*): a retirement refuses
+        its helper, and whatever the probe found then sets nothing, neither a
+        recovery nor a backoff (Sol mac r11)."""
         global _gpu_probe_inflight
         try:
-            if self._gpu_probe_succeeds():
-                with _gpu_state_lock:
-                    _CPU_FALLBACK_ACTIVE.pop(self.whisper_binary, None)
-                    # Keep (halved) failure history so a flapping GPU climbs the
-                    # backoff ladder instead of crash-looping the user's dictations.
-                    state = _gpu_retry_state.get(self.whisper_binary)
-                    if state is not None:
-                        state["failures"] = state["failures"] // 2
-                        state["next_retry"] = 0.0
-                _log_gpu_event("✅ GPU transcription restored — back on the GPU binary")
-            else:
-                delay = _schedule_gpu_retry(self.whisper_binary)
-                _log_gpu_event(f"GPU still unavailable — next retry in {_fmt_delay(delay)}")
+            with dictation_requests(token):
+                ok = self._gpu_probe_succeeds()
+                if ok is None:
+                    # The deadline passed before the probe helper was ever
+                    # spawned (HelperNotStarted): no verdict, so neither a
+                    # recovery nor a backoff — the next scheduled retry gets
+                    # an unspent try instead of this one counting as a
+                    # failure it never ran (Sol mac r21).
+                    return
+                if ok:
+                    with _gpu_state_lock:
+                        # Retired meanwhile, this lock's wait included: no
+                        # recovery for it (Sol mac r12).
+                        if _retired_dictation():
+                            return
+                        _CPU_FALLBACK_ACTIVE.pop(self.whisper_binary, None)
+                        # Keep (halved) failure history so a flapping GPU climbs the
+                        # backoff ladder instead of crash-looping the user's dictations.
+                        state = _gpu_retry_state.get(self.whisper_binary)
+                        if state is not None:
+                            state["failures"] = state["failures"] // 2
+                            state["next_retry"] = 0.0
+                    _log_gpu_event("✅ GPU transcription restored — back on the GPU binary")
+                else:
+                    delay = _schedule_gpu_retry(self.whisper_binary, cancelled=_retired_dictation)
+                    if delay is None:
+                        return   # nor a backoff
+                    _log_gpu_event(f"GPU still unavailable — next retry in {_fmt_delay(delay)}")
+        except HelpersClosed:
+            pass   # cut short by Quit: neither a recovery nor a failure
         finally:
             _gpu_probe_inflight = False
 
-    def _gpu_probe_succeeds(self) -> bool:
-        """Run the GPU binary over 0.1s of silence; True iff it exits cleanly."""
+    def _gpu_probe_succeeds(self) -> Optional[bool]:
+        """Run the GPU binary over 0.1s of silence; True iff it exits cleanly,
+        None if the deadline passed before it was ever spawned (HelperNotStarted
+        — no verdict either way, Sol mac r21)."""
         probe_wav = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -705,7 +882,7 @@ class WhisperCppBackend(TranscriptionBackend):
                 wav.setsampwidth(2)
                 wav.setframerate(16000)
                 wav.writeframes(b"\x00\x00" * 1600)
-            result = subprocess.run(
+            result = run_tracked(
                 [self.whisper_binary, "-m", self.model_path, "-f", probe_wav,
                  "--no-timestamps"],
                 capture_output=True,
@@ -714,6 +891,12 @@ class WhisperCppBackend(TranscriptionBackend):
                 **_NO_WINDOW,
             )
             return result.returncode == 0
+        except HelpersClosed:
+            raise   # Quit, not the GPU: _probe_gpu_recovery leaves its state alone
+        except HelperNotStarted:
+            return None
+        except subprocess.TimeoutExpired as exc:
+            return None if helper_budget_shortened(exc, 60.0) else False
         except Exception:
             return False
         finally:
@@ -749,6 +932,10 @@ class WhisperServerBackend(TranscriptionBackend):
     # this — a single-write-site invariant nothing here guaranteed.
     _server_use_gpu: Optional[bool] = None
     _server_threads: Optional[int] = None  # -t at spawn (macOS/Windows reuse check)
+    # The published child once past its readiness check: a server still loading
+    # (Core ML takes ~11 s) would make the next dictation wait.
+    _server_ready: Optional[subprocess.Popen] = None
+    _server_vk_devices: Optional[str] = None  # GGML_VK_VISIBLE_DEVICES at spawn
     # whisper-server is intentionally verbose (several KB per request). Its stdout
     # MUST be consumed continuously: leaving Popen(stdout=PIPE) unread eventually
     # fills the kernel pipe and blocks the server in write(), which looks exactly like
@@ -759,6 +946,29 @@ class WhisperServerBackend(TranscriptionBackend):
     # then delegates straight to the per-call CLI backend instead of paying
     # the failed-startup cost on every dictation.
     _server_disabled: bool = False
+    # The epoch the failed start was configured under (None: unscoped). The
+    # failure belongs to that mode: after a switch the new mode gets its own
+    # try, and a start the switch cancelled cannot disable the mode after it.
+    _server_disabled_epoch: Optional[int] = None
+    # Bumped by supersede()/shutdown(). A startup that began under an older
+    # epoch abandons its load and stops its own child: a CPU/GPU switch or Quit
+    # never waits for a model load it no longer wants. _server_epoch is the
+    # epoch the resident server's configuration was last validated under: by
+    # the start that spawned it, or by the latest start that reused it.
+    _epoch: int = 0
+    _server_epoch: int = 0
+    # Set by a terminal shutdown (Quit, restart, exit): no start is admitted
+    # after it, so a dictation that read its settings just before cannot
+    # leave a child behind for os._exit() to orphan.
+    _closed: bool = False
+    # macos_coreml.runtime_key() of a published Core ML server, cleared with
+    # its record: when that record is stopped or replaced after the server
+    # exited on its own, the exit counts as a Core ML failure, once.
+    _server_coreml_key: Optional[tuple] = None
+    # Bumped when the app retires a dictation (force reset, cancel, a
+    # watchdog): its requests still in flight restart no server and count no
+    # Core ML failure (Sol mac r4).
+    _abandoned: int = 0
 
     # The server has its own short request/restart budget. CLI salvage must not
     # share the already-expired tail of that budget: it needs enough time to
@@ -806,6 +1016,15 @@ class WhisperServerBackend(TranscriptionBackend):
         self.suppress_nst = suppress_nst
         self.prompt = prompt
         self.custom_vocabulary = custom_vocabulary or []
+        # The switch this backend's configuration was read under. A server
+        # start under a later one would load a mode the user has left.
+        self._load_epoch = WhisperServerBackend._epoch
+        # macOS Core ML: its server takes ~11 s to load on an M1, Metal's under
+        # 1 s. A backend get_backend() chose because Core ML was resident uses
+        # it only while it still is; otherwise this Metal twin serves and the
+        # hand-over brings Core ML back once it is loaded (Sol mac r2).
+        self._ready_only_fallback: Optional["WhisperServerBackend"] = None
+        self._ready_only_config: Optional[dict] = None
 
         # Lazy-init the class-level lock
         if WhisperServerBackend._server_lock is None:
@@ -868,8 +1087,8 @@ class WhisperServerBackend(TranscriptionBackend):
                     return port  # Port is free
                 # macOS never adopts an unowned HTTP service: a local process
                 # could serve a page containing "whisper" and receive Aura's
-                # audio at /inference. There the supervised child is the
-                # ownership proof and cannot outlive the app. Linux keeps
+                # audio at /inference. There our own child is the ownership
+                # proof, and its watcher ends it if the app dies. Linux keeps
                 # main's reuse of our own server (no supervisor yet, so a
                 # crash would otherwise stack a second server per launch).
                 # Windows: the server is bound to the app by a job object
@@ -1021,9 +1240,19 @@ class WhisperServerBackend(TranscriptionBackend):
                 sys.platform not in ("darwin", "win32")
                 or WhisperServerBackend._server_threads == self.threads
             )
+            # Vulkan picks its device from GGML_VK_VISIBLE_DEVICES at spawn. GPU
+            # setup sets it off the Tk thread after GPU is turned on, so a server
+            # spawned before that finished runs on the default device and must
+            # not be kept once the selection lands.
+            and (
+                not self.use_gpu or sys.platform == "darwin"
+                or WhisperServerBackend._server_vk_devices
+                == os.environ.get("GGML_VK_VISIBLE_DEVICES")
+            )
         )
 
-    def _start_server(self, deadline: float = None, force: bool = False) -> None:
+    def _start_server(self, deadline: float = None, force: bool = False,
+                      abandoned_at: Optional[int] = None) -> None:
         """Start the whisper-server process if not already running.
 
         deadline: optional absolute time.monotonic() budget. When set (the recovery
@@ -1033,9 +1262,17 @@ class WhisperServerBackend(TranscriptionBackend):
         cannot push the caller past the PROCESSING watchdog. None = full, unbounded wait.
         force: restart even if a server appears to be running — recovery uses this to
         replace a wedged-but-listening server that would otherwise look healthy.
+        abandoned_at: a dictation's abandon token; once the app retires it, the
+        start raises RequestAbandoned before stopping or spawning anything.
         """
+        if WhisperServerBackend._epoch != self._load_epoch:
+            # Configured before a switch: what it finds missing is the old
+            # mode's, so it must not disable the server for the new one.
+            raise ServerStartSuperseded("whisper-server configuration superseded")
+        if WhisperServerBackend._closed:
+            raise ServerStartSuperseded("whisper-server shutting down")
         if not self.is_available():
-            WhisperServerBackend._server_disabled = True
+            self._disable_server()
             raise TranscriptionError(
                 f"whisper-server binary not found: {self.whisper_server_binary or '<empty>'}"
             )
@@ -1058,12 +1295,41 @@ class WhisperServerBackend(TranscriptionBackend):
             if rem <= 0 or not WhisperServerBackend._server_lock.acquire(timeout=rem):
                 raise TranscriptionError(
                     "recovery deadline hit while acquiring the server lock")
+        epoch = self._load_epoch
+
+        def _abandon_if_superseded() -> None:
+            # Not a broken server: _server_disabled stays untouched.
+            if WhisperServerBackend._epoch != epoch:
+                self._stop_server_internal(deadline=deadline)
+                raise ServerStartSuperseded("whisper-server startup superseded")
+
         try:
+            if WhisperServerBackend._epoch != epoch:
+                # Configured before a CPU/GPU or model switch: start nothing,
+                # and leave whatever the new mode is running alone.
+                raise ServerStartSuperseded("whisper-server configuration superseded")
+            # Again under the lock: a start that passed the entry check before
+            # a Quit must not spawn once the Quit's stop has run.
+            if WhisperServerBackend._closed:
+                raise ServerStartSuperseded("whisper-server shutting down")
+            # Under the lock too: a reset that lands while this waited for it
+            # must not let a retired dictation replace the next one's server.
+            self._check_not_abandoned(abandoned_at)
             # Already running with the right model AND the right CPU/GPU mode?
             # Skipped when force=True so a wedged-but-alive server is replaced
             # instead of mistaken for healthy.
             if not force and self._server_reusable():
+                # Validated for this start's epoch, so it is that mode's server
+                # now: a teardown from an earlier switch (GPU off then on again
+                # before it ran) must not stop it under the dictation.
+                WhisperServerBackend._server_epoch = max(
+                    WhisperServerBackend._server_epoch, epoch)
                 return
+            if self._ready_only_fallback is not None:
+                # Core ML is not resident (it died, or a recovery would replace
+                # it): never load it under a dictation. Decided under the lock,
+                # so no start, restart or recovery spawns it here.
+                raise CoreMLNotLoaded("Core ML server not loaded")
 
             # Kill any existing server (different config, or force-replace a wedge).
             self._stop_server_internal(deadline=deadline)
@@ -1081,6 +1347,7 @@ class WhisperServerBackend(TranscriptionBackend):
             # branch is disabled — recovery MUST bind a fresh server, not the wedge.
             # macOS never adopts (see _find_available_port).
             port = self._find_available_port(probe_timeout=_probe_budget(), reuse_ok=not force)
+            _abandon_if_superseded()
 
             if (
                 sys.platform not in ("darwin", "win32")
@@ -1106,38 +1373,55 @@ class WhisperServerBackend(TranscriptionBackend):
                 if deadline is not None and _left() <= 0:
                     raise TranscriptionError(
                         "whisper-server startup exceeded the recovery deadline (before spawn)")
+                _abandon_if_superseded()
                 if attempt:
                     print(f"[Whisper Server] Start failed ({last_error.strip()[-200:]}) — "
                           f"retrying with reduced flags (attempt {attempt + 1})...")
                 else:
                     print(f"[Whisper Server] Starting on port {port}...")
 
-                spawn_cmd, spawn_env = wrap_macos_child_command(
-                    cmd, bundle_binary_env(whisper_metal_env(cmd))
-                )
-                proc = subprocess.Popen(
-                    spawn_cmd,
+                spawn_env = bundle_binary_env(whisper_metal_env(cmd))
+                # Last, after every wait of this start (the stop, the port
+                # scan, Linux's adoption probe): a retired dictation spawns
+                # nothing (Sol mac r7/r8).
+                self._check_not_abandoned(abandoned_at)
+
+                def _still_wanted() -> None:
+                    # The same again after macOS's crash-watcher wait, right
+                    # before the server starts (Sol mac r18).
+                    if deadline is not None and _left() <= 0:
+                        raise TranscriptionError(
+                            "whisper-server startup exceeded the recovery deadline (before spawn)")
+                    _abandon_if_superseded()
+                    self._check_not_abandoned(abandoned_at)
+                proc = spawn_supervised(
+                    cmd,
+                    env=spawn_env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    env=spawn_env,
+                    before_helper=_still_wanted,
+                    ready_within=_left(),
                     **_NO_WINDOW,
                 )
                 # Windows: the server dies with the app even on a crash (job
                 # object); no-op elsewhere.
                 bind_to_app_lifetime(proc)
+                # Which switch this child belongs to, for shutdown(before_epoch=...).
+                WhisperServerBackend._server_epoch = epoch
                 WhisperServerBackend._server_process = proc
                 WhisperServerBackend._server_port = port
                 WhisperServerBackend._server_model_path = self.model_path
                 WhisperServerBackend._server_use_gpu = self.use_gpu
                 WhisperServerBackend._server_binary = self.whisper_server_binary
                 WhisperServerBackend._server_threads = self.threads
+                WhisperServerBackend._server_vk_devices = spawn_env.get("GGML_VK_VISIBLE_DEVICES")
                 # Start draining BEFORE readiness probes. A chatty startup or repeated
                 # requests must never be able to fill stdout and deadlock inference.
                 WhisperServerBackend._start_server_output_drain(proc)
 
                 # Register atexit handler for cleanup (idempotent: shutdown is
                 # safe to call multiple times)
-                atexit.register(WhisperServerBackend.shutdown)
+                atexit.register(WhisperServerBackend._shutdown_at_exit)
 
                 # Wait for server to be ready (model loading takes a few seconds).
                 # macOS/Windows poll every 0.1s: with a warm Metal cache (or the
@@ -1163,9 +1447,15 @@ class WhisperServerBackend(TranscriptionBackend):
                     else:
                         sleep_to, probe_to = poll, 2
                     time.sleep(sleep_to)
+                    _abandon_if_superseded()
                     if self._is_our_server(port, timeout=probe_to):
+                        # A switch during the probe wins over a late "ready".
+                        _abandon_if_superseded()
                         print(f"[Whisper Server] Ready on port {port} (took {time.monotonic() - started:.1f}s)")
+                        WhisperServerBackend._server_ready = proc
                         return
+                    # A child stopped by a concurrent shutdown is not a failed start.
+                    _abandon_if_superseded()
                     if proc.poll() is not None:
                         last_error = WhisperServerBackend._server_output()[-500:]
                         died = True
@@ -1173,18 +1463,71 @@ class WhisperServerBackend(TranscriptionBackend):
 
                 if not died:
                     # Startup hang with budget still available — a real fault; stop trying.
+                    _abandon_if_superseded()
                     self._stop_server_internal(deadline=deadline)
-                    WhisperServerBackend._server_disabled = True
+                    # Unless the dictation was retired meanwhile (sleep stalls
+                    # a load too): then nothing is disabled (Sol mac r6).
+                    self._check_not_abandoned(abandoned_at)
+                    self._disable_server()
                     raise TranscriptionError(
                         f"whisper-server timed out during startup ({self.startup_timeout:g}s)")
 
-            WhisperServerBackend._server_process = None
-            WhisperServerBackend._server_model_path = ""
-            WhisperServerBackend._server_use_gpu = None
-            WhisperServerBackend._server_disabled = True
+                # A child a switch stopped is not a failed start (the check
+                # above it in the loop can race the switch's kill).
+                _abandon_if_superseded()
+                # Reap the attempt (and on macOS end whatever it forked into
+                # its group) before the next one replaces the record (Sol mac r6).
+                self._stop_server_internal(deadline=deadline)
+                # A retired dictation spawns no reduced-flags retry and
+                # disables nothing: its failure may be the reset's doing.
+                self._check_not_abandoned(abandoned_at)
+
+            self._disable_server()
             raise TranscriptionError(f"whisper-server failed to start: {last_error}")
         finally:
             WhisperServerBackend._server_lock.release()
+
+    @classmethod
+    def _check_not_abandoned(cls, abandoned_at: Optional[int]) -> None:
+        if abandoned_at is not None and cls._abandoned != abandoned_at:
+            raise RequestAbandoned("dictation abandoned")
+
+    @classmethod
+    def request_token(cls) -> int:
+        """The abandonment token a request runs under: its dictation's, taken
+        when the dictation began (see dictation_requests), else the current one."""
+        token = getattr(_dictation, "token", None)
+        return cls._abandoned if token is None else token
+
+    @classmethod
+    def abandon_requests(cls) -> None:
+        """The app retired a dictation: see _abandoned. Lock-free, for the Tk thread."""
+        cls._abandoned += 1
+
+    @classmethod
+    def _note_core_ml_exit(cls) -> None:
+        """Before a published record is stopped or replaced: a Core ML server
+        that already exited on its own is a Core ML failure. Every stop of
+        ours passes here first and clears the key, so each exit counts once,
+        whether found by a dictation, a warm-up, get_backend picking Metal or
+        a hand-over (Sol mac r4)."""
+        proc, key = cls._server_process, cls._server_coreml_key
+        cls._server_coreml_key = None
+        if proc is None or key is None or cls._closed:
+            return
+        try:
+            code = proc.poll()
+        except Exception:
+            return
+        if code is None:
+            return
+        try:
+            from wayfinder.utils.macos_coreml import record_runtime_failure
+            count = record_runtime_failure(key, f"server exited ({code})")
+            print(f"[Whisper] Core ML server exited ({code}, failure {count}); "
+                  "Metal serves for the rest of this session")
+        except Exception as exc:
+            print(f"[Whisper] Core ML exit not recorded ({type(exc).__name__})")
 
     @classmethod
     def _stop_server_internal(cls, deadline: float = None) -> None:
@@ -1194,20 +1537,21 @@ class WhisperServerBackend(TranscriptionBackend):
         to the remaining budget — under a deadline we escalate to SIGKILL sooner rather
         than blocking the caller for the full 5s + 2s.
         """
+        cls._note_core_ml_exit()
         if cls._server_process is not None:
-            import signal, time
+            import time
             term_wait, kill_wait = 5.0, 2.0
             if deadline is not None:
                 term_wait = max(0.1, min(term_wait, deadline - time.monotonic()))
+            # macOS: the server's whole group, while it is unreaped and so
+            # still ours, whatever became of its watcher (Sol mac r6/r7).
             try:
-                cls._server_process.send_signal(signal.SIGTERM)
-                try:
-                    cls._server_process.wait(timeout=term_wait)
-                except subprocess.TimeoutExpired:
-                    cls._server_process.kill()
+                signal_supervised(cls._server_process)
+                if not wait_supervised(cls._server_process, term_wait):
+                    signal_supervised(cls._server_process, kill=True)
                     if deadline is not None:
                         kill_wait = max(0.1, min(kill_wait, deadline - time.monotonic()))
-                    cls._server_process.wait(timeout=kill_wait)
+                    wait_supervised(cls._server_process, kill_wait)
             except Exception:
                 pass
         # Identity clears even when no local Popen exists (adopted server /
@@ -1219,12 +1563,80 @@ class WhisperServerBackend(TranscriptionBackend):
         cls._server_use_gpu = None
 
     @classmethod
-    def shutdown(cls) -> None:
-        """Stop the whisper-server process. Safe to call multiple times."""
-        if cls._server_lock is not None:
-            with cls._server_lock:
-                cls._stop_server_internal()
-        else:
+    def load_epoch(cls) -> int:
+        """The epoch to read a configuration under; see bind_to_epoch()."""
+        return cls._epoch
+
+    def bind_to_epoch(self, epoch: Optional[int]) -> None:
+        """Tie this backend's server start to the epoch its config was read
+        under, for a backend built later than that (see LOAD_EPOCH_KEY)."""
+        if epoch is not None:
+            self._load_epoch = epoch
+
+    @classmethod
+    def supersede(cls) -> int:
+        """Cancel every startup in flight without waiting; returns the new epoch.
+
+        Lock-free, so the Tk thread can call it. Pass the result to
+        shutdown(before_epoch=...) to stop only servers spawned before it.
+        """
+        cls._epoch += 1
+        return cls._epoch
+
+    @classmethod
+    def _disabled_now(cls) -> bool:
+        """Whether a failed start disabled the server for the current mode."""
+        return cls._server_disabled and cls._server_disabled_epoch in (None, cls._epoch)
+
+    def _disable_server(self) -> None:
+        WhisperServerBackend._server_disabled = True
+        WhisperServerBackend._server_disabled_epoch = self._load_epoch
+
+    @classmethod
+    def reopen(cls) -> None:
+        """Admit starts again after a terminal shutdown that did not exit."""
+        from wayfinder.utils.child_supervisor import reopen_tracked
+        cls._closed = False
+        reopen_tracked()
+
+    @classmethod
+    def _shutdown_at_exit(cls) -> None:
+        cls.shutdown(terminal=True)
+
+    @classmethod
+    def shutdown(cls, before_epoch: Optional[int] = None, *, terminal: bool = False) -> None:
+        """Stop the whisper-server process. Safe to call multiple times.
+
+        A startup in flight is superseded first, so this waits only for it to
+        stop its own child, never for the model load to finish.
+        before_epoch: stop the resident server only if it was spawned before
+        that supersede() epoch. A server started after a CPU/GPU switch is in
+        the new mode and stays. Without it the cutoff is this call's own
+        supersede(): a start that read the new settings while this waited for
+        the lock keeps its server.
+        terminal: Quit, restart and final cleanup stop everything, that too,
+        and admit no start after it (see reopen()).
+        """
+        if terminal:
+            cls._closed = True   # before the supersede: see _start_server()
+            cls.supersede()
+            # whisper-cli too: a dictation that fell back just before this
+            # must not outlive the app.
+            from wayfinder.utils.child_supervisor import close_tracked
+            close_tracked()
+            before_epoch = None
+        elif before_epoch is None:
+            before_epoch = cls.supersede()
+        if cls._server_lock is None:
+            cls._stop_server_internal()
+            return
+        with cls._server_lock:
+            proc = cls._server_process
+            if (
+                before_epoch is not None and proc is not None
+                and cls._server_epoch >= before_epoch
+            ):
+                return
             cls._stop_server_internal()
 
     def is_available(self) -> bool:
@@ -1250,6 +1662,12 @@ class WhisperServerBackend(TranscriptionBackend):
         try:
             self._start_server()
             return True
+        except CoreMLNotLoaded:
+            fallback = self._ready_only_fallback
+            try:
+                return fallback.warm_up()
+            finally:
+                self._schedule_coreml_hand_over()
         except Exception as e:
             print(f"[Whisper Server] Warm-up skipped: {e}")
             return False
@@ -1296,6 +1714,9 @@ class WhisperServerBackend(TranscriptionBackend):
         degradation ladder is: server(GPU) -> server(CPU) -> cli(GPU) -> cli(CPU)
         — slower per dictation but always working.
         """
+        if self._ready_only_fallback is not None:
+            # Per-call Core ML loads its encoder each time: Metal's CLI.
+            return self._ready_only_fallback._cli_fallback()
         if getattr(self, "_cli_backend", None) is None:
             self._cli_backend = WhisperCppBackend(
                 whisper_binary=self._resolve_cli_binary(),
@@ -1314,23 +1735,101 @@ class WhisperServerBackend(TranscriptionBackend):
             )
         return self._cli_backend
 
+    def _schedule_coreml_hand_over(self) -> None:
+        try:
+            from wayfinder.utils.macos_coreml import schedule_preparation
+            schedule_preparation(self._ready_only_config, self._ready_only_fallback)
+        except Exception as exc:
+            print(f"[Whisper] Core ML hand-over not scheduled ({type(exc).__name__})")
+
+    def _coreml_outcome_void(self):
+        """Whether this server's outcome stopped counting: Quit, a mode or
+        model change (both supersede the epoch; Sol mac r3) or the dictation's
+        retirement. Asked under the accounting lock, after its reads (Sol mac
+        r11, r12)."""
+        cls = WhisperServerBackend
+        epoch = self._load_epoch
+        retired = _dictation_cancelled()
+        return lambda: cls._closed or cls._epoch != epoch or retired()
+
+    def _record_coreml_failure(self, reason: str) -> None:
+        """Count a failure of the loaded Core ML server, never one Quit, a mode
+        or model change or a retirement caused (see _coreml_outcome_void)."""
+        void = self._coreml_outcome_void()
+        if void():
+            return
+        try:
+            from wayfinder.utils.macos_coreml import record_runtime_failure, runtime_key
+            count = record_runtime_failure(runtime_key(self._ready_only_config), reason,
+                                           cancelled=void)
+            if not count:
+                return
+            print(f"[Whisper] Core ML failed ({reason}, failure {count}); "
+                  "Metal serves for the rest of this session")
+        except Exception as exc:
+            print(f"[Whisper] Core ML failure not recorded ({type(exc).__name__})")
+
+    def _record_coreml_success(self) -> None:
+        try:
+            from wayfinder.utils.macos_coreml import record_runtime_success, runtime_key
+            record_runtime_success(runtime_key(self._ready_only_config),
+                                   cancelled=self._coreml_outcome_void())
+        except Exception as exc:
+            print(f"[Whisper] Core ML success not recorded ({type(exc).__name__})")
+
+    def _serve_on_metal(self, audio_path: str, context: str, abandoned_at: Optional[int] = None) -> str:
+        # The twin's transcribe takes its own token on entry, right after this.
+        self._check_not_abandoned(abandoned_at)
+        print("[Whisper] Core ML is not loaded; this dictation runs on Metal")
+        try:
+            return self._ready_only_fallback.transcribe(audio_path, context)
+        finally:
+            if abandoned_at is None or WhisperServerBackend._abandoned == abandoned_at:
+                self._schedule_coreml_hand_over()
+
     def transcribe(self, audio_path: str, context: str = "") -> str:
         """Transcribe audio via the whisper-server HTTP API."""
+        # One token for all this request runs, its Metal twin and whisper-cli
+        # included (see dictation_requests).
+        abandoned_at = WhisperServerBackend.request_token()
+        with dictation_requests(abandoned_at):
+            return self._transcribe(audio_path, context, abandoned_at)
+
+    def _transcribe(self, audio_path: str, context: str, abandoned_at: int) -> str:
         if not Path(audio_path).exists():
             raise TranscriptionError(f"Audio file not found: {audio_path}")
 
         # Server already proved unusable on this machine — go straight to CLI.
-        if WhisperServerBackend._server_disabled:
+        if WhisperServerBackend._disabled_now():
             return self._cli_fallback().transcribe(audio_path, context)
 
         # Ensure server is running
         try:
-            self._start_server()
+            self._start_server(abandoned_at=abandoned_at)
+        except RequestAbandoned:
+            raise
+        except CoreMLNotLoaded:
+            return self._serve_on_metal(audio_path, context, abandoned_at)
+        except ServerStartSuperseded:
+            if WhisperServerBackend._closed:
+                # Quit or restart: nothing starts after a terminal shutdown,
+                # whisper-cli included.
+                raise TranscriptionError("Aura is shutting down")
+            self._check_not_abandoned(abandoned_at)
+            # A CPU/GPU switch or model change cancelled the load mid-dictation.
+            print("[Whisper Server] Startup cancelled by a settings change; "
+                  "this dictation uses whisper-cli.")
+            return self._cli_fallback().transcribe(audio_path, context)
         except TranscriptionError as e:
             print(f"[Whisper Server] Unusable on this machine ({e}). "
                   "Falling back to whisper-cli per dictation.")
             return self._cli_fallback().transcribe(audio_path, context)
+        # Retired while the server started: the server stays for the next
+        # dictation, but this one sends it nothing (Sol mac r6).
+        self._check_not_abandoned(abandoned_at)
         port = WhisperServerBackend._server_port
+        # A failure counts against Core ML only while this is still the server.
+        served_by = WhisperServerBackend._server_process
 
         # Build prompt
         final_prompt = self._build_prompt(context)
@@ -1411,6 +1910,9 @@ class WhisperServerBackend(TranscriptionBackend):
             body += f"--{boundary}--\r\n".encode()
 
             def _post(_port: int, _timeout: float) -> str:
+                # Not for a dictation retired meanwhile, during the audio read
+                # above or a recovery's start included (Sol mac r11).
+                self._check_not_abandoned(abandoned_at)
                 # Rebuilt per attempt: _start_server() may pick a DIFFERENT port on a
                 # restart, so the URL must follow the live _server_port, not a stale one.
                 req = urllib.request.Request(
@@ -1432,7 +1934,13 @@ class WhisperServerBackend(TranscriptionBackend):
                 # merely slow inference worker (TimeoutError), OR a malformed/short/
                 # undecodable response — routes to the SAME bounded recovery below, so
                 # a bad response can never silently drop the chunk's words.
-                return _post(port, req_timeout)
+                text = _post(port, req_timeout)
+                # A retired dictation's answer proves nothing about Core ML
+                # (Sol mac r7).
+                if (self._ready_only_fallback is not None
+                        and WhisperServerBackend._abandoned == abandoned_at):
+                    self._record_coreml_success()
+                return text
             except Exception as e:
                 # We deliberately do NOT re-POST to the same server before restarting:
                 # after a client timeout the original /inference is usually still
@@ -1447,14 +1955,28 @@ class WhisperServerBackend(TranscriptionBackend):
                 # CLI salvage gets a separate, fixed window below: sharing this
                 # deadline starved salvage whenever the retry consumed the last
                 # second, producing a false "No speech detected" after valid audio.
+                # Retired while in flight (sleep, Escape, the watchdog): no
+                # restart and no Core ML failure for words nobody will type. A
+                # restart could replace the next dictation's server, so every
+                # later stage checks again (Sol mac r4/r5).
+                self._check_not_abandoned(abandoned_at)
                 recovery_deadline = time.monotonic() + float(self.timeout)
                 print(f"[Whisper Server] {type(e).__name__}: {e}. Restarting server...")
+                coreml = self._ready_only_fallback is not None
+                if coreml and WhisperServerBackend._server_process is served_by:
+                    self._record_coreml_failure(f"request failed ({type(e).__name__})")
                 try:
                     # force=True replaces a wedged-but-listening server (which would
                     # otherwise look "already running"); _start_server bounds every
                     # step of its own restart — lock, stop, probes, readiness — by the
                     # same deadline, so the whole recovery is hard-capped.
-                    self._start_server(deadline=recovery_deadline, force=True)
+                    # Restarting Core ML is a cold load: its Metal twin replaces the
+                    # failed server under this same deadline, and the CLI salvage
+                    # below is Metal's, so the cascade fits the watchdog as Metal's
+                    # does (Sol mac r3). The hand-over brings Core ML back unless
+                    # this counted as its failure; then the next launch retries.
+                    (self._ready_only_fallback or self)._start_server(
+                        deadline=recovery_deadline, force=True, abandoned_at=abandoned_at)
                     # Retry once on the fresh server (fresh port), clamped to the
                     # remaining budget. Skip entirely if the restart already spent it.
                     remaining = recovery_deadline - time.monotonic()
@@ -1462,6 +1984,7 @@ class WhisperServerBackend(TranscriptionBackend):
                         raise TimeoutError("recovery budget exhausted before retry")
                     return _post(WhisperServerBackend._server_port, remaining)
                 except Exception as retry_err:
+                    self._check_not_abandoned(abandoned_at)
                     # Any recovery failure — still-dead server, _start_server() failure,
                     # malformed response, or exhausted budget — falls to the per-call
                     # whisper-cli salvage. Give it a FRESH bounded window: the server
@@ -1477,10 +2000,15 @@ class WhisperServerBackend(TranscriptionBackend):
                         )
                         return self._cli_fallback().transcribe(
                             audio_path, context, deadline=cli_deadline)
+                    except RequestAbandoned:   # whisper-cli refused at its spawn
+                        raise
                     except Exception as cli_err:
                         raise TranscriptionError(
                             f"whisper-server failed after restart ({retry_err}); "
                             f"whisper-cli salvage also failed: {cli_err}")
+                finally:
+                    if coreml and WhisperServerBackend._abandoned == abandoned_at:
+                        self._schedule_coreml_hand_over()
 
         except TranscriptionError:
             raise
@@ -1650,6 +2178,9 @@ class FasterWhisperBackend(TranscriptionBackend):
         device = "cuda" if want_gpu else "cpu"
         compute_type = self.compute_type if device == "cuda" else "int8"
 
+        # Not for a dictation retired meanwhile, during the CUDA discovery
+        # above or the import included (Sol mac r11).
+        _check_dictation()
         try:
             self._model = WhisperModel(
                 self.model_size,
@@ -1668,6 +2199,7 @@ class FasterWhisperBackend(TranscriptionBackend):
                     f"(device_index={device_index}, compute_type={compute_type})",
                     flush=True,
                 )
+                _check_dictation()   # retired during the failed GPU load: no CPU one
                 try:
                     self._model = WhisperModel(
                         self.model_size,
@@ -1988,6 +2520,9 @@ class GroqWhisperBackend(TranscriptionBackend):
                 if self.language and self.language.lower() != "auto":
                     params["language"] = self.language
                 
+                # Not for a dictation retired meanwhile, during the client's
+                # setup or the file open included (Sol mac r11).
+                _check_dictation()
                 transcription = client.audio.transcriptions.create(**params)
             
             elapsed = time.time() - start_time
@@ -1996,6 +2531,8 @@ class GroqWhisperBackend(TranscriptionBackend):
             # Response is just text when response_format="text"
             return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
             
+        except RequestAbandoned:
+            raise
         except Exception as e:
             print(f"[Groq Whisper] ✗ Error: {e}")
             raise TranscriptionError(_friendly_cloud_error(e))
@@ -2130,6 +2667,9 @@ class OpenAIWhisperBackend(TranscriptionBackend):
                 if self.language and self.language.lower() != "auto":
                     params["language"] = self.language
                 
+                # Not for a dictation retired meanwhile, during the client's
+                # setup or the file open included (Sol mac r11).
+                _check_dictation()
                 transcription = client.audio.transcriptions.create(**params)
             
             print(f"[OpenAI Whisper] ✓ Transcription received")
@@ -2137,6 +2677,8 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             # Response is just text when response_format="text"
             return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
             
+        except RequestAbandoned:
+            raise
         except Exception as e:
             print(f"[OpenAI Whisper] ✗ Error: {e}")
             raise TranscriptionError(_friendly_cloud_error(e))
@@ -2170,6 +2712,12 @@ def warm_up_transcription(config: dict) -> bool:
     return False
 
 
+# A config snapshot carries the WhisperServerBackend.load_epoch() it was read
+# under, so a server start for it after a CPU/GPU or model switch is
+# cancelled however long the snapshot waited (a recording, a queued warm-up).
+LOAD_EPOCH_KEY = "_whisper_load_epoch"
+
+
 def get_backend(config: dict) -> TranscriptionBackend:
     """
     Factory function to create the appropriate transcription backend.
@@ -2180,6 +2728,14 @@ def get_backend(config: dict) -> TranscriptionBackend:
     Returns:
         A TranscriptionBackend instance
     """
+    # Read before any setting: a switch landing between the two reads then
+    # cancels this backend's server start rather than mislabelling it.
+    load_epoch = config.get(LOAD_EPOCH_KEY)
+    # The caller's settings, before the presets below are folded into a copy:
+    # what the Core ML preparation job is keyed on (see warm_up_transcription).
+    requested_config = config
+    if load_epoch is None:
+        load_epoch = WhisperServerBackend.load_epoch()
     backend_type = config.get("transcription_backend", "whisper_cpp")
 
     # License gating (F1): a hand-edited config.json must not unlock a premium backend
@@ -2410,12 +2966,26 @@ def get_backend(config: dict) -> TranscriptionBackend:
 
             cli_binary = gpu_twin(cli_binary) or cli_binary
         coreml_selected = False
+        coreml_pending = False
         selected_model_path = config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin")
         if (sys.platform == "darwin" and use_gpu_effective
                 and config.get("whisper_coreml_encoder", True)):
-            from wayfinder.utils.macos_coreml import coreml_twin, converted_model_path
+            from wayfinder.utils.macos_coreml import (
+                converted_model_path, coreml_resident, coreml_twin,
+            )
 
             coreml_binary = coreml_twin(cli_binary, config.get("model_path", ""))
+            if (coreml_binary and config.get("whisper_server_mode", True)
+                    and not coreml_resident(
+                        _derive_whisper_server_binary(coreml_binary),
+                        str(converted_model_path(config.get("model_path", ""))),
+                        config.get("threads", 4))):
+                # Its server takes ~11 s to load on an M1, Metal's under 1 s: a
+                # dictation right after launch (or any reload) runs on Metal
+                # while Core ML loads beside it and takes over when idle.
+                coreml_binary = None
+                coreml_pending = True
+            metal_cli_binary = cli_binary
             if coreml_binary:
                 cli_binary = coreml_binary
                 selected_model_path = str(converted_model_path(config.get("model_path", "")))
@@ -2423,28 +2993,45 @@ def get_backend(config: dict) -> TranscriptionBackend:
                 print("[Whisper] macOS encoder: Core ML (automatic)")
         _wc_beam, _wc_best_of = whisper_decoding(config)
         if config.get("whisper_server_mode", True):
+            def _server_backend(binary: str, model: str, startup_timeout: float):
+                backend = WhisperServerBackend(
+                    whisper_server_binary=binary,
+                    model_path=model,
+                    port=config.get("whisper_server_port", 8178),
+                    threads=config.get("threads", 4),
+                    # Short, dedicated timeout (see config: whisper_server_timeout) so a
+                    # wedged inference worker is caught fast → restart + retry can salvage
+                    # the dictation before the 120s PROCESSING watchdog abandons it.
+                    timeout=config.get("whisper_server_timeout", 30),
+                    startup_timeout=startup_timeout,
+                    use_gpu=use_gpu_effective,
+                    beam_size=_wc_beam,
+                    best_of=_wc_best_of,
+                    language=config.get("language", "en"),
+                    entropy_threshold=config.get("entropy_threshold", 2.6),
+                    no_speech_threshold=config.get("no_speech_threshold", 0.5),
+                    suppress_nst=config.get("suppress_nst", False),
+                    prompt=_effective_prompt,
+                    custom_vocabulary=_effective_custom_vocabulary,
+                )
+                backend.bind_to_epoch(load_epoch)
+                return backend
+
             server_binary = _derive_whisper_server_binary(cli_binary)
-            server_backend = WhisperServerBackend(
-                whisper_server_binary=server_binary,
-                model_path=selected_model_path,
-                port=config.get("whisper_server_port", 8178),
-                threads=config.get("threads", 4),
-                # Short, dedicated timeout (see config: whisper_server_timeout) so a
-                # wedged inference worker is caught fast → restart + retry can salvage
-                # the dictation before the 120s PROCESSING watchdog abandons it.
-                timeout=config.get("whisper_server_timeout", 30),
-                startup_timeout=120.0 if coreml_selected else 30.0,
-                use_gpu=use_gpu_effective,
-                beam_size=_wc_beam,
-                best_of=_wc_best_of,
-                language=config.get("language", "en"),
-                entropy_threshold=config.get("entropy_threshold", 2.6),
-                no_speech_threshold=config.get("no_speech_threshold", 0.5),
-                suppress_nst=config.get("suppress_nst", False),
-                prompt=_effective_prompt,
-                custom_vocabulary=_effective_custom_vocabulary,
-            )
+            server_backend = _server_backend(
+                server_binary, selected_model_path, 120.0 if coreml_selected else 30.0)
+            if coreml_selected:
+                # Resident now, but it can die before this dictation reaches
+                # it: then Metal serves rather than an ~11 s Core ML load.
+                server_backend._ready_only_fallback = _server_backend(
+                    _derive_whisper_server_binary(metal_cli_binary),
+                    config.get("model_path", "~/whisper.cpp/models/ggml-base.en.bin"), 30.0)
+                server_backend._ready_only_config = requested_config
             if server_backend.is_available():
+                # Not for a dictation retired while this ran (Sol mac r7).
+                if coreml_pending and not _retired_dictation():
+                    from wayfinder.utils.macos_coreml import schedule_preparation
+                    schedule_preparation(requested_config, server_backend)
                 return server_backend
             if sys.platform in ("darwin", "win32") and not Path(
                     os.path.expanduser(str(server_backend.model_path or ""))).is_file():
@@ -2579,6 +3166,169 @@ _WHISPER_PHRASE_HALLUCINATIONS = frozenset({
 })
 
 
+def _noise_phrase_words(text: str) -> tuple:
+    """Lowercased words, every run of punctuation or whitespace a single
+    break, for the noise path's phrase check only (Sol pr67 r8)."""
+    import re
+
+    return tuple(re.sub(r'[\W_]+', ' ', (text or '').lower()).split())
+
+
+_NOISE_PHRASE_WORDS = frozenset(
+    _noise_phrase_words(phrase) for phrase in _WHISPER_PHRASE_HALLUCINATIONS)
+_NOISE_PHRASE_MAX_WORDS = max(len(words) for words in _NOISE_PHRASE_WORDS)
+
+
+def _made_of_known_phrases(words: tuple) -> bool:
+    """Whether *words* split, end to end, into known catch-phrases only."""
+    ends = [True] + [False] * len(words)
+    for end in range(1, len(words) + 1):
+        for size in range(1, min(_NOISE_PHRASE_MAX_WORDS, end) + 1):
+            if ends[end - size] and words[end - size:end] in _NOISE_PHRASE_WORDS:
+                ends[end] = True
+                break
+    return bool(words) and ends[-1]
+
+
+def _is_whisper_phrase_hallucination(text: str, *, noise_check: bool = False) -> bool:
+    """Whether *text* is, in full, one of Whisper's known silence/noise
+    catch-phrases — matched the same way :func:`clean_whisper_artifacts`
+    matches it at the end of its cleanup (repeated sentences collapsed,
+    trailing punctuation stripped). Never a mid-sentence substring match.
+
+    *noise_check* (Sol pr67 r8): the noise path's own check ignores every
+    mark and space between words, then asks whether the whole text is made
+    of catch-phrases and nothing else: "Thank you, thank you", "Thank
+    you.Thank you." and a repeated "Subtitles by the Amara.org community."
+    all are, while "Turn it down. Turn it down." over a fan is speech.
+    Splitting into sentences first kept missing a repeat written some new
+    way. Normal cleanup (noise_check=False) keeps 2dad2af's exact
+    behaviour: trailing punctuation only.
+    """
+    stripped = (text or "").strip()
+    if not noise_check:
+        candidate = _collapse_repeated_sentences_for_phrase_match(stripped)
+        key = candidate.lower().rstrip('.!?,;: ').strip()
+        return key in _WHISPER_PHRASE_HALLUCINATIONS
+
+    return _made_of_known_phrases(_noise_phrase_words(stripped))
+
+
+# Whisper's bracketed/parenthesized non-speech annotations ("[audience noise]",
+# "(sound of the rain)") built only from known noise vocabulary. Shared by
+# clean_whisper_artifacts and _strip_non_speech_markers below (Sol pr67 r2) so
+# the speech-guard's own safety copy strips exactly what normal cleanup does,
+# instead of a second, drifting copy of the same pattern.
+_NOISE_WORD = (
+    r'(?:audience|background|street|wind|static|noise|noises|sound|sounds|'
+    r'music|applause|laughter|laughing|laughs|coughing|coughs?|typing|'
+    r'keyboard|clicking|clicks|silence|silent|inaudible|unintelligible|'
+    r'indistinct|chatter|murmuring|breathing|sighs?|sighing|sniffs?|'
+    r'sniffing|beeping|buzzing|humming|rustling|footsteps|door|engine|'
+    r'clapping|claps|cheering|cheers|whistling|whistles|ringing|phone|'
+    r'camera|shutter|snapping|snaps|tapping|taps|knocking|knocks|'
+    r'banging|thud|thumping|crowd|birds?|chirping|barking|dog|rain|'
+    r'thunder|water|waves|crackling|scraping|shuffling|whispering|'
+    r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
+    r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
+)
+# Short joiners ("[sound of wind]", "(sound of the rain)") may sit between
+# noise words; the annotation must still start and end with one.
+_NOISE_JOINER = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
+_NOISE_MARKER = r'\s*' + _NOISE_WORD + r'(?:' + _NOISE_JOINER + r'\s+' + _NOISE_WORD + r'){0,2}\s*'
+
+
+def _strip_non_speech_markers(text: str) -> str:
+    """Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
+    [Music], (background noise), ♪, special-token leaks like <|endoftext|>
+    or a <|0.00|> timestamp ... — the exact patterns
+    :func:`clean_whisper_artifacts` strips during normal cleanup, reused here
+    (Sol pr67 r2) to build a safety copy for the speech-guard's own checks,
+    which must never read one of Whisper's own annotations, or a leaked
+    special token like <|endoftext|>, as a transcribed word (Sol pr67 r3).
+    """
+    import re
+
+    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
+    text = re.sub(r'\*+', '', text)
+    text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[' + _NOISE_MARKER + r'\]', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\(' + _NOISE_MARKER + r'\)', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'♪+', ' ', text)
+    # Whisper special-token leaks: <|endoftext|>, a <|0.00|> timestamp, etc.
+    text = re.sub(r'<\|[^|]*\|>', ' ', text)
+    return text
+
+
+# Anything Whisper wrapped, whatever it says inside: [Music], (door opens),
+# {noise}, full-width and CJK brackets, <|endoftext|>.
+_WRAP_OPENERS = '[({（【「『'
+_WRAP_CLOSERS = '])}）】」』'
+# Whisper's own music symbols (its tokenizer's non-speech set), all one kind.
+_MUSIC_SYMBOLS = '♩♪♫♬♭♮♯'
+
+
+def _noise_check_safety_copy(text: str) -> str:
+    """A safety copy of *text* for the noise-verdict speech-guard's own two
+    checks ONLY (Sol pr67 r2) — never what Raw Transcript, or anything else
+    downstream, sees: an accepted recording's text is returned unchanged.
+
+    Nothing Whisper wrapped counts as a spoken word here, whatever is
+    inside (Sol pr67 r6). Erring towards removal is safe on this path only:
+    these are recordings 1.3.0 dropped outright as having no speech
+    activity, so a wrongly rejected one is dropped exactly as it was
+    before, while annotation text wrongly counted as speech would type
+    something that was never said.
+
+    What is wrapped is worked out on the original text in one pass, then
+    removed together (Sol pr67 r8): removing one kind of bracket first
+    exposed another kind's contents ("[noise (] loud [) noise]"). Brackets
+    of every kind, and <| |> special tokens, count as one nesting depth, so
+    a crossed or mismatched pair still covers everything between; an opener
+    never closed covers to the end, a closer never opened, from the start.
+    Asterisks and music symbols open and close alike, so their nesting
+    can't be told apart (Sol pr67 r7): from the first of a kind to the last
+    is covered, or to the end when their count is odd. Whitespace is then
+    canonicalised the same way normal cleanup does right before its own
+    final hallucination check.
+    """
+    import re
+
+    text = text or ""
+    covered = [False] * len(text)
+    depth = 0
+    cut_before = 0
+    i = 0
+    while i < len(text):
+        if text.startswith('<|', i) or text[i] in _WRAP_OPENERS:
+            width = 2 if text.startswith('<|', i) else 1
+            depth += 1
+            covered[i:i + width] = [True] * width
+        elif text.startswith('|>', i) or text[i] in _WRAP_CLOSERS:
+            width = 2 if text.startswith('|>', i) else 1
+            covered[i:i + width] = [True] * width
+            if depth:
+                depth -= 1
+            else:
+                cut_before = i + width
+        else:
+            width = 1
+            if depth:
+                covered[i] = True
+        i += width
+    covered[:cut_before] = [True] * cut_before
+    for symbols in ('*', _MUSIC_SYMBOLS):
+        at = [k for k, ch in enumerate(text) if ch in symbols]
+        if at:
+            last = at[-1] if len(at) % 2 == 0 else len(text) - 1
+            covered[at[0]:last + 1] = [True] * (last + 1 - at[0])
+    kept = ''.join(' ' if gone else ch for ch, gone in zip(text, covered))
+    return re.sub(r'\s+', ' ', kept).strip()
+
+
 # whisper.cpp refuses more than 8 decoders ("too many decoders requested"),
 # which made a hand-edited beam_size of 9+ fail every dictation.
 WHISPER_MAX_DECODERS = 8
@@ -2630,49 +3380,12 @@ def clean_whisper_artifacts(
     # Also handle "ll, "re, "ve (two-letter suffixes)
     text = re.sub(r'(\w)"(ll|re|ve)\b', r"\1'\2", text, flags=re.IGNORECASE)
 
-    # Remove asterisk-wrapped non-speech markers (Whisper uses *text* for sounds/music)
-    # e.g., *loud noise*, *bird music*, *laughing* → removed
-    text = re.sub(r'\*[^*]{1,40}\*', ' ', text)
-    # Clean orphaned/stray asterisks
-    text = re.sub(r'\*+', '', text)
-
-    # Remove [BLANK_AUDIO] and similar markers (case insensitive)
-    # Replace with space to preserve word boundaries (will be normalized later)
-    text = re.sub(r'\[BLANK_AUDIO\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[SILENCE\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[MUSIC\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\[APPLAUSE\]', ' ', text, flags=re.IGNORECASE)
-
-    # Generalized noise annotations. Whisper emits many bracketed/parenthesized
-    # variants beyond the exact markers above — "[audience noise]" was typed
+    # Remove Whisper's own non-speech annotations: *laughing*, [BLANK_AUDIO],
+    # [Music], (background noise), ♪ ... — "[audience noise]" was typed
     # verbatim into a user's document when they dictated near-silence (launch
-    # feedback). Strip short annotations built ONLY from known noise vocabulary
-    # so legitimately dictated bracket text survives.
-    _noise_word = (
-        r'(?:audience|background|street|wind|static|noise|noises|sound|sounds|'
-        r'music|applause|laughter|laughing|laughs|coughing|coughs?|typing|'
-        r'keyboard|clicking|clicks|silence|silent|inaudible|unintelligible|'
-        r'indistinct|chatter|murmuring|breathing|sighs?|sighing|sniffs?|'
-        r'sniffing|beeping|buzzing|humming|rustling|footsteps|door|engine|'
-        r'clapping|claps|cheering|cheers|whistling|whistles|ringing|phone|'
-        r'camera|shutter|snapping|snaps|tapping|taps|knocking|knocks|'
-        r'banging|thud|thumping|crowd|birds?|chirping|barking|dog|rain|'
-        r'thunder|water|waves|crackling|scraping|shuffling|whispering|'
-        r'whispers|mumbling|mumbles|gasps?|gasping|groans?|groaning|'
-        r'grunts?|grunting|snoring|yawning|swallowing|throat|clearing)'
-    )
-    # Short joiners ("[sound of wind]", "(sound of the rain)") may sit between
-    # noise words; the annotation must still start and end with one.
-    _joiner = r'(?:\s+(?:of|the|a|an|and|in|from|with))*'
-    _noise_marker = r'\s*' + _noise_word + r'(?:' + _joiner + r'\s+' + _noise_word + r'){0,2}\s*'
-    text = re.sub(r'\[' + _noise_marker + r'\]', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\(' + _noise_marker + r'\)', ' ', text, flags=re.IGNORECASE)
-
-    # Remove music note symbols (replace with space to preserve word boundaries)
-    text = re.sub(r'♪+', ' ', text)
-
-    # Remove Whisper special token leaks: <|...|> patterns (timestamps, end-of-text, etc.)
-    text = re.sub(r'<\|[^|]*\|>', ' ', text)
+    # feedback). Shared with the speech-guard's safety copy (Sol pr67 r2) so
+    # both strip exactly the same patterns.
+    text = _strip_non_speech_markers(text)
 
     # Fix angle brackets that Whisper inserts instead of punctuation
     # < often replaces commas, > often replaces periods
@@ -2720,10 +3433,10 @@ def clean_whisper_artifacts(
     # Drop the whole thing if the entire cleaned output is a known Whisper
     # phrase-hallucination (the stock YouTube-caption strings it emits on silence).
     # Only the ENTIRE output is checked — never a mid-sentence substring.
-    _phrase_candidate = _collapse_repeated_sentences_for_phrase_match(text)
-    _phrase_key = _phrase_candidate.lower().rstrip('.!?,;: ').strip()
-    if _phrase_key in _WHISPER_PHRASE_HALLUCINATIONS:
-        print(f"[Transcription] Dropped Whisper phrase-hallucination: {text!r}")
+    if _is_whisper_phrase_hallucination(text):
+        # Say it was dropped, never what it said (Sol pr67 r2) — the speech-
+        # guard's own diagnostics must not leak recognized text either.
+        print("[Transcription] Dropped Whisper phrase-hallucination")
         return ""
 
     # Log if we cleaned something
@@ -3169,6 +3882,8 @@ def transcribe_with_config(
     config: dict, 
     context: str = "",
     skip_post_processing: bool = False,
+    request_token: Optional[int] = None,
+    unprompted: bool = False,
 ) -> str:
     """
     Transcribe using settings from config dictionary.
@@ -3180,6 +3895,15 @@ def transcribe_with_config(
         context: Optional context from previous transcription (helps continuity)
         skip_post_processing: If True, skip LLM post-processing (useful for chunked mode
             where post-processing should happen on the final combined text)
+        request_token: The dictation's WhisperServerBackend.request_token(),
+            taken when it began; a retirement since raises RequestAbandoned
+        unprompted: Send Whisper no prompt, vocabulary or context. For audio the
+            speech check calls steady noise: primed with the dictation prompt,
+            large-v3-turbo turned 9 of 36 fan/hum/hiss recordings into invented
+            sentences; unprompted, 90 of 90 came back as "." or one word. The
+            recognizer's own output is then held to the two-word rule (and
+            checked for a known hallucination phrase) before anything else —
+            including Raw Transcript's early return — can touch it.
 
     Returns:
         Transcribed text string
@@ -3200,8 +3924,45 @@ def transcribe_with_config(
     
     config["prompt"] = original_prompt
     
-    backend = get_backend(config)
-    text = backend.transcribe(audio_path, context=context)
+    # A caller without a dictation (the Welcome test, a benchmark) is one
+    # from here: a retirement during ASR still skips its cleanup (Sol mac r7).
+    if request_token is None:
+        request_token = WhisperServerBackend.request_token()
+    with dictation_requests(request_token):
+        WhisperServerBackend._check_not_abandoned(request_token)
+        backend = get_backend(config)
+        WhisperServerBackend._check_not_abandoned(request_token)
+        if unprompted:
+            # A Core ML server not yet loaded hands the audio to its Metal
+            # stand-in, which would otherwise prime Whisper with its own prompt.
+            for heard_by in (backend, getattr(backend, "_ready_only_fallback", None)):
+                if heard_by is not None:
+                    heard_by.prompt = ""
+                    heard_by.custom_vocabulary = []
+            context = ""
+        text = backend.transcribe(audio_path, context=context)
+
+    if unprompted:
+        # Evaluate the RECOGNIZER's own words here, before vocabulary
+        # replacement or LLM cleanup get a chance to rewrite them: those ran
+        # AFTER the two-word rule below and could turn a one-word noise
+        # artifact into something that reads like two words ("Okay." ->
+        # "Sounds good.", wrongly kept) or collapse real two-word speech into
+        # one corrected term ("open ai" -> "OpenAI", wrongly dropped). A known
+        # Whisper hallucination phrase is rejected here too — unlike the
+        # two-word rule, a phrase like "Thank you for watching." has enough
+        # words to pass it, so Raw Transcript must not let it through either.
+        # Both checks run on a SAFETY COPY only (Sol pr67 r2): stripped of
+        # Whisper's own non-speech annotations and whitespace-canonicalised,
+        # so "[Music] Okay." can't pass as two words and repeated whitespace
+        # inside a known hallucination phrase can't dodge the match. The text
+        # returned below, including to Raw Transcript, is still the raw text.
+        from wayfinder.core.recorder import noise_transcript_has_speech
+        safety_text = _noise_check_safety_copy(text)
+        if (_is_whisper_phrase_hallucination(safety_text, noise_check=True)
+                or not noise_transcript_has_speech(safety_text)):
+            # Say the recording was rejected, never what was heard.
+            return ""
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep
     # entitlement checks in get_backend(), but bypass every Aura text rewrite
@@ -3240,6 +4001,8 @@ def transcribe_with_config(
     post_processing_enabled = config.get("post_processing_enabled", True)
     
     if (post_processing_enabled or tone == "minimal") and text and not skip_post_processing:
+        # No cleanup model for words nobody will type.
+        WhisperServerBackend._check_not_abandoned(request_token)
         try:
             from .postprocessor import process_with_config
             import os
@@ -3268,13 +4031,16 @@ def transcribe_with_config(
                     print(f"[Post-processing] Using local model: {os.path.basename(model_path)}")
             
             original_text = text
-            text = process_with_config(text, config)
+            with dictation_requests(request_token):
+                text = process_with_config(text, config)
             
             if text != original_text:
                 print(f"[Post-processing] ✓ Text cleaned ({len(original_text)} → {len(text)} chars)")
             else:
                 print("[Post-processing] Text unchanged (or processing skipped)")
                 
+        except RequestAbandoned:
+            raise
         except ImportError as e:
             print(f"[Post-processing] ✗ Module not available: {e}")
         except Exception as e:

@@ -250,7 +250,7 @@ libraries into the sandbox.
 
 ### Local ASR backend auto-select (GPU)
 
-Settings → **Backend** offers **Auto (whisper.cpp)** | whisper.cpp |
+Settings → Advanced → Processing → **Backend** offers **Auto (whisper.cpp)** | whisper.cpp |
 **Faster-Whisper (experimental)** (listed only when NVIDIA is detected).
 
 Logic: `recommend_local_transcription_backend()` / `apply_auto_transcription_backend()`
@@ -301,7 +301,7 @@ cmake --build build --config Release -j$(nproc)
 ```
 
 After rebuilding, enable GPU in Wayfinder Aura settings:
-1. Open Settings → Advanced → GPU Acceleration
+1. Open Settings → Processing Mode → GPU Acceleration
 2. Enable "GPU Acceleration"
 3. GPU Layers: "Auto (all)" for maximum speed
 

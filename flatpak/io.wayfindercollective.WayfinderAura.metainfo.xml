@@ -127,6 +127,32 @@
   </supports>
 
   <releases>
+    <release version="1.3.0" date="2026-10-20">
+      <description>
+        <p>Wayfinder Aura 1.3.0:</p>
+        <ul>
+          <li>A simple workspace, on by default.</li>
+          <li>Windows: Aura offers a restart when it stops answering the hotkey.</li>
+          <li>Windows: diagnostics for the dictation pill and for sleep.</li>
+          <li>The Disappearing indicator now uses the glassmorphic pill on every platform.</li>
+          <li>Consistent panels across Linux, Windows, and macOS.</li>
+          <li>Settings shows only what most people need.</li>
+          <li>The Mic Test moved to the Dictate tab,</li>
+          <li>Linux Flatpak updates install in place and Settings includes a Check for Updates button.</li>
+          <li>Vocabulary editors no longer trap page scrolling.</li>
+          <li>The macOS mic button stays sharp on Retina screens.</li>
+          <li>Mic Test and Gamer Mode card borders stay continuous.</li>
+          <li>Advanced panes keep their rounded edges and matching background.</li>
+          <li>macOS waveform placement follows the layout.</li>
+          <li>Simple settings use the app's shared state.</li>
+          <li>macOS permissions and Ultra setup flow.</li>
+          <li>Periodic update checks while running.</li>
+          <li>The desktop asks one question at a time on first run, and the tour says what is coming.</li>
+          <li>Typing into every app recovers by itself.</li>
+          <li>The AppImage tells the desktop who is asking.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-10-05">
       <description>
         <p>Linux: dictation for gamers on every desktop.</p>

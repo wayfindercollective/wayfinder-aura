@@ -156,11 +156,6 @@ a = Analysis(
         'sounddevice',
         'numpy',
         'numpy.core._multiarray_umath',
-        # SciPy for audio preprocessing (important for quality)
-        'scipy',
-        'scipy.signal',
-        'scipy.io',
-        'scipy.io.wavfile',
         # System integration
         'evdev',
         # PyQt6 for overlay
@@ -180,6 +175,9 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        # No SciPy: core.audio_dsp's NumPy filters replace it (a dev install
+        # still has it for tests/test_audio_dsp.py).
+        'scipy',
         # Exclude test frameworks from build
         'pytest',
         'pytest_cov',

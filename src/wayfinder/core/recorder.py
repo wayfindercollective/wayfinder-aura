@@ -7,17 +7,19 @@ Supports chunked recording for indefinite duration sessions.
 """
 
 import queue
+import re
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import wave
 from collections.abc import Mapping
 from numbers import Real
 from math import gcd
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import numpy as np
 
@@ -63,44 +65,27 @@ except (ImportError, OSError) as _sounddevice_error:
     sd = _MissingSoundDevice()
     sys.modules.setdefault("sounddevice", sd)
 
-# SciPy's signal package pulls in a large statistics/interpolation stack. Importing it at
-# module scope added roughly a second to every launch even though it is only needed after a
-# recording is complete. Resolve and cache the three functions on first audio-processing use.
-_SCIPY_SIGNAL_FUNCTIONS = None
-_SCIPY_IMPORT_ATTEMPTED = False
-_SCIPY_IMPORT_LOCK = threading.Lock()
+# Resampling and the rumble filter are NumPy (core.audio_dsp), checked against
+# scipy.signal by tests/test_audio_dsp.py. SciPy itself is no longer bundled:
+# it was ~100 MB of the Flatpak and cost ~0.4-1 s to import on the first
+# dictation, for three functions.
+from wayfinder.core.audio_dsp import butter, filtfilt, resample_poly  # noqa: E402
 
-
-def _get_scipy_signal_functions():
-    """Return ``(butter, filtfilt, resample_poly)``: SciPy's, or the NumPy twins.
-
-    The import is deliberately lazy so microphone discovery and recorder construction stay
-    fast. Without SciPy (the Windows bundle leaves it out) the same algorithms come from
-    ``core.audio_dsp``, checked against SciPy by tests/test_audio_dsp.py. The result is
-    cached, so repeated dictations never probe the import again.
-    """
-    global _SCIPY_SIGNAL_FUNCTIONS, _SCIPY_IMPORT_ATTEMPTED
-    if _SCIPY_IMPORT_ATTEMPTED:
-        return _SCIPY_SIGNAL_FUNCTIONS
-    with _SCIPY_IMPORT_LOCK:
-        if _SCIPY_IMPORT_ATTEMPTED:
-            return _SCIPY_SIGNAL_FUNCTIONS
-        try:
-            from scipy.signal import butter, filtfilt, resample_poly
-        except ImportError:
-            from wayfinder.core.audio_dsp import butter, filtfilt, resample_poly
-        _SCIPY_SIGNAL_FUNCTIONS = (butter, filtfilt, resample_poly)
-        _SCIPY_IMPORT_ATTEMPTED = True
-    return _SCIPY_SIGNAL_FUNCTIONS
+# Medium and Heavy preprocessing high-pass corner.
+RUMBLE_CUTOFF_HZ = 80
 
 
 def preload_audio_processing() -> None:
-    """Warm optional audio processing after first paint.
+    """Warm the rumble filter after first paint.
 
-    This is a one-shot import, not a resident worker. It keeps SciPy off the click-to-visible
-    path without making the first completed dictation absorb the import cost.
+    A one-shot, not a resident worker: the filter caches its impulse response,
+    so computing it here keeps the first Medium/Heavy dictation from paying.
     """
-    _get_scipy_signal_functions()
+    try:
+        b, a = butter(2, RUMBLE_CUTOFF_HZ / (WHISPER_SAMPLE_RATE / 2), btype="high")
+        filtfilt(b, a, np.zeros(64))
+    except Exception:
+        pass
 
 
 # Target sample rate for Whisper
@@ -158,30 +143,134 @@ def _frame_rms(audio_data: np.ndarray, sample_rate: int, frame_ms: float = 20.0)
     return np.sqrt(np.mean(frames * frames, axis=1)).astype(np.float32)
 
 
-def audio_has_speech_activity(audio_data: np.ndarray, sample_rate: int = 16000) -> bool:
-    """Conservative speech-activity guard for Whisper hallucination prevention.
+def _dbfs(level: float) -> float:
+    return 20.0 * float(np.log10(max(level, 1e-10)))
+
+
+class SpeechActivity(NamedTuple):
+    """What the speech-activity check measured, and its verdict.
+
+    ``verdict`` is ``"silence"`` (nothing above SILENCE_PEAK_THRESHOLD),
+    ``"noise"`` (audible, but its loudness barely varies, like a fan, hum or
+    hiss) or ``"speech"``. ``floor`` and ``loud`` are the 20th and 90th
+    percentile 20ms RMS levels the noise test compares.
+    """
+
+    verdict: str
+    peak: float
+    floor: float
+    loud: float
+
+    @property
+    def has_speech(self) -> bool:
+        return self.verdict == "speech"
+
+    def describe(self) -> str:
+        """Levels for the activity log, e.g. ``peak -24 dBFS, floor -52 dBFS, loud/floor ×8.4``."""
+        ratio = self.loud / max(self.floor, 1e-7)
+        return (f"peak {_dbfs(self.peak):.0f} dBFS, floor {_dbfs(self.floor):.0f} dBFS, "
+                f"loud/floor ×{ratio:.1f}")
+
+
+def analyze_speech_activity(audio_data: np.ndarray, sample_rate: int = 16000) -> SpeechActivity:
+    """Conservative speech-activity check for Whisper hallucination prevention.
 
     Peak-only silence detection treats a steady fan, hum, or low microphone noise
     floor as speech. Normalization can then amplify that stationary sound into a
     confident invented transcript. Speech has substantial short-time energy
-    variation; stationary noise does not. Reject only recordings at least 0.5s
-    long whose 20ms RMS distribution is very flat, otherwise fail open so unusual
-    but real speech is preserved.
+    variation; stationary noise does not. Only recordings at least 0.5s long
+    whose 20ms RMS distribution is very flat are called noise; everything else
+    fails open so unusual but real speech is preserved.
     """
     samples = np.asarray(audio_data, dtype=np.float32).reshape(-1)
     if samples.size == 0:
-        return False
+        return SpeechActivity("silence", 0.0, 0.0, 0.0)
     samples = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
-    if float(np.max(np.abs(samples))) < SILENCE_PEAK_THRESHOLD:
-        return False
-
+    peak = float(np.max(np.abs(samples)))
     frame_levels = _frame_rms(samples, sample_rate)
+    if frame_levels.size:
+        floor = float(np.percentile(frame_levels, 20))
+        loud = float(np.percentile(frame_levels, 90))
+    else:
+        floor = loud = 0.0
+    if peak < SILENCE_PEAK_THRESHOLD:
+        return SpeechActivity("silence", peak, floor, loud)
     if frame_levels.size < 25:  # less than 0.5s: peak guard only, fail open
+        return SpeechActivity("speech", peak, floor, loud)
+    verdict = "speech" if loud / max(floor, 1e-7) >= 1.8 else "noise"
+    return SpeechActivity(verdict, peak, floor, loud)
+
+
+def audio_has_speech_activity(audio_data: np.ndarray, sample_rate: int = 16000) -> bool:
+    """Whether :func:`analyze_speech_activity` calls *audio_data* speech."""
+    return analyze_speech_activity(audio_data, sample_rate).has_speech
+
+
+# Unprompted, Whisper's whole output for steady noise is "." or one stray word
+# ("so", "Okay.", "Oh"): large-v3-turbo with Light preprocessing on 90 fan/hum/
+# hiss recordings, 2026-10-13. Audio the check calls noise is still transcribed
+# (unprompted), because that verdict also deleted real dictations on a MacBook
+# Air mic, but its transcript only counts as speech with at least this many words.
+NOISE_TRANSCRIPT_MIN_WORDS = 2
+
+# A script that doesn't separate words with spaces (Chinese, Japanese kana,
+# Korean Hangul, Thai, Lao, Tibetan, Burmese, Khmer, Balinese, Javanese, ...)
+# would otherwise read as one long "word" and get silently dropped no matter
+# how much was said; such a transcript is counted by character instead, at
+# roughly a word's worth per character. Lao, Burmese and Khmer were missing
+# (Sol pr67 r3).
+NOISE_TRANSCRIPT_MIN_NO_SPACE_CHARS = 4
+_NO_SPACE_SCRIPT_RANGES = (
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
+    (0x3040, 0x30FF),   # Hiragana + Katakana
+    (0xAC00, 0xD7A3),   # Hangul syllables
+    (0x0E00, 0x0E7F),   # Thai
+    (0x0E80, 0x0EFF),   # Lao
+    (0x0F00, 0x0FFF),   # Tibetan
+    (0x1000, 0x109F),   # Myanmar (Burmese)
+    (0x1780, 0x17FF),   # Khmer
+    (0x1B00, 0x1B7F),   # Balinese
+    (0xA980, 0xA9DF),   # Javanese
+)
+
+# Any Unicode letter or digit, excluding "_" (which \w matches but a word
+# doesn't consist of).
+_WORD_CHAR = re.compile(r"[^\W_]", re.UNICODE)
+
+
+def _is_no_space_script_letter(ch: str) -> bool:
+    """Whether *ch* is a letter or combining mark of a script written without
+    spaces: its block's digits and punctuation ("・・・・") are not speech
+    (Sol pr67 r3)."""
+    if not any(lo <= ord(ch) <= hi for lo, hi in _NO_SPACE_SCRIPT_RANGES):
+        return False
+    return unicodedata.category(ch)[0] in ("L", "M")
+
+
+def noise_transcript_has_speech(text: str) -> bool:
+    """Whether Whisper's transcript of noise-verdict audio is real speech.
+
+    Splits on whitespace and keeps a token if it has any letter or digit, so
+    an internal apostrophe or dot ("I'm.", "Let's.", "O.K.") stays one word
+    instead of splitting into two the way a bare ``\\w+`` scan would (that
+    counted "I'm." as two words and let a single filler word through).
+
+    The no-space-script count and the whitespace word count are judged
+    separately, and either reaching its own bar is enough (Sol pr67 r2): a
+    sentence with no-space-script text used to also need EVERY letter in the
+    whole transcript to come from such a script, so one digit, Latin letter
+    or bit of punctuation mixed in ("10時に", "GitHubの...", a trailing "。")
+    fell through to whitespace-word-counting, which sees the whole no-space
+    run as a single giant "word" and drops a real sentence as noise. Counting
+    no-space-script letters on their own fixes that without weakening the
+    word-count side for scripts that DO use spaces.
+    """
+    text = text or ""
+    no_space_letters = sum(1 for ch in text if _is_no_space_script_letter(ch))
+    if no_space_letters >= NOISE_TRANSCRIPT_MIN_NO_SPACE_CHARS:
         return True
-    low = float(np.percentile(frame_levels, 20))
-    high = float(np.percentile(frame_levels, 90))
-    dynamic_ratio = high / max(low, 1e-7)
-    return dynamic_ratio >= 1.8
+    words = [token for token in text.split() if _WORD_CHAR.search(token)]
+    return len(words) >= NOISE_TRANSCRIPT_MIN_WORDS
 
 
 def audio_is_digital_silence(audio_data: np.ndarray) -> bool:
@@ -197,30 +286,6 @@ def audio_is_digital_silence(audio_data: np.ndarray) -> bool:
     return samples.size > 0 and not np.any(samples)
 
 
-def get_wav_peak_amplitude(audio_path: str | Path) -> float | None:
-    """Return a mono/stereo PCM WAV's normalized peak, or ``None`` if unreadable.
-
-    Chunked recordings are written as signed 16-bit PCM before transcription.
-    Measuring the saved file lets the orchestration layer reject an individually
-    silent trailing chunk even when earlier chunks contained real speech.  Fail
-    open for an unexpected WAV format so a format mismatch never drops words.
-    """
-    try:
-        with wave.open(str(audio_path), "rb") as wav_file:
-            if wav_file.getsampwidth() != 2:
-                return None
-            frames = wav_file.readframes(wav_file.getnframes())
-        if not frames:
-            return 0.0
-        samples = np.frombuffer(frames, dtype="<i2")
-        if samples.size == 0:
-            return 0.0
-        # Promote before abs: abs(int16(-32768)) overflows in int16.
-        return float(np.max(np.abs(samples.astype(np.int32)))) / 32768.0
-    except (OSError, EOFError, wave.Error):
-        return None
-
-
 def get_wav_duration_seconds(audio_path: str | Path) -> float | None:
     """Return a WAV's length in seconds, or ``None`` if unreadable."""
     try:
@@ -231,8 +296,14 @@ def get_wav_duration_seconds(audio_path: str | Path) -> float | None:
         return None
 
 
-def wav_has_speech_activity(audio_path: str | Path) -> bool | None:
-    """Return speech activity for a 16-bit PCM WAV, or ``None`` if unreadable."""
+def analyze_wav_speech_activity(audio_path: str | Path) -> SpeechActivity | None:
+    """:func:`analyze_speech_activity` for a 16-bit PCM WAV, or ``None`` if unreadable.
+
+    Chunked recordings are written as signed 16-bit PCM before transcription.
+    Measuring the saved file lets the orchestration layer skip an individually
+    silent trailing chunk even when earlier chunks contained real speech. Callers
+    fail open on ``None`` so a format mismatch never drops words.
+    """
     try:
         with wave.open(str(audio_path), "rb") as wav_file:
             if wav_file.getsampwidth() != 2:
@@ -240,7 +311,7 @@ def wav_has_speech_activity(audio_path: str | Path) -> bool | None:
             sample_rate = wav_file.getframerate()
             frames = wav_file.readframes(wav_file.getnframes())
         samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
-        return audio_has_speech_activity(samples, sample_rate)
+        return analyze_speech_activity(samples, sample_rate)
     except (OSError, EOFError, wave.Error, ValueError):
         return None
 
@@ -913,20 +984,8 @@ def resample_audio(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.nd
     if orig_rate == target_rate:
         return audio
     
-    scipy_signal = _get_scipy_signal_functions()
-    if scipy_signal is not None:
-        # Use scipy's polyphase resampling for high quality
-        _, _, resample_poly = scipy_signal
-        g = gcd(orig_rate, target_rate)
-        up = target_rate // g
-        down = orig_rate // g
-        return resample_poly(audio, up, down).astype(np.float32)
-    else:
-        # Simple linear interpolation fallback
-        duration = len(audio) / orig_rate
-        target_length = int(duration * target_rate)
-        indices = np.linspace(0, len(audio) - 1, target_length)
-        return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
+    g = gcd(orig_rate, target_rate)
+    return resample_poly(audio, target_rate // g, orig_rate // g).astype(np.float32)
 
 
 def preprocess_audio(
@@ -952,7 +1011,7 @@ def preprocess_audio(
         Preprocessed audio data
     """
     # Work with a finite float copy. PortAudio should never emit NaN/Inf, but a
-    # malformed buffer must not become undefined int16 samples or poison SciPy.
+    # malformed buffer must not become undefined int16 samples or poison the filters.
     audio = np.asarray(audio_data, dtype=np.float32).copy()
     if audio.size == 0:
         return audio
@@ -975,17 +1034,13 @@ def preprocess_audio(
     
     # Medium and Heavy: High-pass filter at 80Hz (remove rumble/noise)
     if level in ("medium", "heavy"):
-        scipy_signal = _get_scipy_signal_functions()
-        if scipy_signal is not None:
-            butter, filtfilt, _ = scipy_signal
-            try:
-                nyquist = sample_rate / 2
-                cutoff = 80 / nyquist
-                if cutoff < 1:
-                    b, a = butter(2, cutoff, btype='high')
-                    audio = filtfilt(b, a, audio).astype(np.float32)
-            except Exception:
-                pass
+        try:
+            cutoff = RUMBLE_CUTOFF_HZ / (sample_rate / 2)
+            if cutoff < 1:
+                b, a = butter(2, cutoff, btype='high')
+                audio = filtfilt(b, a, audio).astype(np.float32)
+        except Exception:
+            pass
     
     # Heavy only: frame-based soft noise gate. A sample-by-sample gate changes
     # gain at every waveform zero crossing, adding distortion while barely
@@ -1546,11 +1601,15 @@ class AudioRecorder:
         """Highest absolute sample seen since start() — compare to SILENCE_PEAK_THRESHOLD."""
         return self.last_peak
 
+    def speech_activity(self) -> SpeechActivity:
+        """The speech-activity verdict and levels for the captured audio."""
+        if not self.frames:
+            return analyze_speech_activity(np.empty(0, dtype=np.float32))
+        return analyze_speech_activity(np.concatenate(self.frames, axis=0), self.sample_rate)
+
     def has_speech_activity(self) -> bool:
         """Whether captured audio looks like speech rather than stationary noise."""
-        if not self.frames:
-            return False
-        return audio_has_speech_activity(np.concatenate(self.frames, axis=0), self.sample_rate)
+        return self.speech_activity().has_speech
 
     def is_digital_silence(self) -> bool:
         """Whether the device delivered audio but every sample was exactly zero."""
@@ -1850,13 +1909,17 @@ class ChunkedRecorder:
         """Highest absolute sample seen since start() — compare to SILENCE_PEAK_THRESHOLD."""
         return self.last_peak
 
-    def has_speech_activity(self) -> bool:
-        """Whether captured audio looks like speech rather than stationary noise."""
+    def speech_activity(self) -> SpeechActivity:
+        """The speech-activity verdict and levels for the captured audio."""
         with self._buffer_lock:
             if not self._buffer:
-                return False
+                return analyze_speech_activity(np.empty(0, dtype=np.float32))
             audio = np.concatenate(self._buffer, axis=0)
-        return audio_has_speech_activity(audio, self.sample_rate)
+        return analyze_speech_activity(audio, self.sample_rate)
+
+    def has_speech_activity(self) -> bool:
+        """Whether captured audio looks like speech rather than stationary noise."""
+        return self.speech_activity().has_speech
 
     def is_digital_silence(self) -> bool:
         """Whether the device delivered audio but every sample was exactly zero."""

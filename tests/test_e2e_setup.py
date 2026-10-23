@@ -367,6 +367,7 @@ class TestCheckBuildTools:
 # =============================================================================
 
 
+@pytest.mark.usefixtures("no_host_binaries")
 class TestCheckWhisperCpp:
     """Test whisper.cpp binary detection."""
 

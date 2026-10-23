@@ -59,26 +59,39 @@ def test_resample_poly_matches_scipy_for_every_device_rate(orig):
     np.testing.assert_allclose(ours, theirs, rtol=0, atol=1e-9)
 
 
-def test_recorder_uses_numpy_when_scipy_is_missing(monkeypatch):
+def test_recorder_runs_on_the_numpy_twins():
+    # No bundle ships SciPy any more: the recorder must not reach for it.
     from wayfinder.core import recorder
 
-    monkeypatch.setattr(recorder, "_SCIPY_SIGNAL_FUNCTIONS", None)
-    monkeypatch.setattr(recorder, "_SCIPY_IMPORT_ATTEMPTED", False)
-    import builtins
-
-    real_import = builtins.__import__
-
-    def no_scipy(name, *args, **kwargs):
-        if name.startswith("scipy"):
-            raise ImportError(name)
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", no_scipy)
-    butter, filtfilt, resample_poly = recorder._get_scipy_signal_functions()
-    assert butter is audio_dsp.butter and resample_poly is audio_dsp.resample_poly
+    assert recorder.butter is audio_dsp.butter
+    assert recorder.filtfilt is audio_dsp.filtfilt
+    assert recorder.resample_poly is audio_dsp.resample_poly
     audio = _speechlike(48000, 1.0)
     out = recorder.resample_audio(audio, 48000, 16000)
     assert out.dtype == np.float32 and len(out) == 16000
     medium = recorder.preprocess_audio(_speechlike(16000, 1.0), 16000, "medium")
     spectrum = np.abs(np.fft.rfft(medium))
     assert spectrum[25] < spectrum[140] * 0.2  # 25 Hz rumble removed, 140 Hz voice kept
+
+
+@pytest.mark.parametrize("length", [0, 1, 2, 5, 37])
+@pytest.mark.parametrize("up, down", [(1, 3), (160, 441), (2, 3), (1, 1)])
+def test_resample_poly_matches_scipy_on_tiny_inputs(length, up, down):
+    # The recorder no longer falls back to np.interp: these run on every
+    # clipped, aborted or near-silent recording.
+    x = np.linspace(-1.0, 1.0, length)
+    expected = signal.resample_poly(x, up, down)
+    got = audio_dsp.resample_poly(x, up, down)
+    assert got.shape == expected.shape
+    np.testing.assert_allclose(got, expected, atol=1e-9)
+
+
+@pytest.mark.parametrize("seconds", [60, 300])
+def test_filtfilt_matches_scipy_on_long_recordings(seconds):
+    # Overlap-add blocks: block edges must not show in a long dictation.
+    rate = 16000
+    x = _speechlike(rate, seconds).astype(np.float64)
+    b, a = signal.butter(2, 80 / (rate / 2), btype="high")
+    np.testing.assert_allclose(
+        audio_dsp.filtfilt(b, a, x), signal.filtfilt(b, a, x), rtol=0, atol=1e-9
+    )

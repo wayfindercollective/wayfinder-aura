@@ -2,6 +2,8 @@
 Tests for the transcription module.
 """
 
+import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -673,6 +675,37 @@ class TestWhisperServerBackend:
                 backend.transcribe(str(audio), deadline=time.monotonic() + 2)
         assert str(binary) not in _T._CPU_FALLBACK_ACTIVE, \
             "a deadline-clamped timeout must NOT memoize CPU fallback"
+
+    def test_a_pre_spawn_expiry_does_not_poison_gpu_health_either(self, tmp_path):
+        """Sol mac r21 (Finding 1 caller audit): HelperNotStarted — the deadline
+        passing before this attempt's helper was ever spawned — is the same
+        budget-vs-failure gap as the deadline-clamped TimeoutExpired case right
+        above, just one layer earlier. It must bail the same way, never reach
+        _activate_fallback's memoized CPU fallback."""
+        import time
+        from wayfinder.core import transcriber as _T
+        from wayfinder.core.transcriber import WhisperCppBackend, TranscriptionError
+        from wayfinder.utils.child_supervisor import HelperNotStarted
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        cpu = tmp_path / "whisper-cli-cpu"; cpu.write_text("#!/bin/sh\n"); cpu.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        _T._CPU_FALLBACK_ACTIVE.pop(str(binary), None)
+        backend = WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                    use_gpu=True, timeout=30)
+
+        def fake_run_tracked(cmd, **kw):
+            if "--help" in cmd:
+                m = MagicMock(); m.returncode = 0; m.stdout = ""; m.stderr = ""
+                return m
+            raise HelperNotStarted(cmd, kw.get("timeout"))   # nothing ran
+
+        with patch("wayfinder.core.transcriber.run_tracked", side_effect=fake_run_tracked):
+            with pytest.raises(TranscriptionError):
+                backend.transcribe(str(audio), deadline=time.monotonic() + 2)
+        assert str(binary) not in _T._CPU_FALLBACK_ACTIVE, \
+            "a pre-spawn expiry must NOT memoize CPU fallback either"
 
     def test_start_server_lock_acquire_bounded_by_deadline(self, tmp_path):
         """Round-4 Finding-1: a competing holder of _server_lock must not make a
@@ -1428,6 +1461,17 @@ class TestWhisperArtifactCleanup:
 
         assert clean_whisper_artifacts(text) == ""
 
+    def test_drop_print_never_includes_the_dropped_text(self, capsys):
+        """Finding 4 (Sol pr67 r2, scoped): the phrase-hallucination drop
+        print must say it happened without repeating what was heard."""
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        secret = "We'll be right back."
+        assert clean_whisper_artifacts(secret) == ""
+        out = capsys.readouterr().out
+        assert "Dropped" in out
+        assert secret not in out and "right back" not in out
+
     def test_keeps_known_phrase_inside_real_sentence(self):
         from wayfinder.core.transcriber import clean_whisper_artifacts
 
@@ -1441,6 +1485,131 @@ class TestWhisperArtifactCleanup:
         text = "Ship it today. Ship it today."
 
         assert clean_whisper_artifacts(text) == text
+
+    # Sol pr67 r3, finding 2's scope guard: the safety copy gets a
+    # stricter, SEPARATE asterisk rule precisely so normal cleanup's own
+    # output never has to change. These pin that down literally, and (when
+    # a `base` checkout of this review's starting commit is available as a
+    # sibling of this repo) also replay them against ITS clean_whisper_
+    # artifacts in a subprocess, so a future edit that drifts the two
+    # apart fails loudly instead of only matching a value written by hand.
+    _CLEANUP_PARITY_INPUTS = (
+        "*args and **kwargs",
+        "<|endoftext|> Okay.",
+        "<|0.00|> So,",
+        "Thank you for watching…",
+        "Hello [MUSIC] world.",
+        "Ship it today. Ship it today.",
+        "I'll see you next time after the build finishes.",
+        "*laughing* Okay, let's go.",
+        "Hello *world*, this is *emphasis* right.",
+    )
+
+    def test_normal_cleanup_output_is_unchanged_for_safety_copy_fix_inputs(self):
+        """These inputs exercise findings 2, 4 and 5's machinery
+        (asterisk handling, special-token stripping, punctuation folding),
+        all of which had to change the SAFETY COPY without changing what
+        normal cleanup returns -- pinned here so a future refactor that
+        merges the two paths can't silently do so."""
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        expected = {
+            "*args and **kwargs": "kwargs",
+            "<|endoftext|> Okay.": "Okay.",
+            "<|0.00|> So,": "So,",
+            "Thank you for watching…": "",
+            "Hello [MUSIC] world.": "Hello world.",
+            "Ship it today. Ship it today.": "Ship it today. Ship it today.",
+            "I'll see you next time after the build finishes.":
+                "I'll see you next time after the build finishes.",
+            "*laughing* Okay, let's go.": "Okay, let's go.",
+            "Hello *world*, this is *emphasis* right.": "Hello , this is right.",
+        }
+        for text in self._CLEANUP_PARITY_INPUTS:
+            assert clean_whisper_artifacts(text) == expected[text], text
+
+    def test_normal_cleanup_matches_the_pre_fix_base_commit(self):
+        """Best-effort cross-check against this review round's starting
+        commit (base/, a sibling of this checkout under the same pr67-r3
+        scratch work dir) -- skipped where that sibling doesn't exist, e.g.
+        once this patch has landed and base/ is gone."""
+        import json
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        base_root = Path(__file__).resolve().parents[2] / "base"
+        if not (base_root / "src" / "wayfinder" / "core" / "transcriber.py").exists():
+            pytest.skip("no sibling base/ checkout for this review round")
+
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1] + '/src')\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from wayfinder.core.transcriber import clean_whisper_artifacts\n"
+            "texts = json.loads(sys.argv[2])\n"
+            "print(json.dumps([clean_whisper_artifacts(t) for t in texts], ensure_ascii=False))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(base_root),
+             json.dumps(list(self._CLEANUP_PARITY_INPUTS))],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        base_outputs = json.loads(result.stdout.strip().splitlines()[-1])
+        tree_outputs = [clean_whisper_artifacts(t) for t in self._CLEANUP_PARITY_INPUTS]
+        assert tree_outputs == base_outputs
+
+    # Sol pr67 r4, finding 1: the noise path's new punctuation/quote fold
+    # and generic-repeat rejection leaked into normal cleanup. Normal
+    # cleanup's SPEECH-verdict output must match 2dad2af (orig/) exactly
+    # for each of these, including the two it used to wrongly drop.
+    _SPEECH_PATH_PARITY_INPUTS = (
+        "“Thank you”",             # “Thank you” -- curly quotes
+        "Please subscribe",
+        "We’ll be right back.",          # curly apostrophe
+        "Thank you for watching…",       # trailing ellipsis
+        "*args and **kwargs",
+        "*loud noise* Okay.",
+        "Thank you. Thank you, 李明。",         # mixed CJK name
+        "谢谢观看。谢谢观看。",  # mixed CJK repeat
+    )
+
+    def test_normal_cleanup_matches_orig_for_the_noise_check_scope_guard(self):
+        """Finding 1 (Sol pr67 r4): replayed against orig/ (2dad2af, this
+        review round's starting commit) in a subprocess, the same way the
+        base/ parity check above runs; skipped where that sibling doesn't
+        exist, e.g. once this patch has landed and orig/ is gone."""
+        import json
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        orig_root = Path(__file__).resolve().parents[2] / "orig"
+        if not (orig_root / "src" / "wayfinder" / "core" / "transcriber.py").exists():
+            pytest.skip("no sibling orig/ checkout for this review round")
+
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1] + '/src')\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from wayfinder.core.transcriber import clean_whisper_artifacts\n"
+            "texts = json.loads(sys.argv[2])\n"
+            "print(json.dumps([clean_whisper_artifacts(t) for t in texts], ensure_ascii=False))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(orig_root),
+             json.dumps(list(self._SPEECH_PATH_PARITY_INPUTS))],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        orig_outputs = json.loads(result.stdout.strip().splitlines()[-1])
+        tree_outputs = [clean_whisper_artifacts(t) for t in self._SPEECH_PATH_PARITY_INPUTS]
+        assert tree_outputs == orig_outputs
 
     def test_drops_observed_vocabulary_prompt_leak_when_hints_are_active(self):
         from wayfinder.core.transcriber import drop_whisper_prompt_leak
@@ -1643,6 +1812,45 @@ class TestGpuCpuFallback:
             backend.transcribe(audio)
         assert backend.whisper_binary not in transcriber._CPU_FALLBACK_ACTIVE
 
+    def test_a_reset_during_the_gpu_attempt_runs_no_cpu_attempt(self, tmp_path, monkeypatch):
+        # Sol mac r6: a dictation retired while its GPU attempt ran still
+        # launched the CPU attempt and memoized CPU for the session.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        marker = tmp_path / "cpu-runs"
+        backend, audio = self._backend(
+            tmp_path, gpu_body="kill -SEGV $$",
+            cpu_body=f'if [ "$1" = "-m" ]; then echo run >> "{marker}"; fi; echo "words nobody will type"',
+        )
+        run = transcriber.run_tracked
+
+        def reset_mid_attempt(cmd, **kwargs):
+            result = run(cmd, **kwargs)
+            if cmd[0] == backend.whisper_binary and cmd[1] == "-m":
+                cls.abandon_requests()   # the sleep handler's reset
+            return result
+
+        monkeypatch.setattr(transcriber, "run_tracked", reset_mid_attempt)
+        with pytest.raises(transcriber.RequestAbandoned):
+            backend.transcribe(audio)
+        assert not marker.exists()
+        assert backend.whisper_binary not in transcriber._CPU_FALLBACK_ACTIVE
+
+    def test_a_retired_dictation_starts_no_whisper_cli(self, tmp_path, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        backend, audio = self._backend(tmp_path, gpu_body='echo "words"', cpu_body=None)
+        backend._supported_flags = lambda **_k: pytest.fail("a retired dictation probed whisper-cli")
+        monkeypatch.setattr(transcriber, "run_tracked",
+                            lambda *_a, **_k: pytest.fail("a retired dictation ran whisper-cli"))
+        token = cls.request_token()
+        cls.abandon_requests()
+        with transcriber.dictation_requests(token):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend.transcribe(audio)
+
     def test_cpu_only_install_unaffected(self, tmp_path):
         """From-source installs (no sibling) keep working exactly as before."""
         backend, audio = self._backend(tmp_path, gpu_body='echo "normal text"', cpu_body=None)
@@ -1785,6 +1993,28 @@ class TestGpuRecoveryProbe:
 
         state = transcriber._gpu_retry_state[backend.whisper_binary]
         assert state["failures"] == 2
+        assert backend.whisper_binary in transcriber._CPU_FALLBACK_ACTIVE
+
+    def test_probe_succeeds_returns_none_on_a_pre_spawn_expiry(self, tmp_path):
+        """Sol mac r21: HelperNotStarted during the probe itself is no verdict,
+        the same as _probe_gpu_ok's None on the llama side."""
+        from wayfinder.utils.child_supervisor import HelperNotStarted
+        backend, _audio = self._backend(tmp_path, "echo gpu-text")
+        with patch("wayfinder.core.transcriber.run_tracked",
+                   side_effect=HelperNotStarted(["x"], 60.0)):
+            assert backend._gpu_probe_succeeds() is None
+
+    def test_recovery_probe_is_a_no_op_on_a_pre_spawn_expiry(self, tmp_path):
+        """Neither a recovery nor a backoff on no-verdict: the next scheduled
+        retry gets an unspent try instead of this one counting as a failure
+        it never ran (Sol mac r21)."""
+        from wayfinder.core import transcriber
+        backend, audio = self._backend(tmp_path, "kill -SEGV $$")
+        backend.transcribe(audio)   # failures = 1, CPU fallback active
+        before = dict(transcriber._gpu_retry_state[backend.whisper_binary])
+        with patch.object(backend, "_gpu_probe_succeeds", return_value=None):
+            backend._probe_gpu_recovery()
+        assert transcriber._gpu_retry_state[backend.whisper_binary] == before
         assert backend.whisper_binary in transcriber._CPU_FALLBACK_ACTIVE
 
     def test_transcribe_spawns_probe_after_window(self, tmp_path):
@@ -2184,13 +2414,14 @@ class TestServerReuseIdentity:
 
     MODEL = "/models/ggml-base.en.bin"
 
-    def _set_state(self, alive=True, model=MODEL, gpu=False, threads=4):
+    def _set_state(self, alive=True, model=MODEL, gpu=False, threads=4, vk=None):
         from wayfinder.core.transcriber import WhisperServerBackend
         proc = MagicMock()
         proc.poll.return_value = None if alive else 1
         WhisperServerBackend._server_process = proc
         WhisperServerBackend._server_model_path = model
         WhisperServerBackend._server_use_gpu = gpu
+        WhisperServerBackend._server_vk_devices = vk
         # macOS/Windows also match -t (the backend's default is 4); set it
         # rather than inherit whatever an earlier test left on the class.
         WhisperServerBackend._server_threads = threads
@@ -2207,6 +2438,48 @@ class TestServerReuseIdentity:
         WhisperServerBackend._server_use_gpu = None
         WhisperServerBackend._server_threads = None
         WhisperServerBackend._server_binary = None
+        WhisperServerBackend._server_vk_devices = None
+
+    @pytest.fixture
+    def linux(self, monkeypatch):
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(transcriber.sys, "platform", "linux")
+        monkeypatch.delenv("GGML_VK_VISIBLE_DEVICES", raising=False)
+
+    def test_vulkan_device_change_fails_reuse(self, linux, monkeypatch):
+        # GPU just turned on: a dictation started the Vulkan server before the
+        # device selection set GGML_VK_VISIBLE_DEVICES, so it runs on device 0.
+        self._set_state(gpu=True, vk=None)
+        monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "1")
+        assert self._backend(gpu=True)._server_reusable() is False
+        self._set_state(gpu=True, vk="1")
+        assert self._backend(gpu=True)._server_reusable() is True
+
+    def test_a_cpu_server_ignores_the_vulkan_device(self, linux, monkeypatch):
+        self._set_state(gpu=False, vk=None)
+        monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "1")
+        assert self._backend(gpu=False)._server_reusable() is True
+
+    def test_spawn_records_the_vulkan_device_it_started_on(self, linux, monkeypatch, tmp_path):
+        from wayfinder.core.transcriber import WhisperServerBackend
+
+        binary = tmp_path / "whisper-server"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        backend = WhisperServerBackend(whisper_server_binary=str(binary),
+                                       model_path=str(model), use_gpu=True)
+        WhisperServerBackend._server_process = None
+        monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "1")
+        new_proc = MagicMock(); new_proc.poll.return_value = None
+        with patch.object(WhisperServerBackend, "_stop_server_internal"), \
+             patch.object(WhisperServerBackend, "_find_available_port", return_value=8200), \
+             patch.object(WhisperServerBackend, "_is_our_server", return_value=True), \
+             patch("subprocess.Popen", return_value=new_proc) as mock_popen, \
+             patch("time.sleep"):
+            backend._start_server(force=True)
+        assert mock_popen.call_args.kwargs["env"]["GGML_VK_VISIBLE_DEVICES"] == "1"
+        assert backend._server_reusable() is True
+        monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "0")  # the user picked another GPU
+        assert backend._server_reusable() is False
 
     def test_same_model_same_mode_is_reusable(self):
         self._set_state(gpu=False)
@@ -2453,3 +2726,1104 @@ class TestSoundAnnotations:
     def test_dictated_brackets_survive(self, text):
         from wayfinder.core.transcriber import clean_whisper_artifacts
         assert clean_whisper_artifacts(text) == text
+
+
+class TestOneTokenPerDictation:
+    """Sol mac r6: a request nested in a dictation (the Metal twin, whisper-cli,
+    a re-heard chunk) took the abandonment counter afresh, so a reset before
+    it began went unseen."""
+
+    @pytest.fixture(autouse=True)
+    def _counter(self, monkeypatch):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        monkeypatch.setattr(WhisperServerBackend, "_abandoned", WhisperServerBackend._abandoned)
+
+    def test_requests_inside_a_dictation_keep_its_token(self):
+        import threading
+        from wayfinder.core.transcriber import WhisperServerBackend as cls, dictation_requests
+        token = cls.request_token()
+        other = {}
+        with dictation_requests(token):
+            cls.abandon_requests()
+            assert cls.request_token() == token
+            with dictation_requests(cls._abandoned):   # a nested scope cannot renew it
+                assert cls.request_token() == token
+            thread = threading.Thread(target=lambda: other.update(token=cls.request_token()))
+            thread.start()
+            thread.join()
+        assert other["token"] == cls._abandoned   # only this thread's requests
+        assert cls.request_token() == cls._abandoned
+
+    def test_whisper_server_hands_its_token_to_whisper_cli(self, tmp_path, monkeypatch):
+        from wayfinder.core.transcriber import WhisperServerBackend as cls
+        audio = tmp_path / "audio.wav"
+        audio.write_bytes(b"\x00")
+        backend = cls(whisper_server_binary=str(tmp_path / "whisper-server"),
+                      model_path=str(tmp_path / "model.bin"))
+        monkeypatch.setattr(cls, "_disabled_now", classmethod(lambda c: True))
+        token = cls.request_token()
+        seen = []
+
+        class Cli:
+            def transcribe(self, audio_path, context="", deadline=None):
+                cls.abandon_requests()   # a reset as whisper-cli starts
+                seen.append(cls.request_token())
+                return "words"
+
+        backend._cli_fallback = lambda: Cli()
+        assert backend.transcribe(str(audio)) == "words"
+        assert seen == [token]
+
+    def test_a_dictation_retired_before_it_reaches_the_backend_builds_none(self, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(transcriber, "get_backend",
+                            lambda _config: pytest.fail("a retired dictation built a backend"))
+        token = cls.request_token()
+        cls.abandon_requests()
+        with pytest.raises(transcriber.RequestAbandoned):
+            transcriber.transcribe_with_config("chunk.wav", {}, request_token=token)
+
+    def test_a_reset_as_the_request_begins_reaches_its_backend(self, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        seen = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                cls.abandon_requests()             # lands as the request begins
+                seen.append(cls.request_token())   # what whisper-server's own start checks
+                return "words"
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        token = cls.request_token()
+        transcriber.transcribe_with_config("chunk.wav", {"raw_transcription": True}, request_token=token)
+        assert seen == [token]
+
+    def test_a_dictation_retired_during_asr_gets_no_cleanup(self, monkeypatch):
+        from wayfinder.core import transcriber
+        from wayfinder.core import postprocessor
+        cls = transcriber.WhisperServerBackend
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                cls.abandon_requests()
+                return "words nobody will type"
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        monkeypatch.setattr(postprocessor, "process_with_config",
+                            lambda *_a, **_k: pytest.fail("a retired dictation was cleaned up"))
+        with pytest.raises(transcriber.RequestAbandoned):
+            transcriber.transcribe_with_config(
+                "chunk.wav", {"post_processing_enabled": True}, request_token=cls.request_token())
+
+
+class TestRetiredDictationGapsSolR7:
+    """Sol mac r7: stages a retired dictation still reached."""
+
+    @pytest.fixture(autouse=True)
+    def _counter(self, monkeypatch):
+        from wayfinder.core.transcriber import WhisperServerBackend
+        monkeypatch.setattr(WhisperServerBackend, "_abandoned", WhisperServerBackend._abandoned)
+
+    def test_a_reset_during_the_flag_probe_runs_no_attempt(self, tmp_path, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        backend, audio = TestGpuCpuFallback()._backend(tmp_path, gpu_body='echo "words"', cpu_body=None)
+
+        def probe(**_kwargs):
+            cls.abandon_requests()   # Escape while --help ran
+            return set()
+
+        backend._supported_flags = probe
+        monkeypatch.setattr(transcriber, "run_tracked",
+                            lambda *_a, **_k: pytest.fail("a retired dictation ran whisper-cli"))
+        with transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend.transcribe(audio)
+
+    def test_a_reset_while_the_backend_is_built_sends_it_nothing(self, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+
+        class Backend:
+            def transcribe(self, *_a, **_k):
+                pytest.fail("a retired dictation reached the backend")
+
+        def build(_config):
+            cls.abandon_requests()
+            return Backend()
+
+        monkeypatch.setattr(transcriber, "get_backend", build)
+        with pytest.raises(transcriber.RequestAbandoned):
+            transcriber.transcribe_with_config("chunk.wav", {}, request_token=cls.request_token())
+
+    @pytest.mark.parametrize("caller", ["no dictation", "an enclosing dictation"])
+    def test_a_call_without_a_token_is_cancelled_too(self, monkeypatch, caller):
+        # The Welcome test and a benchmark pass no token: a reset during ASR
+        # still started cleanup and returned the words.
+        from wayfinder.core import postprocessor, transcriber
+        cls = transcriber.WhisperServerBackend
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                cls.abandon_requests()
+                return "words nobody will type"
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        monkeypatch.setattr(postprocessor, "process_with_config",
+                            lambda *_a, **_k: pytest.fail("a retired call was cleaned up"))
+        if caller == "no dictation":
+            with pytest.raises(transcriber.RequestAbandoned):
+                transcriber.transcribe_with_config("a.wav", {"post_processing_enabled": True})
+        else:
+            token = cls.request_token()
+            cls.abandon_requests()   # retired before this call began
+            monkeypatch.setattr(transcriber, "get_backend",
+                                lambda _config: pytest.fail("a retired dictation built a backend"))
+            with transcriber.dictation_requests(token):
+                with pytest.raises(transcriber.RequestAbandoned):
+                    transcriber.transcribe_with_config("a.wav", {"post_processing_enabled": True})
+
+
+class TestWhisperCliOutputIsUtf8:
+    """whisper.cpp prints UTF-8 whatever the system code page. Decoded with
+    Windows' default (cp1252), "it’s café" was typed as "itâ€™s cafÃ©", and a
+    byte cp1252 lacks dropped the whole transcript."""
+
+    SPOKEN = "it’s café, naïve — “quoted” Ásgeir"
+
+    def test_non_ascii_text_survives_the_cli(self, tmp_path, monkeypatch):
+        import subprocess
+        import sys
+        from wayfinder.core import transcriber
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        backend = transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                                use_gpu=False, timeout=30)
+        real_run = transcriber.run_tracked
+        speak = f"import sys; sys.stdout.buffer.write({self.SPOKEN.encode()!r})"
+
+        def run(cmd, **kwargs):
+            if "--help" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            # The real decode, with the kwargs the backend passes. They
+            # must name it: CI sets PYTHONUTF8, the shipped app does not.
+            assert kwargs.get("encoding") == "utf-8"
+            return real_run([sys.executable, "-c", speak], **kwargs)
+
+        monkeypatch.setattr(transcriber, "run_tracked", run)
+        assert backend.transcribe(str(audio)) == self.SPOKEN
+
+
+class TestARetiredDictationsHelpers:
+    """Sol mac r10: a tracked helper is refused under the spawn lock once its
+    dictation is retired. whisper-cli's probes then cache nothing, and its
+    transcription ends as RequestAbandoned, not as a shutdown."""
+
+    @staticmethod
+    def _backend(tmp_path):
+        from wayfinder.core import transcriber
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        return transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                             use_gpu=False, timeout=30)
+
+    def test_probes_refused_for_a_retired_dictation_cache_nothing(self, tmp_path, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        backend = self._backend(tmp_path)
+        with transcriber.dictation_requests(cls.request_token()):
+            cls.abandon_requests()
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._supported_flags()
+            assert backend.supports_gpu() is False
+        assert getattr(backend, "_supported_flags_cache", None) is None   # not "no flags"
+        assert backend._gpu_supported is None                              # not "no GPU"
+
+    def test_a_gpu_probe_that_runs_out_of_time_caches_nothing(self, tmp_path, monkeypatch):
+        # Sol mac r19: the probe's time now counts its watcher's start too,
+        # and a slow start says nothing about the binary.
+        import subprocess
+        from wayfinder.core import transcriber
+
+        def timed_out(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+        monkeypatch.setattr(transcriber, "run_tracked", timed_out)
+        backend = self._backend(tmp_path)
+        assert backend.supports_gpu() is False
+        assert backend._gpu_supported is None                              # not "no GPU"
+
+    @pytest.mark.parametrize("at", ["flag-probe", "transcription"])
+    def test_a_transcription_refused_at_the_spawn_lock_is_abandoned(self, tmp_path, monkeypatch, at):
+        import subprocess
+        import threading
+        from wayfinder.core import transcriber
+        from wayfinder.utils import child_supervisor
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        backend = self._backend(tmp_path)
+        if at == "transcription":   # else the --help probe is the first spawn
+            monkeypatch.setattr(backend, "_supported_flags", lambda *a, **k: set())
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        spawned = []
+        real_popen = subprocess.Popen
+        monkeypatch.setattr(subprocess, "Popen",
+                            lambda *a, **k: spawned.append(a) or real_popen(*a, **k))
+        token = cls.request_token()
+        outcome = {}
+
+        def dictation():
+            with transcriber.dictation_requests(token):
+                try:
+                    outcome["result"] = backend.transcribe(str(audio))
+                except BaseException as exc:
+                    outcome["error"] = exc
+
+        with child_supervisor._tracked_lock:   # another helper's spawn
+            worker = threading.Thread(target=dictation, daemon=True)
+            worker.start()
+            worker.join(0.3)
+            assert worker.is_alive(), outcome
+            cls.abandon_requests()
+        worker.join(10)
+        assert isinstance(outcome.get("error"), transcriber.RequestAbandoned), outcome
+        assert spawned == []
+
+
+class TestARetiredDictationsActions:
+    """Sol mac r11: each action is refused at the point of action, after
+    every wait in front of it: the server POST, the CLI salvage, a cloud
+    request, a model load, a timed worker, the GPU recovery probe."""
+
+    @pytest.fixture
+    def cls(self, monkeypatch):
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        return cls
+
+    @staticmethod
+    def _serving(tmp_path, monkeypatch, cls):
+        """A backend whose server is up on 8178: no start, no spawn."""
+        monkeypatch.setattr(cls, "_server_port", 8178)
+        monkeypatch.setattr(cls, "_server_process", None)
+        monkeypatch.setattr(cls, "_disabled_now", staticmethod(lambda: False))
+        backend = cls(use_gpu=False, timeout=5)
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        return backend, str(audio)
+
+    @pytest.mark.parametrize("at", ["initial", "recovery"])
+    def test_no_server_request_after_a_retirement(self, tmp_path, monkeypatch, cls, at):
+        # The initial POST waited through the audio read after its check.
+        from wayfinder.core import transcriber
+        backend, audio = self._serving(tmp_path, monkeypatch, cls)
+        posts, starts = [], []
+
+        def post(req, timeout):
+            posts.append(req)
+            raise ConnectionResetError("connection reset")
+
+        def start(**_kwargs):
+            starts.append(_kwargs)
+            if at == "recovery" and len(starts) == 2:
+                cls.abandon_requests()   # retired during the restart
+
+        monkeypatch.setattr(transcriber, "urlopen_loopback", post)
+        backend._start_server = start
+        if at == "initial":
+            def prompt(context):
+                cls.abandon_requests()   # anything after the start's check
+                return ""
+            backend._build_prompt = prompt
+        backend._cli_fallback = lambda: pytest.fail("a retired dictation ran whisper-cli")
+        with pytest.raises(transcriber.RequestAbandoned):
+            backend.transcribe(audio)
+        assert len(posts) == (0 if at == "initial" else 1)
+
+    def test_a_salvage_refused_at_its_spawn_is_abandoned(self, tmp_path, monkeypatch, cls):
+        # It was wrapped in "whisper-cli salvage also failed".
+        from wayfinder.core import transcriber
+        backend, audio = self._serving(tmp_path, monkeypatch, cls)
+        starts = []
+
+        def start(**_kwargs):
+            starts.append(_kwargs)
+            if len(starts) == 2:
+                raise transcriber.TranscriptionError("still dead")
+
+        class Cli:
+            def transcribe(self, *_args, **_kwargs):
+                cls.abandon_requests()
+                raise transcriber.HelperRefused("the dictation was retired: no helper for it")
+
+        monkeypatch.setattr(transcriber, "urlopen_loopback",
+                            lambda *_a, **_k: (_ for _ in ()).throw(ConnectionResetError("reset")))
+        backend._start_server = start
+        backend._cli_fallback = Cli
+        with pytest.raises(transcriber.RequestAbandoned) as err:
+            backend.transcribe(audio)
+        assert "salvage" not in str(err.value)
+
+    @pytest.mark.parametrize("cloud", ["groq", "openai"])
+    def test_no_cloud_transcription_for_a_dictation_retired_during_its_setup(
+            self, tmp_path, cls, cloud):
+        from wayfinder.core import transcriber
+        backend = (transcriber.GroqWhisperBackend(api_key="gsk_test") if cloud == "groq"
+                   else transcriber.OpenAIWhisperBackend(api_key="sk-test"))
+        client = MagicMock()
+
+        def get_client():
+            cls.abandon_requests()   # retired while the client was built
+            return client
+
+        backend.is_available = lambda: True
+        backend._get_client = get_client
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        with transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend.transcribe(str(audio))
+        client.audio.transcriptions.create.assert_not_called()
+
+    @pytest.mark.parametrize("at", ["cuda-discovery", "failed-gpu-load"])
+    def test_no_faster_whisper_load_for_a_retired_dictation(self, monkeypatch, cls, at):
+        import sys
+        import types
+        from wayfinder.core import transcriber
+        loads = []
+
+        def model(size, device="cpu", **_kwargs):
+            loads.append(device)
+            if device == "cuda":
+                cls.abandon_requests()   # retired during the failed load
+                raise RuntimeError("CUDA out of memory")
+            return object()
+
+        monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=model))
+        monkeypatch.setattr(transcriber.FasterWhisperBackend, "_model_cache", {})
+        backend = transcriber.FasterWhisperBackend(model_size="tiny", use_gpu=True)
+
+        def supports_gpu():
+            if at == "cuda-discovery":
+                cls.abandon_requests()
+                return False
+            return True
+
+        backend.supports_gpu = supports_gpu
+        backend._cuda_device_index = lambda: 0
+        with transcriber.dictation_requests(cls.request_token()):
+            with pytest.raises(transcriber.RequestAbandoned):
+                backend._get_model()
+        assert loads == ([] if at == "cuda-discovery" else ["cuda"])
+        assert transcriber.FasterWhisperBackend._model_cache == {}
+
+    def test_a_timed_worker_runs_under_its_callers_dictation(self, cls):
+        from wayfinder.core import transcriber
+        from wayfinder.utils.timeout import run_with_timeout
+        token = cls.request_token()
+        seen = lambda: getattr(transcriber._dictation, "token", None)   # noqa: E731
+        with transcriber.dictation_requests(token):
+            assert run_with_timeout(seen, 5) == token
+        assert run_with_timeout(seen, 5) is None   # outside a dictation: none
+
+    @pytest.mark.parametrize("timeout", [5, 0])
+    def test_a_worker_that_starts_after_a_retirement_runs_nothing(self, monkeypatch, cls, timeout):
+        # The resident and in-process models and Faster-Whisper run on a
+        # run_with_timeout worker, after the caller's last check.
+        import threading
+        import types
+        from wayfinder.core import transcriber
+        from wayfinder.utils import timeout as timeout_module
+        ran = []
+
+        class LateThread(threading.Thread):
+            def start(self):
+                cls.abandon_requests()   # while the worker waits to run
+                super().start()
+
+        monkeypatch.setattr(timeout_module, "threading", types.SimpleNamespace(Thread=LateThread))
+        with transcriber.dictation_requests(cls.request_token()):
+            if not timeout:   # inline, on the caller's thread
+                cls.abandon_requests()
+            with pytest.raises(transcriber.RequestAbandoned):
+                timeout_module.run_with_timeout(lambda: ran.append(True), timeout)
+        assert ran == []
+        assert timeout_module.run_with_timeout(lambda: ran.append(True) or "ran", 5) == "ran"
+
+    @staticmethod
+    def _gpu_backend(tmp_path, monkeypatch):
+        from wayfinder.core import transcriber
+        backend = TestARetiredDictationsHelpers._backend(tmp_path)
+        monkeypatch.setattr(transcriber, "_gpu_retry_state",
+                            {backend.whisper_binary: {"next_retry": 0.0, "failures": 2}})
+        monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {backend.whisper_binary: True})
+        monkeypatch.setattr(transcriber, "_gpu_probe_inflight", False)
+        return backend
+
+    def test_no_gpu_recovery_probe_for_a_dictation_retired_at_its_lock(self, tmp_path, monkeypatch, cls):
+        import threading
+        from wayfinder.core import transcriber
+        backend = self._gpu_backend(tmp_path, monkeypatch)
+        probes = []
+        backend._probe_gpu_recovery = lambda *a: probes.append(a)
+        token = cls.request_token()
+
+        def dictation():
+            with transcriber.dictation_requests(token):
+                backend._maybe_probe_gpu_recovery()
+
+        with transcriber._gpu_probe_lock:   # another probe's admission
+            worker = threading.Thread(target=dictation, daemon=True)
+            worker.start()
+            worker.join(0.2)
+            assert worker.is_alive()
+            cls.abandon_requests()
+        worker.join(5)
+        assert probes == [] and transcriber._gpu_probe_inflight is False
+
+    @pytest.mark.parametrize("found", [True, False])
+    def test_a_gpu_recovery_probe_retired_meanwhile_sets_nothing(self, tmp_path, monkeypatch, cls, found):
+        from wayfinder.core import transcriber
+        backend = self._gpu_backend(tmp_path, monkeypatch)
+        seen = []
+
+        def probe():
+            seen.append(getattr(transcriber._dictation, "token", None))
+            cls.abandon_requests()
+            return found
+
+        backend._gpu_probe_succeeds = probe
+        token = cls.request_token()
+        with transcriber.dictation_requests(token):
+            backend._maybe_probe_gpu_recovery()
+        for thread in threading_enumerate("wayfinder-gpu-probe"):
+            thread.join(5)
+        assert seen == [token]   # the probe ran under the dictation's token
+        assert transcriber._gpu_retry_state[backend.whisper_binary] == {"next_retry": 0.0, "failures": 2}
+        assert transcriber._CPU_FALLBACK_ACTIVE == {backend.whisper_binary: True}
+        assert transcriber._gpu_probe_inflight is False
+
+    @staticmethod
+    def _gated_state_lock(monkeypatch):
+        """_gpu_state_lock, held by the test until it releases gate.lock;
+        gate.waiting says a thread now waits for it."""
+        import threading
+        from wayfinder.core import transcriber
+
+        class Gate:
+            lock = threading.Lock()
+            waiting = threading.Event()
+
+            def __enter__(self):
+                self.waiting.set()
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, *_a):
+                self.lock.release()
+
+        gate = Gate()
+        monkeypatch.setattr(transcriber, "_gpu_state_lock", gate)
+        gate.lock.acquire()
+        return gate
+
+    @pytest.mark.parametrize("retire", [True, False])
+    @pytest.mark.parametrize("found", [True, False])
+    def test_a_gpu_recovery_verdict_asks_under_the_state_lock(self, tmp_path, monkeypatch, cls,
+                                                              found, retire):
+        # Sol mac r12: the probe left its dictation's scope before the state
+        # lock; a retirement while it waited there still set its verdict.
+        from wayfinder.core import transcriber
+        backend = self._gpu_backend(tmp_path, monkeypatch)
+        backend._gpu_probe_succeeds = lambda: found
+        gate = self._gated_state_lock(monkeypatch)
+        with transcriber.dictation_requests(cls.request_token()):
+            backend._maybe_probe_gpu_recovery()
+        assert gate.waiting.wait(5)
+        if retire:
+            cls.abandon_requests()
+        gate.lock.release()
+        for thread in threading_enumerate("wayfinder-gpu-probe"):
+            thread.join(5)
+        state = transcriber._gpu_retry_state[backend.whisper_binary]
+        if retire:
+            assert state == {"next_retry": 0.0, "failures": 2}
+            assert transcriber._CPU_FALLBACK_ACTIVE == {backend.whisper_binary: True}
+        elif found:
+            assert state["failures"] == 1 and transcriber._CPU_FALLBACK_ACTIVE == {}
+        else:
+            assert state["failures"] == 3
+        assert transcriber._gpu_probe_inflight is False
+
+    @pytest.mark.skipif(os.name == "nt", reason="the whisper-cli stand-ins are shell scripts")
+    @pytest.mark.parametrize("retire", [True, False])
+    def test_a_cpu_fallback_retired_at_the_state_lock_memoizes_nothing(self, tmp_path, monkeypatch,
+                                                                       cls, retire):
+        # Sol mac r12, the CLI's twin of the probe: a crashed GPU run memoized
+        # the CPU fallback and counted a failure for a dictation retired while
+        # it waited for the state lock.
+        import threading
+        from wayfinder.core import transcriber
+        gpu = tmp_path / "whisper-cli"
+        gpu.write_text("#!/bin/sh\nkill -SEGV $$\n"); gpu.chmod(0o755)
+        cpu = tmp_path / "whisper-cli-cpu"
+        cpu.write_text('#!/bin/sh\necho "cpu words"\n'); cpu.chmod(0o755)
+        model = tmp_path / "model.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "audio.wav"; audio.write_bytes(b"\x00")
+        backend = transcriber.WhisperCppBackend(whisper_binary=str(gpu), model_path=str(model),
+                                                timeout=10, use_gpu=True)
+        monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+        monkeypatch.setattr(transcriber, "_gpu_retry_state", {})
+        gate = self._gated_state_lock(monkeypatch)
+        result = {}
+
+        def run():
+            try:
+                with transcriber.dictation_requests(cls.request_token()):
+                    result["text"] = backend.transcribe(str(audio))
+            except Exception as e:   # the test inspects it
+                result["err"] = e
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        assert gate.waiting.wait(10)
+        if retire:
+            cls.abandon_requests()
+        gate.lock.release()
+        worker.join(10)
+        if retire:
+            assert isinstance(result.get("err"), transcriber.RequestAbandoned)
+            assert transcriber._CPU_FALLBACK_ACTIVE == {} and transcriber._gpu_retry_state == {}
+        else:
+            assert result.get("text") == "cpu words"
+            assert transcriber._CPU_FALLBACK_ACTIVE[str(gpu)].endswith("-cpu")
+            assert transcriber._gpu_retry_state[str(gpu)]["failures"] == 1
+
+
+def threading_enumerate(name):
+    import threading
+    return [t for t in threading.enumerate() if t.name == name]
+
+
+def test_recovery_probe_does_not_condemn_gpu_after_shortened_admission(monkeypatch):
+    from types import SimpleNamespace
+    from wayfinder.core import transcriber
+    error = subprocess.TimeoutExpired(["whisper-cli"], 0.25)
+    error.execution_budget = 0.25
+    monkeypatch.setattr(transcriber, "run_tracked", MagicMock(side_effect=error))
+    backend = SimpleNamespace(whisper_binary="unused", model_path="unused")
+    assert transcriber.WhisperCppBackend._gpu_probe_succeeds(backend) is None
+
+
+def test_cli_admission_timeout_never_memoizes_cpu_fallback(tmp_path, monkeypatch):
+    from wayfinder.core import transcriber
+    binary, cpu, model, audio = [tmp_path / name for name in
+                                ("whisper-cli", "whisper-cli-cpu", "model.bin", "audio.wav")]
+    for path in (binary, cpu, model, audio):
+        path.touch()
+    monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+    backend = transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                            use_gpu=True, timeout=30)
+
+    def run(cmd, **kwargs):
+        if "--help" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        assert cmd[0] != str(cpu), "admission delay must not select the CPU fallback"
+        error = subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        error.execution_budget = 0.25
+        raise error
+
+    monkeypatch.setattr(transcriber, "run_tracked", run)
+    with pytest.raises(transcriber.TranscriptionError):
+        backend.transcribe(str(audio))
+    assert str(binary) not in transcriber._CPU_FALLBACK_ACTIVE
+
+
+@pytest.mark.parametrize("remaining,expected", [(59.99, False), (0.25, None)])
+def test_recovery_timeout_distinguishes_launch_overhead_from_admission(monkeypatch, remaining, expected):
+    from types import SimpleNamespace
+    from wayfinder.core import transcriber
+    error = subprocess.TimeoutExpired(["whisper-cli"], remaining)
+    error.execution_budget = remaining
+    monkeypatch.setattr(transcriber, "run_tracked", MagicMock(side_effect=error))
+    backend = SimpleNamespace(whisper_binary="unused", model_path="unused")
+    assert transcriber.WhisperCppBackend._gpu_probe_succeeds(backend) is expected
+
+
+def test_normal_gpu_timeout_still_tries_and_remembers_cpu_fallback(tmp_path, monkeypatch):
+    from wayfinder.core import transcriber
+    binary, cpu, model, audio = [tmp_path / name for name in
+                                ("whisper-cli", "whisper-cli-cpu", "model.bin", "audio.wav")]
+    for path in (binary, cpu, model, audio):
+        path.touch()
+    monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+    backend = transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                            use_gpu=True, timeout=30)
+    attempts = []
+
+    def run(cmd, **kwargs):
+        if "--help" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        attempts.append(cmd[0])
+        if cmd[0] == str(binary):
+            error = subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            error.execution_budget = 29.99
+            raise error
+        return subprocess.CompletedProcess(cmd, 0, "These spoken words survived the fallback.", "")
+
+    monkeypatch.setattr(transcriber, "run_tracked", run)
+    assert "spoken words" in backend.transcribe(str(audio))
+    assert attempts == [str(binary), str(cpu)]
+    assert str(binary) in transcriber._CPU_FALLBACK_ACTIVE
+
+class TestUnpromptedTranscription:
+    """Noise-verdict audio is heard with no prompt: primed with the dictation
+    prompt, large-v3-turbo turned fan/hum/hiss into invented sentences (2026-10-13)."""
+
+    @pytest.fixture
+    def prompts(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        import wayfinder.license as lic
+        from wayfinder.core import transcriber as T
+
+        gate = SimpleNamespace(is_premium=True, has_feature=lambda f: True)
+        monkeypatch.setattr(lic, "get_feature_gate", lambda *a, **k: gate)
+        heard = []
+
+        def transcribe(backend, audio_path, context="", deadline=None):
+            heard.append(backend._build_prompt(context))
+            return "hello there"
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
+        model = tmp_path / "ggml-base.en.bin"
+        model.write_bytes(b"\0")
+        self.config = {"transcription_backend": "whisper_cpp", "model_path": str(model),
+                       "whisper_server_mode": False, "post_processing_enabled": False,
+                       "output_tone": "professional", "custom_vocabulary": ["Wayfinder"]}
+        self.audio = str(tmp_path / "a.wav")
+        return heard
+
+    def test_dictation_is_primed_with_prompt_vocabulary_and_context(self, prompts):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        transcribe_with_config(self.audio, self.config)
+        transcribe_with_config(self.audio, self.config, context="earlier words")
+        assert "Use proper punctuation" in prompts[0] and "Wayfinder" in prompts[0]
+        assert prompts[1].startswith("earlier words")
+
+    def test_unprompted_reaches_the_core_ml_servers_metal_stand_in(self, prompts, monkeypatch):
+        from types import SimpleNamespace
+
+        from wayfinder.core import transcriber as T
+
+        heard = []
+        stand_in = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"])
+        stand_in.transcribe = lambda audio_path, context="": heard.append(
+            (stand_in.prompt, stand_in.custom_vocabulary, context)) or "hello there"
+        server = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"],
+                                 _ready_only_fallback=stand_in)
+        # Core ML not loaded yet: the dictation goes to the Metal stand-in.
+        server.transcribe = lambda audio_path, context="": stand_in.transcribe(audio_path, context)
+        monkeypatch.setattr(T, "get_backend", lambda config: server)
+        T.transcribe_with_config(self.audio, self.config, context="earlier words", unprompted=True)
+        assert heard == [("", [], "")]
+
+    def test_unprompted_sends_no_prompt_vocabulary_or_context(self, prompts):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        text = transcribe_with_config(self.audio, self.config, context="earlier words",
+                                      unprompted=True)
+        assert prompts == [""]
+        assert text == "Hello there."
+
+    # -- Sol review of the PR #67 port: the two-word rule must run on the
+    # recognizer's OWN words, before vocabulary replacement or LLM cleanup can
+    # rewrite them, and a known hallucination phrase must be rejected even
+    # under Raw Transcript (whose early return used to skip that check). --
+
+    def test_unprompted_two_word_rule_precedes_vocabulary_correction(self, prompts, monkeypatch):
+        """A one-word noise artifact ("Okay.") must stay rejected even though a
+        configured correction would turn it into two words ("Sounds good."):
+        the rule has to see what the recognizer actually said."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: "Okay.")
+        self.config["vocabulary_replacements"] = [["okay", "sounds good"]]
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_unprompted_raw_transcription_still_rejects_a_hallucination_phrase(
+        self, prompts, monkeypatch
+    ):
+        """Raw Transcript's early return happens AFTER the noise checks now: a
+        known Whisper silence/noise catch-phrase has enough words to pass the
+        two-word rule, so it needs its own rejection — matching what normal
+        (non-raw) mode already does via clean_whisper_artifacts."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None: "Thank you for watching.")
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r2: the two-word rule counted a bracketed
+        # annotation Whisper itself emits as a "word", so noise output with
+        # exactly one real word behind an annotation passed it; normal
+        # cleanup then strips the annotation and leaves the lone filler word
+        # for Aura to type.
+        "[Music] Okay.",
+        "[BLANK_AUDIO] So,",
+        "*music* Okay.",
+    ])
+    def test_unprompted_two_word_rule_ignores_non_speech_annotations(
+        self, prompts, monkeypatch, heard
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_unprompted_two_word_rule_still_keeps_real_speech_behind_an_annotation(
+        self, prompts, monkeypatch
+    ):
+        """A real two-word phrase must still survive once the annotation in
+        front of it is set aside — the fix must not reject on sight of any
+        annotation."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None:
+                "[Music] Thanks for the update.")
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == "Thanks for the update."
+
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r2: the early phrase match lacked the whitespace
+        # canonicalisation normal cleanup does before its own final
+        # hallucination check, so repeated whitespace defeated it.
+        "Thank  you for watching.",
+        # ... and surrounding non-speech markers must not defeat it either.
+        "[Music] Thank you  for watching.",
+        "Thank you for watching.  [Applause]",
+    ])
+    def test_unprompted_hallucination_match_normalizes_whitespace_and_markers(
+        self, prompts, monkeypatch, heard
+    ):
+        """Raw Transcript on, so the EARLY phrase match is the only thing
+        standing between this and typing the hallucinated phrase — normal
+        cleanup's own (already whitespace-safe) check never runs."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_unprompted_hallucination_match_is_never_a_substring_match(
+        self, prompts, monkeypatch
+    ):
+        """A real sentence that merely CONTAINS a known catch-phrase must be
+        kept — only the entire (whitespace-canonicalised) text is compared."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None:
+                "I want to thank you for watching the show")
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text != ""
+
+    # -- Sol pr67 r3: six more findings against the safety copy itself. --
+
+    def test_unprompted_raw_transcription_returns_accepted_text_untouched(
+        self, prompts, monkeypatch
+    ):
+        """Finding 2, redone (Sol pr67 r6): wrapped text never counts towards
+        the two-word rule, but it only decides accept or reject. An accepted
+        recording comes back from Raw Transcript exactly as heard, wrappers
+        included."""
+        from wayfinder.core import transcriber as T
+
+        heard = "*Really* we need **two** more chairs (for later)."
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == heard
+
+    def test_unprompted_raw_transcription_keeps_mixed_script_sentences_distinct(
+        self, prompts, monkeypatch
+    ):
+        """Finding 3: the repetition helper's ASCII-only key
+        discarded "李明", so "Thank you." and "Thank you, 李明。" hashed to
+        the SAME key, were wrongly treated as one repeated sentence, and
+        collapsed down to "Thank you." -- a blacklisted phrase -- throwing
+        away the real sentence (with the name) along with it. A Unicode-
+        aware key must keep these two different sentences different."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None:
+                "Thank you. Thank you, 李明。")
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == "Thank you. Thank you, 李明。"
+
+    @pytest.mark.parametrize("heard", [
+        # Finding 4: the special-token leak regex lived only in
+        # clean_whisper_artifacts, AFTER the point where normal mode's own
+        # cleanup runs, so the safety copy's two-word rule counted the
+        # token itself as a word and let a single real filler word
+        # ("Okay.") through. Once the token is stripped before counting,
+        # "Okay." alone is one word and must be rejected -- in BOTH modes,
+        # since the early check runs before Raw Transcript's return.
+        "<|endoftext|> Okay.",
+        "<|0.00|> So,",   # a timestamp token, not just <|endoftext|>
+    ])
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_unprompted_two_word_rule_ignores_special_tokens(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("heard", [
+        # Finding 5: the early phrase match strips ASCII punctuation
+        # only; normal cleanup folds a Unicode ellipsis down to a plain "."
+        # well before its OWN hallucination check, so it correctly rejects
+        # this, but the early safety-copy check (the only thing standing
+        # between this and Raw Transcript) did not and let it through.
+        "Thank you for watching…",
+        # Curly quotes and full-width CJK punctuation render the same marks
+        # and must canonicalise the same way, in the comparison copy only.
+        "“Thank you for watching”",
+        "Thank you for watching。",
+    ])
+    def test_unprompted_raw_transcription_rejects_punctuation_variant_hallucinations(
+        self, prompts, monkeypatch, heard
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = True
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    # -- Sol pr67 r4: three more findings, all noise-path only. --
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Finding 2: a descriptive annotation built from a noise word and
+        # plain filler words ("loud", "soft") still describes non-speech
+        # audio even though those filler words aren't noise vocabulary.
+        "*loud noise* Okay.",
+        "*soft music* So,",
+        # Sol pr67 r5: a closing mark inside, and the bracketed shapes.
+        "*loud noise.* Okay.",
+        "*loud noise!* Okay.",
+        "(loud music) Okay.",
+        "[soft music] So,",
+    ])
+    def test_unprompted_noise_rejects_descriptive_sound_annotations(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r6: nothing Whisper wrapped counts as a spoken word on the
+        # noise path, whatever it says inside. Telling an annotation from
+        # emphasis or code by its words failed both ways ("*a loud noise*
+        # Okay." passed, "Turn **music**" lost a word). A wrong rejection
+        # drops the recording as 1.3.0 already did; a wrong acceptance types
+        # something never said.
+        "*a loud noise* Okay.",
+        "*loud crashing noise* Okay.",
+        "Close *the door*",
+        "Turn **music**",
+        "`*phone rings*` twice",
+        "(door opens) Alice",
+        "*door and **kwargs",
+        "*args and **kwargs",
+        # An opener left unmatched runs to the end, a closer from the start.
+        "Okay [Music",
+        "loud noise] Okay.",
+        "♪ la la la",
+        # Sol pr67 r7: nested asterisks can't expose an inner word, every
+        # one of Whisper's music symbols counts, and the other bracket kinds.
+        "*a loud **crashing** noise* Okay.",
+        "**loud *crashing* noise** Okay.",
+        "♫ la la ♫ Okay.",
+        "♬ la la ♪ Okay.",
+        "Okay ♫ la la",
+        "{noise} Okay.",
+        "（music） Okay.",
+        "[loud (crashing] noise) Okay.",
+        # Sol pr67 r8: what is wrapped is decided on the original text, so
+        # removing one bracket kind can't expose another's contents.
+        "[noise (] loud crashing [) noise] Okay.",
+        "(noise [) loud crashing (] noise) Okay.",
+        "<|nospeech|> [Music (] loud [|>] Okay.",
+        "*a* Okay *crashing",
+    ])
+    def test_unprompted_noise_never_counts_wrapped_words(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Sol pr67 r7: a repeat with no space after the stop is still one
+        # known phrase said twice.
+        "Thank you.Thank you.",
+        "Thanks for watching!Thanks for watching!",
+        # Sol pr67 r8: a text made of catch-phrases and nothing else, however
+        # they are punctuated or spaced.
+        "Subtitles by the Amara.org community. Subtitles by the Amara.org community.",
+        "Thank you, thank you.",
+        "Thank you Thank you",
+        "Thank you. Thanks for watching!",
+    ])
+    def test_unprompted_noise_rejects_repeats_with_no_space_between(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        "Close *the door* behind you please.",
+        "(door opens) Alice, come in.",
+        "We need [two] more chairs.",
+    ])
+    def test_unprompted_noise_keeps_two_words_outside_any_wrapper(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        """Two spoken words outside every wrapper still pass, Raw Transcript
+        on or off; Raw returns them exactly as heard."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == heard if raw else text.strip()
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        # Finding 3: repetition matching ran before punctuation folding, so
+        # a repeated catch-phrase separated by an ellipsis, a closing
+        # quote, or a full-width stop evaded the noise check.
+        "Thank you for watching… Thank you for watching…",
+        '"Thank you." "Thank you."',
+        "Thank you for watching。Thank you for watching。",
+        # Sol pr67 r5: bracketed repeats, mixed wrappers too.
+        "(Thank you.) (Thank you.)",
+        "[Thank you.] [Thank you.]",
+        "(Thank you.) [Thank you.]",
+    ])
+    def test_unprompted_noise_rejects_repeats_across_punctuation_variants(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", ["Turn it down. Turn it down.", "谢谢你。谢谢你。"])
+    def test_unprompted_noise_keeps_a_repeated_sentence_that_is_no_catch_phrase(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        # A sentence said twice over a fan is speech: only a repeated
+        # catch-phrase is the hallucination.
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text.strip()
+
+    @pytest.mark.parametrize("raw", [False, True])
+    def test_unprompted_noise_rejects_curly_quoted_known_phrase(
+        self, prompts, monkeypatch, raw
+    ):
+        """The noise path's own quote fold (finding 1 scopes it OUT of
+        normal cleanup, not out of the noise check) must still catch a
+        curly-quoted catch-phrase on its own, no repeat involved."""
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(
+            T.WhisperCppBackend, "transcribe",
+            lambda backend, audio_path, context="", deadline=None:
+                "“Thank you”")
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == ""
+
+    def test_unprompted_rejection_never_logs_the_recognized_text(
+        self, prompts, monkeypatch, capsys
+    ):
+        """Finding 4 (Sol pr67 r2, scoped): the speech-guard's own
+        diagnostics must say a transcript was dropped without printing what
+        it said, on every rejection path this change touches."""
+        from wayfinder.core import transcriber as T
+
+        for heard in ("Secretword.", "[Music] Secretword.", "Thank  you for watching."):
+            monkeypatch.setattr(
+                T.WhisperCppBackend, "transcribe",
+                lambda backend, audio_path, context="", deadline=None, heard=heard: heard)
+            text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+            assert text == ""
+
+        out = capsys.readouterr().out
+        assert "Secretword" not in out
+        assert "Thank" not in out and "watching" not in out

@@ -130,7 +130,7 @@ metadata. The full process is [RELEASING.md](RELEASING.md); in short:
 
 1. Every night the **Beta** workflow publishes `vX.Y.Z-beta.N` (a GitHub
    prerelease) from `main`, if `main` moved and its required checks passed.
-   Only users who chose Beta (Settings → System → Updates) are offered it.
+   Only users who chose Beta (Settings → Advanced → System → Updates) are offered it.
 2. A beta that has held up for at least 5 days is promoted with
    `scripts/release/promote.py`: it tags `vX.Y.Z` on exactly the beta's code.
    For Linux, build and test that commit with

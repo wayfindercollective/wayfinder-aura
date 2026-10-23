@@ -16,8 +16,8 @@ import wayfinder_main
 def test_disappearing_uses_separate_qt_process_only_on_macos():
     assert wayfinder_main.visual_overlay_mode("darwin", "disappearing") == "transient"
     assert wayfinder_main.visual_overlay_mode("darwin", "always_on") == "persistent"
-    assert wayfinder_main.visual_overlay_mode("linux", "disappearing") is None
-    assert wayfinder_main.visual_overlay_mode("win32", "disappearing") is None
+    assert wayfinder_main.visual_overlay_mode("linux", "disappearing") == "transient"
+    assert wayfinder_main.visual_overlay_mode("win32", "disappearing") == "transient"
 
 
 @pytest.mark.parametrize("tray_required", [False, True])
@@ -488,8 +488,8 @@ def test_tab_switch_raises_persistent_opaque_pages_instead_of_unmapping_them():
     # without glass); pages inside keep the opaque _tab_surface_kwargs().
     assert '**self._content_pane_kwargs()' in setup_source
     assert wayfinder_main._tab_surface_kwargs("darwin") == {
-        "fg_color": wayfinder_main.COLORS["bg_base"],
-        "bg_color": wayfinder_main.COLORS["bg_base"],
+        "fg_color": wayfinder_main.COLORS["bg_card"],
+        "bg_color": wayfinder_main.COLORS["bg_card"],
         "corner_radius": 0,
     }
     assert wayfinder_main._tab_surface_kwargs("linux") == {
@@ -785,7 +785,7 @@ def test_paste_failure_guidance_is_platform_specific(monkeypatch):
     monkeypatch.setattr(wayfinder_main, "IS_WINDOWS", False)
     linux = wayfinder_main.WayfinderApp._error_guidance(ns, "inject failed")
     assert linux == ("Couldn't type the text — click into a text box and try again. On "
-                     "Wayland, check Settings → System → Type into every app.")
+                     "Wayland, check Settings → Advanced → System → Type into every app.")
     # Messages written for the user pass through instead of the generic line.
     held = ("Injection: A Shift, Ctrl, Alt, or Super key is still held. "
             "Release it, then dictate again; the transcript was not typed.")

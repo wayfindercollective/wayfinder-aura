@@ -4,7 +4,7 @@ Simplified GPU detection for Wayfinder Aura.
 This replaces the complex multi-layer detection with a simple, reliable approach:
 1. Run whisper-cli once to get ggml's view of devices
 2. Pick the discrete GPU (uma=0)
-3. Set GGML_VK_VISIBLE_DEVICES once at startup
+3. Set GGML_VK_VISIBLE_DEVICES once at startup (GPU mode only; CPU mode never probes)
 4. Done. No caching, no fallbacks, no complexity.
 """
 
@@ -14,6 +14,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
+
+from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
 
 
 @dataclass
@@ -103,15 +105,22 @@ def detect_gpu_devices(config: Optional[dict] = None) -> List[GpuDevice]:
                 wav.setframerate(16000)
                 wav.writeframes(struct.pack("<" + "h" * 1600, *([0] * 1600)))
         
-        # Run whisper - GPU info appears during model init
-        result = subprocess.run(
+        # Run whisper - GPU info appears during model init. Unmasked: after an
+        # earlier pick (GPU off -> on) the mask would renumber the chosen GPU
+        # as device 0, and the probe would then select physical device 0.
+        env = dict(os.environ)
+        env.pop("GGML_VK_VISIBLE_DEVICES", None)
+        result = run_tracked(
             [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"],
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",   # whisper.cpp's output, any code page
             timeout=30,
+            env=env,
         )
         
         devices = parse_ggml_vulkan_devices(result.stdout + result.stderr)
+    except HelpersClosed:
+        raise   # Quit: no device list, and not "no discrete GPU" either
     except Exception:
         pass
     finally:
@@ -174,9 +183,11 @@ def _detect_windows_vulkan_devices(config: Optional[dict]) -> List[GpuDevice]:
 
         env = dict(os.environ)
         env.pop("GGML_VK_VISIBLE_DEVICES", None)  # list every device, not the chosen one
-        result = subprocess.run([cli, "--help"], capture_output=True, text=True,
+        result = run_tracked([cli, "--help"], capture_output=True, text=True,
                                 timeout=20, env=env, **subprocess_no_window_kwargs())
         return parse_ggml_vulkan_devices(result.stdout + result.stderr)
+    except HelpersClosed:
+        raise
     except Exception:
         return []
 
@@ -208,12 +219,13 @@ def get_discrete_gpu(config: Optional[dict] = None) -> Optional[int]:
     return None
 
 
-def setup_gpu_environment(config: Optional[dict] = None) -> dict:
+def setup_gpu_environment(config: Optional[dict] = None, *, force: bool = False) -> dict:
     """
     Set up GPU environment variables. Call this ONCE at app startup.
     
     Args:
         config: Optional config dict for manual override (gpu_device setting)
+        force: probe even in CPU mode (the benchmark's GPU preview run)
     
     Returns:
         Dict of environment variables that were set.
@@ -241,12 +253,18 @@ def setup_gpu_environment(config: Optional[dict] = None) -> dict:
             print("[GPU] macOS transcription — CPU mode (Metal available when enabled)")
         return env_set
 
-    # Windows: only GPU mode runs the Vulkan build (use_gpu is already
-    # license-enforced at startup), so CPU users skip the probe entirely.
+    # Only GPU mode uses the Vulkan device (use_gpu is already license-enforced
+    # at startup), so CPU users skip the probe entirely; on Linux it loads a
+    # Whisper model. Turning GPU on later runs it then
+    # (WayfinderApp._apply_transcription_hardware_change).
+    gpu_mode = bool(config and config.get("use_gpu", False))
     if sys.platform == "win32" and not (
-        config and config.get("use_gpu", False) and windows_vulkan_whisper(config)
+        (gpu_mode or force) and windows_vulkan_whisper(config)
     ):
         print("[GPU] Windows transcription — CPU mode")
+        return env_set
+    if not (gpu_mode or force):
+        print("[GPU] CPU mode — GPU probe skipped")
         return env_set
 
     # 3. Linux/Windows: Auto-detect discrete Vulkan GPU

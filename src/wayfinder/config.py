@@ -338,6 +338,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "whisper_server_port": 8178,
     
     # UI settings
+    # A presentation preference only: both views edit the same settings above.
+    "advanced_mode": False,
     "start_minimized": False,
     "enable_tray_icon": True,
     "enabled_input_devices": [],  # Empty = all devices; otherwise list of device names
@@ -430,6 +432,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Groq Whisper API settings (ultra-fast cloud transcription)
     # Get API key from: https://console.groq.com/keys
     "groq_whisper_model": "whisper-large-v3",  # whisper-large-v3 (same quality as local, 10x faster)
+    "groq_llm_model": "llama-3.3-70b-versatile",  # Groq LLM model for post-processing
     "groq_api_key": "",  # Groq API key (stored in plaintext config.json, chmod 600; loaded into GROQ_API_KEY env var)
     
     # Floating indicator settings
@@ -547,8 +550,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # App update checking
     "check_for_app_updates": True,  # Check GitHub Releases for a newer app version on startup (once/day)
     "app_update_dismissed_version": "",  # Release tag the user dismissed; a newer tag shows the banner again
-    "update_channel": "",  # "stable" or "beta" (Settings > System > Updates); "" follows the running build
-    "crash_reports": "",  # "on" / "off" (Settings > System); "" follows the channel: Beta sends, Stable doesn't
+    "update_channel": "",  # "stable" or "beta" (Settings > Advanced > System > Updates); "" follows the running build
+    "crash_reports": "",  # "on" / "off" (Settings > Advanced > System); "" follows the channel: Beta sends, Stable doesn't
 
     # License / Premium
     # "Buy Now" goes straight to the Ultra checkout; "More Info" goes to the landing page.

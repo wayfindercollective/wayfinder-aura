@@ -14,16 +14,23 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 
 
-def test_recorder_import_does_not_import_scipy_signal():
+def test_audio_processing_never_imports_scipy():
+    # SciPy is not bundled any more; nothing on the dictation path may need it.
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO / "src")
     code = """
 import sys
 from wayfinder.core import recorder
-assert 'scipy.signal' not in sys.modules
+assert 'scipy' not in sys.modules
 same_rate = recorder.resample_audio(recorder.np.zeros(8), 16000, 16000)
 assert len(same_rate) == 8
-assert 'scipy.signal' not in sys.modules
+audio = recorder.np.random.default_rng(0).normal(0, 0.1, 48000).astype(recorder.np.float32)
+resampled = recorder.resample_audio(audio, 48000, 16000)
+assert len(resampled) == 16000
+for level in ('light', 'medium', 'heavy'):
+    recorder.preprocess_audio(resampled, 16000, level)
+recorder.preload_audio_processing()
+assert 'scipy' not in sys.modules, sorted(m for m in sys.modules if m.startswith('scipy'))
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -36,13 +43,32 @@ assert 'scipy.signal' not in sys.modules
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_audio_processing_preload_is_one_shot(monkeypatch):
-    from wayfinder.core import recorder
+def test_launch_does_not_import_requests():
+    # main.py imports the setup pane on every launch to decide the first-run
+    # flow; requests (~35 ms warm) is needed only once a download starts.
+    env = os.environ.copy()
+    env.update(PYTHONPATH=str(REPO / "src"), QT_QPA_PLATFORM="offscreen")
+    code = """
+import sys
+import wayfinder_main
+from wayfinder.ui.setup_pane import first_run_plan, should_chain_welcome
+assert 'requests' not in sys.modules, 'requests imported at launch'
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=REPO, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
-    calls = []
-    monkeypatch.setattr(recorder, "_get_scipy_signal_functions", lambda: calls.append(True))
+
+def test_audio_processing_preload_warms_the_rumble_filter():
+    from wayfinder.core import audio_dsp, recorder
+
+    audio_dsp._impulse_response.cache_clear()
     recorder.preload_audio_processing()
-    assert calls == [True]
+    assert audio_dsp._impulse_response.cache_info().currsize == 1
+    b, a = audio_dsp.butter(2, recorder.RUMBLE_CUTOFF_HZ / 8000, btype="high")
+    audio_dsp.filtfilt(b, a, [0.0] * 64)
+    assert audio_dsp._impulse_response.cache_info().hits >= 1
 
 
 def test_steam_deck_defaults_to_idle_efficient_overlay():

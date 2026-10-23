@@ -513,8 +513,9 @@ def test_public_tier_copy_matches_runtime_gpu_and_model_gates():
 def test_documented_dictation_defaults_and_auto_enter_warning_match_runtime():
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     support = (REPO / "SUPPORT.md").read_text(encoding="utf-8")
-    main = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
-    normalized_docs = [" ".join(text.split()) for text in (readme, support, main)]
+    # The in-app hint lives in SETTING_TOOLTIPS (ui/components.py).
+    hints = (REPO / "src" / "wayfinder" / "ui" / "components.py").read_text(encoding="utf-8")
+    normalized_docs = [" ".join(text.split()) for text in (readme, support, hints)]
 
     sys.path.insert(0, str(REPO / "src"))
     from wayfinder.config import DEFAULT_CONFIG
@@ -1197,7 +1198,6 @@ def test_flatpak_compiled_python_dependencies_build_from_source():
         "python-cffi",
         "python-cryptography",
         "python-numpy",
-        "python-scipy",
         "python-pillow",
         "python-jiter",
         "python-pydantic-core",
@@ -1207,7 +1207,6 @@ def test_flatpak_compiled_python_dependencies_build_from_source():
     dependency_manifests = [
         PYTHON_DEPS,
         REPO / "flatpak" / "python-numpy-build-tools.json",
-        REPO / "flatpak" / "python-scipy-build-tools.json",
     ]
     for path in dependency_manifests:
         text = path.read_text(encoding="utf-8")
@@ -1219,7 +1218,13 @@ def test_flatpak_compiled_python_dependencies_build_from_source():
     # NumPy's extensions disappeared only during the final cleanup stage.
     for path in dependency_manifests[1:]:
         assert '"cleanup"' not in path.read_text(encoding="utf-8"), path
-    assert "/lib/python*/site-packages/pythran*" in manifest
+    assert "pythran" not in manifest and "python-scipy" not in manifest
+    # Pillow 12's build imports pybind11. SciPy's build tools used to install
+    # it as a side effect; dropping SciPy broke the Pillow module.
+    build_tools = json.loads(dependency_manifests[1].read_text(encoding="utf-8"))
+    tool_pins = [cmd for module in build_tools["modules"] for cmd in module["build-commands"]]
+    assert any('"pybind11==' in cmd for cmd in tool_pins)
+    assert manifest.index("  - python-numpy-build-tools.json") < manifest.index("  - name: python-pillow")
 
     assert "-DBUILD_SHARED_LIBS:BOOL=ON" in manifest
     assert "-DBUILD_WITHOUT_LAPACKE:BOOL=ON" in manifest
@@ -1569,3 +1574,35 @@ def test_appimage_container_installs_what_appimagetool_needs():
     packages = release[start:release.index("\n\n", start)].replace("\\\n", " ").split()
     for needed in ("libfuse2", "wget", "file"):
         assert needed in packages, needed
+
+
+def test_the_windows_suite_runs_once_per_commit():
+    """ci.yml's "Windows tests" job covers pushes, PRs and release tags (the
+    release's build-windows needs it), so the installer workflow re-runs the
+    suite only on a manual run: twice on the one Windows runner was the waste.
+
+    run-tests must be declared on both triggers: GitHub's loose comparison makes
+    a missing input equal false, so a manual run would silently skip tests.
+    """
+    build = (REPO / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+    triggers = build[build.index("\non:"):build.index("\n  push:")]
+    call = triggers[triggers.index("  workflow_call:"):triggers.index("  workflow_dispatch:")]
+    dispatch = triggers[triggers.index("  workflow_dispatch:"):]
+    for block in (call, dispatch):
+        assert "      run-tests:" in block and "type: boolean" in block and "default: true" in block
+    step = build[build.index("      - name: Run Windows tests"):]
+    step = step[:step.index("\n      - name:")]
+    assert "        if: inputs.run-tests\n" in step
+
+    release_build = _workflow_job_body("build-windows")
+    assert "needs: [quality, release-readiness]" in release_build
+    assert "      run-tests: false" in release_build
+
+
+def test_release_python_setups_cache_pip():
+    # build-appimage compiles PyGObject and dbus-python from source every run.
+    release = _release_workflow_text()
+    setups = release.split("uses: actions/setup-python@v7")[1:]
+    assert len(setups) == 2
+    for setup in setups:
+        assert "cache: pip" in setup[:setup.index("\n      - ")]

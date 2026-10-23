@@ -1,54 +1,121 @@
 """
 Reusable UI components for Wayfinder Aura.
 
-Contains common widgets used throughout the application:
-- ToolTip: Hover tooltips for widgets
+The one home for the app's shared widgets and setting hints (wayfinder_main
+imports them from here):
+- ToolTip: Hover tooltips for widgets, plus hide_all_tooltips()
 - ModeSelector: Segmented control for mode selection
 - SmoothScrollableFrame: Scrollable container
+- CompatibilityBanner: Model compatibility warning
+- SETTING_TOOLTIPS / get_dynamic_tooltip: Setting hints
 """
 
+import os
+import sys
+import weakref
+from pathlib import Path
+
 import customtkinter as ctk
+
+from wayfinder.core.whisper_timings import format_bench_seconds, warm_benchmark_results
+
 from .theme import COLORS, RADIUS, FONT_SIZES
+from .tooltip_geometry import anchor_in_area, tooltip_position, tooltip_wraplength
+from .window_geometry import macos_visible_frame, windows_work_area
+
+IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+_IS_LINUX = sys.platform.startswith("linux")
+
+
+# Flipped True for the duration of a mouse-wheel gesture so hover ToolTips
+# don't spawn CTkToplevel windows while content is sliding under the pointer.
+_WHEEL_SCROLL_ACTIVE = False
+
+
+def set_wheel_scroll_active(active: bool) -> None:
+    """The app's wheel handler flips this; ToolTips stay hidden while it is True."""
+    global _WHEEL_SCROLL_ACTIVE
+    _WHEEL_SCROLL_ACTIVE = active
+
+
+#: Every ToolTip that has been constructed and not yet destroyed.
+#: A WeakSet so holding a reference here never keeps a dead widget alive.
+#: Tk's event delivery through pack_forget() is the thing that failed here, so
+#: hide_all_tooltips() does not rely on it — the tab switcher calls it directly.
+_LIVE_TOOLTIPS: "weakref.WeakSet[ToolTip]" = weakref.WeakSet()
+
+
+def hide_all_tooltips() -> None:
+    """Dismiss every visible tooltip. Safe to call at any time."""
+    for tip in list(_LIVE_TOOLTIPS):
+        try:
+            tip.on_leave()
+        except Exception:
+            # One stuck tooltip must never stop the others being cleared.
+            pass
 
 
 class ToolTip:
     """
     Modern hover tooltip for CustomTkinter widgets.
-    Styled to match the design system.
+    Styled to match Nano Banana design system.
     """
-    
-    def __init__(self, widget, text: str, delay: int = 300):
-        """
-        Create a tooltip for a widget.
-        
-        Args:
-            widget: The widget to attach the tooltip to
-            text: Tooltip text (supports multi-line)
-            delay: Delay in ms before showing tooltip
-        """
+
+    def __init__(self, widget, text, delay=300):
         self.widget = widget
         self.text = text
         self.delay = delay
         self.tooltip_window = None
         self.scheduled_id = None
-        
+        _LIVE_TOOLTIPS.add(self)
+
         widget.bind("<Enter>", self.on_enter)
         widget.bind("<Leave>", self.on_leave)
         widget.bind("<ButtonPress>", self.on_leave)
-    
+        # Switching tabs calls pack_forget() on the pane, which unmaps this
+        # widget without the pointer ever leaving it — so <Leave> never fires
+        # and the tooltip was left stranded. It is an overrideredirect topmost
+        # Toplevel with no chrome, so there is then no way to dismiss it: it
+        # floats over every other tab until the app restarts.
+        widget.bind("<Unmap>", self.on_leave, add="+")
+        widget.bind("<Destroy>", self.on_destroy, add="+")
+
     def on_enter(self, event=None):
+        # Pointer is skating across rows during a wheel gesture — scheduling a
+        # Toplevel tooltip mid-scroll is a common source of bottom-of-pane jank.
+        if _WHEEL_SCROLL_ACTIVE:
+            return
         self.scheduled_id = self.widget.after(self.delay, self.show_tooltip)
-    
+
     def on_leave(self, event=None):
         if self.scheduled_id:
-            self.widget.after_cancel(self.scheduled_id)
+            try:
+                self.widget.after_cancel(self.scheduled_id)
+            except Exception:
+                # The widget may already be gone; the timer dies with it.
+                pass
             self.scheduled_id = None
         self.hide_tooltip()
-    
+
+    def on_destroy(self, event=None):
+        self.on_leave()
+        _LIVE_TOOLTIPS.discard(self)
+
     def show_tooltip(self):
         if self.tooltip_window:
             return
-        
+        if _WHEEL_SCROLL_ACTIVE:
+            return
+        # The 300ms timer can outlive the widget: hover a row, switch tab, and
+        # this fires against something unmapped or destroyed, stranding a
+        # tooltip from a pane the user already left.
+        try:
+            if not self.widget.winfo_exists() or not self.widget.winfo_ismapped():
+                return
+        except Exception:
+            return
+
         # Create tooltip window
         self.tooltip_window = tw = ctk.CTkToplevel(self.widget)
         tw.wm_overrideredirect(True)
@@ -69,48 +136,42 @@ class ToolTip:
         label = ctk.CTkLabel(
             frame,
             text=self.text,
-            font=("DejaVu Sans", 12),
+            font=("DejaVu Sans", 12),  # module-scope: no font_sizes access
             text_color=COLORS["text_primary"],
-            wraplength=260,
+            wraplength=tooltip_wraplength(self.text),
             justify="left",
         )
         label.pack(padx=12, pady=10)
-        
-        # Position tooltip above widget
+
+        # Above the widget if it fits, else below, else beside it - always
+        # inside the usable screen (macOS: menu bar and Dock excluded).
         tw.update_idletasks()
-        tw_width = tw.winfo_width()
-        tw_height = tw.winfo_height()
-        screen_width = tw.winfo_screenwidth()
-        screen_height = tw.winfo_screenheight()
-        
-        # Center above widget
-        widget_x = self.widget.winfo_rootx()
-        widget_width = self.widget.winfo_width()
-        x = widget_x + (widget_width - tw_width) // 2
-        
-        # Position above with gap
-        y = self.widget.winfo_rooty() - tw_height - 6
-        
-        # Keep on screen horizontally
-        if x < 10:
-            x = 10
-        elif x + tw_width > screen_width - 10:
-            x = screen_width - tw_width - 10
-        
-        # If would go off top, show below
-        if y < 10:
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-        
+        size = (tw.winfo_width(), tw.winfo_height())
+        screen_w, screen_h = tw.winfo_screenwidth(), tw.winfo_screenheight()
+        anchor = (self.widget.winfo_rootx(), self.widget.winfo_rooty(),
+                  self.widget.winfo_width(), self.widget.winfo_height())
+        area = (macos_visible_frame(screen_w, screen_h) if IS_MACOS
+                else windows_work_area(screen_w, screen_h, physical=True) if IS_WINDOWS
+                else (0, 0, screen_w, screen_h))
+        if anchor_in_area(anchor, area):
+            x, y = tooltip_position(anchor, size, area)
+        else:
+            # Another monitor: Tk only reports the primary screen, so don't
+            # pull the tooltip onto it; keep it centred above (or below) the widget.
+            x = anchor[0] + (anchor[2] - size[0]) // 2
+            y = anchor[1] - size[1] - 6
+            if y < 10:
+                y = anchor[1] + anchor[3] + 6
         tw.wm_geometry(f"+{x}+{y}")
     
     def hide_tooltip(self):
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
-    
-    def update_text(self, text: str):
-        """Update the tooltip text."""
-        self.text = text
+
+    def update_text(self, new_text: str):
+        """Update the tooltip text dynamically."""
+        self.text = new_text
 
 
 class ModeSelector(ctk.CTkFrame):
@@ -136,7 +197,7 @@ class ModeSelector(ctk.CTkFrame):
         
         # Display labels and icons for each mode
         self.display_info = {
-            "local": {"label": "Local", "icon": "", "desc": "Private local mode"},
+            "local": {"label": "Local", "icon": "", "desc": "100% Private"},
             "remote": {"label": "Remote", "icon": "", "desc": "Cloud Processing"},
         }
         
@@ -162,11 +223,7 @@ class ModeSelector(ctk.CTkFrame):
         # Create buttons
         for i, value in enumerate(self.values):
             info = self.display_info.get(value, {"label": value.title(), "icon": "", "desc": ""})
-            text = (
-                f"{info['icon']}  {info['label']}".strip()
-                if info.get("icon")
-                else info["label"]
-            )
+            text = f"{info['icon']}  {info['label']}".strip() if info.get("icon") else info["label"]
             
             is_selected = value == self.current_value
             btn = ctk.CTkButton(
@@ -197,7 +254,7 @@ class ModeSelector(ctk.CTkFrame):
             btn.configure(
                 fg_color=COLORS["bg_card"] if is_selected else "transparent",
                 text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),
+                font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
             )
         
         # Call callback
@@ -217,19 +274,41 @@ class ModeSelector(ctk.CTkFrame):
                 btn.configure(
                     fg_color=COLORS["bg_card"] if is_selected else "transparent",
                     text_color=COLORS["text_bright"] if is_selected else COLORS["text_secondary"],
-                    font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),
+                    font=("DejaVu Sans", 13, "bold" if is_selected else "normal"),  # module-scope: no font_sizes access
                 )
 
 
 class SmoothScrollableFrame(ctk.CTkScrollableFrame):
     """
-    Scrollable frame wrapper that uses CTk's built-in scrolling.
-    The custom smooth scrolling implementation was incompatible with 
-    the current CustomTkinter version.
+    Scrollable frame with a few scroll-feel patches on top of CTk.
+
+    CTk's stock <Configure>→scrollregion path rewrites the canvas region on
+    every child geometry change (hover recolors, font reflow, etc.). Near the
+    bottom that can shift yview by a fraction of a pixel and read as a glitch.
+    We only push scrollregion when bbox("all") actually changes.
+
+    The custom momentum/lerp scroller was removed earlier — it fought CTk.
     """
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._sr_bbox = None
+        # Replace CTk's Configure→scrollregion binding (bind without add
+        # overwrites the widget-level handler installed in super().__init__).
+        self.bind("<Configure>", self._on_inner_configure)
+
+    def _on_inner_configure(self, _event=None):
+        try:
+            bbox = self._parent_canvas.bbox("all")
+        except Exception:
+            return
+        if bbox is None or bbox == self._sr_bbox:
+            return
+        self._sr_bbox = bbox
+        try:
+            self._parent_canvas.configure(scrollregion=bbox)
+        except Exception:
+            pass
         # Just use standard CTk scrolling - works reliably
 
 
@@ -254,63 +333,133 @@ MODEL_RECOMMENDATIONS = """
 💡 Tip: qwen3:4b for styles and Strong; Normal works with no model at all.
 """
 
-SETTING_TOOLTIPS: dict[str, str] = {
-    # ⚡ No latency impact - UI/configuration only
-    "hotkey": "The keyboard or mouse button to start/stop voice recording.\nSupports F-keys, mouse middle/side/extra buttons.\n⚡ Latency: None",
-    "microphone": "Select which microphone/audio input device to use.\n⚡ Latency: None",
-    "hotkey_devices": "Which keyboards, mice, or keypads can trigger the hotkey.\nMice are auto-detected when using mouse button hotkeys.\n⚡ Latency: None",
-    "benchmark": "Measure transcription speed on your hardware.\nResults customize speed estimates throughout the app.\n⏱️ Run once to get accurate timing predictions.",
-    "start_minimized": "Start the app minimized to the system tray.\n⚡ Latency: None",
-    "ui_scale": "Adjust the size of the user interface.\n⚡ Latency: None",
-    "overlay_type": "Choose the status indicator style:\n• Always On: Stays visible, never steals focus (PyQt6)\n• Disappearing: Shows only during recording (CTk)\n⚠️ Requires restart to take effect.",
-    "overlay_scale": "Adjust the size of the status overlay.\nSeparate from the main UI scale.\n⚡ Latency: None",
-    "prompt": "Initial text that guides transcription style.\n⚡ Latency: None (processed at model load)",
-    "language": "The language for transcription. English is most optimized.\n⚡ Latency: None",
-    
-    # 🟢 Minimal latency impact (<10ms per invocation)
-    "typing_speed": "How fast text is typed out.\n🟢 Instant: 0ms | Fast: ~50ms | Normal: ~200ms | Slow: ~500ms per sentence",
+# Setting hints (hover the (i) next to a setting). Plain text, no emoji
+# (rule 11); keep claims to what the code does today. Benchmark-driven ones are
+# rebuilt by get_dynamic_tooltip.
+SETTING_TOOLTIPS = {
+    "hotkey": "The shortcut that starts and stops dictation.",
+    "microphone": "The microphone Aura listens to.",
+    "hotkey_devices": "Which keyboards, mice or keypads can trigger the shortcut.",
+    "enable_tray_icon": (
+        "Show Aura in the menu bar, with its state and quick controls. "
+        "Turn it off if your menu bar is crowded."
+    ),
+    "ui_scale": "Size of Aura's window and text.",
+    "update_channel": (
+        "Stable: tested releases, every few weeks.\n"
+        "Beta: the newest build, as often as daily. New features sooner, "
+        "and sometimes new bugs.\n"
+        "Going back to Stable keeps your version until the next stable release."
+    ),
+    "crash_reports": (
+        "When Aura crashes or hits an error, send Wayfinder the kind of error, "
+        "where in Aura's code it happened and the app and system versions, so "
+        "it gets fixed. Never the error message, audio, dictated text or your "
+        "settings.\n"
+        "On by default for Beta, off for Stable."
+    ),
+    "gamer_mode": (
+        "When World of Warcraft is in front, Aura hears gamer talk (inc, pull, LFG, "
+        "M+...), keeps your words as said, and sends them to chat: don't press "
+        "Enter first, just tap your shortcut, speak, tap again. One message per "
+        "dictation: past WoW's 255-character limit, the next part waits in chat "
+        "for your Enter.\n"
+        "Also set up for Final Fantasy XIV, Elder Scrolls Online, Lord of the Rings "
+        "Online, Albion Online, RuneScape and EVE Online. In games Aura pastes "
+        "rather than typing keys, so dictation can't trigger a keybind."
+        + (
+            "\nDark Age of Camelot (Linux) has no paste: press Enter to open chat "
+            "first, then dictate, and Aura types it into the chat box."
+            if _IS_LINUX and not (IS_MACOS or IS_WINDOWS) else ""
+        )
+    ),
+    "game_chat_send": (
+        "On: Aura presses Enter to send each message.\n"
+        "Off: the text is left in the chat box for you to check and send."
+    ),
+    "overlay_type": (
+        "Always On: the pill stays on screen and never takes focus.\n"
+        "Disappearing: it shows only while you dictate.\n"
+        "Applies immediately."
+    ),
+    "overlay_enabled": (
+        "Show the floating status pill (Listening, Processing, Ready). "
+        "With it off, dictation still works."
+    ),
+    "overlay_scale": "Size of the status pill, separate from the window size.",
+    "overlay_position": "Move the status pill up or down the screen. Left is higher, right is lower.",
+    "language": (
+        "The language you dictate in. Other languages need a multilingual "
+        "model (one without .en in its name)."
+    ),
+    "linux_portal_typing": (
+        "Lets Aura type into every app on a Wayland desktop, native Wayland apps "
+        "included, through your desktop's remote-control permission. Your desktop "
+        "asks once; KDE shows a Remote Control icon in the tray while Aura runs.\n"
+        "Off: Aura types with xdotool, which reaches X11 apps and games only."
+    ),
     "press_enter_after_dictation": (
-        "Press Enter automatically once dictated text finishes typing. Off by default.\n"
-        "⚠️ This immediately submits chat messages, terminal commands, and AI prompts.\n"
-        "Keep it off when you need to review dictated text first."
+        "Press Enter after the text is typed. Off by default.\n"
+        "This sends chat messages, runs terminal commands and submits AI prompts "
+        "straight away, so leave it off if you want to check the text first."
     ),
-    "ensure_punctuation": "Extra punctuation fixes if model output lacks periods/caps.\n🟢 Latency: +1-3ms (optional, most models handle this well)",
     "audio_preprocessing": (
-        "Conditions microphone audio before speech recognition.\n\n"
-        "• Off — Leaves audio untouched. Use as a diagnostic baseline or when your "
-        "mic/interface already produces clean, consistently leveled audio.\n\n"
-        "• Light — Safely evens out quiet or inconsistent mic levels without huge "
-        "noise boosts. Best everyday default.\n\n"
-        "• Medium — Light plus an 80 Hz high-pass filter. Use for electrical hum, "
-        "desk vibration, handling noise, or low HVAC rumble. It does not remove fan hiss.\n\n"
-        "• Heavy — Medium plus a soft gate that lowers steady noise between words. "
-        "Use only when background noise remains; it can suppress soft consonants or quiet speech.\n\n"
-        "Processing cannot repair clipping or replace correct microphone gain."
+        "Sound processing on your mic before Whisper hears it. It never changes "
+        "words; text cleanup is separate (Post-Processing).\n\n"
+        "Off: the raw mic signal.\n"
+        "Light (recommended): raises quiet recordings toward a normal level, at "
+        "most 8x, so faint noise isn't blown up.\n"
+        "Medium: Light plus an 80 Hz filter for hum, rumble and desk bumps. For a "
+        "fan, air conditioning or a mic on the desk.\n"
+        "Heavy: Medium plus turning steady noise between words down. For a noisy "
+        "room when Medium isn't enough; it can swallow soft speech.\n\n"
+        "None of them can fix clipping or a mic set far too loud."
     ),
-    
-    # 🟡 Moderate latency impact (10-100ms)
     "chunked_mode": (
-        "Choose when recordings are split for background transcription.\n"
-        "Off: always one pass. Auto: one pass under 30s, then chunks. "
-        "On: chunks from the first 15s segment.\n"
-        "Auto is recommended."
+        "Transcribes long dictations in pieces while you speak, so the text is "
+        "ready soon after you stop. Ultra.\n\n"
+        "Off: one pass for the whole recording.\n"
+        "Auto: one pass under 30 s; longer recordings go in 15 s pieces that "
+        "overlap by 2 s. Recommended: in testing, 2-minute dictations on Large "
+        "v3 Turbo Q5 lost words in one pass and kept them all on Auto.\n"
+        "On: 15 s pieces from the start."
     ),
-    "chunk_duration": "Length of each segment after chunking begins.\nShorter = faster feedback but more splice points.\n⚠️ 15s with 2s overlap is the tested default",
-    
-    # 🔴 MAJOR latency impact - These are the biggest factors
-    "whisper_model": "Local on-device speech recognition model.\nBase is the Free default: fast and lightweight, but it can be inaccurate compared with Ultra models.\nProcessed entirely on your machine — no cloud API needed.",
-    
-    # GPU/Backend - Can dramatically change all timings
-    "backend": "Transcription engine selection.\n⚙️ Free: Base on CPU with whisper.cpp\n🚀 Ultra: GPU whisper.cpp, experimental Faster-Whisper, or optional cloud backends",
-    "groq_whisper": "☁️ Groq Whisper API - Ultra-fast cloud transcription\n\n🚀 ~10x faster than local GPU!\n   ~0.3s for 10s audio (vs ~3s local)\n\n✅ Same Whisper Large-v3 model\n✅ Free tier: 14,400 requests/day\n\n⚠️ Requires internet connection\n⚠️ Audio sent to Groq servers\n\nGet API key: https://console.groq.com/keys",
-    "gpu_acceleration": "Ultra-only GPU acceleration for transcription and local cleanup.\nFree runs Base on CPU. Run Benchmark for a GPU upgrade preview.",
-    "gpu_layers": "Model layers to offload to GPU.\n⚙️ Auto: Maximum speed | Fewer: Saves VRAM, slower",
-    
-    # Post-processing tooltips
-    "post_processing": "Clean up transcription locally.\nFree includes minimal filler/grammar cleanup; Ultra adds larger cleanup models and selectable styles.\n🟡 Latency: +100ms to a few seconds depending on model",
-    "fast_filler_removal": "⚡ INSTANT filler removal (~1ms)\n\nUses regex instead of LLM to remove:\num, uh, ah, er, eh, hmm, mm\n\n✅ ~1000x faster than LLM\n✅ No model loading required\n✅ Perfect for the 'Normal' style\n\n🟢 Best when you just want ums/ahs removed\n    and don't need grammar fixes.",
-    "output_tone": "Style for processed output:\n• Professional — Polished, business-appropriate\n• AI Prompt — Optimized for talking to LLMs\n• Casual — Relaxed, conversational",
-    "intensity": "How aggressively to clean up text:\n• Light — Minimal cleanup, preserves natural speech\n• Standard — Balanced cleanup (recommended)\n• Strong — Heavy cleanup, may alter phrasing",
+    "whisper_model": (
+        "The speech model. It runs on your computer; nothing is sent to the cloud."
+    ),
+    "backend": (
+        "Local transcription engine.\n\n"
+        "• Auto / default — always whisper.cpp. Free uses Base on the CPU; Ultra\n"
+        "  follows the GPU toggle. Never selects Faster-Whisper.\n\n"
+        "• whisper.cpp — CPU for Free; with Ultra's GPU toggle, Metal on a Mac\n"
+        "  and Vulkan on Linux and Windows.\n\n"
+        "• Faster-Whisper (experimental) — Manual only, NVIDIA hosts only.\n"
+        "  CTranslate2 CUDA path; not fully dogfooded. May fall back to slow CPU.\n"
+        "  Ultra feature. Manual pick turns Auto off."
+    ),
+    "gpu_acceleration": (
+        (
+            "Use the Mac's GPU (Metal) for transcription and local cleanup. Ultra.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+        if IS_MACOS
+        else (
+            "Use your graphics card for transcription. Ultra.\n"
+            "Vulkan on AMD, NVIDIA and Intel GPUs; text cleanup stays on the CPU.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+        if IS_WINDOWS
+        else (
+            "Use your GPU for transcription and local cleanup. Ultra.\n"
+            "whisper.cpp uses Vulkan on AMD, NVIDIA and Intel GPUs. "
+            "Faster-Whisper (experimental, manual): NVIDIA CUDA only.\n"
+            "Free runs Base on the CPU. Benchmark shows what the GPU would do."
+        )
+    ),
+    "gpu_device": (
+        "Which graphics card transcribes. Automatic picks the dedicated GPU;\n"
+        "choose the integrated one if the big card is busy with games or a local AI model."
+    ),
 }
 
 
@@ -319,29 +468,22 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
     Generate dynamic tooltip text based on benchmark results.
     Falls back to static text with TBD for unbenchmarked values.
     """
-    from wayfinder.core.whisper_timings import (
-        format_bench_seconds,
-        warm_benchmark_results,
-    )
-
-    # Warm results only — legacy cold single shots are retired everywhere.
     benchmark_results = warm_benchmark_results(config)
     fastest = config.get("benchmark_fastest_processor", None)
     
     # Model-specific tooltip with actual benchmarked speeds
     if key == "whisper_model":
-        base_text = "Local on-device speech recognition model.\nProcessed entirely on your machine — no cloud API needed."
-        import os
-        from pathlib import Path
+        base_text = SETTING_TOOLTIPS["whisper_model"]
         selected_name = Path(os.path.expanduser(str(config.get("model_path", "") or ""))).name.lower()
         if selected_name in ("ggml-base.en.bin", "ggml-base.bin"):
             base_text += (
-                "\n\nBase is the Free default: fast and lightweight, but it can be "
-                "inaccurate compared with the higher-accuracy Ultra models."
+                "\n\nBase is the Free default: fast and light, but less accurate. "
+                "Large v3 Turbo Q5 (Ultra) on a GPU made 43% fewer mistakes in our "
+                "tests, at the same speed; on the CPU it is much slower."
             )
         
         if not benchmark_results:
-            return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
+            return f"{base_text}\n\nRun Benchmark to measure speeds on your hardware."
         
         # Build speed table from benchmarks
         speed_lines = []
@@ -357,9 +499,9 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         for model_id in model_order:
             if model_id in benchmark_results:
                 result = benchmark_results[model_id]
-                if fastest == "gpu" and "gpu_10s" in result:
+                if fastest == "gpu" and result.get("gpu_10s") is not None:
                     time_str = format_bench_seconds(result["gpu_10s"])
-                elif "cpu_10s" in result:
+                elif result.get("cpu_10s") is not None:
                     time_str = format_bench_seconds(result["cpu_10s"])
                 else:
                     time_str = "TBD"
@@ -368,14 +510,16 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
         
         if speed_lines:
             speeds = " | ".join(speed_lines)
-            return f"{base_text}\n\n🚀 {processor_label} speeds (10s audio):\n{speeds}"
+            return f"{base_text}\n\n{processor_label} time for 10 s of audio:\n{speeds}"
         
-        return f"{base_text}\n\n⏱️ Run benchmark to measure speeds on your hardware."
+        return f"{base_text}\n\nRun Benchmark to measure speeds on your hardware."
+    
+    # Accuracy mode tooltip with benchmarked impact
     
     # GPU acceleration tooltip with measured speedup
     if key == "gpu_acceleration":
-        base_text = "Use GPU for transcription."
-        if benchmark_results and isinstance(benchmark_results, dict):
+        base_text = SETTING_TOOLTIPS.get("gpu_acceleration", "Use GPU for transcription.")
+        if benchmark_results:
             # Calculate actual speedup from benchmark data
             speedups = []
             for model_id, result in benchmark_results.items():
@@ -385,8 +529,76 @@ def get_dynamic_tooltip(key: str, config: dict) -> str:
                     speedups.append(cpu_time / gpu_time)
             if speedups:
                 avg_speedup = sum(speedups) / len(speedups)
-                return f"{base_text}\n🚀 Your GPU is {avg_speedup:.1f}x faster than CPU on average!"
-        return f"{base_text}\n🚀 TBD — run benchmark to measure your GPU speedup"
+                return f"{base_text}\n\nOn your hardware the GPU was {avg_speedup:.1f}x faster than the CPU."
+        return base_text
+
+    # Backend: static rules + this machine's Auto recommendation
+    if key == "backend":
+        base = SETTING_TOOLTIPS.get("backend", "")
+        try:
+            from wayfinder.utils.gpu import recommend_local_transcription_backend
+            # Tooltip cannot call feature_gate; pass allow from config-only hints
+            # (Ultra is not stored as a simple flag — fail closed for “allowed”).
+            fw_hint = False
+            rec, reason = recommend_local_transcription_backend(
+                allow_faster_whisper=fw_hint,
+                use_gpu=bool(config.get("use_gpu", False)),
+            )
+        except Exception:
+            rec, reason = "whisper_cpp", "whisper.cpp is the safe default."
+        rec_label = {
+            "whisper_cpp": "whisper.cpp",
+            "faster_whisper": "Faster-Whisper (experimental)",
+        }.get(rec, rec)
+        auto_on = bool(config.get("transcription_backend_auto", True))
+        active = config.get("transcription_backend", "whisper_cpp")
+        active_label = {
+            "whisper_cpp": "whisper.cpp",
+            "faster_whisper": "Faster-Whisper (experimental)",
+        }.get(active, active)
+        mode = "Auto" if auto_on else "Manual (your choice)"
+        return (
+            f"{base}\n\n"
+            f"This PC → Auto picks: {rec_label}\n"
+            f"{reason}\n\n"
+            f"Current: {active_label} · {mode}"
+        )
+
+    # Post-processing tooltip with measured cleanup times + pipeline total
+    if key == "post_processing":
+        base_text = (
+            "Rewrites your dictation in the chosen style with a local model.\n"
+            "Normal needs no model: it removes filler words instantly."
+        )
+        pp_results = config.get("postprocessing_benchmark_results", {}) or {}
+        pipeline = config.get("pipeline_benchmark", {}) or {}
+        if pipeline.get("method") != "warm":  # legacy cold pipeline: retire
+            pipeline = {}
+        lines = []
+        if pipeline.get("total_time") is not None:
+            asr = pipeline.get("asr_time")
+            ppt = pipeline.get("pp_time")
+            asr_s = format_bench_seconds(asr)
+            pp_s = format_bench_seconds(ppt) if ppt is not None else "off"
+            lines.append(
+                f"Your setup total: {format_bench_seconds(pipeline['total_time'])} "
+                f"(speech-to-text {asr_s} + cleanup {pp_s})"
+            )
+        if pp_results:
+            ranked = sorted(
+                (
+                    (mid, r) for mid, r in pp_results.items()
+                    if isinstance(r, dict) and r.get("avg_time") is not None and not r.get("error")
+                ),
+                key=lambda item: item[1]["avg_time"],
+            )
+            for mid, r in ranked[:6]:
+                mark = " ← current" if r.get("is_current") else ""
+                name = r.get("model_name", mid)
+                lines.append(f"  {name}: {format_bench_seconds(r['avg_time'])}{mark}")
+        if lines:
+            return base_text + "\n\nMeasured on your hardware:\n" + "\n".join(lines)
+        return base_text + "\n\nRun Benchmark for measured times on your hardware."
     
     # Default to static tooltip
     return SETTING_TOOLTIPS.get(key, "")
@@ -470,7 +682,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.icon_label = ctk.CTkLabel(
             self.header,
             text="⚠",
-            font=("DejaVu Sans", 14),
+            font=("DejaVu Sans", 14),  # module-scope: no font_sizes access
             text_color=COLORS["accent_yellow"],
         )
         self.icon_label.pack(side="left", padx=(0, 8))
@@ -478,7 +690,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.title_label = ctk.CTkLabel(
             self.header,
             text="Model Compatibility",
-            font=("DejaVu Sans", 12, "bold"),
+            font=("DejaVu Sans", 12, "bold"),  # module-scope: no font_sizes access
             text_color=COLORS["text_bright"],
         )
         self.title_label.pack(side="left")
@@ -487,7 +699,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.issue_label = ctk.CTkLabel(
             self.content,
             text="",
-            font=("DejaVu Sans", 11),
+            font=("DejaVu Sans", 11),  # module-scope: no font_sizes access
             text_color=COLORS["text_secondary"],
             wraplength=320,
             justify="left",
@@ -509,7 +721,7 @@ class CompatibilityBanner(ctk.CTkFrame):
         self.suggestion_label = ctk.CTkLabel(
             self.suggestion_frame,
             text="",
-            font=("DejaVu Sans", 11),
+            font=("DejaVu Sans", 11),  # module-scope: no font_sizes access
             text_color=COLORS["accent"],
         )
         self.suggestion_label.pack(side="left", padx=10, pady=8)
@@ -568,7 +780,7 @@ class CompatibilityBanner(ctk.CTkFrame):
             rec_label = ctk.CTkLabel(
                 self.recommendations_frame,
                 text=f"• {rec}",
-                font=("DejaVu Sans", 10),
+                font=("DejaVu Sans", 10),  # module-scope: no font_sizes access
                 text_color=COLORS["text_muted"],
                 wraplength=300,
                 justify="left",

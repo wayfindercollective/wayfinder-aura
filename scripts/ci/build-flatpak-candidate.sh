@@ -149,6 +149,9 @@ grep -Fq "AUDIO_PROCESSING_SELF_TEST_OK" "$test_logs/audio-processing.log"
 flatpak run "$APP_ID" --tls-self-test | tee "$test_logs/tls.log"
 grep -Fq "TLS_SELF_TEST_OK" "$test_logs/tls.log"
 
+flatpak run "$APP_ID" --app-import-self-test | tee "$test_logs/app-import.log"
+grep -Fq "APP_IMPORT_SELF_TEST_OK" "$test_logs/app-import.log"
+
 # Portal typing (Gio) and Gamer mode (python-xlib) degrade silently when their
 # imports are missing; prove them inside the sandbox.
 flatpak run "$APP_ID" --linux-input-self-test | tee "$test_logs/linux-input.log"
@@ -157,6 +160,25 @@ grep -Fq "LINUX_INPUT_SELF_TEST_OK" "$test_logs/linux-input.log"
 xvfb-run -a flatpak run "$APP_ID" --ui-renderer-self-test \
   | tee "$test_logs/ui-renderer.log"
 grep -Fq "UI_RENDERER_SELF_TEST_OK" "$test_logs/ui-renderer.log"
+
+# The Flathub manifest and smoke tests above stay on strict static permissions
+# (no org.freedesktop.Flatpak). The standalone GitHub Release .flatpak bundle
+# has no OSTree remote until Flathub, and Bazaar ignores bundle files when an
+# older version is installed, so grant host Flatpak access in the bundle export
+# for in-place self-updates (src/wayfinder/core/app_installer.py).
+python3 - "$REPO_ROOT/flatpak/build-dir/metadata" <<'PY'
+import configparser, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+cp = configparser.ConfigParser(interpolation=None)
+cp.optionxform = str
+cp.read(path, encoding="utf-8")
+if not cp.has_section("Session Bus Policy"):
+    cp.add_section("Session Bus Policy")
+cp.set("Session Bus Policy", "org.freedesktop.Flatpak", "talk")
+with path.open("w", encoding="utf-8") as fh:
+    cp.write(fh, space_around_delimiters=False)
+PY
+flatpak build-export "$REPO_ROOT/flatpak/repo" "$REPO_ROOT/flatpak/build-dir" master
 
 rm -f -- "$OUTPUT"
 flatpak build-bundle "$REPO_ROOT/flatpak/repo" "$OUTPUT" \

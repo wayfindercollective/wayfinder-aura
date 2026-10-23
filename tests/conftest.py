@@ -504,6 +504,52 @@ def no_host_binaries(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
 # =============================================================================
 
 @pytest.fixture(autouse=True)
+def _servers_admit_starts_again():
+    """A terminal shutdown (Quit, cleanup_all, exit) closes both server
+    managers for the rest of the process; a test that runs one must not leave
+    every later test's server start refused."""
+    yield
+    for module, name in (("wayfinder.core.transcriber", "WhisperServerBackend"),
+                         ("wayfinder.core.llama_server", "LlamaServerManager")):
+        cls = getattr(sys.modules.get(module), name, None)
+        if cls is not None:
+            cls._closed = False
+    supervisor = sys.modules.get("wayfinder.utils.child_supervisor")
+    if supervisor is not None:
+        supervisor.reopen_tracked()
+
+
+@pytest.fixture(autouse=True)
+def _tracked_runs_follow_a_patched_subprocess_run(monkeypatch):
+    """The CLI paths spawn one-shot helpers through
+    child_supervisor.run_tracked (a tracked Popen), but many tests stub those
+    helpers by patching subprocess.run. While subprocess.run is patched, the
+    stub stands in for the spawn; the closed-app gate still applies. The
+    registry's own tests leave subprocess.run alone and get the real thing."""
+    import subprocess
+    from wayfinder.utils import child_supervisor
+
+    real_run, real_tracked = subprocess.run, child_supervisor.run_tracked
+
+    def run_tracked(command, **kwargs):
+        if subprocess.run is real_run:
+            return real_tracked(command, **kwargs)
+        if child_supervisor._tracked_closed:
+            raise child_supervisor.HelpersClosed("shutting down: no new helper process")
+        kwargs.pop("stop", None)
+        return subprocess.run(command, **kwargs)
+
+    import importlib
+    for module in ("wayfinder.core.transcriber", "wayfinder.core.postprocessor",
+                   "wayfinder.utils.gpu_simple", "wayfinder.utils.gpu",
+                   "wayfinder.core.whisper_timings", "wayfinder.core.setup"):
+        loaded = importlib.import_module(module)
+        if getattr(loaded, "run_tracked", None) is real_tracked:
+            monkeypatch.setattr(loaded, "run_tracked", run_tracked)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_voice_profile():
     """Reset the global voice profile singleton between tests."""
     yield

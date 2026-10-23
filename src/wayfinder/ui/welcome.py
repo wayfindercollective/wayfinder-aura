@@ -395,6 +395,9 @@ class WelcomePane:
                 needs_permissions = any(v is not True for v in permission_snapshot().values())
             except Exception:
                 needs_permissions = False
+        self._perm_started_missing = bool(
+            needs_permissions or getattr(app, "_macos_input_relaunch_required", False)
+        )
         if self._only_permissions:
             self.flow = WelcomeFlow(on_complete=self._complete_flow, steps=["permissions"])
         else:
@@ -576,7 +579,11 @@ class WelcomePane:
         header.pack(side="top", fill="x", padx=pad, pady=(pad, 0))
         title = self._STEP_TITLES.get(self.flow.current, "")
         if self.flow.current == "permissions" and self._only_permissions:
-            title = "finish setting up"
+            title = (
+                "finish setting up"
+                if getattr(self, "_perm_started_missing", True)
+                else "macos permissions"
+            )
         elif self.flow.current == "mic" and "permissions" in self.flow.steps:
             title = "test your microphone"
         self._title(header, title)
@@ -636,6 +643,8 @@ class WelcomePane:
         requested = relaunch_aware_requests(self._perm_requested, snapshot, self._perm_health)
         all_on = (all(v is True for v in snapshot.values())
                   and "input_monitoring" not in requested)
+        if not all_on:
+            self._perm_started_missing = True
         self._body_label(
             body,
             "all set — Aura can hear you and type for you."
@@ -650,9 +659,11 @@ class WelcomePane:
         rows.pack(fill="x", pady=(SPACING["md"], 0))
         for name, title, why, icon in self._PERMISSION_ROWS:
             granted = snapshot.get(name) is True
+            # While any permission is still missing, keep already-granted rows
+            # showing "on" so only the missing grant has an action button.
             why, actions = permission_row_plan(
                 name, why, snapshot, requested,
-                always_open_settings=self._only_permissions,
+                always_open_settings=bool(self._only_permissions and all_on),
             )
             row = ctk.CTkFrame(rows, fg_color="transparent")
             row.pack(fill="x", pady=(0, SPACING["sm"]))
@@ -686,20 +697,28 @@ class WelcomePane:
                     command = lambda n=name: self._open_permission_settings(n)
                 else:
                     command = lambda n=name: self._request_permission(n)
+                subtle = granted and action == "settings"
                 ctk.CTkButton(
                     row, text=action, width=86, height=30,
                     corner_radius=RADIUS["sm"],
-                    fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-                    text_color=COLORS["bg_base"],
-                    font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
+                    fg_color=COLORS["bg_input"] if subtle else COLORS["accent"],
+                    hover_color=COLORS["bg_hover"] if subtle else COLORS["accent_hover"],
+                    text_color=COLORS["text_secondary"] if subtle else COLORS["bg_base"],
+                    font=(FONTS["body"][0], FONT_SIZES["small"], "normal" if subtle else "bold"),
                     command=command,
                 ).pack(side="right")
-        if all_on and not self._only_permissions:
-            if not self._perm_done_scheduled:
-                # Let the green checks register, then move on by themselves.
-                self._perm_done_scheduled = True
-                self.card.after(900, self._permissions_complete)
-            return
+            if granted and actions == ("settings",):
+                ctk.CTkLabel(row, text="on", font=(FONTS["body"][0], FONT_SIZES["small"], "bold"),
+                             text_color=COLORS["accent_green"]).pack(side="right", padx=(0, SPACING["sm"]))
+        if all_on:
+            if self._only_permissions:
+                self._continue_button(body, "done", command=self._on_skip)
+            if not self._only_permissions or getattr(self, "_perm_started_missing", False):
+                if not self._perm_done_scheduled:
+                    # Let the green checks register, then move on by themselves.
+                    self._perm_done_scheduled = True
+                    self.card.after(900, self._permissions_complete)
+                return
         if not self._only_permissions and not all_on:
             later = ctk.CTkLabel(body, text="not now", height=FONT_SIZES["small"] + 5,
                                  font=(FONTS["body"][0], FONT_SIZES["small"]),

@@ -51,7 +51,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install -e . \
-            pytest pytest-cov pytest-mock pytest-timeout ruff
+            pytest pytest-cov pytest-mock pytest-timeout ruff scipy
 
       - name: Enforce self-hosted runner policy
         run: python scripts/ci/check-runner-policy.py
@@ -130,7 +130,7 @@ jobs:
         run: python scripts/ci/prepare-python.py
 
       - name: Install Aura + test tools
-        run: python -m pip install -e . pytest pytest-mock pytest-timeout ruff
+        run: python -m pip install -e . pytest pytest-mock pytest-timeout ruff scipy
 
       - name: Run high-signal Ruff checks
         run: ruff check --output-format=github --select F821,F823,F722,E9 .

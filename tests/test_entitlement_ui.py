@@ -137,8 +137,11 @@ def test_ultra_gpu_toggle_on_persists_and_restarts_runtime(monkeypatch):
     )
     monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: saved.append(dict(cfg)))
 
-    with patch("wayfinder.core.transcriber.WhisperServerBackend.shutdown") as shutdown:
+    with patch("wayfinder.core.transcriber.WhisperServerBackend.shutdown") as shutdown, \
+         patch.object(wayfinder_main, "_release_cleanup_residency"):
         wayfinder_main.WayfinderApp.toggle_gpu(app)
+        # The old mode's servers stop on a worker thread, off the Tk thread.
+        assert app._model_teardown_done.wait(5)
 
     assert app.config["use_gpu"] is True
     assert saved[-1]["use_gpu"] is True
@@ -157,8 +160,11 @@ def test_ultra_gpu_toggle_off_persists_cpu_and_restarts_runtime(monkeypatch):
     )
     monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
 
-    with patch("wayfinder.core.transcriber.WhisperServerBackend.shutdown") as shutdown:
+    with patch("wayfinder.core.transcriber.WhisperServerBackend.shutdown") as shutdown, \
+         patch.object(wayfinder_main, "_release_cleanup_residency"):
         wayfinder_main.WayfinderApp.toggle_gpu(app)
+        # The old mode's servers stop on a worker thread, off the Tk thread.
+        assert app._model_teardown_done.wait(5)
 
     assert app.config["use_gpu"] is False
     shutdown.assert_called_once()

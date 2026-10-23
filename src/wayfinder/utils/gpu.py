@@ -12,11 +12,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
 
+from wayfinder.utils.child_supervisor import (
+    HelperNotStarted, HelpersClosed, helper_budget_shortened, helper_elapsed, run_tracked,
+)
+
 
 @dataclass
 class GPUInfo:
     """Detected GPU information."""
-    vendor: str  # "nvidia", "amd", "intel", "unknown"
+    vendor: str  # "nvidia", "amd", "intel", "apple", "unknown"
     name: str
     driver: str = ""
     
@@ -33,8 +37,16 @@ class GPUInfo:
         return self.vendor == "intel"
     
     @property
-    def is_known(self) -> bool:
+    def is_apple(self) -> bool:
+        return self.vendor == "apple"
+
+    @property
+    def has_gpu(self) -> bool:
         return self.vendor != "unknown"
+
+    @property
+    def is_known(self) -> bool:
+        return self.has_gpu
 
 
 @dataclass
@@ -358,10 +370,10 @@ def detect_ggml_devices() -> List[GgmlDevice]:
         # We use --no-prints to minimize output but GPU info still appears
         cmd = [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"]
         
-        result = subprocess.run(
+        result = run_tracked(
             cmd,
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",   # whisper.cpp's output, any code page
             timeout=30,  # Should be fast with tiny model + minimal audio
         )
         
@@ -399,6 +411,8 @@ def detect_ggml_devices() -> List[GgmlDevice]:
                 except (ValueError, IndexError):
                     continue
         
+    except HelpersClosed:
+        raise   # Quit: no device list, which would read as "no ggml devices"
     except Exception:
         pass
     finally:
@@ -509,7 +523,10 @@ def benchmark_gpu_devices(
     # IMPORTANT: Use ggml's device ordering, NOT vulkaninfo's!
     # ggml may order devices differently than vulkaninfo, so we must
     # detect devices the way ggml sees them to get correct benchmark results.
-    ggml_devices = detect_ggml_devices()
+    try:
+        ggml_devices = detect_ggml_devices()
+    except HelpersClosed:
+        return {"error": "Aura is shutting down", "fastest": "error"}
     
     # Fallback to vulkaninfo if ggml detection fails
     if not ggml_devices:
@@ -573,18 +590,26 @@ def benchmark_gpu_devices(
             
             try:
                 start = time.perf_counter()
-                result = subprocess.run(
+                result = run_tracked(
                     cmd,
                     capture_output=True,
                     timeout=timeout,
                     env=env,
                 )
-                elapsed = time.perf_counter() - start
+                elapsed = helper_elapsed(result, time.perf_counter() - start)
                 
                 if result.returncode == 0:
                     results[device_idx_str] = round(elapsed, 3)
-            except subprocess.TimeoutExpired:
-                results[device_idx_str] = float(timeout)  # Timed out = slow
+            except HelperNotStarted:
+                return {"error": "GPU benchmark could not start a device probe", "fastest": "error"}
+            except subprocess.TimeoutExpired as exc:
+                if helper_budget_shortened(exc, float(timeout)):
+                    return {"error": "GPU benchmark ran out of execution time", "fastest": "error"}
+                results[device_idx_str] = float(timeout)
+            except HelpersClosed:
+                # Quit stopped or refused a device: the rest are no measurement,
+                # and the "fastest" left standing must never be cached.
+                return {"error": "Aura is shutting down", "fastest": "error"}
             except Exception:
                 pass  # Skip failed devices
         
@@ -824,6 +849,18 @@ def detect_gpu() -> GPUInfo:
 
         found = primary_gpu()
         return GPUInfo(found[0], found[1], "windows") if found else GPUInfo("unknown", "Unknown GPU", "")
+    if sys.platform == "darwin":
+        # Apple Silicon or an Intel Mac, both on Metal.
+        try:
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=5,
+            )
+            chip = result.stdout.strip() if result.returncode == 0 else ""
+            vendor = "apple" if "Apple" in chip else "intel"
+            return GPUInfo(vendor, f"{chip} (Metal)", "metal")
+        except Exception:
+            return GPUInfo("apple", "Apple GPU (Metal)", "metal")
     try:
         # Try lspci first (most reliable on Linux)
         result = subprocess.run(
@@ -1042,42 +1079,10 @@ def get_optimal_thread_count() -> int:
 
 
 def get_system_info() -> dict[str, str]:
-    """
-    Detect system hardware: CPU, GPU, RAM.
-    
-    Returns:
-        Dict with "cpu", "gpu", and "ram" keys.
-    """
-    info = {"cpu": "Unknown", "gpu": "Unknown", "ram": "Unknown"}
-    
-    # CPU detection
-    try:
-        with open("/proc/cpuinfo") as f:
-            for line in f:
-                if "model name" in line:
-                    info["cpu"] = line.split(":")[1].strip()
-                    break
-    except Exception:
-        pass
-    
-    # GPU detection
-    gpu_info = get_gpu_info()
-    if gpu_info.is_known:
-        info["gpu"] = gpu_info.name
-    
-    # RAM detection
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if "MemTotal" in line:
-                    mem_kb = int(line.split()[1])
-                    mem_gb = mem_kb / 1024 / 1024
-                    info["ram"] = f"{mem_gb:.0f} GB"
-                    break
-    except Exception:
-        pass
-    
-    return info
+    """Detect system hardware: CPU, GPU, RAM (see ``utils.system_info``)."""
+    from wayfinder.utils.system_info import get_system_info as _get_system_info
+
+    return _get_system_info()
 
 
 
