@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from wayfinder.core.transcriber import RequestAbandoned, _dictation_cancelled, _retired_dictation
-from wayfinder.utils.child_supervisor import HelpersClosed, run_tracked
+from wayfinder.utils.child_supervisor import (
+    HelperNotStarted, HelpersClosed, helper_budget_shortened, helper_elapsed, run_tracked,
+)
 from wayfinder.utils.hostexec import bundle_binary_env
 from wayfinder.utils.platform import (
     get_user_llm_models_dir,
@@ -2575,12 +2577,16 @@ class LlamaCppCliBackend(PostProcessorBackend):
         cand = self.llama_binary.replace("llama-simple", "llama-simple-cpu")
         return cand if cand != self.llama_binary and Path(cand).exists() else None
 
-    def _probe_gpu_ok(self, ngl: int, budget: Optional[float] = None) -> bool:
+    def _probe_gpu_ok(self, ngl: int, budget: Optional[float] = None) -> Optional[bool]:
         """One tiny GPU generation. False if Vulkan crashes (rc != 0) or degrades to
         ~1 tok/s (times out) — the 60s-hang case the Flatpak used to dodge by staying
         CPU-only. Isolated in a subprocess so a Vulkan-init crash can't take us down.
         budget clamps the probe's subprocess timeout to the caller's remaining
-        cleanup budget so a first-ever probe cannot blow the dictation's ceiling."""
+        cleanup budget so a first-ever probe cannot blow the dictation's ceiling.
+
+        None means no verdict: admission either expired before spawn or left
+        too little execution time to judge the GPU after a timeout.
+        """
         if not self.model_path or not Path(self.model_path).exists():
             return False
         import time as _t
@@ -2588,8 +2594,9 @@ class LlamaCppCliBackend(PostProcessorBackend):
         # clamp here never exceeds what the dictation actually has left.
         limit = _GPU_PROBE_TIMEOUT if budget is None \
             else min(_GPU_PROBE_TIMEOUT, budget)
+        t0 = _t.monotonic()
+        wall_start = _t.time()
         try:
-            t0 = _t.time()
             r = run_tracked(
                 [self.llama_binary, "-m", self.model_path, "-ngl", str(ngl), "-n", "16", "warm up"],
                 capture_output=True, text=True, timeout=limit,
@@ -2598,9 +2605,18 @@ class LlamaCppCliBackend(PostProcessorBackend):
             )
         except HelpersClosed:
             raise   # Quit, not the GPU: _subprocess_target caches no verdict
+        except HelperNotStarted:
+            return None   # nothing ran: no verdict either way (Sol mac r20)
+        except subprocess.TimeoutExpired as exc:
+            if helper_budget_shortened(exc, _GPU_PROBE_MAX_SECONDS, deadline=t0 + limit):
+                return None
+            return False
         except Exception:
             return False
-        return r.returncode == 0 and (_t.time() - t0) < _GPU_PROBE_MAX_SECONDS
+        spawned_at = getattr(r, "spawned_at", None)
+        fallback = (_t.monotonic() - spawned_at if isinstance(spawned_at, (int, float))
+                    else _t.time() - wall_start)
+        return r.returncode == 0 and helper_elapsed(r, fallback) < _GPU_PROBE_MAX_SECONDS
 
     def _subprocess_target(self, deadline: Optional[float] = None) -> tuple:
         """Return ``(binary, ngl)`` for the subprocess cleanup, with a cached one-time
@@ -2639,6 +2655,13 @@ class LlamaCppCliBackend(PostProcessorBackend):
             ok = self._probe_gpu_ok(requested, budget=budget)
             # A retirement during the probe may have stopped it: no verdict.
             _check_dictation()
+            if ok is None:
+                # The deadline passed before the probe helper was ever
+                # spawned (HelperNotStarted): no verdict, not a GPU failure.
+                # CPU for THIS call only — nothing cached, and not counted
+                # as a clamped probe, so an unhurried call still probes
+                # fresh (Sol mac r20).
+                return (self._cpu_sibling() or self.llama_binary), 0
             if not ok and budget is not None and budget < _GPU_PROBE_TIMEOUT:
                 # A budget-clamped failure may be the clamp, not the GPU.
                 # Don't poison the cache — but remember the burn, so this key

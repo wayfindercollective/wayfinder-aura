@@ -26,6 +26,11 @@ from typing import Mapping, Sequence
 
 # Set on the watcher (spawn_supervised): the pid it guards comes on its stdin.
 WATCHER_ENV = "WAYFINDER_CHILD_SUPERVISOR"
+# The watcher's one byte on its stdout once it ignores SIGTERM; the helper
+# starts only after it (Sol mac r17). A fresh frozen app on a busy 8 GB Mac
+# can take seconds to get there.
+WATCHER_READY = b"r"
+WATCHER_READY_TIMEOUT_S = 20.0
 
 
 def parent_process_alive(pid: int) -> bool:
@@ -68,13 +73,16 @@ def _bound_waits(proc) -> None:
 
 
 def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = None, popen=None,
-                     platform_name: str | None = None, **popen_kwargs) -> subprocess.Popen:
+                     platform_name: str | None = None, before_helper=None,
+                     ready_within: float | None = None,
+                     **popen_kwargs) -> subprocess.Popen:
     """Popen a native helper that must not outlive the app.
 
     macOS: its watcher starts first, the app's own child leading a new
     process group in the app's session, and the helper, the app's own child
-    too, starts inside that group, so the native binary never runs before
-    its watcher does (Sol mac r15). The watcher learns the helper's pid on
+    too, starts inside that group once the watcher reports it ignores
+    SIGTERM, so the native binary never runs before its watcher watches
+    (Sol mac r15, r17). The watcher learns the helper's pid on
     its lifeline pipe. A group keeps its id while it has a member, an exited
     one too until it is reaped (XNU's reap_child_locked leaves the group, as
     Linux's release_task does), so while either of the two is unreaped the
@@ -85,6 +93,14 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
     watcher, no helper: the spawn fails instead (Sol mac r15). Killing a
     supervisor in front of the helper used to orphan whisper-server, which
     then kept the model loaded and its port open.
+
+    *before_helper*, if given, runs on macOS after the watcher's readiness
+    wait and right before the helper starts; it raises to refuse the helper,
+    and the watcher goes with it (Sol mac r18: that wait can take seconds,
+    and a dictation retired or a deadline passed meanwhile must not get its
+    helper). It runs too when the watcher never got ready, so the caller's
+    own refusal wins over "no crash watcher". *ready_within* caps that wait
+    at the caller's time left.
 
     Elsewhere a plain Popen: Linux binds by PR_SET_PDEATHSIG, Windows by
     bind_to_app_lifetime()."""
@@ -98,10 +114,22 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
     # The watcher's stdin is the app's lifeline: the app holds the only
     # write end, so the kernel closes it however the app exits.
     watcher = _POPEN(_watcher_command(), process_group=0, env={**os.environ, WATCHER_ENV: "1"},
-                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                      stderr=subprocess.DEVNULL, bufsize=0)
+    # Not before the watcher ignores SIGTERM: a stop's group SIGTERM landing
+    # while it still started up would end it, and a helper that outlasts
+    # SIGTERM would then run unwatched (Sol mac r17).
+    wait = WATCHER_READY_TIMEOUT_S
+    if ready_within is not None:
+        wait = max(0.0, min(wait, ready_within))
     try:
+        ready = _watcher_ready(watcher, wait)
+        if before_helper is not None:
+            before_helper()
+        if not ready:
+            raise OSError(f"no crash watcher for {Path(str(command[0])).name}")
         proc = _POPEN(command, env=env, process_group=watcher.pid, **popen_kwargs)
+        proc.spawned_at = time.monotonic()
     except BaseException:
         _drop_watcher(watcher)
         raise
@@ -120,6 +148,23 @@ def spawn_supervised(command: Sequence[str], *, env: Mapping[str, str] | None = 
         _drop_watcher(watcher)
         raise OSError(f"no crash watcher for {Path(str(command[0])).name}") from exc
     return proc
+
+
+def _watcher_ready(watcher: subprocess.Popen, timeout: float) -> bool:
+    """Whether *watcher* reported WATCHER_READY within *timeout*. End of file
+    (it refused or died) or silence is False. Its stdout is closed either
+    way: nothing else comes on it."""
+    try:
+        fd = watcher.stdout.fileno()
+        # One select: it retries an interrupted wait itself with the time
+        # left (PEP 475), and the first thing on the pipe settles it.
+        readable, _, _ = select.select([fd], [], [], timeout)
+        return bool(readable) and os.read(fd, len(WATCHER_READY)) == WATCHER_READY
+    finally:
+        try:
+            watcher.stdout.close()
+        except (OSError, ValueError, AttributeError):
+            pass
 
 
 def _drop_watcher(watcher: subprocess.Popen) -> None:
@@ -450,29 +495,76 @@ def refuse_spawns_when(check) -> None:
             _spawn_checks.append(check)
 
 
+def _run_spawn_checks() -> None:
+    for check in _spawn_checks:
+        check()
+
+
+class HelperNotStarted(subprocess.TimeoutExpired):
+    """Raised instead of a plain TimeoutExpired when the deadline passed
+    before the helper was ever spawned: nothing ran, so nothing a caller
+    caches, disables or counts as a broken binary may be based on it (Sol
+    mac r20/r21). A subclass of TimeoutExpired, so an existing
+    ``except subprocess.TimeoutExpired`` still catches it unchanged."""
+
+
+def _refuse_past(command, deadline) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise HelperNotStarted(list(command), 0.0)
+
+
 def spawn_tracked(command: Sequence[str], *, stop=None, popen=None,
-                  **popen_kwargs) -> subprocess.Popen:
+                  deadline: float | None = None, **popen_kwargs) -> subprocess.Popen:
     """Popen (or *popen*, such as spawn_supervised) a helper that a terminal
     shutdown stops (with *stop*, default terminate then kill, its whole group
-    on macOS); refused once one has begun. macOS supervises it by default."""
+    on macOS); refused once one has begun. macOS supervises it by default.
+
+    *deadline* (time.monotonic()) bounds the wait for the lock and for the
+    watcher: past it, subprocess.TimeoutExpired and no helper (Sol mac r19)."""
     global _exit_hook_registered
     if popen is None and _supervise_by_default():
         popen = _darwin_spawn
-    with _tracked_lock:
+    if deadline is None:
+        _tracked_lock.acquire()
+    elif not _tracked_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise HelperNotStarted(list(command), 0.0)
+    try:
         if _tracked_closed:
             raise HelpersClosed("shutting down: no new helper process")
-        for check in _spawn_checks:
-            check()
+        _run_spawn_checks()
         if not _exit_hook_registered:
             # An interpreter exit with no server started (main.py, CLI verbs)
             # runs no server exit hook: this one stops the helpers itself.
             import atexit
             atexit.register(close_tracked)
             _exit_hook_registered = True
+        if popen is _darwin_spawn or popen is spawn_supervised:
+            # Again after the watcher's readiness wait, right before the
+            # helper starts: that wait can take seconds, and a dictation
+            # retired meanwhile must not get its helper (Sol mac r18).
+            # Shutdown cannot begin meanwhile: close_tracked needs this lock.
+            own_check = popen_kwargs.pop("before_helper", None)
+
+            def recheck():
+                _run_spawn_checks()
+                if own_check is not None:
+                    own_check()
+                _refuse_past(command, deadline)
+            popen_kwargs["before_helper"] = recheck
+            if deadline is not None:
+                left = max(0.0, deadline - time.monotonic())
+                given = popen_kwargs.get("ready_within")
+                popen_kwargs["ready_within"] = left if given is None else min(given, left)
+        _refuse_past(command, deadline)
         proc = (popen or subprocess.Popen)(command, **popen_kwargs)
+        # Supervised spawns record this before their watcher handshake.
+        if not isinstance(getattr(proc, "spawned_at", None), (int, float)):
+            proc.spawned_at = time.monotonic()
         if stop is None:
             stop = _stop_helper_group if _is_helper_group(proc) else _terminate_child
         _tracked[proc] = stop
+    finally:
+        _tracked_lock.release()
     bind_to_app_lifetime(proc)
     return proc
 
@@ -507,21 +599,42 @@ def shutdown_generation() -> int:
 
 def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = None,
                 check: bool = False, **kwargs) -> subprocess.CompletedProcess:
-    """subprocess.run() through spawn_tracked(): the same arguments and errors."""
+    """subprocess.run() through spawn_tracked(): the same arguments and errors.
+    *timeout* counts from this call, the wait for the lock and the watcher
+    included, so a deadline's time left really bounds the helper (Sol mac r19).
+
+    The returned CompletedProcess carries ``spawned_at`` (time.monotonic(),
+    the moment the helper actually started, past admission) when it was
+    spawned at all; a subprocess.TimeoutExpired raised after that point
+    carries the same attribute, so a caller whose verdict depends on how
+    long the helper ran can measure from there instead of from this call's
+    own start, which would count admission as the helper's own time (Sol mac
+    r21, Finding 1). HelperNotStarted (admission itself timed out, nothing
+    ever spawned) carries no such attribute: there is nothing to measure."""
+    deadline = None if timeout is None else time.monotonic() + timeout
     if kwargs.pop("capture_output", False):
         kwargs["stdout"] = kwargs["stderr"] = subprocess.PIPE
     if input is not None:
         kwargs["stdin"] = subprocess.PIPE
-    proc = spawn_tracked(command, **kwargs)
+    try:
+        proc = spawn_tracked(command, deadline=deadline, **kwargs)
+    except HelperNotStarted:
+        raise HelperNotStarted(command, timeout) from None
+    except subprocess.TimeoutExpired:
+        raise subprocess.TimeoutExpired(command, timeout) from None
     try:
         with proc:
             try:
-                stdout, stderr = proc.communicate(input, timeout=timeout)
-            except subprocess.TimeoutExpired:
+                left = None if deadline is None else max(0.0, deadline - time.monotonic())
+                stdout, stderr = proc.communicate(input, timeout=left)
+                finished_at = time.monotonic()
+            except subprocess.TimeoutExpired as exc:
                 _kill_helper(proc)
                 proc.wait()
                 if cut_short(proc):
                     raise HelperStopped("stopped by a terminal shutdown") from None
+                exc.spawned_at = getattr(proc, "spawned_at", None)
+                exc.execution_budget = left
                 raise
             except BaseException as exc:
                 _kill_helper(proc)
@@ -537,7 +650,33 @@ def run_tracked(command: Sequence[str], *, input=None, timeout: float | None = N
         raise HelperStopped("stopped by a terminal shutdown")
     if check and proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, stdout, stderr)
-    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    result = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    result.spawned_at = getattr(proc, "spawned_at", None)
+    result.execution_seconds = max(0.0, finished_at - result.spawned_at)
+    result.execution_budget = left
+    return result
+
+
+def helper_elapsed(result, fallback: float) -> float:
+    """Helper runtime excluding admission, or a legacy runner's measurement."""
+    elapsed = getattr(result, "execution_seconds", None)
+    return elapsed if isinstance(elapsed, (int, float)) else fallback
+
+
+def helper_budget_shortened(error, required: float, *, deadline=None) -> bool:
+    """Whether admission materially shortened a timed-out helper's window.
+
+    Process creation and the watcher handshake always consume some time.
+    Allow five percent of the nominal window, capped at one second, so an
+    ordinary near-full timeout still drives normal fallback and backoff.
+    """
+    budget = getattr(error, "execution_budget", None)
+    if not isinstance(budget, (int, float)) and deadline is not None:
+        spawned_at = getattr(error, "spawned_at", None)
+        if isinstance(spawned_at, (int, float)):
+            budget = deadline - spawned_at
+    allowance = min(1.0, required * 0.05)
+    return isinstance(budget, (int, float)) and budget < required - allowance
 
 
 def close_tracked(timeout: float = 6.0) -> None:
@@ -567,6 +706,24 @@ def reopen_tracked() -> None:
         _tracked_closed = False
 
 
+def _polled_helper_exited(pid: int) -> bool:
+    """Whether a helper has exited when no kernel exit notification is usable.
+
+    kill(pid, 0) also succeeds for an unreaped Linux zombie. The watcher is
+    the helper's sibling and cannot reap it, so use procfs's state when
+    available; unreadable process metadata stays conservatively alive.
+    """
+    if not parent_process_alive(pid):
+        return True
+    if sys.platform.startswith("linux"):
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            return fields[0] in ("Z", "X")
+        except (OSError, IndexError):
+            pass
+    return False
+
+
 class _Watch:
     """Wakes on news from the app's pipe (a byte, or end of file) or on the
     helper's exit. kqueue on macOS; a pidfd and select() where only that
@@ -591,8 +748,9 @@ class _Watch:
             try:
                 self._pidfd = os.pidfd_open(child_pid)
             except OSError:
-                self.child_gone = True
-        elif not parent_process_alive(child_pid):
+                # An unavailable/denied pidfd is not evidence of exit.
+                self.child_gone = _polled_helper_exited(child_pid)
+        elif _polled_helper_exited(child_pid):
             self.child_gone = True
 
     def close_pipe(self) -> None:
@@ -627,7 +785,7 @@ class _Watch:
             ready = []
         if self._pidfd is not None and self._pidfd in ready:
             self.child_gone = True
-        if self._pidfd is None and not parent_process_alive(self.child_pid):
+        if self._pidfd is None and _polled_helper_exited(self.child_pid):
             self.child_gone = True
         return self.pipe_fd in ready
 
@@ -648,7 +806,7 @@ def _read_child_pid(pipe_fd: int):
     return (int(line) if line.isdigit() and int(line) > 1 else None), rest
 
 
-def run_watcher(*, pipe_fd: int = 0, term_wait: float = 3.0) -> int:
+def run_watcher(*, pipe_fd: int = 0, term_wait: float = 3.0, ready_fd: int | None = None) -> int:
     """The helper's watcher (see spawn_supervised): end its group once the app
     is gone.
 
@@ -659,31 +817,45 @@ def run_watcher(*, pipe_fd: int = 0, term_wait: float = 3.0) -> int:
     group (killpg 0), never a number that could have been reused: SIGTERM
     then SIGKILL when the app dies, SIGKILL as soon as the helper leaves
     what it forked behind (Sol mac r13, r14), and SIGKILL straight away if
-    the app died before naming the helper (Sol mac r15)."""
+    the app died before naming the helper (Sol mac r15). With *ready_fd* it
+    writes WATCHER_READY there once SIGTERM is ignored, the app's cue to
+    start the helper (Sol mac r17)."""
     if os.getpgrp() != os.getpid():
         print("child-supervisor: not leading its own group", file=sys.stderr, flush=True)
         return 2
     signal.signal(signal.SIGTERM, signal.SIG_IGN)   # its own group's SIGTERM
-    child_pid, rest = _read_child_pid(pipe_fd)
-    if child_pid is None:
-        os.killpg(0, signal.SIGKILL)   # a helper that may have started goes
-        return 0
-    if rest:
-        return 0              # released already
-    watch = _Watch(pipe_fd, child_pid)
-    while not watch.child_gone:
-        if not watch.wait(None):
-            continue
+    if ready_fd is not None:
+        # Only now may the helper start (Sol mac r17).
         try:
-            news = os.read(pipe_fd, 1)
+            os.write(ready_fd, WATCHER_READY)
         except OSError:
-            news = b""
-        if news:
-            return 0          # released: the app reaped it
-        watch.close_pipe()
-        watch.wait(0)         # an exit that came with the app's own
-        _end_own_group(watch, term_wait)
-        return 0
+            pass   # the app stopped waiting; its lifeline says the rest
+    try:
+        child_pid, rest = _read_child_pid(pipe_fd)
+        if child_pid is None:
+            os.killpg(0, signal.SIGKILL)   # a helper that may have started goes
+            return 0
+        if rest:
+            return 0              # released already
+        watch = _Watch(pipe_fd, child_pid)
+        while not watch.child_gone:
+            if not watch.wait(None):
+                continue
+            try:
+                news = os.read(pipe_fd, 1)
+            except OSError:
+                news = b""
+            if news:
+                return 0          # released: the app reaped it
+            watch.close_pipe()
+            watch.wait(0)         # an exit that came with the app's own
+            _end_own_group(watch, term_wait)
+            return 0
+    except BaseException:
+        # Whatever stops the watching ends the helper: a watcher gone while
+        # its helper runs is the orphan it exists to prevent (Sol mac r18).
+        os.killpg(0, signal.SIGKILL)
+        raise
     os.killpg(0, signal.SIGKILL)   # the helper left: what it forked goes
     return 0
 
@@ -712,7 +884,7 @@ def run_from_env() -> int:
     if os.environ.get(WATCHER_ENV) != "1":
         print("Invalid child-supervisor request", file=sys.stderr, flush=True)
         return 2
-    return run_watcher()
+    return run_watcher(ready_fd=1)
 
 
 if __name__ == "__main__":

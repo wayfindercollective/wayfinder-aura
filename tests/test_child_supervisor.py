@@ -6,11 +6,13 @@ watcher) runs on any POSIX host with platform_name="darwin"."""
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -143,6 +145,274 @@ def test_no_watcher_no_helper(monkeypatch, tmp_path):
                                           platform_name="darwin")
     time.sleep(0.2)
     assert not marker.exists()
+
+
+@posix
+@pytest.mark.parametrize("watcher_body", ["pass", "import time; time.sleep(30)"],
+                         ids=["exits-silently", "never-ready"])
+def test_a_watcher_that_never_reports_ready_starts_no_helper(monkeypatch, tmp_path, watcher_body):
+    # Sol mac r17: the helper waits for the watcher's word, not just its spawn.
+    marker = tmp_path / "ran"
+    _record_spawns(monkeypatch)
+    monkeypatch.setattr(child_supervisor, "_watcher_command",
+                        lambda: [sys.executable, "-c", watcher_body])
+    monkeypatch.setattr(child_supervisor, "WATCHER_READY_TIMEOUT_S", 1.0)
+    with pytest.raises(OSError, match="no crash watcher"):
+        child_supervisor.spawn_supervised(["touch", str(marker)], env=dict(os.environ),
+                                          platform_name="darwin")
+    [watcher] = _Recording.instances                      # the helper was never spawned
+    assert watcher.returncode is not None                 # stopped and reaped
+    time.sleep(0.2)
+    assert not marker.exists()
+
+
+class _Retired(Exception):
+    pass
+
+
+@posix
+def test_a_helper_retired_while_its_watcher_got_ready_never_starts(monkeypatch, tmp_path):
+    # Sol mac r18: the tracked spawn checks ran before the readiness wait,
+    # which can take seconds, so a dictation retired meanwhile got its helper.
+    marker = tmp_path / "ran"
+    _record_spawns(monkeypatch)
+    retired = threading.Event()
+
+    def refuse_a_retired_helper():
+        if retired.is_set():
+            raise _Retired()
+
+    ready = child_supervisor._watcher_ready
+
+    def retired_meanwhile(watcher, timeout):
+        retired.set()
+        return ready(watcher, timeout)
+
+    monkeypatch.setattr(child_supervisor, "_spawn_checks", [refuse_a_retired_helper])
+    monkeypatch.setattr(child_supervisor, "_watcher_ready", retired_meanwhile)
+    with pytest.raises(_Retired):
+        child_supervisor.spawn_tracked(["touch", str(marker)], env=dict(os.environ),
+                                       popen=child_supervisor._darwin_spawn)
+    [watcher] = _Recording.instances                      # the helper was never spawned
+    assert watcher.returncode is not None                 # stopped and reaped
+    assert not child_supervisor._tracked
+    time.sleep(0.2)
+    assert not marker.exists()
+
+
+@posix
+def test_the_callers_refusal_wins_over_a_watcher_that_never_got_ready(monkeypatch, tmp_path):
+    # Its wait is capped at the caller's time left, and the caller's own
+    # refusal (a deadline passed) is what it raises, not "no crash watcher".
+    marker = tmp_path / "ran"
+    _record_spawns(monkeypatch)
+    monkeypatch.setattr(child_supervisor, "_watcher_command",
+                        lambda: [sys.executable, "-c", "import time; time.sleep(30)"])
+
+    def deadline_passed():
+        raise _Retired()
+
+    started = time.monotonic()
+    with pytest.raises(_Retired):
+        child_supervisor.spawn_supervised(["touch", str(marker)], env=dict(os.environ),
+                                          platform_name="darwin", ready_within=0.3,
+                                          before_helper=deadline_passed)
+    assert time.monotonic() - started < 5                 # not the 20 s readiness ceiling
+    [watcher] = _Recording.instances
+    assert watcher.returncode is not None
+    time.sleep(0.2)
+    assert not marker.exists()
+
+
+@posix
+def test_a_ready_watcher_runs_the_check_before_the_helper(monkeypatch):
+    spawned = _record_spawns(monkeypatch)
+    seen = []
+    proc = child_supervisor.spawn_supervised(
+        ["sleep", "30"], env=dict(os.environ), platform_name="darwin",
+        before_helper=lambda: seen.append(len(spawned)))
+    try:
+        assert seen == [1]                                # the watcher only, then the helper
+        assert len(spawned) == 2
+    finally:
+        child_supervisor.stop_supervised(proc, term_wait=1, platform_name="darwin")
+
+
+# Sol mac r19: run_tracked's timeout began after the spawn, so the wait for
+# the lock and the watcher could spend a deadline's whole time left and the
+# helper still got its full timeout after it.
+
+@posix
+def test_a_tracked_run_whose_watcher_never_gets_ready_times_out_in_its_own_time(monkeypatch, tmp_path):
+    marker = tmp_path / "ran"
+    _record_spawns(monkeypatch)
+    monkeypatch.setattr(child_supervisor, "_watcher_command",
+                        lambda: [sys.executable, "-c", "import time; time.sleep(30)"])
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        child_supervisor.run_tracked(["touch", str(marker)], timeout=0.3, env=dict(os.environ),
+                                     popen=child_supervisor._darwin_spawn)
+    assert time.monotonic() - started < 3                 # not the 20 s readiness ceiling
+    assert caught.value.timeout == 0.3
+    [watcher] = _Recording.instances                      # the helper was never spawned
+    assert watcher.returncode is not None
+    assert not child_supervisor._tracked
+    time.sleep(0.2)
+    assert not marker.exists()
+
+
+@posix
+def test_a_tracked_run_gets_only_the_time_its_watcher_left(monkeypatch):
+    _record_spawns(monkeypatch)
+    ready = child_supervisor._watcher_ready
+
+    def slow_ready(watcher, timeout):
+        time.sleep(0.5)
+        return ready(watcher, timeout)
+
+    monkeypatch.setattr(child_supervisor, "_watcher_ready", slow_ready)
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        child_supervisor.run_tracked(["sleep", "5"], timeout=0.8, env=dict(os.environ),
+                                     popen=child_supervisor._darwin_spawn)
+    assert time.monotonic() - started < 1.2               # 0.8 s in all, not 0.5 s + 0.8 s
+    assert not child_supervisor._tracked
+
+
+@posix
+def test_a_tracked_run_out_of_time_while_waiting_for_the_lock_never_starts(tmp_path):
+    marker = tmp_path / "ran"
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with child_supervisor._tracked_lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    held.wait(5)
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            child_supervisor.run_tracked(["touch", str(marker)], timeout=0.2)
+        assert time.monotonic() - started < 1
+    finally:
+        release.set()
+        holder.join(5)
+    time.sleep(0.2)
+    assert not marker.exists()
+    assert not child_supervisor._tracked
+
+
+@posix
+def test_a_tracked_run_already_past_its_deadline_starts_nothing(monkeypatch):
+    spawned = _record_spawns(monkeypatch)
+    with pytest.raises(subprocess.TimeoutExpired):
+        child_supervisor.run_tracked(["true"], timeout=0)
+    assert spawned == []
+
+
+# Sol mac r21 (Finding 1): a pre-spawn expiry is HelperNotStarted, a distinct
+# subclass of TimeoutExpired — nothing ran, so a caller must be able to tell
+# this apart from a helper that actually hung, instead of caching or counting
+# it as a failure. The three sites above (already past deadline, the lock
+# wait, and the watcher never getting ready) all raise it; Popen is never
+# called in any of them.
+
+@posix
+def test_a_tracked_run_already_past_its_deadline_raises_helper_not_started(monkeypatch):
+    spawned = _record_spawns(monkeypatch)
+    with pytest.raises(child_supervisor.HelperNotStarted) as caught:
+        child_supervisor.run_tracked(["true"], timeout=0)
+    assert isinstance(caught.value, subprocess.TimeoutExpired)   # existing catchers unaffected
+    assert spawned == []
+
+
+@posix
+def test_spawn_tracked_already_past_its_deadline_raises_helper_not_started(monkeypatch):
+    spawned = _record_spawns(monkeypatch)
+    with pytest.raises(child_supervisor.HelperNotStarted):
+        child_supervisor.spawn_tracked(["true"], deadline=time.monotonic() - 1,
+                                       env=dict(os.environ))
+    assert spawned == []
+
+
+@posix
+def test_a_tracked_run_out_of_time_for_the_lock_raises_helper_not_started(tmp_path):
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with child_supervisor._tracked_lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    held.wait(5)
+    try:
+        with pytest.raises(child_supervisor.HelperNotStarted):
+            child_supervisor.run_tracked(["touch", str(tmp_path / "ran")], timeout=0.2)
+    finally:
+        release.set()
+        holder.join(5)
+    assert not child_supervisor._tracked
+
+
+@posix
+def test_a_tracked_run_whose_watcher_never_gets_ready_raises_helper_not_started(monkeypatch, tmp_path):
+    _record_spawns(monkeypatch)
+    monkeypatch.setattr(child_supervisor, "_watcher_command",
+                        lambda: [sys.executable, "-c", "import time; time.sleep(30)"])
+    with pytest.raises(child_supervisor.HelperNotStarted):
+        child_supervisor.run_tracked(["touch", str(tmp_path / "ran")], timeout=0.3,
+                                     env=dict(os.environ), popen=child_supervisor._darwin_spawn)
+    assert not child_supervisor._tracked
+
+
+@posix
+def test_an_early_group_sigterm_cannot_end_a_slow_watcher(monkeypatch, tmp_path):
+    # Sol mac r17: a watcher still starting up (here 1 s) did not yet ignore
+    # SIGTERM, so a stop's group SIGTERM right after the spawn ended it and
+    # left a helper that outlasts SIGTERM unwatched.
+    script = child_supervisor.__file__
+    monkeypatch.setattr(child_supervisor, "_watcher_command", lambda: [
+        sys.executable, "-c",
+        f"import runpy, time; time.sleep(1.0); runpy.run_path({script!r}, run_name='__main__')"])
+    proc = _helper(tmp_path, ignores_term=True)
+    watcher = proc._aura_watcher
+    try:
+        os.killpg(proc._aura_gid, signal.SIGTERM)
+        time.sleep(0.5)
+        assert watcher.poll() is None                     # still watching
+        assert proc.poll() is None                        # the helper shrugged it off
+    finally:
+        child_supervisor.stop_supervised(proc, term_wait=1, platform_name="darwin")
+    assert proc.returncode is not None
+    watcher.wait(timeout=5)
+
+
+@posix
+def test_the_watcher_reports_ready_only_once_it_ignores_sigterm(monkeypatch):
+    ready_read, ready_write = os.pipe()
+    seen_before_ignore = []
+
+    def ignore(sig, how):
+        readable, _, _ = select.select([ready_read], [], [], 0)
+        seen_before_ignore.append((sig, how, bool(readable)))
+
+    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: os.getpid())
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(child_supervisor.signal, "signal", ignore)
+    pid_read, pid_write = os.pipe()
+    os.close(pid_write)                                   # the app went before naming a helper
+    try:
+        assert child_supervisor.run_watcher(pipe_fd=pid_read, ready_fd=ready_write) == 0
+        assert seen_before_ignore == [(signal.SIGTERM, signal.SIG_IGN, False)]
+        assert os.read(ready_read, 8) == child_supervisor.WATCHER_READY
+    finally:
+        for fd in (ready_read, ready_write, pid_read):
+            os.close(fd)
 
 
 @posix
@@ -469,8 +739,19 @@ def test_the_group_keeps_its_id_while_either_member_lives(tmp_path, reaped):
     try:
         gone.kill()
         gone.wait()
-        os.killpg(gid, 0)                               # still there: the other member
-        assert os.getpgid(kept.pid) == gid
+        if reaped == "helper":
+            # The watcher ends itself once its helper leaves; unreaped, it
+            # still holds the number. macOS answers a group of only a
+            # zombie with EPERM, and getpgid() of a zombie with ESRCH.
+            assert kept.pid == gid
+            try:
+                os.killpg(gid, 0)
+            except PermissionError:
+                assert sys.platform == "darwin"
+            os.kill(kept.pid, 0)                        # unreaped: the number is held
+        else:
+            os.killpg(gid, 0)                           # still there: the other member
+            assert os.getpgid(kept.pid) == gid
     finally:
         child_supervisor.stop_supervised(proc, term_wait=1, platform_name="darwin")
     assert watcher.wait(timeout=3) is not None
@@ -509,6 +790,41 @@ def test_the_watcher_signals_its_group_by_zero_never_by_number(monkeypatch, case
     expected = {"app-died": [(0, signal.SIGTERM), (0, signal.SIGKILL)],
                 "released": [], "released-with-its-name": []}.get(case, [(0, signal.SIGKILL)])
     assert sent == expected
+
+
+@posix
+@pytest.mark.parametrize("stage", ["setting up", "waiting"])
+def test_a_watcher_whose_watching_fails_ends_its_group(monkeypatch, stage):
+    # Sol mac r18: _Watch() or its wait raising after the helper's pid came
+    # left the watcher gone and its helper unwatched.
+    sent = []
+    monkeypatch.setattr(child_supervisor.os, "getpgrp", lambda: os.getpid())
+    monkeypatch.setattr(child_supervisor.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    monkeypatch.setattr(child_supervisor.signal, "signal", lambda sig, how: None)
+    real = child_supervisor._Watch
+
+    class Broken(real):
+        def __init__(self, *args):
+            if stage == "setting up":
+                raise OSError("kqueue")
+            super().__init__(*args)
+
+        def wait(self, timeout):
+            raise OSError("kevent")
+
+    monkeypatch.setattr(child_supervisor, "_Watch", Broken)
+    helper = subprocess.Popen(["sleep", "30"])
+    read_end, write_end = os.pipe()
+    os.write(write_end, b"%d\n" % helper.pid)
+    try:
+        with pytest.raises(OSError):
+            child_supervisor.run_watcher(pipe_fd=read_end, term_wait=0.2)
+        assert sent == [(0, signal.SIGKILL)]
+    finally:
+        for fd in (read_end, write_end):
+            os.close(fd)
+        helper.kill()
+        helper.wait()
 
 
 @posix
@@ -751,7 +1067,7 @@ def test_a_watcher_started_outside_the_protocol_refuses(monkeypatch):
     monkeypatch.delenv(child_supervisor.WATCHER_ENV, raising=False)
     assert child_supervisor.run_from_env() == 2 and watched == []
     monkeypatch.setenv(child_supervisor.WATCHER_ENV, "1")
-    assert child_supervisor.run_from_env() == 0 and watched == [{}]
+    assert child_supervisor.run_from_env() == 0 and watched == [{"ready_fd": 1}]
 
 
 def test_orphaned_helpers_are_only_launchd_parented_aura_binaries():
@@ -799,3 +1115,121 @@ def test_llama_servers_stop_ends_what_its_helper_forked(tmp_path, monkeypatch):
             os.kill(worker, signal.SIGKILL)
         except OSError:
             pass
+
+
+@pytest.mark.parametrize("admission", [0.0, 0.5, 1.5])
+def test_run_tracked_reports_only_execution_time_after_admission(monkeypatch, admission):
+    from types import SimpleNamespace
+    from wayfinder.utils import child_supervisor as cs
+    clock = [0.0]
+
+    class Process:
+        args, returncode = ["helper"], 0
+        spawned_at = admission
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def communicate(self, _input, timeout):
+            assert timeout == pytest.approx(2.0 - admission)
+            clock[0] += 0.125
+            return "ok", ""
+
+    def spawn(*_args, **_kwargs):
+        clock[0] = admission
+        return Process()
+
+    monkeypatch.setattr(cs, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(cs, "spawn_tracked", spawn)
+    monkeypatch.setattr(cs, "release_supervised", lambda _proc: None)
+    result = cs.run_tracked(["helper"], timeout=2.0)
+    assert result.execution_seconds == pytest.approx(0.125)
+    assert result.execution_budget == pytest.approx(2.0 - admission)
+
+
+def test_timeout_reports_the_execution_budget_left_after_admission(monkeypatch):
+    from types import SimpleNamespace
+    from wayfinder.utils import child_supervisor as cs
+    clock = [0.0]
+
+    class Process:
+        args, returncode, spawned_at = ["helper"], -9, 1.75
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def communicate(self, _input, timeout):
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+        def wait(self):
+            return self.returncode
+
+    def spawn(*_args, **_kwargs):
+        clock[0] = 1.75
+        return Process()
+
+    monkeypatch.setattr(cs, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(cs, "spawn_tracked", spawn)
+    monkeypatch.setattr(cs, "_kill_helper", lambda _proc: None)
+    monkeypatch.setattr(cs, "release_supervised", lambda _proc: None)
+    with pytest.raises(subprocess.TimeoutExpired) as info:
+        cs.run_tracked(["helper"], timeout=2.0)
+    assert info.value.execution_budget == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("nominal,remaining", [(5.0, 4.99), (30.0, 29.99), (60.0, 59.9)])
+def test_routine_launch_overhead_preserves_timeout_verdict(nominal, remaining):
+    error = subprocess.TimeoutExpired(["helper"], nominal)
+    error.execution_budget = remaining
+    assert not child_supervisor.helper_budget_shortened(error, nominal)
+
+
+@pytest.mark.parametrize("nominal,remaining", [(5.0, 0.1), (30.0, 20.0), (60.0, 30.0)])
+def test_substantial_admission_delay_still_has_no_timeout_verdict(nominal, remaining):
+    error = subprocess.TimeoutExpired(["helper"], nominal)
+    error.execution_budget = remaining
+    assert child_supervisor.helper_budget_shortened(error, nominal)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux polling fallback")
+def test_polled_watcher_ends_an_exited_leaders_worker(tmp_path, monkeypatch):
+    source = str(Path(child_supervisor.__file__).resolve())
+    bootstrap = ("import os,runpy; os.__dict__.pop('pidfd_open', None); "
+                 f"runpy.run_path({source!r}, run_name='__main__')")
+    monkeypatch.setattr(child_supervisor, "_watcher_command", lambda: [sys.executable, "-c", bootstrap])
+    test_the_watcher_ends_the_worker_of_a_leader_that_left_on_its_own(tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux polling fallback")
+def test_polled_watcher_does_not_wait_the_grace_after_helper_exit(monkeypatch):
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    test_a_watcher_whose_app_died_waits_only_for_the_helper_to_go(monkeypatch)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux pidfd fallback")
+def test_an_unavailable_pidfd_keeps_a_live_helper_then_observes_its_exit(monkeypatch):
+    def unavailable(_pid):
+        raise PermissionError("pidfds unavailable in this environment")
+
+    monkeypatch.setattr(os, "pidfd_open", unavailable, raising=False)
+    helper = subprocess.Popen(["sleep", "30"])
+    read_end, write_end = os.pipe()
+    try:
+        watch = child_supervisor._Watch(read_end, helper.pid)
+        assert not watch.child_gone
+        helper.terminate()
+        helper.wait(5)
+        watch.wait(0.3)
+        assert watch.child_gone
+    finally:
+        if helper.poll() is None:
+            helper.kill()
+            helper.wait()
+        os.close(read_end)
+        os.close(write_end)

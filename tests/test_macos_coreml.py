@@ -838,7 +838,11 @@ def test_a_compile_superseded_in_its_accounting_counts_nothing(tmp_path, monkeyp
     if failure == "timed-out":
         real, calls = time.monotonic, [0]
 
-        def monotonic():   # the 180 s deadline passes after the first look
+        def monotonic():
+            # Advance the compiler's wait clock, after helper admission. The
+            # helper registry also reads the clock to record the spawn time.
+            if not child_supervisor._tracked:
+                return real()
             calls[0] += 1
             return real() + (0 if calls[0] == 1 else 1000)
 
@@ -2198,3 +2202,89 @@ def test_a_preparation_superseded_in_its_accounting_counts_nothing(comparison_ri
     with pytest.raises(TimeoutError):
         macos_coreml._prepare_comparison(rig.config, rig.backend, cancelled=lambda: flag[0])
     assert macos_coreml.comparison_failures(str(rig.cli), str(rig.model)) == 0
+
+
+# Sol mac r19: a switch that cancels Core ML preparation while a helper's
+# watcher gets ready passed dictation's spawn check (no dictation owns this
+# work), so the superseded helper started and was only stopped afterwards.
+
+def _cancelled_while_the_watcher_gets_ready(monkeypatch, cancel):
+    """Every spawn's command, recorded: the watcher's, then the helper's."""
+    import subprocess
+    from wayfinder.utils import child_supervisor
+    spawned = []
+
+    class Recording(subprocess.Popen):
+        def __init__(self, args, **kwargs):
+            spawned.append(list(args))
+            super().__init__(args, **kwargs)
+
+    monkeypatch.setattr(child_supervisor, "_POPEN", Recording)
+    monkeypatch.setattr(child_supervisor.subprocess, "Popen", Recording)
+    original = child_supervisor.spawn_supervised
+    monkeypatch.setattr(child_supervisor, "spawn_supervised",
+                        lambda command, **kw: original(command, platform_name="darwin", **kw))
+    ready = child_supervisor._watcher_ready
+
+    def meanwhile(watcher, timeout):
+        cancel.set()
+        return ready(watcher, timeout)
+
+    monkeypatch.setattr(child_supervisor, "_watcher_ready", meanwhile)
+    return spawned
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_a_probe_cancelled_while_its_watcher_gets_ready_never_starts(tmp_path, monkeypatch):
+    import sys
+    import threading
+    import time
+    from wayfinder.utils import child_supervisor
+    marker = tmp_path / "ran"
+    cancel = threading.Event()
+    spawned = _cancelled_while_the_watcher_gets_ready(monkeypatch, cancel)
+    backend = _probe_backend([sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"])
+    with pytest.raises(InterruptedError):
+        with macos_coreml._probe_server(backend, "/bin/whisper-server", "/m.bin",
+                                        coreml=True, cancelled=cancel.is_set):
+            pass
+    assert cancel.is_set()
+    assert len(spawned) == 1                              # the watcher only
+    assert not child_supervisor._tracked
+    time.sleep(0.5)
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the compiler stand-in is a shell script")
+def test_a_compile_cancelled_while_its_watcher_gets_ready_never_starts(tmp_path, monkeypatch):
+    import threading
+    import time
+    from wayfinder.utils import child_supervisor, macos_coreml_convert
+    marker = tmp_path / "ran"
+    cli = tmp_path / "bin" / "whisper-cli"
+    cli.parent.mkdir()
+    cli.write_bytes(b"cli")
+    compiler = cli.with_name("coreml-compile")
+    compiler.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    compiler.chmod(0o700)
+    model = tmp_path / "ggml-large-v3-turbo-q5_0.bin"
+    model.write_bytes(b"model")
+    monkeypatch.setattr(macos_coreml, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(macos_coreml, "_conversion_root", lambda: tmp_path / "derived")
+    monkeypatch.setattr(macos_coreml, "_failure_path", lambda: tmp_path / "coreml-failures.json")
+    monkeypatch.setattr(macos_coreml, "_hardware_identity", lambda: {"hardware": "MacBookAir10,1"})
+    monkeypatch.setattr(macos_coreml, "_binary_twin", lambda c: cli)
+    monkeypatch.setattr(macos_coreml, "prepared_twin", lambda c, m: None)
+    monkeypatch.setattr(macos_coreml_convert, "template_path", lambda: None)
+    monkeypatch.setattr(macos_coreml_convert, "load_bindings", lambda path: {"weights_size": 1})
+    monkeypatch.setattr(macos_coreml_convert, "populate_package", lambda m, p, cancelled: {"format": 2})
+    cancel = threading.Event()
+    spawned = _cancelled_while_the_watcher_gets_ready(monkeypatch, cancel)
+    with pytest.raises(InterruptedError):
+        macos_coreml.prepare_encoder(str(cli), str(model), cancelled=cancel.is_set)
+    assert cancel.is_set()
+    assert len(spawned) == 1                              # the watcher only
+    assert not child_supervisor._tracked
+    time.sleep(0.5)
+    assert not marker.exists()
+    assert macos_coreml.comparison_failures(str(cli), str(model)) == 0

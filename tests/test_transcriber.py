@@ -3,6 +3,7 @@ Tests for the transcription module.
 """
 
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -674,6 +675,37 @@ class TestWhisperServerBackend:
                 backend.transcribe(str(audio), deadline=time.monotonic() + 2)
         assert str(binary) not in _T._CPU_FALLBACK_ACTIVE, \
             "a deadline-clamped timeout must NOT memoize CPU fallback"
+
+    def test_a_pre_spawn_expiry_does_not_poison_gpu_health_either(self, tmp_path):
+        """Sol mac r21 (Finding 1 caller audit): HelperNotStarted — the deadline
+        passing before this attempt's helper was ever spawned — is the same
+        budget-vs-failure gap as the deadline-clamped TimeoutExpired case right
+        above, just one layer earlier. It must bail the same way, never reach
+        _activate_fallback's memoized CPU fallback."""
+        import time
+        from wayfinder.core import transcriber as _T
+        from wayfinder.core.transcriber import WhisperCppBackend, TranscriptionError
+        from wayfinder.utils.child_supervisor import HelperNotStarted
+
+        binary = tmp_path / "whisper-cli"; binary.write_text("#!/bin/sh\n"); binary.chmod(0o755)
+        cpu = tmp_path / "whisper-cli-cpu"; cpu.write_text("#!/bin/sh\n"); cpu.chmod(0o755)
+        model = tmp_path / "m.bin"; model.write_bytes(b"\x00")
+        audio = tmp_path / "a.wav"; audio.write_bytes(b"\x00")
+        _T._CPU_FALLBACK_ACTIVE.pop(str(binary), None)
+        backend = WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                    use_gpu=True, timeout=30)
+
+        def fake_run_tracked(cmd, **kw):
+            if "--help" in cmd:
+                m = MagicMock(); m.returncode = 0; m.stdout = ""; m.stderr = ""
+                return m
+            raise HelperNotStarted(cmd, kw.get("timeout"))   # nothing ran
+
+        with patch("wayfinder.core.transcriber.run_tracked", side_effect=fake_run_tracked):
+            with pytest.raises(TranscriptionError):
+                backend.transcribe(str(audio), deadline=time.monotonic() + 2)
+        assert str(binary) not in _T._CPU_FALLBACK_ACTIVE, \
+            "a pre-spawn expiry must NOT memoize CPU fallback either"
 
     def test_start_server_lock_acquire_bounded_by_deadline(self, tmp_path):
         """Round-4 Finding-1: a competing holder of _server_lock must not make a
@@ -1963,6 +1995,28 @@ class TestGpuRecoveryProbe:
         assert state["failures"] == 2
         assert backend.whisper_binary in transcriber._CPU_FALLBACK_ACTIVE
 
+    def test_probe_succeeds_returns_none_on_a_pre_spawn_expiry(self, tmp_path):
+        """Sol mac r21: HelperNotStarted during the probe itself is no verdict,
+        the same as _probe_gpu_ok's None on the llama side."""
+        from wayfinder.utils.child_supervisor import HelperNotStarted
+        backend, _audio = self._backend(tmp_path, "echo gpu-text")
+        with patch("wayfinder.core.transcriber.run_tracked",
+                   side_effect=HelperNotStarted(["x"], 60.0)):
+            assert backend._gpu_probe_succeeds() is None
+
+    def test_recovery_probe_is_a_no_op_on_a_pre_spawn_expiry(self, tmp_path):
+        """Neither a recovery nor a backoff on no-verdict: the next scheduled
+        retry gets an unspent try instead of this one counting as a failure
+        it never ran (Sol mac r21)."""
+        from wayfinder.core import transcriber
+        backend, audio = self._backend(tmp_path, "kill -SEGV $$")
+        backend.transcribe(audio)   # failures = 1, CPU fallback active
+        before = dict(transcriber._gpu_retry_state[backend.whisper_binary])
+        with patch.object(backend, "_gpu_probe_succeeds", return_value=None):
+            backend._probe_gpu_recovery()
+        assert transcriber._gpu_retry_state[backend.whisper_binary] == before
+        assert backend.whisper_binary in transcriber._CPU_FALLBACK_ACTIVE
+
     def test_transcribe_spawns_probe_after_window(self, tmp_path):
         import time as _time
         from wayfinder.core import transcriber
@@ -2896,6 +2950,20 @@ class TestARetiredDictationsHelpers:
         assert getattr(backend, "_supported_flags_cache", None) is None   # not "no flags"
         assert backend._gpu_supported is None                              # not "no GPU"
 
+    def test_a_gpu_probe_that_runs_out_of_time_caches_nothing(self, tmp_path, monkeypatch):
+        # Sol mac r19: the probe's time now counts its watcher's start too,
+        # and a slow start says nothing about the binary.
+        import subprocess
+        from wayfinder.core import transcriber
+
+        def timed_out(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+        monkeypatch.setattr(transcriber, "run_tracked", timed_out)
+        backend = self._backend(tmp_path)
+        assert backend.supports_gpu() is False
+        assert backend._gpu_supported is None                              # not "no GPU"
+
     @pytest.mark.parametrize("at", ["flag-probe", "transcription"])
     def test_a_transcription_refused_at_the_spawn_lock_is_abandoned(self, tmp_path, monkeypatch, at):
         import subprocess
@@ -3245,6 +3313,78 @@ class TestARetiredDictationsActions:
 def threading_enumerate(name):
     import threading
     return [t for t in threading.enumerate() if t.name == name]
+
+
+def test_recovery_probe_does_not_condemn_gpu_after_shortened_admission(monkeypatch):
+    from types import SimpleNamespace
+    from wayfinder.core import transcriber
+    error = subprocess.TimeoutExpired(["whisper-cli"], 0.25)
+    error.execution_budget = 0.25
+    monkeypatch.setattr(transcriber, "run_tracked", MagicMock(side_effect=error))
+    backend = SimpleNamespace(whisper_binary="unused", model_path="unused")
+    assert transcriber.WhisperCppBackend._gpu_probe_succeeds(backend) is None
+
+
+def test_cli_admission_timeout_never_memoizes_cpu_fallback(tmp_path, monkeypatch):
+    from wayfinder.core import transcriber
+    binary, cpu, model, audio = [tmp_path / name for name in
+                                ("whisper-cli", "whisper-cli-cpu", "model.bin", "audio.wav")]
+    for path in (binary, cpu, model, audio):
+        path.touch()
+    monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+    backend = transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                            use_gpu=True, timeout=30)
+
+    def run(cmd, **kwargs):
+        if "--help" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        assert cmd[0] != str(cpu), "admission delay must not select the CPU fallback"
+        error = subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        error.execution_budget = 0.25
+        raise error
+
+    monkeypatch.setattr(transcriber, "run_tracked", run)
+    with pytest.raises(transcriber.TranscriptionError):
+        backend.transcribe(str(audio))
+    assert str(binary) not in transcriber._CPU_FALLBACK_ACTIVE
+
+
+@pytest.mark.parametrize("remaining,expected", [(59.99, False), (0.25, None)])
+def test_recovery_timeout_distinguishes_launch_overhead_from_admission(monkeypatch, remaining, expected):
+    from types import SimpleNamespace
+    from wayfinder.core import transcriber
+    error = subprocess.TimeoutExpired(["whisper-cli"], remaining)
+    error.execution_budget = remaining
+    monkeypatch.setattr(transcriber, "run_tracked", MagicMock(side_effect=error))
+    backend = SimpleNamespace(whisper_binary="unused", model_path="unused")
+    assert transcriber.WhisperCppBackend._gpu_probe_succeeds(backend) is expected
+
+
+def test_normal_gpu_timeout_still_tries_and_remembers_cpu_fallback(tmp_path, monkeypatch):
+    from wayfinder.core import transcriber
+    binary, cpu, model, audio = [tmp_path / name for name in
+                                ("whisper-cli", "whisper-cli-cpu", "model.bin", "audio.wav")]
+    for path in (binary, cpu, model, audio):
+        path.touch()
+    monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+    backend = transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                            use_gpu=True, timeout=30)
+    attempts = []
+
+    def run(cmd, **kwargs):
+        if "--help" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        attempts.append(cmd[0])
+        if cmd[0] == str(binary):
+            error = subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            error.execution_budget = 29.99
+            raise error
+        return subprocess.CompletedProcess(cmd, 0, "These spoken words survived the fallback.", "")
+
+    monkeypatch.setattr(transcriber, "run_tracked", run)
+    assert "spoken words" in backend.transcribe(str(audio))
+    assert attempts == [str(binary), str(cpu)]
+    assert str(binary) in transcriber._CPU_FALLBACK_ACTIVE
 
 class TestUnpromptedTranscription:
     """Noise-verdict audio is heard with no prompt: primed with the dictation

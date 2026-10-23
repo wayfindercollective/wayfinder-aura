@@ -60,7 +60,7 @@ def test_stall_is_logged_once_with_stack_and_probe_then_recovery():
     assert len(lines) == 3
     assert lines[0].startswith("⚠ Aura stopped checking for the hotkey at ")
     assert "presses are not being handled" in lines[0]
-    assert lines[1] == "   main thread: mainloop (__init__.py:1505)"
+    assert lines[1] == "   main thread at 1s: mainloop (__init__.py:1505)"
     assert lines[2] == "   Tk check: probe-result"
     assert spawned == ["poll-watchdog-probe"]
     beat[0] = clock.t + 1
@@ -93,7 +93,8 @@ def test_restart_offered_once_only_when_a_press_is_waiting():
     waiting[0] = True
     run_for(dog, clock, 20)
     assert offers == [1]
-    assert "offering a restart" in lines[-1]
+    assert "offering a restart" in lines[-2]
+    assert lines[-1].startswith("   main thread at ")   # where it is stuck at the offer
     assert spawned.count("poll-watchdog-restart") == 1
 
 
@@ -261,3 +262,34 @@ def test_probe_reports_a_tk_that_never_answers(wm):
         assert wm.WayfinderApp._windows_poll_probe(App) == "Tk did not answer a direct call within 3s"
     finally:
         hang.set()
+
+
+def test_stall_report_shows_where_it_was_stuck_from_the_start():
+    """16 Oct: a press held the main thread ~10 s opening the mic, then moved
+    on to the error banner; the report must show both, earliest first."""
+    clock = Clock()
+    beat = [clock.t]
+    where = ["start_recording (wayfinder_main.py:1)"]
+    lines = []
+    dog = wd.PollWatchdog(
+        heartbeat=lambda: beat[0], log=lines.append, probe=lambda: "p",
+        pending_hotkey=lambda: False, offer_restart=lambda: None,
+        stack=lambda: where[0], clock=clock, spawn=lambda fn, name: fn(),
+    )
+    run_for(dog, clock, 3)
+    assert lines == []                      # sampled, not yet reported
+    where[0] = "_show_error_banner (wayfinder_main.py:2)"
+    run_for(dog, clock, 3)
+    assert lines[0].startswith("⚠ Aura stopped checking for the hotkey")
+    assert lines[1] == "   main thread at 1s: start_recording (wayfinder_main.py:1)"
+    assert lines[2] == "   main thread at 4s: _show_error_banner (wayfinder_main.py:2)"
+
+
+def test_short_freeze_is_sampled_but_never_reported():
+    clock = Clock()
+    beat = [clock.t]
+    dog, lines, _, _ = make(clock, beat)
+    run_for(dog, clock, 4)
+    beat[0] = clock.t
+    run_for(dog, clock, 20, beat, alive=True)
+    assert lines == []

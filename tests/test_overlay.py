@@ -771,6 +771,244 @@ def test_disappearing_qt_pill_moves_without_remapping_or_raising(monkeypatch):
         overlay.deleteLater()
 
 
+def test_pill_hwnd_for_keeper_skips_hidden_minimized_and_cloaked(monkeypatch):
+    """20 Oct: persistent mode never calls hide() — _finish_hide() parks the
+    pill off-screen instead (see test_disappearing_qt_pill_... above), so
+    isVisible() stays True while HIDDEN and the Windows topmost keeper kept
+    scanning/repairing a pill nobody can see. A minimized or cloaked (parked
+    on another virtual desktop) pill reports isVisible() True too — exercise
+    the actual _pill_hwnd_for() wiring run_overlay() hands the keeper, not a
+    stand-in."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui import overlay as overlay_mod
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])
+    ov = GlassmorphicOverlay()
+    try:
+        ov._state = OverlayState.READY
+        ov.show()
+        app.processEvents()
+        assert ov.isVisible()
+        assert overlay_mod._pill_hwnd_for(ov) == int(ov.winId())  # normal case: a real hwnd
+
+        ov._state = OverlayState.HIDDEN
+        assert ov.isVisible()                            # parked off-screen, not hide()
+        assert overlay_mod._pill_hwnd_for(ov) is None     # but the keeper must leave it alone
+
+        ov._state = OverlayState.READY
+        monkeypatch.setattr(ov, "isMinimized", lambda: True)
+        assert overlay_mod._pill_hwnd_for(ov) is None     # minimized
+
+        monkeypatch.setattr(ov, "isMinimized", lambda: False)
+        monkeypatch.setattr(overlay_mod, "_cloaked", lambda h: True)
+        assert overlay_mod._pill_hwnd_for(ov) is None     # cloaked (other virtual desktop)
+    finally:
+        ov.deleteLater()
+
+
+def test_set_state_notifies_on_hide_and_show():
+    """Round 3: the Windows topmost keeper's suspend()/resume() hang off
+    this one hook (overlay._on_hidden_changed), fired only when self._state
+    actually crosses into/out of HIDDEN — see run_overlay()'s win32 setup
+    block in overlay.py, which wires it to the keeper."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        calls = []
+        overlay._on_hidden_changed = calls.append
+        overlay._state = OverlayState.READY
+
+        overlay.set_state(OverlayState.HIDDEN, animate=False)
+        assert calls == [True]
+
+        overlay.set_state(OverlayState.READY, animate=False)
+        assert calls == [True, False]
+    finally:
+        overlay.deleteLater()
+
+
+def test_set_state_notifies_when_a_transient_ready_remaps_to_hidden():
+    """Round 2 left this split across the "show"/"hide" command handlers in
+    overlay.py, keyed on which COMMAND ran rather than where self._state
+    actually landed — so a transient overlay's "show ready" (remapped to
+    HIDDEN right here; see set_state() above) kept resuming the keeper
+    regardless of whether the pill was actually still hidden. The idle
+    watchdog's own HIDDEN transition (process_commands() in run_overlay(),
+    transient mode) goes through this exact same call, so covering it here
+    covers that path too."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "transient"
+        overlay._state = OverlayState.LISTENING
+        calls = []
+        overlay._on_hidden_changed = calls.append
+
+        overlay.set_state(OverlayState.READY, animate=False)  # remapped to HIDDEN
+        assert overlay._state == OverlayState.HIDDEN
+        assert calls == [True]
+    finally:
+        overlay.deleteLater()
+
+
+def test_set_state_does_not_notify_again_when_a_transient_overlay_is_already_hidden():
+    """The actual round-3 bug: "hide" (state -> HIDDEN) then "show ready" on
+    a transient overlay remaps to HIDDEN again — state == self._state, so
+    set_state() early-returns with no transition at all. The hook must not
+    fire a spurious resume here; the old code did, because it lived in the
+    "show" command handler and ran regardless of what set_state() had
+    actually done (state=HIDDEN, keeper_suspended=False, timer_active=True,
+    per the review)."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "transient"
+        overlay._state = OverlayState.HIDDEN
+        calls = []
+        overlay._on_hidden_changed = calls.append
+
+        overlay.set_state(OverlayState.READY, animate=False)  # remapped to HIDDEN == self._state
+        assert overlay._state == OverlayState.HIDDEN
+        assert calls == []
+    finally:
+        overlay.deleteLater()
+
+
+def test_set_state_notifies_when_an_error_auto_return_lands_on_hidden():
+    """The ERROR banner auto-returns to READY after ~2s via set_state()'s
+    own single-shot timer (see set_state(), the "_error_return_timer"
+    block) — on a transient overlay that lands on HIDDEN too, through the
+    exact same remap exercised above, and must suspend the keeper just as
+    an explicit "hide" would. Calls set_state() directly with the state the
+    auto-return timer would apply, rather than waiting on the real timer."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "transient"
+        overlay._state = OverlayState.ERROR
+        calls = []
+        overlay._on_hidden_changed = calls.append
+
+        overlay.set_state(OverlayState.READY, animate=False)  # the auto-return's own call
+        assert overlay._state == OverlayState.HIDDEN
+        assert calls == [True]
+    finally:
+        overlay.deleteLater()
+
+
+def test_set_state_notifies_active_through_listening_processing_ready():
+    """Sol pill r4: overlay._on_active_changed fires exactly when self._state
+    crosses into/out of ACTIVE_OVERLAY_STATES (LISTENING, PROCESSING) — the
+    Windows topmost keeper's set_active() hangs off this, the same way
+    suspend()/resume() hang off _on_hidden_changed above. PROCESSING must
+    not fire a second "active" notification; only READY (leaving both
+    states) fires "inactive"."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        calls = []
+        overlay._on_active_changed = calls.append
+        overlay._state = OverlayState.READY
+
+        overlay.set_state(OverlayState.LISTENING, animate=False)
+        assert calls == [True]
+
+        overlay.set_state(OverlayState.PROCESSING, animate=False)
+        assert calls == [True]           # still active: no duplicate notify
+
+        # PROCESSING->READY has its own, unrelated minimum-display-time
+        # guard (shows "Processing..." for >=800ms by delaying this exact
+        # transition on a QTimer) — push the recorded start back so this
+        # test exercises the real, immediate transition instead of a timer
+        # callback that a non-interactive test never pumps.
+        overlay._processing_start_time -= 1.0
+        overlay.set_state(OverlayState.READY, animate=False)
+        assert calls == [True, False]
+    finally:
+        overlay.deleteLater()
+
+
+def test_set_state_notifies_active_false_when_an_error_interrupts_a_dictation():
+    """The ERROR banner (set_state()'s own auto-return timer) is not an
+    active dictation state — a recording that errors out must free the
+    keeper from its ACTIVE_MAX_PAUSE_S cap immediately, not keep it active
+    until the ~2s auto-return to READY lands."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        calls = []
+        overlay._on_active_changed = calls.append
+        overlay._state = OverlayState.LISTENING
+
+        overlay.set_state(OverlayState.ERROR, animate=False)
+        assert calls == [False]
+
+        overlay.set_state(OverlayState.READY, animate=False)   # the auto-return's own call
+        assert calls == [False]          # already inactive: no duplicate notify
+    finally:
+        overlay.deleteLater()
+
+
+def test_set_state_notifies_active_through_the_idle_watchdog_remap():
+    """The idle watchdog (process_commands() in run_overlay(), transient
+    mode) calls set_state(READY) on a stuck LISTENING/PROCESSING pill, which
+    set_state() itself remaps to HIDDEN for a transient overlay (see the
+    remap at the top of set_state()) — a single call that must still notify
+    _on_active_changed(False), the same as a real "hide" would, not leave
+    the keeper thinking a dictation is still in progress."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "transient"
+        overlay._state = OverlayState.LISTENING
+        calls = []
+        overlay._on_active_changed = calls.append
+
+        overlay.set_state(OverlayState.READY, animate=False)  # remapped to HIDDEN
+        assert overlay._state == OverlayState.HIDDEN
+        assert calls == [False]
+    finally:
+        overlay.deleteLater()
+
+
 @pytest.mark.parametrize("platform_name, expected", [("linux", "primary"), ("darwin", "pointer")])
 def test_overlay_screen_follows_pointer_on_macos_only(
     monkeypatch, overlay_module, platform_name, expected
