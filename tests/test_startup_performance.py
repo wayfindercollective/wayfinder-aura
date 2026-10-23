@@ -43,6 +43,23 @@ assert 'scipy' not in sys.modules, sorted(m for m in sys.modules if m.startswith
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_launch_does_not_import_requests():
+    # main.py imports the setup pane on every launch to decide the first-run
+    # flow; requests (~35 ms warm) is needed only once a download starts.
+    env = os.environ.copy()
+    env.update(PYTHONPATH=str(REPO / "src"), QT_QPA_PLATFORM="offscreen")
+    code = """
+import sys
+import wayfinder_main
+from wayfinder.ui.setup_pane import first_run_plan, should_chain_welcome
+assert 'requests' not in sys.modules, 'requests imported at launch'
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=REPO, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_audio_processing_preload_warms_the_rumble_filter():
     from wayfinder.core import audio_dsp, recorder
 

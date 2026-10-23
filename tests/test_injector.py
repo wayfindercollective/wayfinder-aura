@@ -836,6 +836,29 @@ class TestModifierReleaseGate:
                 _inject_text_xdotool("I'm ready.")
         run.assert_not_called()
 
+    def test_a_dictation_retired_during_the_modifier_wait_types_nothing(self):
+        # Sol mac r11, on Linux: every tool waits for the modifiers in
+        # _require_modifier_release(), which asks inject_text's cancellation.
+        import wayfinder.core.injector as injector
+        retired = [False]
+
+        def wait():
+            retired[0] = True   # Escape, while a modifier was held
+            return True
+
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", side_effect=wait), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector.subprocess.run", return_value=ok) as run:
+            with pytest.raises(injector.InjectionCancelled):
+                injector.inject_text("retired words", cancelled=lambda: retired[0])
+            assert not any("type" in call.args[0] for call in run.call_args_list)
+            with pytest.raises(injector.InjectionCancelled):
+                injector.press_enter(cancelled=lambda: retired[0])
+            assert not any("Return" in call.args[0] for call in run.call_args_list)
+        assert getattr(injector._injection, "cancelled", None) is None
+
     def test_wtype_aborts_instead_of_typing_shift_corrupted_text(self):
         with patch("wayfinder.core.injector._wait_for_modifier_release",
                    return_value=False), \
@@ -1202,3 +1225,1047 @@ class TestModifierProbeStaleMask:
 
     def test_without_keymap_calls_the_mask_decides(self):
         assert self._probe(self._lib(mask=0x01, keymap_calls=False)).query() == 0x01
+
+
+class TestARetiredClipboardPaste:
+    """do_inject's explicit clipboard paste (Sol mac r12) asks the dictation's
+    cancellation on Linux: before the clipboard and after the modifier wait."""
+
+    @pytest.mark.parametrize("retire_at", ["before", "modifier-wait", None])
+    def test_a_retired_clipboard_paste_pastes_nothing(self, retire_at):
+        import wayfinder.core.injector as injector
+        state = {"retired": retire_at == "before", "clipboard": "theirs"}
+
+        def wait():
+            if retire_at == "modifier-wait":
+                state["retired"] = True   # Escape, while a modifier was held
+            return True
+
+        writes = []
+
+        def write(text, restoring=False):
+            writes.append(text)
+            state["clipboard"] = text
+
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", side_effect=wait), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._clipboard_read_linux", side_effect=lambda: state["clipboard"]), \
+             patch("wayfinder.core.injector._clipboard_write_linux", side_effect=write), \
+             patch("wayfinder.core.injector.time.sleep"), \
+             patch("wayfinder.core.injector.subprocess.run", return_value=ok) as run:
+            if retire_at is None:
+                injector.inject_text_clipboard_paste("live words", cancelled=lambda: state["retired"])
+                assert any("ctrl+v" in call.args[0] for call in run.call_args_list)
+                return
+            with pytest.raises(injector.InjectionCancelled):
+                injector.inject_text_clipboard_paste("retired words", cancelled=lambda: state["retired"])
+            assert not any("ctrl+v" in call.args[0] for call in run.call_args_list)
+        assert state["clipboard"] == "theirs"      # untouched, or put back
+        if retire_at == "before":
+            assert writes == []                    # not even for a moment
+        assert getattr(injector._injection, "cancelled", None) is None
+
+
+class TestEveryLinuxKeyToolAsks:
+    """Sol mac r12: the check sits right before each key command, so a
+    fallback's own waits (wtype failing, ydotool's readiness) let none through."""
+
+    def test_a_key_tool_for_a_retired_dictation_never_runs(self):
+        import wayfinder.core.injector as injector
+        with patch("wayfinder.core.injector.subprocess.run") as run:
+            with injector.cancellable(lambda: True):
+                with pytest.raises(injector.InjectionCancelled):
+                    injector._run_key_tool(["xdotool", "key", "Return"])
+            run.assert_not_called()
+            injector._run_key_tool(["xdotool", "key", "Return"])
+            run.assert_called_once()
+
+    @pytest.mark.parametrize("retire", [True, False])
+    def test_an_enter_fallback_retired_during_its_readiness_sends_nothing(self, retire):
+        import wayfinder.core.injector as injector
+        state = {"retired": False}
+        failed = MagicMock(returncode=1, stdout="", stderr="unsupported")
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def ready():
+            state["retired"] = retire   # Escape while ydotool's readiness is checked
+            return True, ""
+
+        def run(argv, **_k):
+            return failed if argv[0] == "wtype" else ok
+
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._note_wtype_failure"), \
+             patch("wayfinder.core.injector.check_ydotool_ready", side_effect=ready), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._check_ydotool_result"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run) as runs:
+            if retire:
+                with pytest.raises(injector.InjectionCancelled):
+                    injector.press_enter(cancelled=lambda: state["retired"])
+            else:
+                injector.press_enter(cancelled=lambda: state["retired"])
+        tools = [call.args[0][0] for call in runs.call_args_list]
+        assert tools == (["wtype"] if retire else ["wtype", "ydotool"])
+
+
+class TestLinuxTypingInPieces:
+    """Sol mac r13: a typing tool is one process nothing can ask between its
+    keys; a reset while it typed let it type the rest. Long text now goes out
+    in pieces, each its own run, each asked first."""
+
+    def test_pieces_put_the_text_back_together(self):
+        import wayfinder.core.injector as injector
+        text = "one two three four five six seven eight nine ten " * 8 + "end\r\nnext"
+        pieces = injector.typing_chunks(text, lambda p: len(p) * 0.025)   # 20 characters each
+        assert "".join(pieces) == text and len(pieces) > 5
+        assert all(len(p) <= 20 for p in pieces)
+        assert all(p.endswith(" ") for p in pieces[:-2])   # cut after a space
+        assert injector.typing_chunks("short", lambda p: len(p) * 0.005) == ["short"]
+        assert injector.typing_chunks("", lambda p: 1.0) == []
+        crlf_text = "x" * 15 + "\r\n" + "y" * 20
+        crlf = injector.typing_chunks(crlf_text, lambda p: len(p) * 0.5 / 16)   # 16 a piece
+        assert "".join(crlf) == crlf_text
+        assert not any(p.endswith("\r") for p in crlf)     # one Enter, not two
+        # A character over the budget alone still goes out, one at a time.
+        assert injector.typing_chunks("abc", lambda p: len(p) * 2.0) == ["a", "b", "c"]
+
+    def test_the_schedule_counts_every_sleep(self):
+        # Sol mac r14: an alternating "aA" piece slept 1.8 s between its keys.
+        # Codex finding 4: the warm-up `key` tap and both Shift-release
+        # `keyup` sweeps also cost xdotool's own 12ms-per-key default, which
+        # the estimator used to skip entirely.
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("aB", 10, warmup=True)
+        # warm-up key press, warm-up gap, the release sweep after it,
+        # "a", the gap before "B", "B", the gap before the final sweep,
+        # the final release sweep (two keys).
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(
+            0.013 + 0.020 + 0.026 + 0.011 + 0.012 + 0.011 + 0.012 + 0.026)
+
+    @pytest.mark.parametrize("text", ["aA" * 300, "Hello World. " * 40, "x" * 600])
+    @pytest.mark.parametrize("speed", ["instant", "fast", "normal", "slow", "very_slow"])
+    def test_no_xdotool_piece_is_scheduled_past_the_budget(self, text, speed):
+        import wayfinder.core.injector as injector
+        delay = injector.TYPING_SPEEDS[speed][0]
+        for warmup in (False, True):
+            def seconds(piece):
+                return injector.xdotool_scheduled_seconds(
+                    injector.build_xdotool_type_command(piece, delay, warmup=warmup))
+            pieces = injector.typing_chunks(text, seconds)
+            assert "".join(pieces) == text
+            assert all(seconds(p) <= injector.TYPING_CHUNK_S for p in pieces)
+
+    def test_very_slow_ydotool_pieces_stay_within_the_budget(self, monkeypatch):
+        # Sol mac r14: a 16-character floor made a very slow piece 2.4 s.
+        # Codex finding 7: this must force ydotool selection explicitly — on
+        # a host that also has xdotool, get_text_injector() would prefer it,
+        # silently exercising the WRONG budget math (xdotool's, not
+        # ydotool's key_delay+key_hold) and this test would pass for the
+        # wrong reason, or fail, depending on what happens to be installed.
+        import wayfinder.core.injector as injector
+        delay, hold = injector.TYPING_SPEEDS["very_slow"]
+        runs, bins = [], []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def record(argv, **_k):
+            bins.append(argv[0])
+            if argv[1:2] == ["type"]:
+                runs.append(argv[-1])
+            return ok
+
+        monkeypatch.setattr("wayfinder.utils.platform.get_text_injector", lambda: "ydotool")
+        with patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._require_modifier_release"), \
+             patch("wayfinder.core.injector._check_ydotool_result"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=record):
+            injector._inject_text_type_linux("slow and steady words", "very_slow")
+        assert "".join(runs) == "slow and steady words"
+        # The executable actually run was ydotool, not xdotool.
+        assert bins and all(b == "ydotool" for b in bins)
+        assert all(len(p) * (delay + hold) / 1000 <= injector.TYPING_CHUNK_S for p in runs)
+
+
+    def test_wtype_types_a_dash_as_text(self):
+        # Sol mac r14: wtype read a piece starting with "-" as its options.
+        import wayfinder.core.injector as injector
+        argvs = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        text = "-" + "x" * 499 + "-n --" + " y" * 200
+        with patch("wayfinder.core.injector._require_modifier_release"), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=lambda argv, **_k: argvs.append(argv) or ok):
+            injector._inject_text_wtype(text)
+            injector._inject_text_wtype("-")
+        assert len(argvs) > 2 and any(a[-1].startswith("-") for a in argvs[1:-1])
+        assert all(a[:2] == ["wtype", "--"] and len(a) == 3 for a in argvs)
+        assert "".join(a[-1] for a in argvs[:-1]) == text
+
+    @pytest.mark.parametrize("tool", ["xdotool", "wtype", "ydotool"])
+    def test_a_reset_mid_typing_stops_at_the_next_piece(self, tool):
+        import wayfinder.core.injector as injector
+        state = {"retired": False}
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def run(argv, **_k):
+            state["retired"] = True     # Escape while the first piece types
+            return ok
+
+        text = "word " * 200
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch("wayfinder.core.injector._check_ydotool_result"), \
+             patch("wayfinder.core.injector.time.sleep"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run) as runs:
+            typing = {"xdotool": lambda: injector._inject_text_xdotool(text),
+                      "wtype": lambda: injector._inject_text_wtype(text),
+                      "ydotool": lambda: injector._inject_text_type_linux(text)}[tool]
+            with injector.cancellable(lambda: state["retired"]):
+                with pytest.raises(injector.InjectionCancelled):
+                    typing()
+            assert runs.call_count == 1
+            state["retired"] = False
+            runs.reset_mock()
+            runs.side_effect = lambda argv, **_k: ok
+            with injector.cancellable(lambda: state["retired"]):
+                typing()
+            typed = "".join(call.args[0][-1] for call in runs.call_args_list)
+            assert runs.call_count > 1 and typed.replace(" ", "") == text.replace(" ", "")
+
+    @pytest.mark.parametrize("failure", ["exit", "timeout", "oserror"])
+    @pytest.mark.parametrize("tool", ["xdotool", "wtype", "ydotool"])
+    def test_a_later_piece_failing_is_uncertain_and_never_falls_back(self, tool, failure):
+        # Part of the text landed: ydotool or a game-mode paste would type it
+        # all again, a timed-out ydotool piece too (Sol mac r14).
+        import wayfinder.core.injector as injector
+        runs = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        failed = MagicMock(returncode=1, stdout="", stderr="gone")
+
+        def run(argv, **_k):
+            runs.append(argv[0])
+            if len(runs) == 1:
+                return ok
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, 120)
+            if failure == "oserror":
+                raise OSError(7, "Argument list too long")
+            return failed
+
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value=tool), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
+             patch("wayfinder.core.injector._note_wtype_failure") as noted, \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.time.sleep"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run):
+            with pytest.raises(injector.InjectionError) as caught:
+                injector.inject_text("word " * 200, game_mode=True, paste_fallback=True)
+        assert caught.value.uncertain_delivery is True
+        assert "word" not in str(caught.value)              # never the dictated text
+        assert failure != "timeout" or "timed out" in str(caught.value)
+        assert set(runs) == {tool} and len(runs) == 2
+        noted.assert_not_called()
+        pasted.assert_not_called()
+
+    def test_game_chat_typing_stops_at_the_next_piece(self, monkeypatch):
+        import wayfinder.core.injector as injector
+        from wayfinder.core import linux_game_chat as gc
+        state, runs = {"retired": False}, []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def run(argv, **_k):
+            runs.append(argv)
+            state["retired"] = True
+            return ok
+
+        monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
+        monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
+        monkeypatch.setattr(gc, "_portal", lambda: None)
+        monkeypatch.setattr(gc.subprocess, "run", run)
+        with injector.cancellable(lambda: state["retired"]):
+            with pytest.raises(injector.InjectionCancelled):
+                gc.type_text("gg " * 100)
+        assert len(runs) == 1
+
+
+    def test_game_chat_later_piece_timing_out_is_uncertain(self, monkeypatch):
+        import wayfinder.core.injector as injector
+        from wayfinder.core import linux_game_chat as gc
+        runs = []
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def run(argv, **_k):
+            runs.append(argv)
+            if len(runs) > 1:
+                raise subprocess.TimeoutExpired(argv, 10)
+            return ok
+
+        monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
+        monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
+        monkeypatch.setattr(gc, "_portal", lambda: None)
+        monkeypatch.setattr(gc.subprocess, "run", run)
+        with pytest.raises(injector.InjectionError) as caught:
+            gc.type_text("gg " * 100)
+        assert caught.value.uncertain_delivery is True and len(runs) == 2
+
+
+def _xdotool_commands(argv):
+    """Split a real xdotool argv (everything after the leading "xdotool")
+    into (command_word, following_tokens) pairs, cut at each sleep/type/
+    key/keyup/keydown boundary found by scanning the whole list up front.
+    A structurally different first step than xdotool_scheduled_seconds's
+    own single running index, so the oracle built on it below cannot
+    retrace that loop and inherit the same mistake (Codex review finding
+    4b: the previous "independent" model was a byte-for-byte copy of the
+    estimator's parser).
+
+    Finding 6 (Sol mac r17): the boundary scan used to match a command word
+    anywhere in the list, including a dictated "type", "sleep" or "key"
+    sitting in a `type` command's own text argument — the one token that
+    always follows a "--" terminator (build_xdotool_type_command never
+    emits `type`'s text any other way). That token is data, never a new
+    command, so it is skipped here regardless of its value."""
+    words = argv[1:]
+    starts = []
+    data_next = False
+    for i, w in enumerate(words):
+        if data_next:
+            data_next = False
+            continue
+        if w in ("sleep", "type", "key", "keyup", "keydown"):
+            starts.append(i)
+        elif w == "--":
+            data_next = True   # the very next token is an argument value
+    ends = starts[1:] + [len(words)]
+    return [(words[s], words[s + 1:e]) for s, e in zip(starts, ends)]
+
+
+_INDEPENDENT_XDOTOOL_DEFAULT_MS = 12  # xdotool's own default, read from
+                                      # cmd_key.c / cmd_type.c, kept as a
+                                      # separate name from the estimator's
+                                      # private constant on purpose.
+
+
+def _independent_xdotool_seconds(argv) -> float:
+    """A second reading of xdotool's documented defaults — (--delay or the
+    12ms default) + 1ms per key or character; ``sleep`` costs its literal
+    argument — derived without reusing xdotool_scheduled_seconds's parsing
+    loop: commands are cut out first (_xdotool_commands) and each is costed
+    by indexing/slicing the already-isolated token list, not by an
+    incrementing index walked branch-by-branch like the estimator's."""
+    total = 0.0
+    for command, rest in _xdotool_commands(argv):
+        if command == "sleep":
+            total += float(rest[0])
+        elif command == "type":
+            # The typed text is always the command's LAST token — either
+            # the bare argument, or whatever follows a "--" terminator —
+            # since nothing xdotool accepts for `type` can follow it.
+            text = rest[-1]
+            delay = (int(rest[rest.index("--delay") + 1]) if "--delay" in rest
+                      else _INDEPENDENT_XDOTOOL_DEFAULT_MS)
+            total += len(text) * (delay + 1) / 1000
+        else:  # key / keyup / keydown
+            delay = (int(rest[rest.index("--delay") + 1]) if "--delay" in rest
+                      else _INDEPENDENT_XDOTOOL_DEFAULT_MS)
+            # Every token that is neither a "--flag" nor the value sitting
+            # right after "--delay" is a key (a "+"-joined chord counts
+            # every member it names).
+            keys = [tok for pos, tok in enumerate(rest)
+                    if not tok.startswith("--")
+                    and not (pos and rest[pos - 1] == "--delay")]
+            total += sum(tok.count("+") + 1 for tok in keys) * (delay + 1) / 1000
+    return total
+
+
+class TestXdotoolScheduledSecondsKeyCommands:
+    """Codex review finding 4: key/keyup/keydown delays were omitted
+    entirely from the estimator, so the warm-up tap and the Shift-release
+    sweeps build_xdotool_type_command emits were free. Hand-written argv,
+    hand-computed expected seconds — never calling the estimator to check
+    the estimator."""
+
+    def test_single_key_no_delay_uses_xdotools_12ms_default(self):
+        import wayfinder.core.injector as injector
+        argv = ["xdotool", "key", "--clearmodifiers", "Shift_L"]
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(0.013)
+
+    def test_keyup_sweep_two_keys_no_delay(self):
+        import wayfinder.core.injector as injector
+        argv = ["xdotool", "keyup", "Shift_L", "Shift_R"]
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(0.026)
+
+    def test_key_with_explicit_delay_and_a_chorded_sequence(self):
+        # "shift+a" is two keys, "b" is one: 3 keys at (50+1)ms each.
+        import wayfinder.core.injector as injector
+        argv = ["xdotool", "key", "--delay", "50", "shift+a", "b"]
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(0.153)
+
+    def test_keydown_single_key_zero_delay(self):
+        import wayfinder.core.injector as injector
+        argv = ["xdotool", "keydown", "--delay", "0", "Return"]
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(0.001)
+
+    def test_type_without_delay_uses_xdotools_12ms_default(self):
+        import wayfinder.core.injector as injector
+        argv = ["xdotool", "type", "--", "hello"]
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(0.065)
+
+    def test_each_commands_delay_is_scoped_to_itself(self):
+        # The `key` command gets no --delay (xdotool's 12ms default applies
+        # to it alone); `type`'s own 4ms --delay never leaks into `key`.
+        import wayfinder.core.injector as injector
+        argv = ["xdotool",
+                "sleep", "0.5",
+                "key", "Return",
+                "type", "--delay", "4", "--", "hi"]
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(
+            0.5 + 0.013 + 2 * 0.005)
+
+
+class TestXdotoolPieceBudgetIndependentModel:
+    """Codex review finding 4b: a piece built by typing_chunks using the real
+    estimator must also respect the budget under an INDEPENDENTLY DERIVED
+    model — not a second copy of xdotool_scheduled_seconds's own parsing
+    loop — otherwise a shared mistake in the estimator and its "independent"
+    check would agree with each other and hide the regression (e.g. 'aA' *
+    300 at the XWayland 4ms floor with warm-up was once estimated at 0.485s
+    while its key delays alone really cost 0.740s). The first few tests
+    below hand-compute the expected schedule straight from xdotool's own
+    documented defaults for a handful of representative pieces; the rest
+    cost every piece with _independent_xdotool_seconds, which reads argv
+    differently from the estimator (see its docstring above)."""
+
+    # -- representative pieces, hand-computed against xdotool's own
+    # documented defaults (cmd_key.c / cmd_type.c: (--delay or 12ms) + 1ms
+    # per key or character; cmd_sleep: the literal argument) --------------
+
+    def test_plain_lowercase_no_warmup_no_shift(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("hello", 12)
+        # one plain `type` run: 5 chars x (12+1)ms
+        expected = 5 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_alternating_case_without_warmup(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("aA", 10)
+        # "a" (plain, 1 char x (10+1)ms) + settle gap before "A"; "A"
+        # (shift, 1 char x (10+1)ms) + settle gap; the Shift-release sweep
+        # after it (2 keys x xdotool's own 12ms default — this run's
+        # --delay 10 only ever reaches the `type` commands):
+        expected = 0.011 + 0.012 + 0.011 + 0.012 + 0.026
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_word_with_a_shift_sweep(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("Hi there", 12)
+        # "H" (shift, 1 char x 13ms) + its release sweep (2 keys x 13ms) +
+        # settle gap; "i there" (plain, 7 chars x 13ms) + its own leading
+        # settle gap:
+        expected = 0.013 + 0.012 + 0.026 + 0.012 + 7 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_warmup_adds_its_own_key_and_sweep_before_the_text(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("hi", 4, warmup=True)
+        # warm-up key (1 key x 13ms) + its settle gap (20ms) + its own
+        # release sweep (2 keys x 13ms); "hi" typed plain at --delay 4:
+        # 2 chars x (4+1)ms
+        expected = 0.013 + 0.020 + 0.026 + 2 * 0.005
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_explicit_delay_overrides_the_default(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("abc", 50)
+        # one plain run, --delay 50: 3 chars x (50+1)ms
+        expected = 3 * 0.051
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_key_command_with_a_chorded_sequence(self):
+        # build_xdotool_type_command never emits a "+"-joined chord itself
+        # (its warm-up/release keys are always single), but
+        # xdotool_scheduled_seconds must still cost one correctly, so this
+        # is a hand-built argv rather than one from the app's own builder.
+        import wayfinder.core.injector as injector
+        argv = ["xdotool", "key", "--delay", "20", "shift+a", "b"]
+        # chord "shift+a" (2 keys) + "b" (1 key) = 3 keys x (20+1)ms
+        expected = 3 * 0.021
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    # -- Finding 6 (Sol mac r17): dictating one of the oracle's own boundary
+    # words must not be mistaken for a second command. Each is typed plain
+    # (lowercase, no Shift segment), so build_xdotool_type_command emits one
+    # `type` run and nothing else; the only correct accounting is that run's
+    # own char count at its own --delay. -------------------------------
+
+    def test_a_dictated_type_is_data_not_a_command_boundary(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("type", 12)
+        # one plain `type` run: 4 chars x (12+1)ms. The old oracle matched
+        # the typed word "type" itself as a second `type` command with no
+        # text argument left, and raised IndexError reading it.
+        expected = 4 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_a_dictated_sleep_is_data_not_a_command_boundary(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("sleep", 12)
+        # one plain `type` run: 5 chars x (12+1)ms. The old oracle matched
+        # the typed word "sleep" as a second, argument-less `sleep` command
+        # and raised IndexError reading its duration.
+        expected = 5 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    def test_a_dictated_key_is_data_not_a_command_boundary(self):
+        import wayfinder.core.injector as injector
+        argv = injector.build_xdotool_type_command("key", 12)
+        # one plain `type` run: 3 chars x (12+1)ms = 0.039s. The old oracle
+        # cut the real `type` run short at the "--" before the typed word
+        # "key" (costing its "--" token as 2 "chars") and then matched "key"
+        # itself as a third, key-less command — 0.026s total instead.
+        expected = 3 * 0.013
+        assert injector.xdotool_scheduled_seconds(argv) == pytest.approx(expected)
+        assert _independent_xdotool_seconds(argv) == pytest.approx(expected)
+
+    # -- every piece typing_chunks actually produces, costed again by the
+    # independent oracle rather than the estimator being tested ----------
+
+    @pytest.mark.parametrize("text", [
+        "aA" * 300,                                       # worst case: a Shift transition every character
+        "Hello World. " * 40,                              # shifted words: a cap after every ". "
+        "plain lowercase text with no shifting at all " * 10,  # no Shift transitions at all
+    ])
+    @pytest.mark.parametrize("speed", list(TYPING_SPEEDS))
+    @pytest.mark.parametrize("warmup", [False, True])
+    def test_pieces_stay_within_budget_and_rejoin_exactly(self, text, speed, warmup):
+        import wayfinder.core.injector as injector
+        delay = TYPING_SPEEDS[speed][0]
+
+        def seconds(piece):
+            return injector.xdotool_scheduled_seconds(
+                injector.build_xdotool_type_command(piece, delay, warmup=warmup))
+
+        pieces = injector.typing_chunks(text, seconds)
+        assert "".join(pieces) == text
+        for piece in pieces:
+            real = _independent_xdotool_seconds(
+                injector.build_xdotool_type_command(piece, delay, warmup=warmup))
+            assert real <= injector.TYPING_CHUNK_S
+
+    def test_the_xwayland_floor_case_from_the_review(self):
+        """'aA' * 300 at the XWayland 4ms floor, with warm-up: the review's
+        own numbers (0.485s estimated, 0.740s real) came from exactly this
+        combination, and the first piece must stay within TYPING_CHUNK_S."""
+        import wayfinder.core.injector as injector
+        text = "aA" * 300
+        delay = XWAYLAND_MIN_KEY_DELAY_MS
+
+        def seconds(piece):
+            return injector.xdotool_scheduled_seconds(
+                injector.build_xdotool_type_command(piece, delay, warmup=True))
+
+        pieces = injector.typing_chunks(text, seconds)
+        assert "".join(pieces) == text
+        first_piece_cost = _independent_xdotool_seconds(
+            injector.build_xdotool_type_command(pieces[0], delay, warmup=True))
+        assert first_piece_cost <= injector.TYPING_CHUNK_S
+        for piece in pieces:
+            real = _independent_xdotool_seconds(
+                injector.build_xdotool_type_command(piece, delay, warmup=True))
+            assert real <= injector.TYPING_CHUNK_S
+
+
+class TestIsPreTypingRefusal:
+    """Codex review finding 3: the short-list of failures proven to precede
+    any delivery, so piece zero may still fall back to another tool."""
+
+    @pytest.mark.parametrize("detail", [
+        "wtype: the compositor does not support the virtual keyboard protocol",
+        "Wayland connection failed",
+        "VIRTUAL KEYBOARD PROTOCOL not supported",
+        "ydotool: failed to connect socket: Connection refused",
+        "Error: Can't open display: (null)",
+        "cannot open display ''",
+        "failed to connect to display",
+        "failed to connect to compositor",
+        "No protocol specified",
+        "X connection refused",
+    ])
+    def test_recognised_refusals(self, detail):
+        from wayfinder.core.injector import _is_pre_typing_refusal
+        assert _is_pre_typing_refusal(detail) is True
+
+    @pytest.mark.parametrize("detail", [
+        "BadWindow (invalid window parameter)",
+        "ydotoold backend unavailable (may have latency+delay issues)",  # stays uncertain, not safe
+        "",
+        "unexpected internal error",
+    ])
+    def test_unrecognised_failures_are_not_refusals(self, detail):
+        from wayfinder.core.injector import _is_pre_typing_refusal
+        assert _is_pre_typing_refusal(detail) is False
+
+
+class TestFirstPieceProvenPreDelivery:
+    """Codex review finding 3: piece zero is NOT exempt. A timeout or an
+    unrecognised non-zero exit on the very first piece must be uncertain,
+    exactly like any later piece, because the tool run may already have
+    typed something before it failed. Only a failure PROVEN to precede any
+    delivery (the tool never started, or a recognised pre-typing refusal)
+    may still let the documented fallback run."""
+
+    # -- the wrapper itself: only a failure to start is proven -------------
+
+    def test_an_unknown_error_on_piece_zero_is_uncertain(self):
+        from wayfinder.core.injector import _piece_of_a_typing
+        with pytest.raises(InjectionError) as caught:
+            with _piece_of_a_typing(0):
+                raise RuntimeError("typed: secret words")
+        assert getattr(caught.value, "uncertain_delivery", False) is True
+        assert not getattr(caught.value, "proven_pre_delivery", False)
+        assert "secret" not in str(caught.value)
+
+    def test_a_tool_that_cannot_start_on_piece_zero_is_proven(self):
+        from wayfinder.core.injector import _piece_of_a_typing
+        with pytest.raises(InjectionError) as caught:
+            with _piece_of_a_typing(0):
+                raise PermissionError("xdotool")
+        assert getattr(caught.value, "proven_pre_delivery", False) is True
+        assert not getattr(caught.value, "uncertain_delivery", False)
+
+    # -- timeouts: always uncertain, even on piece zero, every backend -----
+
+    def test_xdotool_first_piece_timeout_is_uncertain(self):
+        def run(argv, **_k):
+            raise subprocess.TimeoutExpired(argv, 120)
+        with patch("wayfinder.core.injector.subprocess.run", side_effect=run), \
+             patch("time.sleep"):
+            with pytest.raises(InjectionError) as caught:
+                _inject_text_xdotool("hello", "instant")
+        assert caught.value.uncertain_delivery is True
+
+    def test_wtype_first_piece_timeout_triggers_no_ydotool_fallback(self):
+        import wayfinder.core.injector as injector
+
+        def run(argv, **_k):
+            raise subprocess.TimeoutExpired(argv, 120)
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector._note_wtype_failure") as noted, \
+             patch("wayfinder.core.injector.check_ydotool_ready") as ready, \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run) as runs:
+            with pytest.raises(injector.InjectionError) as caught:
+                injector._inject_text_type_linux("hello")
+        assert caught.value.uncertain_delivery is True
+        assert {c.args[0][0] for c in runs.call_args_list} == {"wtype"}
+        noted.assert_not_called()
+        ready.assert_not_called()
+
+    def test_ydotool_first_piece_timeout_triggers_no_game_mode_paste(self):
+        import wayfinder.core.injector as injector
+
+        def run(argv, **_k):
+            raise subprocess.TimeoutExpired(argv, 120)
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run):
+            with pytest.raises(injector.InjectionError) as caught:
+                injector.inject_text("hello", game_mode=True, paste_fallback=True)
+        assert caught.value.uncertain_delivery is True
+        pasted.assert_not_called()
+
+    def test_xdotool_first_piece_timeout_triggers_no_game_mode_paste(self):
+        import wayfinder.core.injector as injector
+
+        def run(argv, **_k):
+            raise subprocess.TimeoutExpired(argv, 120)
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run):
+            with pytest.raises(injector.InjectionError) as caught:
+                injector.inject_text("hello", game_mode=True, paste_fallback=True)
+        assert caught.value.uncertain_delivery is True
+        pasted.assert_not_called()
+
+    def test_game_chat_first_piece_timeout_is_uncertain(self, monkeypatch):
+        import wayfinder.core.injector as injector
+        from wayfinder.core import linux_game_chat as gc
+
+        def run(argv, **_k):
+            raise subprocess.TimeoutExpired(argv, 10)
+        monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
+        monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
+        monkeypatch.setattr(gc, "_portal", lambda: None)
+        monkeypatch.setattr(gc.subprocess, "run", run)
+        with pytest.raises(injector.InjectionError) as caught:
+            gc.type_text("gg " * 100)
+        assert caught.value.uncertain_delivery is True
+
+    # -- unrecognised non-zero exits: also always uncertain ----------------
+
+    def test_xdotool_first_piece_unknown_exit_triggers_no_game_mode_paste(self):
+        import wayfinder.core.injector as injector
+        failure = MagicMock(returncode=1, stdout="", stderr="BadWindow (invalid window parameter)")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher(type_result=failure)):
+            with pytest.raises(injector.InjectionError) as caught:
+                injector.inject_text("hello", game_mode=True, paste_fallback=True)
+        assert caught.value.uncertain_delivery is True
+        pasted.assert_not_called()
+
+    def test_wtype_first_piece_unknown_exit_triggers_no_ydotool_fallback(self):
+        import wayfinder.core.injector as injector
+        failure = MagicMock(returncode=1, stdout="", stderr="some other wtype problem")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector._note_wtype_failure") as noted, \
+             patch("wayfinder.core.injector.check_ydotool_ready") as ready, \
+             patch("wayfinder.core.injector.subprocess.run", return_value=failure) as runs:
+            with pytest.raises(injector.InjectionError) as caught:
+                injector._inject_text_type_linux("hello")
+        assert caught.value.uncertain_delivery is True
+        assert {c.args[0][0] for c in runs.call_args_list} == {"wtype"}
+        noted.assert_not_called()
+        ready.assert_not_called()
+
+    def test_ydotool_first_piece_unknown_exit_triggers_no_game_mode_paste(self):
+        import wayfinder.core.injector as injector
+        failed = MagicMock(returncode=1, stdout="", stderr="some other ydotool problem")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run", return_value=failed):
+            with pytest.raises(injector.InjectionError) as caught:
+                injector.inject_text("hello", game_mode=True, paste_fallback=True)
+        assert caught.value.uncertain_delivery is True
+        pasted.assert_not_called()
+
+    def test_game_chat_first_piece_unknown_exit_is_uncertain(self, monkeypatch):
+        import wayfinder.core.injector as injector
+        from wayfinder.core import linux_game_chat as gc
+        failed = MagicMock(returncode=1, stdout="", stderr="BadWindow")
+        monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
+        monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
+        monkeypatch.setattr(gc, "_portal", lambda: None)
+        monkeypatch.setattr(gc.subprocess, "run", lambda *a, **k: failed)
+        with pytest.raises(injector.InjectionError) as caught:
+            gc.type_text("gg " * 100)
+        assert caught.value.uncertain_delivery is True
+
+    # -- recognised pre-typing refusals: piece zero still falls back -------
+
+    def test_wtype_virtual_keyboard_refusal_falls_back_to_ydotool(self):
+        import wayfinder.core.injector as injector
+        refusal = MagicMock(
+            returncode=1, stdout="",
+            stderr="wtype: wl_keyboard: the compositor does not support the "
+                   "virtual keyboard protocol")
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def run(argv, **_k):
+            return refusal if argv[0] == "wtype" else ok
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._check_ydotool_result"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run) as runs:
+            injector._inject_text_type_linux("hello")   # must not raise
+        assert [c.args[0][0] for c in runs.call_args_list] == ["wtype", "ydotool"]
+
+    def test_wtype_display_connection_refusal_falls_back_to_ydotool(self):
+        import wayfinder.core.injector as injector
+        refusal = MagicMock(returncode=1, stdout="", stderr="failed to connect to display")
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def run(argv, **_k):
+            return refusal if argv[0] == "wtype" else ok
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._check_ydotool_result"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run) as runs:
+            injector._inject_text_type_linux("hello")   # must not raise
+        assert [c.args[0][0] for c in runs.call_args_list] == ["wtype", "ydotool"]
+
+    def test_wtype_missing_binary_still_falls_back_to_ydotool(self):
+        import wayfinder.core.injector as injector
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def run(argv, **_k):
+            if argv[0] == "wtype":
+                raise FileNotFoundError("wtype")
+            return ok
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector._check_ydotool_result"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run) as runs:
+            injector._inject_text_type_linux("hello")   # must not raise
+        assert [c.args[0][0] for c in runs.call_args_list] == ["wtype", "ydotool"]
+
+    def test_ydotool_socket_refusal_still_triggers_game_mode_paste(self):
+        import wayfinder.core.injector as injector
+        failed = MagicMock(returncode=1, stdout="",
+                           stderr="ydotool: failed to connect socket: Connection refused")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run", return_value=failed):
+            injector.inject_text("hello", game_mode=True, paste_fallback=True)   # must not raise
+        pasted.assert_called_once_with("hello")
+
+    def test_ydotool_missing_binary_still_triggers_game_mode_paste(self):
+        import wayfinder.core.injector as injector
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="ydotool"), \
+             patch("wayfinder.core.injector.check_ydotool_ready", return_value=(True, "")), \
+             patch("wayfinder.core.injector._get_ydotool_binary", return_value="ydotool"), \
+             patch("wayfinder.core.injector._get_ydotool_env", return_value={}), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=FileNotFoundError("ydotool")):
+            injector.inject_text("hello", game_mode=True, paste_fallback=True)   # must not raise
+        pasted.assert_called_once_with("hello")
+
+    def test_xdotool_display_refused_still_triggers_game_mode_paste(self):
+        import wayfinder.core.injector as injector
+        failure = MagicMock(returncode=1, stdout="", stderr="X connection refused")
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=_xdotool_dispatcher(type_result=failure)):
+            injector.inject_text("hello", game_mode=True, paste_fallback=True)   # must not raise
+        pasted.assert_called_once_with("hello")
+
+    def test_xdotool_missing_binary_still_triggers_game_mode_paste(self):
+        import wayfinder.core.injector as injector
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run",
+                   side_effect=FileNotFoundError("xdotool")):
+            injector.inject_text("hello", game_mode=True, paste_fallback=True)   # must not raise
+        pasted.assert_called_once_with("hello")
+
+    def test_game_chat_missing_binary_is_not_uncertain(self, monkeypatch):
+        import wayfinder.core.injector as injector
+        from wayfinder.core import linux_game_chat as gc
+
+        def run(*a, **k):
+            raise FileNotFoundError("xdotool")
+        monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
+        monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
+        monkeypatch.setattr(gc, "_portal", lambda: None)
+        monkeypatch.setattr(gc.subprocess, "run", run)
+        with pytest.raises(injector.InjectionError) as caught:
+            gc.type_text("hello")
+        assert getattr(caught.value, "uncertain_delivery", False) is False
+
+    def test_game_chat_display_refused_is_not_uncertain(self, monkeypatch):
+        import wayfinder.core.injector as injector
+        from wayfinder.core import linux_game_chat as gc
+        failed = MagicMock(returncode=1, stdout="", stderr="X connection refused")
+        monkeypatch.setattr(injector, "_require_modifier_release", lambda *_a: None)
+        monkeypatch.setattr(injector, "_running_under_xwayland", lambda: False)
+        monkeypatch.setattr(gc, "_portal", lambda: None)
+        monkeypatch.setattr(gc.subprocess, "run", lambda *a, **k: failed)
+        with pytest.raises(injector.InjectionError) as caught:
+            gc.type_text("hello")
+        assert getattr(caught.value, "uncertain_delivery", False) is False
+
+
+class TestLinuxClipboardWritersAsk:
+    """Sol mac r13: a clipboard writer failing or timing out while the
+    dictation was retired let the next writer write the retired text."""
+
+    @pytest.mark.parametrize("retire", [True, False])
+    def test_the_next_writer_asks_after_one_failed(self, retire):
+        import wayfinder.core.injector as injector
+        state, runs = {"retired": False}, []
+        failed = MagicMock(returncode=1, stdout=b"", stderr=b"no display")
+        ok = MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        def run(argv, **_k):
+            runs.append(argv[0])
+            if argv[0] == "wl-copy":
+                state["retired"] = retire
+                return failed
+            return ok
+
+        with patch("wayfinder.core.injector.shutil.which", return_value="/usr/bin/x"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run):
+            with injector.cancellable(lambda: state["retired"]):
+                if retire:
+                    with pytest.raises(injector.InjectionCancelled):
+                        injector._clipboard_write_linux("retired words")
+                else:
+                    injector._clipboard_write_linux("live words")
+                injector._clipboard_write_linux("theirs", restoring=True)   # never refused
+        assert runs == (["wl-copy", "wl-copy", "xclip"] if retire
+                        else ["wl-copy", "xclip", "wl-copy", "xclip"])
+
+    def test_a_retired_paste_puts_the_clipboard_back_through_the_writers(self):
+        import wayfinder.core.injector as injector
+        state = {"clipboard": "theirs", "retired": False}
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+
+        def run(argv, **kwargs):
+            if argv[0] == "wl-copy":
+                state["clipboard"] = kwargs["input"].decode()
+                state["retired"] = True              # Escape during the settle
+            return ok
+
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._clipboard_read_linux",
+                   side_effect=lambda: state["clipboard"]), \
+             patch("wayfinder.core.injector.shutil.which", return_value="/usr/bin/x"), \
+             patch("wayfinder.core.injector.time.sleep"), \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run) as runs:
+            with pytest.raises(injector.InjectionCancelled):
+                injector.inject_text_clipboard_paste("retired words",
+                                                     cancelled=lambda: state["retired"])
+        assert state["clipboard"] == "theirs"
+        assert not any("ctrl+v" in call.args[0] for call in runs.call_args_list)
+
+
+class TestLinuxFallbacksLetACancellationThrough:
+    """Sol mac r13: the fallback handlers took InjectionCancelled for an
+    ordinary failure: wtype's checked ydotool's readiness (and marked wtype
+    unsupported), game mode's pasted."""
+
+    def test_a_cancelled_wtype_typing_tries_no_ydotool(self):
+        import wayfinder.core.injector as injector
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="wtype"), \
+             patch("wayfinder.core.injector._WTYPE_UNSUPPORTED", False), \
+             patch("wayfinder.core.injector._wtype_first_injection", False), \
+             patch("wayfinder.core.injector._note_wtype_failure") as noted, \
+             patch("wayfinder.core.injector.check_ydotool_ready") as ready, \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run") as runs:
+            with pytest.raises(injector.InjectionCancelled):
+                injector.inject_text("retired words", game_mode=True, paste_fallback=True,
+                                     cancelled=lambda: True)
+        runs.assert_not_called()
+        ready.assert_not_called()
+        noted.assert_not_called()
+        pasted.assert_not_called()
+
+    def test_a_cancelled_xdotool_typing_pastes_nothing_in_game_mode(self):
+        import wayfinder.core.injector as injector
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector.sys.platform", "linux"), \
+             patch("wayfinder.utils.platform.get_text_injector", return_value="xdotool"), \
+             patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
+             patch("wayfinder.core.injector._clipboard_read_linux") as read, \
+             patch("wayfinder.core.injector.inject_text_clipboard_paste") as pasted, \
+             patch("wayfinder.core.injector.subprocess.run") as runs:
+            with pytest.raises(injector.InjectionCancelled):
+                injector.inject_text("retired words", game_mode=True, paste_fallback=True,
+                                     cancelled=lambda: True)
+        runs.assert_not_called()
+        pasted.assert_not_called()
+        read.assert_not_called()
+
+    def test_a_cancelled_windowactivate_types_nothing(self):
+        import wayfinder.core.injector as injector
+        state = {"retired": False}
+        calls = []
+        active = MagicMock(returncode=0, stdout="111\n", stderr="")
+
+        def run(argv, **_k):
+            calls.append(argv[1])
+            return active
+
+        def activate(argv, **_k):
+            state["retired"] = True
+            raise injector.InjectionCancelled("the dictation was retired: nothing injected")
+
+        with patch("wayfinder.core.injector._wait_for_modifier_release", return_value=True), \
+             patch("wayfinder.core.injector._running_under_xwayland", return_value=False), \
+             patch("wayfinder.core.injector._run_key_tool", side_effect=activate) as keys, \
+             patch("wayfinder.core.injector.subprocess.run", side_effect=run):
+            with pytest.raises(injector.InjectionCancelled):
+                injector._inject_text_xdotool("retired words", target_window="222")
+        assert keys.call_count == 1 and calls == ["getactivewindow"]

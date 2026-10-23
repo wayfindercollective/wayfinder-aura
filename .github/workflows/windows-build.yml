@@ -1,8 +1,21 @@
 name: Windows Candidate
 
 on:
+  # Pushes, PRs and release tags already run the Windows suite in ci.yml's
+  # "Windows tests" job for the same commit (release.yml's build-windows needs
+  # it), so this workflow runs it again only when asked: manual runs default to
+  # yes, release.yml passes false.
   workflow_call:
+    inputs:
+      run-tests:
+        type: boolean
+        default: true
   workflow_dispatch:
+    inputs:
+      run-tests:
+        description: "Run the Windows test suite before building"
+        type: boolean
+        default: true
   # Every change on main builds the installer (shared code can break the
   # bundle too); a newer push cancels an older build (job concurrency below).
   push:
@@ -81,6 +94,7 @@ jobs:
           "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
 
       - name: Run Windows tests
+        if: inputs.run-tests
         run: python -m pytest tests/ -q --tb=short -m "not ui and not slow and not network and not perf"
 
       - name: Run native Windows contract check

@@ -11,12 +11,14 @@ Platform dispatch:
 - macOS: native pasteboard snapshot + Cmd-V
 """
 
+import contextlib
 import ctypes
 import os
 import string
 import subprocess
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +29,205 @@ class InjectionError(Exception):
     """Raised when text injection fails."""
 
     pass
+
+
+class InjectionCancelled(InjectionError):
+    """The app retired the dictation while its injection waited (a held
+    modifier, the pasteboard): nothing is pasted, typed or sent (Sol mac r11)."""
+
+
+# The cancellation of the injection running on this thread (see cancellable):
+# every check below falls back to it, so the paths that pass none on (Linux's
+# tools, a game chat's pastes and keys) are covered too.
+_injection = threading.local()
+
+
+@contextlib.contextmanager
+def cancellable(cancelled):
+    """Run this thread's injections under *cancelled*, asked after each wait
+    right before anything is pasted, typed or sent (Sol mac r11). An
+    enclosing one stays when *cancelled* is None."""
+    previous = getattr(_injection, "cancelled", None)
+    _injection.cancelled = cancelled if cancelled is not None else previous
+    try:
+        yield
+    finally:
+        _injection.cancelled = previous
+
+
+def current_cancellation():
+    """This thread's injection cancellation, for work it hands to another
+    thread (the Tk clipboard write: Sol mac r13), or None."""
+    return getattr(_injection, "cancelled", None)
+
+
+def _never_cancelled() -> bool:
+    return False
+
+
+def _refuse_if_cancelled(cancelled=None) -> None:
+    if cancelled is None:
+        cancelled = getattr(_injection, "cancelled", None)
+    if cancelled is not None and cancelled():
+        raise InjectionCancelled("the dictation was retired: nothing injected")
+
+
+# The portal keyboard asks too, under its type lock: a typing (or a game chat's
+# keys) that waited there for another one sends nothing for a retired dictation.
+from . import portal_keyboard as _portal_keyboard  # noqa: E402  (stdlib only)
+_portal_keyboard.check_before_keys(_refuse_if_cancelled)
+# And the Mac's Quartz key posts, before each press (Sol mac r13).
+from . import macos_paste as _macos_paste  # noqa: E402  (Quartz only when posting)
+_macos_paste.check_before_keys(_refuse_if_cancelled)
+
+
+def _run_key_tool(argv, **kwargs):
+    """subprocess.run for a command that sends keys or moves the focus
+    (xdotool, wtype, ydotool): none for a retired dictation, whatever waited
+    before it, a fallback's own readiness checks included (Sol mac r12)."""
+    _refuse_if_cancelled()
+    return subprocess.run(argv, **kwargs)
+
+
+# A typing tool is one process that nothing can ask between its keys, so a
+# long transcript goes out in pieces each scheduled to take at most
+# TYPING_CHUNK_S, every one its own run of the tool, asked by _run_key_tool
+# first. A reset mid-typing then stops within one piece, and every key a
+# piece pressed it released (Sol mac r13). Most dictations fit in one piece.
+TYPING_CHUNK_S = 0.5
+
+
+def typing_chunks(text: str, seconds) -> list:
+    """*text* in pieces whose ``seconds(piece)``, the time the tool is
+    scheduled to take over it, sleeps included, stays within TYPING_CHUNK_S
+    (one character at least), cut after a space when there is one in the
+    second half of the piece (Sol mac r14)."""
+    chunks = []
+    while text:
+        low, high = 1, len(text)      # the longest prefix within the budget
+        while low < high:
+            mid = (low + high + 1) // 2
+            if seconds(text[:mid]) <= TYPING_CHUNK_S:
+                low = mid
+            else:
+                high = mid - 1
+        cut = low
+        if cut < len(text):
+            cut = text.rfind(" ", cut // 2, cut) + 1 or cut
+            if text[cut - 1] == "\r" and text[cut] == "\n":
+                cut += -1 if cut > 1 else 1   # one Enter, not two
+        chunks.append(text[:cut])
+        text = text[cut:]
+    return chunks
+
+
+# xdotool's own default when a key/keyup/keydown/type command gets no explicit
+# --delay (cmd_key.c / cmd_type.c): 12ms per key event. The estimator below
+# must charge this even for commands build_xdotool_type_command never passes
+# --delay to itself (the warm-up `key` tap, the Shift-release `keyup` sweeps):
+# those were previously free, undercounting the real xdotool run (Codex
+# review finding 4).
+_XDOTOOL_DEFAULT_DELAY_MS = 12
+_XDOTOOL_KEY_COMMANDS = ("key", "keyup", "keydown")
+_XDOTOOL_COMMAND_WORDS = frozenset(("sleep", "type") + _XDOTOOL_KEY_COMMANDS)
+
+
+def xdotool_scheduled_seconds(argv) -> float:
+    """What an xdotool command from build_xdotool_type_command is scheduled to
+    take: every ``sleep``; every ``type`` character at THAT command's own
+    ``--delay`` (xdotool's 12ms default when none is given) plus a
+    millisecond for the key itself; and every key pressed by a
+    ``key``/``keyup``/``keydown`` command at THAT command's own ``--delay``
+    (again 12ms by default) plus a millisecond each — a chorded key-sequence
+    argument such as ``"shift+a"`` counts every key in it. Each command's
+    ``--delay`` applies only to that one command; nothing carries across
+    commands (Codex review finding 4: key/keyup/keydown were not counted at
+    all, so the warm-up tap and the Shift-release sweeps were free)."""
+    total = 0.0
+    i, n = 1, len(argv)   # argv[0] is "xdotool"
+    while i < n:
+        word = argv[i]
+        if word == "sleep":
+            total += float(argv[i + 1])
+            i += 2
+        elif word in _XDOTOOL_KEY_COMMANDS:
+            i += 1
+            delay = _XDOTOOL_DEFAULT_DELAY_MS
+            keys = []
+            while i < n and argv[i] not in _XDOTOOL_COMMAND_WORDS:
+                if argv[i] == "--delay":
+                    delay = int(argv[i + 1])
+                    i += 2
+                elif argv[i].startswith("--"):
+                    i += 1
+                else:
+                    keys.append(argv[i])
+                    i += 1
+            total += sum(len(k.split("+")) for k in keys) * (delay + 1) / 1000
+        elif word == "type":
+            i += 1
+            delay = _XDOTOOL_DEFAULT_DELAY_MS
+            text = None
+            while i < n and text is None:
+                tok = argv[i]
+                if tok == "--delay":
+                    delay = int(argv[i + 1])
+                    i += 2
+                elif tok == "--args":
+                    i += 2   # its value (e.g. "1"), never the typed text
+                elif tok == "--":
+                    text = argv[i + 1]
+                    i += 2
+                elif tok.startswith("--"):
+                    i += 1
+                elif tok in _XDOTOOL_COMMAND_WORDS:
+                    break
+                else:
+                    text = tok
+                    i += 1
+            if text is not None:
+                total += len(text) * (delay + 1) / 1000
+        else:
+            i += 1
+    return total
+
+
+@contextlib.contextmanager
+def _piece_of_a_typing(index: int):
+    """Every piece is uncertain once its tool run may already have typed
+    something — piece zero included: no fallback may then type or paste the
+    whole transcript again, since that would double whatever landed (Codex
+    review finding 3; before this fix piece zero was always treated as safe,
+    however it failed, which let a timeout or an unknown error after a
+    partial type double the text).
+
+    The only failures left certain (no ``uncertain_delivery``, so a caller's
+    fallback chain may still run) are piece zero's, and then only when the
+    failure is proven to have happened BEFORE any key could have reached the
+    target. A call site proves that itself by setting
+    ``err.proven_pre_delivery = True`` before raising — the tool could not
+    be started (FileNotFoundError / other OSError from the spawn), or a
+    non-zero exit whose message is a recognised pre-typing refusal (no
+    virtual-keyboard protocol, no display/compositor connection, no
+    ydotoold socket; see ``_is_pre_typing_refusal``). A timeout and an
+    unrecognised non-zero exit are always uncertain, piece zero included,
+    and any piece after the first is unconditionally uncertain regardless
+    of how it failed (something already landed)."""
+    try:
+        yield
+    except InjectionError as err:
+        if index or not getattr(err, "proven_pre_delivery", False):
+            err.uncertain_delivery = True
+        raise
+    except Exception as exc:
+        # The type only: a command's own message carries the dictated text
+        # (a TimeoutExpired's str embeds the argv, which holds the piece).
+        err = InjectionError(f"typing stopped part way: {type(exc).__name__}")
+        if index or not isinstance(exc, OSError):
+            err.uncertain_delivery = True
+        else:
+            err.proven_pre_delivery = True
+        raise err from exc
 
 
 # Set once a wtype attempt reveals the compositor refuses the virtual-keyboard
@@ -46,6 +247,30 @@ def _note_wtype_failure(detail: str) -> None:
     global _WTYPE_UNSUPPORTED
     if "virtual keyboard protocol" in detail.lower():
         _WTYPE_UNSUPPORTED = True
+
+
+def _is_pre_typing_refusal(detail: str) -> bool:
+    """True when a non-zero exit's own message is a refusal already known to
+    happen before any key could reach the target: wtype's missing
+    virtual-keyboard protocol (GNOME/Mutter always refuses it; some KWin
+    setups deny it), no display/compositor connection at all (xdotool or
+    wtype with no live session), or ydotool's socket connection to a dead
+    ydotoold. Piece zero of a typing run may still fall back to another tool
+    for these (Codex review finding 3); anything else — a timeout, or an
+    unrecognised non-zero exit — might mean the tool already started typing,
+    so it stays uncertain instead."""
+    low = (detail or "").lower()
+    return (
+        "virtual keyboard protocol" in low
+        or "wayland connection failed" in low
+        or "failed to connect socket" in low
+        or "failed to connect to display" in low
+        or "failed to connect to compositor" in low
+        or "can't open display" in low
+        or "cannot open display" in low
+        or "no protocol specified" in low
+        or "connection refused" in low
+    )
 
 
 def _path_is_under(path: str, root: str) -> bool:
@@ -287,7 +512,10 @@ def _check_ydotool_result(result, action: str) -> None:
     stdout = _to_text(result.stdout).strip()
     if result.returncode != 0:
         detail = stderr or stdout or "(no output)"
-        raise InjectionError(f"ydotool {action} failed (exit {result.returncode}): {detail}")
+        err = InjectionError(f"ydotool {action} failed (exit {result.returncode}): {detail}")
+        if _is_pre_typing_refusal(detail):
+            err.proven_pre_delivery = True
+        raise err
     if "backend unavailable" in stderr.lower():
         err = InjectionError(
             f"ydotool {action}: ydotoold unreachable (client/daemon mismatch or dead "
@@ -601,7 +829,23 @@ def _wait_for_macos_modifier_release(timeout: float = 2.0) -> bool:
         time.sleep(0.1)
 
 
-def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
+def _leave_on_macos_clipboard(text: str, cancelled=None) -> bool:
+    """A refused paste leaves the transcript on the clipboard for a manual
+    one; returns whether it did. Not a retired dictation's: that raises
+    InjectionCancelled instead (Sol mac r12)."""
+    try:
+        pasteboard, _snapshot = _snapshot_macos_pasteboard()
+    except Exception:
+        return False
+    _refuse_if_cancelled(cancelled)
+    try:
+        _write_macos_pasteboard_text(pasteboard, text)
+        return True
+    except Exception:
+        return False
+
+
+def _inject_text_pyautogui(text: str, typing_speed: str = "instant", cancelled=None) -> None:
     """Inject text on macOS using clipboard paste (Cmd+V).
 
     pyautogui.typewrite() only handles ASCII and is slow. Instead, we copy
@@ -620,11 +864,7 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
         # macOS silently drops synthetic keys without Accessibility. Leave the
         # dictation on the clipboard for a manual paste instead of "typing"
         # nothing and then restoring the old clipboard over it.
-        try:
-            pasteboard, _snapshot = _snapshot_macos_pasteboard()
-            _write_macos_pasteboard_text(pasteboard, text)
-        except Exception:
-            pass
+        _leave_on_macos_clipboard(text, cancelled)
         raise InjectionError(
             "macOS blocked the paste: Accessibility is off for Wayfinder Aura. "
             "Your text is on the clipboard — press ⌘V. To paste automatically, "
@@ -640,13 +880,7 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
     except Exception:
         focused = None
     if focused and focused.partition(":")[0] == str(os.getpid()):
-        copied = False
-        try:
-            pasteboard, _snapshot = _snapshot_macos_pasteboard()
-            _write_macos_pasteboard_text(pasteboard, text)
-            copied = True
-        except Exception:
-            pass
+        copied = _leave_on_macos_clipboard(text, cancelled)
         where = ("on the clipboard — click a text field in another app and press ⌘V"
                  if copied else "in Aura History")
         raise InjectionError(
@@ -663,15 +897,29 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
             raise InjectionError(
                 "Command, Option, Control, or Shift is still held; release it and try again."
             )
+        # Retired while a modifier was held: the pasteboard stays untouched.
+        _refuse_if_cancelled(cancelled)
         pasteboard, snapshot = _snapshot_macos_pasteboard()
+        # ... or while the snapshot read the pasteboard: it is not written
+        # (Sol mac r13).
+        _refuse_if_cancelled(cancelled)
         injected_change = _write_macos_pasteboard_text(pasteboard, text)
+        # ... or during the pasteboard writes: no Cmd+V, and the finally puts
+        # the user's clipboard back now.
+        _refuse_if_cancelled(cancelled)
         try:
             macos_paste.post_command_v()
+        except InjectionCancelled:
+            raise   # refused at a press: no other route sends it
         except Exception:
             import pyautogui
 
-            pyautogui.hotkey("command", "v")
+            # Retired while Quartz failed or PyAutoGUI loaded (Sol mac r12).
+            _refuse_if_cancelled(cancelled)
+            _pyautogui_command_v(pyautogui, cancelled)
         paste_succeeded = True
+    except InjectionCancelled:
+        raise
     except Exception as exc:
         raise InjectionError(f"macOS text injection failed: {exc}") from exc
     finally:
@@ -693,6 +941,37 @@ def _inject_text_pyautogui(text: str, typing_speed: str = "instant") -> None:
                     # The injection error remains authoritative; restoration is
                     # best-effort and must not mask its actionable message.
                     pass
+
+
+def _pyautogui_command_v(pyautogui, cancelled=None) -> None:
+    """Cmd+V through PyAutoGUI, asking before each press: its Mac sender
+    sleeps after every key it posts, and hotkey() would press V after a
+    retirement during Command's (Sol mac r13). Releases always go out."""
+    try:
+        pyautogui.keyDown("command")
+        _refuse_if_cancelled(cancelled)
+        try:
+            pyautogui.keyDown("v")
+        finally:
+            _release_quietly(pyautogui, "v")
+    finally:
+        _release_quietly(pyautogui, "command")
+
+
+def _release_quietly(pyautogui, key) -> None:
+    """Key up through PyAutoGUI's own sender first: its public keyUp raises
+    the fail-safe with the pointer in a screen corner, which left Command
+    down (Sol mac r14). A failed release must not replace why the paste
+    stopped."""
+    native = getattr(getattr(pyautogui, "platformModule", None), "_keyUp", None)
+    for key_up in (native, pyautogui.keyUp):
+        if key_up is None:
+            continue
+        try:
+            key_up(key)
+            return
+        except Exception:
+            pass
 
 
 def warmup_clipboard() -> None:
@@ -1116,6 +1395,9 @@ def _require_modifier_release() -> None:
     Under XWayland the compositor immediately reasserts a physically-held key,
     so continuing after the bounded wait corrupts the transcript. The complete
     transcript remains available in Aura's Last Transcription UI on this error.
+
+    A dictation retired during the wait (*cancelled*, else this thread's
+    cancellable) types nothing (Sol mac r11).
     """
     if not _wait_for_modifier_release():
         raise InjectionError(
@@ -1162,7 +1444,7 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
             already_focused = False
         if not already_focused:
             try:
-                subprocess.run(
+                _run_key_tool(
                     ["xdotool", "windowactivate", "--sync", str(target_window)],
                     capture_output=True, text=True, timeout=5, env=_env,
                 )
@@ -1173,6 +1455,8 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
                 # every key except the first one.  Give that rare fallback a
                 # full event-loop turn before the transcript begins.
                 _t.sleep(0.10)
+            except InjectionCancelled:
+                raise
             except Exception:
                 pass
 
@@ -1183,22 +1467,40 @@ def _inject_text_xdotool(text: str, typing_speed: str = "instant", target_window
     _require_modifier_release()
 
     text = fold_typography_for_typing(text)
-    cmd = build_xdotool_type_command(text, key_delay, warmup=xwayland)
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=_env,
-        )
-        if result.returncode != 0:
-            error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-            raise InjectionError(f"xdotool failed (exit {result.returncode}): {error_detail}")
-    except subprocess.TimeoutExpired:
-        raise InjectionError("xdotool timed out after 120s")
-    except FileNotFoundError:
-        raise InjectionError("xdotool not found in PATH")
+    def scheduled(piece):
+        # Each run is a new XTEST client: each one gets the warm-up.
+        return build_xdotool_type_command(piece, key_delay, warmup=xwayland)
+
+    def seconds(piece):
+        return xdotool_scheduled_seconds(scheduled(piece))
+
+    for index, piece in enumerate(typing_chunks(text, seconds)):
+        cmd = scheduled(piece)
+        with _piece_of_a_typing(index):
+            try:
+                result = _run_key_tool(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=_env,
+                )
+                if result.returncode != 0:
+                    error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+                    err = InjectionError(f"xdotool failed (exit {result.returncode}): {error_detail}")
+                    if _is_pre_typing_refusal(error_detail):
+                        err.proven_pre_delivery = True
+                    raise err
+            except subprocess.TimeoutExpired:
+                raise InjectionError("xdotool timed out after 120s")
+            except FileNotFoundError:
+                err = InjectionError("xdotool not found in PATH")
+                err.proven_pre_delivery = True
+                raise err
+            except OSError as exc:
+                err = InjectionError(f"xdotool could not be started: {type(exc).__name__}")
+                err.proven_pre_delivery = True
+                raise err from exc
 
 
 # Belt-and-suspenders for the very first wtype injection after launch: even with the
@@ -1223,18 +1525,30 @@ def _inject_text_wtype(text: str) -> None:
     # settle): a physically-held modifier corrupts virtual-keyboard typing the
     # same way it corrupts XTEST typing.
     _require_modifier_release()
-    try:
-        result = subprocess.run(
-            ["wtype", text],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-            raise InjectionError(f"wtype failed (exit {result.returncode}): {error_detail}")
-    except subprocess.TimeoutExpired:
-        raise InjectionError("wtype timed out after 120s")
-    except FileNotFoundError:
-        raise InjectionError("wtype not found in PATH")
+    # wtype has no delay: about a millisecond a character.
+    for index, piece in enumerate(typing_chunks(text, lambda p: len(p) / 1000)):
+        with _piece_of_a_typing(index):
+            try:
+                result = _run_key_tool(
+                    ["wtype", "--", piece],   # a piece may start with "-"
+                    capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode != 0:
+                    error_detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
+                    err = InjectionError(f"wtype failed (exit {result.returncode}): {error_detail}")
+                    if _is_pre_typing_refusal(error_detail):
+                        err.proven_pre_delivery = True
+                    raise err
+            except subprocess.TimeoutExpired:
+                raise InjectionError("wtype timed out after 120s")
+            except FileNotFoundError:
+                err = InjectionError("wtype not found in PATH")
+                err.proven_pre_delivery = True
+                raise err
+            except OSError as exc:
+                err = InjectionError(f"wtype could not be started: {type(exc).__name__}")
+                err.proven_pre_delivery = True
+                raise err from exc
 
 
 def prime_wayland_injection() -> "tuple[bool, str]":
@@ -1323,6 +1637,8 @@ def _fallback_after_portal_error(err: InjectionError) -> str:
     wtype or xdotool) instead of silently retrying a dead session. Other
     errors (clipboard) keep the xdotool fallback.
     """
+    if isinstance(err, InjectionCancelled):
+        raise err   # refused for a retired dictation: no other tool sends it
     if not getattr(err, "portal_failure", False):
         return _portal_fallback_tool()
     from . import portal_keyboard
@@ -1354,22 +1670,34 @@ def _portal_paste(text: str) -> None:
             previous = _PORTAL_CLIPBOARD_READ()
         except Exception:
             previous = None
+    _refuse_if_cancelled()   # retired during the read: the clipboard untouched
     if _PORTAL_CLIPBOARD_WRITE is None or not _PORTAL_CLIPBOARD_WRITE(text):
         raise InjectionError("Could not set the clipboard for the paste")
     time.sleep(_PORTAL_PASTE_SETTLE_S)
-    _portal_press("ctrl+v", 0.02)
+    try:
+        _portal_press("ctrl+v", 0.02)
+    except InjectionCancelled:
+        _restore_portal_clipboard(text, previous)   # nothing pasted: now
+        raise
     if previous is not None and previous != text:
         time.sleep(_PORTAL_RESTORE_AFTER_S)
-        try:
-            # Only if the clipboard still holds the dictation: the user may
-            # have copied something new meanwhile. The app's restorer compares
-            # and writes in one Tk step, so no copy can slip in between.
-            if _PORTAL_CLIPBOARD_RESTORE is not None:
-                _PORTAL_CLIPBOARD_RESTORE(text, previous)
-            elif _PORTAL_CLIPBOARD_READ() == text:
+        _restore_portal_clipboard(text, previous)
+
+
+def _restore_portal_clipboard(text: str, previous) -> None:
+    if previous is None or previous == text:
+        return
+    try:
+        # Only if the clipboard still holds the dictation: the user may
+        # have copied something new meanwhile. The app's restorer compares
+        # and writes in one Tk step, so no copy can slip in between.
+        if _PORTAL_CLIPBOARD_RESTORE is not None:
+            _PORTAL_CLIPBOARD_RESTORE(text, previous)
+        elif _PORTAL_CLIPBOARD_READ() == text:
+            with cancellable(_never_cancelled):   # a restore always goes out
                 _PORTAL_CLIPBOARD_WRITE(previous)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 def _inject_text_portal(text: str, typing_speed: str = "instant") -> None:
@@ -1403,7 +1731,7 @@ def _inject_text_portal(text: str, typing_speed: str = "instant") -> None:
         layout.close()
 
 
-def _clipboard_write_linux(text: str) -> None:
+def _clipboard_write_linux(text: str, *, restoring: bool = False) -> None:
     """Write *text* to the session clipboard. Raises InjectionError on failure."""
     # Prefer Wayland tools when available; fall back to X11 clipboard utilities.
     for cmd in (
@@ -1413,6 +1741,10 @@ def _clipboard_write_linux(text: str) -> None:
     ):
         if not shutil.which(cmd[0]):
             continue
+        # A dictation's write asks before each writer, after the one before
+        # it failed or timed out; a restore always goes out (Sol mac r13).
+        if not restoring:
+            _refuse_if_cancelled()
         try:
             result = subprocess.run(
                 cmd,
@@ -1456,7 +1788,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
         _portal_press("ctrl+v")
         return
     if tool == "xdotool":
-        result = subprocess.run(
+        result = _run_key_tool(
             ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
             capture_output=True,
             text=True,
@@ -1467,7 +1799,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
             raise InjectionError(f"xdotool ctrl+v failed: {detail}")
         return
     if tool == "wtype":
-        result = subprocess.run(
+        result = _run_key_tool(
             ["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
             capture_output=True,
             text=True,
@@ -1485,7 +1817,7 @@ def _send_ctrl_v_linux(tool: str) -> None:
         )
     env = _get_ydotool_env()
     # KEY_LEFTCTRL = 29, KEY_V = 47; 1=press, 0=release
-    result = subprocess.run(
+    result = _run_key_tool(
         [ydotool_bin, "key", "29:1", "47:1", "47:0", "29:0"],
         capture_output=True,
         text=True,
@@ -1495,13 +1827,20 @@ def _send_ctrl_v_linux(tool: str) -> None:
     _check_ydotool_result(result, "ctrl+v")
 
 
-def press_enter() -> None:
+def press_enter(cancelled=None) -> None:
     """Synthesize a single Enter keypress with the active injection backend.
 
     Backs the opt-in "Auto press Enter after dictation" setting: dictate →
     text lands → Enter fires, so chat-style inputs submit hands-free. Uses the
     same tool dispatch as text injection so it works wherever typing works.
+
+    *cancelled*, as for inject_text: asked after every wait, on every platform.
     """
+    with cancellable(cancelled):
+        _press_enter(cancelled)
+
+
+def _press_enter(cancelled=None) -> None:
     if sys.platform == "darwin":
         if not _wait_for_macos_modifier_release():
             raise InjectionError(
@@ -1510,13 +1849,15 @@ def press_enter() -> None:
         from .macos_paste import accessibility_trusted, post_return
         if accessibility_trusted() is False:
             raise InjectionError("macOS blocked the key press: Accessibility is off.")
+        # Retired while a modifier was held or the permission was asked.
+        _refuse_if_cancelled(cancelled)
         # Quartz, not PyAutoGUI: no ~0.2s import, no 0.1s built-in pause, and
         # no corner fail-safe that aborts when the pointer rests in a corner.
         post_return()
         return
     if sys.platform == "win32":
         from .injector_windows import press_enter_windows
-        press_enter_windows()
+        press_enter_windows(cancelled)
         return
     if not sys.platform.startswith("linux"):
         raise InjectionError(
@@ -1535,7 +1876,7 @@ def press_enter() -> None:
         except InjectionError as e:
             tool = _fallback_after_portal_error(e)
     if tool == "xdotool":
-        result = subprocess.run(
+        result = _run_key_tool(
             ["xdotool", "key", "--clearmodifiers", "Return"],
             capture_output=True, text=True, timeout=10,
         )
@@ -1544,7 +1885,7 @@ def press_enter() -> None:
             raise InjectionError(f"xdotool Return failed: {detail}")
         return
     if tool == "wtype" and not _WTYPE_UNSUPPORTED:
-        result = subprocess.run(
+        result = _run_key_tool(
             ["wtype", "-k", "Return"],
             capture_output=True, text=True, timeout=10,
         )
@@ -1563,19 +1904,26 @@ def press_enter() -> None:
             "No host ydotool client found — install ydotool, or rely on wtype/xdotool"
         )
     env = _get_ydotool_env()
-    result = subprocess.run(
+    result = _run_key_tool(
         [ydotool_bin, "key", "28:1", "28:0"],
         capture_output=True, text=True, timeout=10, env=env,
     )
     _check_ydotool_result(result, "Return")
 
 
-def inject_text_clipboard_paste(text: str) -> None:
+def inject_text_clipboard_paste(text: str, cancelled=None) -> None:
     """Inject *text* via clipboard write + Ctrl+V (Linux) or Cmd+V (macOS).
 
     Used as the Game Mode fallback when synthetic typing fails, and as the
     native macOS path. Best-effort clipboard restore after paste.
+
+    *cancelled*, as for inject_text: asked after every wait, on every platform.
     """
+    with cancellable(cancelled):
+        _inject_text_clipboard_paste(text, cancelled)
+
+
+def _inject_text_clipboard_paste(text: str, cancelled=None) -> None:
     if not text:
         return
     text = text.strip()
@@ -1583,11 +1931,11 @@ def inject_text_clipboard_paste(text: str) -> None:
         return
 
     if sys.platform == "darwin":
-        _inject_text_pyautogui(text, "instant")
+        _inject_text_pyautogui(text, "instant", cancelled)
         return
     if sys.platform == "win32":
         from .injector_windows import inject_text_paste_windows
-        inject_text_paste_windows(text)
+        inject_text_paste_windows(text, cancelled)
         return
     if not sys.platform.startswith("linux"):
         raise InjectionError(
@@ -1603,6 +1951,7 @@ def inject_text_clipboard_paste(text: str) -> None:
         )
 
     old_clipboard = _clipboard_read_linux()
+    _refuse_if_cancelled(cancelled)   # the clipboard is not touched for it
     _clipboard_write_linux(text)
     time.sleep(0.05)
     try:
@@ -1614,7 +1963,7 @@ def inject_text_clipboard_paste(text: str) -> None:
                 time.sleep(0.08)
                 current = _clipboard_read_linux()
                 if current == text:
-                    _clipboard_write_linux(old_clipboard)
+                    _clipboard_write_linux(old_clipboard, restoring=True)
             except Exception:
                 pass
 
@@ -1649,7 +1998,11 @@ def _inject_text_type_linux(
         try:
             _inject_text_wtype(text)
             return
+        except InjectionCancelled:
+            raise   # retired: no other tool types it (Sol mac r13)
         except InjectionError as wtype_err:
+            if getattr(wtype_err, "uncertain_delivery", False):
+                raise   # part of it landed: ydotool would type it twice
             # Tool selection can't know the compositor refuses the
             # virtual-keyboard protocol until the first real attempt
             # (GNOME/Mutter never supports it; some KWin setups deny it).
@@ -1685,25 +2038,41 @@ def _inject_text_type_linux(
             raise InjectionError(
                 "No host ydotool client found — install ydotool, or rely on wtype/xdotool"
             )
-        cmd = [
-            ydotool_bin, "type",
-            "--key-delay", str(key_delay),
-            "--key-hold", str(key_hold),
-            "--", text,
-        ]
         env = _get_ydotool_env()
         # Gate immediately before the synthetic keys (after readiness checks):
         # uinput-level typing merges with physically-held modifiers in the
         # compositor exactly like the other backends.
         _require_modifier_release()
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-        )
-        _check_ydotool_result(result, "type")
+        per_char_s = (key_delay + key_hold) / 1000
+        for index, piece in enumerate(typing_chunks(text, lambda p: len(p) * per_char_s)):
+            cmd = [
+                ydotool_bin, "type",
+                "--key-delay", str(key_delay),
+                "--key-hold", str(key_hold),
+                "--", piece,
+            ]
+            with _piece_of_a_typing(index):
+                try:
+                    result = _run_key_tool(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        env=env,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise InjectionError("ydotool timed out after 120s")
+                except FileNotFoundError:
+                    from wayfinder.core.setup import _get_install_hint
+                    err = InjectionError(
+                        f"ydotool not found. Install with: {_get_install_hint('ydotool')}")
+                    err.proven_pre_delivery = True
+                    raise err
+                except OSError as exc:
+                    err = InjectionError(f"ydotool could not be started: {type(exc).__name__}")
+                    err.proven_pre_delivery = True
+                    raise err from exc
+                _check_ydotool_result(result, "type")
     except subprocess.TimeoutExpired:
         raise InjectionError("ydotool timed out after 120s")
     except FileNotFoundError:
@@ -1720,6 +2089,7 @@ def inject_text(
     *,
     game_mode: bool = False,
     paste_fallback: bool = True,
+    cancelled=None,
 ) -> None:
     """
     Inject text into the active window.
@@ -1742,7 +2112,15 @@ def inject_text(
             transcription. xdotool backend only; ignored elsewhere.
         game_mode: Enable Game Mode type→paste fallback when the type path fails.
         paste_fallback: When game_mode is True, attempt clipboard paste after type failure.
+        cancelled: asked after each wait (a held modifier, the clipboard), right
+            before anything is pasted or typed: true for a dictation the app
+            retired meanwhile, which then gets InjectionCancelled.
     """
+    with cancellable(cancelled):
+        _inject_text(text, typing_speed, target_window, game_mode, paste_fallback, cancelled)
+
+
+def _inject_text(text, typing_speed, target_window, game_mode, paste_fallback, cancelled) -> None:
     if not text:
         return
 
@@ -1753,7 +2131,7 @@ def inject_text(
         return
 
     if sys.platform == "darwin":
-        _inject_text_pyautogui(text, typing_speed)
+        _inject_text_pyautogui(text, typing_speed, cancelled)
         return
     if sys.platform == "win32":
         # Clipboard paste (Ctrl+V) is the reliable cross-app primary on Windows:
@@ -1764,9 +2142,17 @@ def inject_text(
         # stays as the fallback for the rare control that ignores synthetic paste.
         from .injector_windows import inject_text_paste_windows, inject_text_windows
         try:
-            inject_text_paste_windows(text)
+            inject_text_paste_windows(text, cancelled)
             return
-        except InjectionError:
+        except InjectionError as e:
+            # Not for a retired dictation, whether the paste refused it or
+            # failed meanwhile (Sol mac r11).
+            _refuse_if_cancelled(cancelled)
+            if getattr(e, "uncertain_delivery", False):
+                # A partial Ctrl+V SendInput may have already landed (Finding
+                # 3 / Sol mac r16): typing now could duplicate it, so surface
+                # the error instead of falling back.
+                raise
             inject_text_windows(text, typing_speed)
             return
     if not sys.platform.startswith("linux"):
@@ -1778,6 +2164,8 @@ def inject_text(
     try:
         _inject_text_type_linux(text, typing_speed, target_window)
         return
+    except InjectionCancelled:
+        raise   # retired: no clipboard paste either (Sol mac r13)
     except InjectionError as e:
         # Uncertain delivery (ydotool direct-uinput fallback engaged): the text
         # MAY have partially landed — a paste retry could duplicate it. Surface

@@ -191,7 +191,9 @@ from wayfinder.utils.platform import (
 )
 from wayfinder.core.injector import inject_text, InjectionError
 from wayfinder.core.recorder import AudioRecorder, ChunkedRecorder, WarmMic, find_best_input_device, list_input_devices, get_input_device_by_name, AudioCalibrator, is_output_device, preload_audio_processing, SILENCE_PEAK_THRESHOLD, get_wav_peak_amplitude, get_wav_duration_seconds, wav_has_speech_activity
-from wayfinder.core.transcriber import transcribe_with_config, TranscriptionError
+from wayfinder.core.transcriber import (
+    RequestAbandoned, TranscriptionError, dictation_requests, transcribe_with_config,
+)
 from wayfinder.core.postprocessor import process_with_config, get_available_backends, get_tone_options as get_template_names, check_settings_compatibility
 from wayfinder.license import get_feature_gate, FeatureGate, PREMIUM_FEATURES, store_license, load_stored_license
 from wayfinder.utils.audio_ducker import AudioDucker
@@ -307,6 +309,26 @@ def _resolve_whisper_model(filename: str) -> Path | None:
         if p.exists():
             return p
     return None
+
+
+def _abandon_transcription_requests() -> None:
+    """The dictation was retired: its requests still in flight restart no
+    whisper-server and count no Core ML failure (Sol mac r4)."""
+    try:
+        from wayfinder.core.transcriber import WhisperServerBackend
+        WhisperServerBackend.abandon_requests()
+    except Exception:
+        pass
+
+
+def _transcription_request_token():
+    """The token a dictation's requests run under, taken when it begins: a
+    retirement after that stops every one of them (Sol mac r6)."""
+    try:
+        from wayfinder.core.transcriber import WhisperServerBackend
+        return WhisperServerBackend.request_token()
+    except Exception:
+        return None
 
 
 def _model_display_name(path: str) -> str:
@@ -525,10 +547,58 @@ STYLE_LABELS = {
 # cache (source installs only). Every caller that means "stop holding the
 # cleanup model" has to release both, so there is one function that does it and
 # no call site that does half the job.
-def _release_cleanup_residency() -> None:
+def _server_load_epochs() -> dict:
+    """The server epochs to stamp on a config snapshot: read them BEFORE the
+    snapshot. A CPU/GPU or model switch writes the config and then supersedes,
+    so a snapshot can carry an older epoch than its settings (its load is then
+    cancelled) but never a newer one (a load the old mode's teardown keeps)."""
+    epochs = {}
+    try:
+        from wayfinder.core.transcriber import LOAD_EPOCH_KEY, WhisperServerBackend
+        epochs[LOAD_EPOCH_KEY] = WhisperServerBackend.load_epoch()
+    except Exception:
+        pass
+    try:
+        from wayfinder.core.llama_server import LOAD_EPOCH_KEY, LlamaServerManager
+        epochs[LOAD_EPOCH_KEY] = LlamaServerManager.load_epoch()
+    except Exception:
+        pass
+    return epochs
+
+
+def _supersede_cleanup_loads() -> "int | None":
+    """Make every cleanup snapshot read so far stale; returns the new epoch.
+
+    For a change of intent (Save memory, cleanup off, another model or
+    backend, Quit): a dictation that read its settings before it must not
+    start the server again once the release has stopped it.
+    """
     try:
         from wayfinder.core.llama_server import LlamaServerManager
-        LlamaServerManager.shutdown()
+        return LlamaServerManager.supersede()
+    except Exception:
+        return None
+
+
+def _release_cleanup_residency(llama_before_epoch: "int | None" = None, *,
+                               terminal: bool = False) -> None:
+    """Stop the cleanup server and drop both backends' cached weights.
+
+    llama_before_epoch: stop only a server started before that supersede()
+    epoch (the CPU/GPU switch's old-mode teardown, which superseded already).
+    Without it this is a change of intent: pending snapshots are superseded
+    here, and again only what predates that is stopped, so a request that
+    read the new settings keeps the server it starts while this waits.
+    terminal: Quit and final cleanup stop everything, a racing start too.
+    """
+    try:
+        from wayfinder.core.llama_server import LlamaServerManager
+        if terminal:
+            LlamaServerManager.close()
+        else:
+            if llama_before_epoch is None:
+                llama_before_epoch = LlamaServerManager.supersede()
+            LlamaServerManager.shutdown(before_epoch=llama_before_epoch)
     except Exception:
         pass
     # BOTH backends cache models, and which one is live depends on whether the
@@ -1039,12 +1109,9 @@ ctk.CTkScrollableFrame._mouse_wheel_all = lambda _self, _event: None
 # the "reload". The other three sliders (overlay scale, overlay position,
 # ducking percent) were changing SILENTLY whenever the pointer crossed them.
 #
-# VERSION-DEPENDENT, verified both ways: CustomTkinter 6.0 (what the AppImage
-# ships, and where this bug was reported) binds the wheel on sliders; 5.2.2
-# (what the Flatpak pins and vendors) has no slider wheel handling at all, so
-# there the assignment is an inert no-op. requirements.txt allows >=5.2.0 and
-# therefore 6.x, while flatpak/python-deps.json pins <6 — the two packages run
-# different CustomTkinter majors, which is worth resolving separately.
+# VERSION-DEPENDENT, verified both ways: CustomTkinter 6.0 (what every package
+# now ships) binds the wheel on sliders; 5.2.2 had no slider wheel handling at
+# all, so there the assignment was an inert no-op.
 #
 # Sliders stay usable by drag; only the wheel is dropped, which is the
 # conventional behaviour for a slider inside a scrolling page. (An earlier
@@ -1058,6 +1125,18 @@ from wayfinder.core.whisper_timings import format_bench_seconds, warm_benchmark_
 # The Linux probe runs whisper-cli with a 30 s timeout; past this the warm-up
 # gives up and the first dictation starts the server instead.
 _GPU_SETUP_WARM_UP_WAIT_S = 45.0
+# A CPU/GPU switch stops the old mode's servers in the background; the new
+# mode's warm-up waits this long for that, then leaves loading to the first
+# dictation.
+_MODEL_TEARDOWN_WAIT_S = 60.0
+
+
+def _model_load_lock(app) -> threading.Lock:
+    """The lock warm-ups load under and switch teardowns stop under (Tk thread)."""
+    lock = getattr(app, "_model_load_lock", None)
+    if lock is None:
+        lock = app._model_load_lock = threading.Lock()
+    return lock
 
 
 class BenchmarkRunner:
@@ -5248,6 +5327,7 @@ class WayfinderApp(ctk.CTk):
         # enumeration without sharing listener-owned file descriptors with Tk.
         self._hotkey_device_names_snapshot: tuple[str, ...] | None = None
         self.session_generation = 0                    # bumped per recording / force_reset; discards stale work
+        self._request_tokens = {}                      # generation -> its transcription request token
         self._finish_injection_job = None              # pending after() id for the delayed overlay reset
         self._welcome_active = False                   # first-run welcome tour up → suppress text injection
         self._welcome_pane = None                      # active WelcomePane, or None
@@ -10013,6 +10093,11 @@ class WayfinderApp(ctk.CTk):
             asr_failures: list[str] = []
             pp_results: dict = {}
             pipeline: dict = {}
+            from wayfinder.utils.child_supervisor import HelpersClosed, shutdown_generation
+            # A Quit during the run stops or refuses its helpers; the cleanup
+            # timings swallow that error, so the token is what tells.
+            started_under = shutdown_generation()
+            stopped = False
             
             try:
                 # Find whisper-cli
@@ -10203,12 +10288,20 @@ class WayfinderApp(ctk.CTk):
                         f"   📦 Pipeline total (current setup): {t:.2f}s"
                     ))
                         
+            except HelpersClosed:
+                stopped = True
             except Exception as e:
                 error = str(e)
                 import traceback
                 debug_log(f"Exception: {e}\n{traceback.format_exc()}")
                 self.after(0, lambda: self.log(f"   ❌ Error: {error}"))
             
+            if stopped or shutdown_generation() != started_under:
+                # Partial timings (GPU measured, CPU stopped) would be saved as
+                # the result and vote GPU fastest: keep the earlier results.
+                debug_log("Benchmark stopped by a terminal shutdown; nothing saved")
+                result_queue.put({"stopped": True})
+                return
             debug_log(
                 f"Benchmark complete: GPU={gpu_time}, CPU={cpu_time}, "
                 f"pp={len(pp_results)}, error={error}"
@@ -10232,6 +10325,13 @@ class WayfinderApp(ctk.CTk):
             """Handle benchmark completion on main thread."""
             # Clear the busy flag first so the bar's next tick stops + hides it.
             self._benchmark_running = False
+            if isinstance(payload, dict) and payload.get("stopped"):
+                stop_timer()
+                self.benchmark_test_btn.configure(
+                    state="normal", text="Compare CPU vs GPU", fg_color=COLORS["accent"])
+                self.benchmark_status_label.configure(text="Benchmark stopped; earlier results kept")
+                self.log("   ⏹ Benchmark stopped while Aura was shutting down; nothing saved")
+                return
             gpu_time = payload.get("gpu_time") if isinstance(payload, dict) else None
             cpu_time = payload.get("cpu_time") if isinstance(payload, dict) else None
             gpu_load = payload.get("gpu_load") if isinstance(payload, dict) else None
@@ -12107,12 +12207,19 @@ class WayfinderApp(ctk.CTk):
             from wayfinder.core.postprocessor import cleanup_model_needed, warm_up_postprocessing
         except Exception:
             return
+        epochs = _server_load_epochs()
         cfg = dict(self.config)
+        cfg.update(epochs)
         if cleanup_model_needed(cfg):
             threading.Thread(target=warm_up_postprocessing, args=(cfg,),
                              daemon=True, name="cleanup-warm").start()
         else:
+            # Superseded here, on the Tk thread, and the release then stops only
+            # what predates it: a warm-up for a quick switch back to a cleanup
+            # style is stamped after this, and keeps the server it starts.
+            llama_epoch = _supersede_cleanup_loads()
             threading.Thread(target=_release_cleanup_residency, daemon=True,
+                             kwargs={"llama_before_epoch": llama_epoch},
                              name="cleanup-release").start()
 
     def _style_availability(self) -> dict:
@@ -13698,10 +13805,16 @@ class WayfinderApp(ctk.CTk):
         if value == "auto":
             os.environ.pop("GGML_VK_VISIBLE_DEVICES", None)
             try:
+                from wayfinder.utils.child_supervisor import HelpersClosed
                 from wayfinder.utils.gpu_simple import setup_gpu_environment
 
-                threading.Thread(target=setup_gpu_environment, args=(dict(self.config),),
-                                 daemon=True).start()
+                def detect(config=dict(self.config)):
+                    try:
+                        setup_gpu_environment(config)
+                    except HelpersClosed:
+                        pass   # Quit stopped the probe: nothing learned, nothing to report
+
+                threading.Thread(target=detect, daemon=True).start()
             except Exception:
                 pass
         else:
@@ -13996,6 +14109,34 @@ class WayfinderApp(ctk.CTk):
 
     def _apply_transcription_hardware_change(self, gpu_on: bool) -> None:
         """Make a CPU/GPU or speech-model change take effect without a restart."""
+        # Every change, CPU-off included, supersedes any warm-up still queued or
+        # running and cancels the model loads in flight, before anything else.
+        self._warm_up_generation = getattr(self, "_warm_up_generation", 0) + 1
+        whisper_epoch = llama_epoch = None
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+            whisper_epoch = WhisperServerBackend.supersede()
+        except Exception:
+            pass
+        try:
+            from wayfinder.core.llama_server import LlamaServerManager
+            llama_epoch = LlamaServerManager.supersede()
+        except Exception:
+            pass
+        if IS_MACOS and not gpu_on:
+            try:
+                from wayfinder.utils.macos_coreml import cancel_preparation
+                cancel_preparation(dict(self.config))
+            except Exception:
+                pass
+        elif IS_MACOS:
+            # Turning GPU on is the user's retry: Core ML failures recorded
+            # earlier (a sleep, low memory) no longer hold it back.
+            try:
+                from wayfinder.utils.macos_coreml import reset_comparison_failures
+                reset_comparison_failures()
+            except Exception:
+                pass
         if (
             gpu_on and not IS_MACOS
             and self.config.get("transcription_backend", "whisper_cpp") == "whisper_cpp"
@@ -14011,8 +14152,13 @@ class WayfinderApp(ctk.CTk):
             self._gpu_setup_failed = False
 
             def _prepare_gpu():
+                from wayfinder.utils.child_supervisor import HelpersClosed
                 try:
                     setup_gpu_environment(dict(self.config))
+                except HelpersClosed:
+                    # Quit cut the device probe short: not a GPU failure, so a
+                    # reopen after a failed restart keeps GPU on its default device.
+                    pass
                 except Exception as exc:
                     if self._gpu_setup_done is ready:
                         self._gpu_setup_failed = True
@@ -14032,23 +14178,48 @@ class WayfinderApp(ctk.CTk):
         elif not IS_MACOS:
             self._gpu_setup_done = None
             self._gpu_setup_failed = False
-        # Apply live: drop the resident whisper-server so the next dictation respawns
-        # it in the new CPU/GPU mode — no app restart needed.
-        try:
-            from wayfinder.core.transcriber import WhisperServerBackend
-            WhisperServerBackend.shutdown()
-        except Exception:
-            pass
-        # Same for the resident llama-server: its -ngl is fixed at spawn, so a
-        # CPU/GPU flip must respawn it rather than keep serving in the old mode.
-        try:
-            _release_cleanup_residency()
-        except Exception:
-            pass
-        if IS_MACOS:
+        WayfinderApp._stop_old_mode_models(self, whisper_epoch, llama_epoch)
+        if IS_MACOS or getattr(self, "_gpu_setup_done", None) is not None:
+            # Load the model again in its new mode. Linux/Windows GPU-on waits for
+            # the device selection above; any warm-up still queued is superseded.
             warm = getattr(self, "_warm_up_transcription", None)
             if callable(warm):
-                warm()
+                warm(startup=False)
+
+    def _stop_old_mode_models(self, whisper_epoch, llama_epoch) -> None:
+        """Stop the servers of the mode just left, off the Tk thread.
+
+        Applies the switch live: the next dictation respawns whisper-server and
+        llama-server (whose -ngl is fixed at spawn) in the new mode. Only servers
+        started before the switch's epochs are stopped; teardowns run in order,
+        and the new mode's warm-up waits for this one.
+        """
+        previous = getattr(self, "_model_teardown_done", None)
+        done = threading.Event()
+        self._model_teardown_done = done
+        lock = _model_load_lock(self)
+
+        def _teardown():
+            try:
+                if previous is not None:
+                    previous.wait(_MODEL_TEARDOWN_WAIT_S)
+                # A warm-up past its generation check finishes or abandons its
+                # loads first, so nothing it starts outlives this teardown.
+                with lock:
+                    try:
+                        from wayfinder.core.transcriber import WhisperServerBackend
+                        WhisperServerBackend.shutdown(before_epoch=whisper_epoch)
+                    except Exception:
+                        pass
+                    try:
+                        _release_cleanup_residency(llama_before_epoch=llama_epoch)
+                    except Exception:
+                        pass
+            finally:
+                done.set()
+
+        threading.Thread(target=_teardown, daemon=True,
+                         name="wayfinder-model-teardown").start()
 
     # === One-time Ultra setup (core/ultra_defaults.py) ===
 
@@ -17835,6 +18006,7 @@ class WayfinderApp(ctk.CTk):
             if value.startswith(home):
                 value = "~" + value[len(home):]
             self.config["model_path"] = value
+            WayfinderApp._retire_coreml_preparation(self)
         self.config["setup_completed"] = True
         save_config(self.config)
         self._hide_setup_cue()
@@ -18022,18 +18194,39 @@ class WayfinderApp(ctk.CTk):
         # Exec keeps the same PID, so neither the native child supervisor nor
         # macOS will infer that old resources should be released. Clean them
         # explicitly before replacing the interpreter.
+        # The exec replaces any dictation in flight, so retire it before the
+        # shutdown below stops its helpers: a chunk cut short reads as a failed
+        # chunk, and a failed exec would otherwise let the finalizer type out
+        # the chunks that did finish, or report silence. The generation never
+        # comes back, so the reopen cannot revive it.
+        self.session_generation += 1
+        _abandon_transcription_requests()
         try:
             self._close_audio_ducking()
             if getattr(self, "warm_mic", None):
                 self.warm_mic.close()
             from wayfinder.core.transcriber import WhisperServerBackend
-            WhisperServerBackend.shutdown()
+            WhisperServerBackend.shutdown(terminal=True)
+            # The cleanup server too: the re-exec'd app starts its own, and
+            # this one would stay resident beside it.
+            from wayfinder.core.llama_server import LlamaServerManager
+            LlamaServerManager.close()
             self._cleanup_overlay()
             from wayfinder.utils.overlay_process import kill_stale_overlay_from_pidfile
             kill_stale_overlay_from_pidfile()
         except Exception:
             pass
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except OSError as e:
+            # Still this process, so dictation needs its servers back.
+            from wayfinder.core.llama_server import LlamaServerManager
+            from wayfinder.core.transcriber import WhisperServerBackend
+            WhisperServerBackend.reopen()
+            LlamaServerManager.reopen()
+            print(f"[Restart] could not restart Aura ({e}); restart it to apply the change")
+            # The retired dictation's recorder, timers and state: back to IDLE.
+            self._do_force_reset()
 
     def clear_log(self):
         self.log_textbox.configure(state="normal")
@@ -20928,18 +21121,66 @@ class WayfinderApp(ctk.CTk):
 
     # === Auto-activate a model the user just downloaded ===
 
+    def _retire_coreml_preparation(self) -> None:
+        """A model change retires the old model's work before anything loads
+        the new one. The whisper load epoch moves on, as for a CPU/GPU switch:
+        a backend built for the old model (a retired chunk still in flight,
+        its Metal twin) can start no server and schedule no hand-over (Sol mac
+        r4). Then the Core ML job for it is retired: once this returns, it
+        cannot hand its server over the new model's (Sol mac r2). Its failure
+        memory stays; only turning GPU acceleration on resets that."""
+        if not IS_MACOS:
+            return
+        try:
+            from wayfinder.core.transcriber import WhisperServerBackend
+            WhisperServerBackend.supersede()
+        except Exception:
+            pass
+        try:
+            from wayfinder.utils.macos_coreml import cancel_preparation
+            cancel_preparation(dict(self.config))
+        except Exception:
+            pass
+
+    def _defer_model_selection(self, path) -> bool:
+        """Mid-dictation, a model the user picks waits for IDLE, as a finished
+        download does: loading it reloads the server under the running
+        request, whose recovery then brings the old model back (Sol mac r3)."""
+        if getattr(self, "app_state", AppState.IDLE) == AppState.IDLE:
+            # It applies now: a choice still queued for the IDLE flush (picked
+            # mid-dictation, the flush not yet run) must not replace it later
+            # (Sol mac r5). A queued cleanup model is not a speech pick.
+            pending = getattr(self, "_pending_model_activations", None)
+            if pending:
+                pending.pop("whisper", None)
+            self._pending_model_pick = None
+            return False
+        pending = getattr(self, "_pending_model_activations", None)
+        if pending is None:
+            pending = {}
+            self._pending_model_activations = pending
+        pending["whisper"] = (str(path), None)  # the latest pick wins
+        # ...over a download finishing during this dictation too (Sol mac r4).
+        self._pending_model_pick = str(path)
+        self.log(f"⚙ Switching to {_model_display_name(path)} when this dictation finishes")
+        return True
+
     def _set_active_whisper_model(self, path: str) -> None:
         """Persist + apply a speech model: the Save & Apply path.
 
         Shared by the Whisper Models panel and download auto-activation. The
         transcriber reloads on the next dictation because the resident
-        whisper-server is keyed by model path.
+        whisper-server is keyed by model path. Mid-dictation it is queued
+        until IDLE (_defer_model_selection).
         """
+        if WayfinderApp._defer_model_selection(self, path):
+            return
         store = str(path)
         home = str(Path.home())
         if store.startswith(home):
             store = "~" + store[len(home):]
         self.config["model_path"] = store
+        WayfinderApp._retire_coreml_preparation(self)
         save_config(self.config)
         if hasattr(self, "model_btn"):
             try:
@@ -20978,6 +21219,11 @@ class WayfinderApp(ctk.CTk):
             if pending is None:
                 pending = {}
                 self._pending_model_activations = pending
+            pick = getattr(self, "_pending_model_pick", None)
+            if role == "whisper" and pick is not None:
+                # The model the user picked during this dictation wins.
+                self.log(f"✓ {name} downloaded — keeping your pick, {_model_display_name(pick)}")
+                return "skipped"
             pending[role] = (path, model_info)  # latest download per role wins
             self.log(f"✓ {name} downloaded — switching to it when this dictation finishes")
             return "deferred"
@@ -21036,6 +21282,7 @@ class WayfinderApp(ctk.CTk):
             return
         items = list(pending.items())
         pending.clear()
+        self._pending_model_pick = None
         for role, (path, model_info) in items:
             if self._apply_downloaded_model(role, path, model_info):
                 self.log(f"✓ {_model_display_name(path)} is now active")
@@ -21610,6 +21857,7 @@ class WayfinderApp(ctk.CTk):
                 else:
                     self.config["model_path"] = ""
                     self.log("⚙ Active model was removed — no other models installed")
+                WayfinderApp._retire_coreml_preparation(self)
                 save_config(self.config)
                 if hasattr(self, "model_btn"):
                     try:
@@ -21941,14 +22189,17 @@ class WayfinderApp(ctk.CTk):
                 self.show_from_tray()
                 self._show_premium_prompt("large_models")
                 return
+            if WayfinderApp._defer_model_selection(self, model_path):
+                return
             # Store with ~ for portability (collapse $HOME -> ~ like the model panel does)
             home = str(Path.home())
             path_str = str(model_path)
             relative_path = "~" + path_str[len(home):] if path_str.startswith(home) else path_str
             self.config["model_path"] = relative_path
+            WayfinderApp._retire_coreml_preparation(self)
             save_config(self.config)
             if IS_MACOS:
-                self._warm_up_transcription()
+                self._warm_up_transcription(startup=False)
             self.log(f"⚙ Model: {model_name}")
             # Update the button in main UI if visible
             if hasattr(self, 'model_btn'):
@@ -22542,6 +22793,12 @@ class WayfinderApp(ctk.CTk):
             crash_reports.mark_clean_exit()
         except Exception:
             pass
+        # Retire any dictation in flight before the shutdown below stops its
+        # helpers. Quit can run off the Tk thread (the tray), which keeps
+        # handling events meanwhile: a chunked dictation cut short must not
+        # be typed as partial text, or reported as silence, on the way out.
+        self.session_generation += 1
+        _abandon_transcription_requests()
         # Signal all background threads to stop
         self.stop_event.set()
         if hasattr(self, '_evdev_stop_event'):
@@ -22574,13 +22831,13 @@ class WayfinderApp(ctk.CTk):
         # Clean up whisper-server if running
         try:
             from wayfinder.core.transcriber import WhisperServerBackend
-            WhisperServerBackend.shutdown()
+            WhisperServerBackend.shutdown(terminal=True)
         except:
             pass
 
         # Same for the resident cleanup model server.
         try:
-            _release_cleanup_residency()
+            _release_cleanup_residency(terminal=True)
         except:
             pass
 
@@ -22916,6 +23173,7 @@ class WayfinderApp(ctk.CTk):
         # injected into whatever the user has focused now; then route through on_error, which
         # resets the overlay to ready + state to IDLE and (in Game Mode) plays the error cue.
         self.session_generation += 1
+        _abandon_transcription_requests()
         self.on_error(
             f"Processing exceeded {timeout_s:.0f}s — likely a stuck transcription or "
             "post-processing step. Reset to idle; see the activity log for details.",
@@ -22955,6 +23213,7 @@ class WayfinderApp(ctk.CTk):
         # fresh one every later paste would queue behind it forever.
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.session_generation += 1
+        _abandon_transcription_requests()
         text = getattr(self, "_pasting_text", "") or ""
         copied = False
         if text:
@@ -23400,43 +23659,83 @@ class WayfinderApp(ctk.CTk):
             self.log("🖥️ X11 detected - using evdev")
         self._start_evdev_listener()
 
-    def _warm_up_transcription(self):
+    def _warm_up_transcription(self, startup: bool = True):
         """Pre-load the transcription model in the background (whisper-server mode).
 
         Makes the first dictation instant without the user warming anything up.
         A no-op for per-invocation backends. Daemon thread; failures are logged
         but never block startup — the lazy start at first transcription remains
-        the fallback.
+        the fallback. ``startup=False`` (a CPU/GPU or model change) reloads the
+        models only. Each call supersedes the models of any warm-up still queued.
         """
         # Snapshot on the Tk thread: a CPU/GPU switch after this point must not
         # be read half-applied by the worker (use_gpu on, Vulkan device unset).
+        # Stamped with the server epochs it was read under, so a switch landing
+        # after a stage's generation check still cancels that stage's load.
+        epochs = _server_load_epochs()
         config = dict(self.config)
+        config.update(epochs)
         gpu_setup = getattr(self, "_gpu_setup_done", None)
+        teardown = getattr(self, "_model_teardown_done", None)
+        lock = _model_load_lock(self)
+        generation = getattr(self, "_warm_up_generation", 0) + 1
+        self._warm_up_generation = generation
 
         def _warm():
+            if startup and IS_MACOS:
+                # A helper an earlier Aura left running keeps a model loaded and
+                # port 8178 open; a second server would then share that port.
+                try:
+                    from wayfinder.utils.child_supervisor import reap_orphaned_helpers
+
+                    stopped = reap_orphaned_helpers()
+                    if stopped:
+                        print(f"[Warmup] Stopped {len(stopped)} helper process(es) left by an earlier session")
+                except Exception as e:
+                    print(f"[Warmup] Leftover helper check skipped: {e}")
+            ready = True
             try:
-                from wayfinder.core.transcriber import warm_up_transcription
-                if not WayfinderApp._gpu_device_ready_for_warm_up(self, config, gpu_setup):
+                if teardown is not None and not teardown.wait(_MODEL_TEARDOWN_WAIT_S):
+                    ready = False
+                    print("[Warmup] The previous mode's models are still stopping; warm-up skipped")
+                elif not WayfinderApp._gpu_device_ready_for_warm_up(self, config, gpu_setup):
+                    ready = False
                     # The first dictation starts the server once the device is set.
                     print("[Warmup] GPU device selection unfinished; transcription warm-up skipped")
-                else:
-                    if config.get("whisper_server_mode"):
-                        self.log("⏳ Warming up transcription model (first dictation will be instant)…")
-                    loaded = warm_up_transcription(config)
-                    if config.get("whisper_server_mode") and (
-                            loaded or not (IS_MACOS or IS_WINDOWS)):
-                        # macOS/Windows only claim "loaded" when a server really
-                        # started (it used to say so with no model installed at all).
-                        self.log("✅ Transcription model loaded — ready for instant dictation")
             except Exception as e:
+                ready = False
                 self.log(f"⚠️ Transcription warm-up skipped: {e}")
-            # Warm the post-processing LLM too (keeps the cleanup model resident so
-            # the first dictation's grammar/tone pass is instant, not a cold load).
-            try:
-                from wayfinder.core.postprocessor import warm_up_postprocessing
-                warm_up_postprocessing(config)
-            except Exception as e:
-                self.log(f"⚠️ Post-processing warm-up skipped: {e}")
+            # Checks and loads happen under the lock a CPU/GPU switch's teardown
+            # takes, so a switch landing between them cannot leave this warm-up's
+            # old-mode models running.
+            with lock:
+                try:
+                    from wayfinder.core.transcriber import warm_up_transcription
+                    if ready and self._warm_up_generation != generation:
+                        ready = False
+                        print("[Warmup] Superseded by a CPU/GPU or model change")
+                    elif ready:
+                        if config.get("whisper_server_mode"):
+                            self.log("⏳ Warming up transcription model (first dictation will be instant)…")
+                        loaded = warm_up_transcription(config)
+                        if config.get("whisper_server_mode") and (
+                                loaded or not (IS_MACOS or IS_WINDOWS)):
+                            # macOS/Windows only claim "loaded" when a server really
+                            # started (it used to say so with no model installed at all).
+                            self.log("✅ Transcription model loaded — ready for instant dictation")
+                except Exception as e:
+                    self.log(f"⚠️ Transcription warm-up skipped: {e}")
+                # Warm the post-processing LLM too (keeps the cleanup model resident so
+                # the first dictation's grammar/tone pass is instant, not a cold load).
+                try:
+                    from wayfinder.core.postprocessor import warm_up_postprocessing
+                    # Its llama-server takes the same CPU/GPU mode and Vulkan device.
+                    if ready and self._warm_up_generation == generation:
+                        warm_up_postprocessing(config)
+                except Exception as e:
+                    self.log(f"⚠️ Post-processing warm-up skipped: {e}")
+            if not startup:
+                return
             # Pre-arm Wayland text injection: surface KDE's one-time "allow input control"
             # approval now (a benign no-op keystroke), so it can't race the first real
             # dictation on a fresh install/rebuild and garble the output. No-op unless wtype
@@ -24251,7 +24550,18 @@ class WayfinderApp(ctk.CTk):
         ))
 
     def _asr_config_for_dictation(self) -> dict:
-        """Snapshot one dictation's ASR mode while Windows finishes GPU setup."""
+        """Snapshot one dictation's ASR mode while Windows finishes GPU setup.
+
+        Stamped with the server epochs it was read under: its cleanup runs
+        after the transcription, and a switch in between must cancel that
+        cleanup's server start, not let it load the mode just left.
+        """
+        epochs = _server_load_epochs()
+        config = WayfinderApp._asr_config_for_dictation_unstamped(self)
+        config.update(epochs)
+        return config
+
+    def _asr_config_for_dictation_unstamped(self) -> dict:
         from wayfinder.core.gm_asr import effective_asr_config
 
         config = dict(WayfinderApp._gamer_asr_config(self, effective_asr_config(
@@ -24392,6 +24702,14 @@ class WayfinderApp(ctk.CTk):
                 self._gpu_setup_notice_logged = False
             self.session_generation += 1
             gen = self.session_generation
+            # Taken with the generation: each request of this dictation, a
+            # re-heard chunk included, runs under it (Sol mac r6).
+            tokens = getattr(self, "_request_tokens", None)
+            if tokens is None:
+                tokens = self._request_tokens = {}
+            tokens[gen] = _transcription_request_token()
+            for old in [g for g in tokens if g < gen - 64]:
+                del tokens[old]
             if self._finish_injection_job is not None:
                 try:
                     self.after_cancel(self._finish_injection_job)
@@ -24623,10 +24941,16 @@ class WayfinderApp(ctk.CTk):
         # code paths (mic-name display, re-resolve) and the next recording use it directly.
         self._resolved_audio_device = self.warm_mic.device
     
+    def _dictation_request_token(self, gen):
+        """The token dictation *gen* took when it began (start_recording), or
+        None, and then each request takes its own."""
+        return (getattr(self, "_request_tokens", None) or {}).get(gen)
+
     def _transcribe_chunk(self, chunk_path: str, chunk_index: int, gen=None, store=None):
         """Transcribe a single chunk in the background."""
         if store is None:
             store = self.chunk_transcriptions
+        request_token = WayfinderApp._dictation_request_token(self, gen)
         try:
             # Skip if this chunk belongs to a superseded session (optimisation — the per-session
             # `store` already isolates writes, so this only avoids wasted transcription work).
@@ -24689,6 +25013,7 @@ class WayfinderApp(ctk.CTk):
                 asr_cfg,
                 context=context,
                 skip_post_processing=True,
+                request_token=request_token,
             )
             raw_session = WayfinderApp._raw_session_enabled(self)
             if context and not raw_session:
@@ -24702,6 +25027,7 @@ class WayfinderApp(ctk.CTk):
                 if chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
                     retry = transcribe_with_config(
                         chunk_path, asr_cfg, context="", skip_post_processing=True,
+                        request_token=request_token,
                     )
                     fuller = prefer_fuller_chunk_text(text, retry)
                     if fuller is not text:
@@ -25006,10 +25332,21 @@ class WayfinderApp(ctk.CTk):
                     from wayfinder.core.postprocessor import process_with_config
                     self.log("🔧 Post-processing combined text...")
                     original_text = combined_text
-                    combined_text = process_with_config(
-                        combined_text, WayfinderApp._gamer_asr_config(self, self.config))
+                    epochs = _server_load_epochs()
+                    cleanup_cfg = dict(WayfinderApp._gamer_asr_config(self, self.config))
+                    cleanup_cfg.update(epochs)
+                    # Under the dictation's token: a reset meanwhile starts,
+                    # restarts and falls back to nothing (Sol mac r8).
+                    with dictation_requests(WayfinderApp._dictation_request_token(self, gen)):
+                        combined_text = process_with_config(combined_text, cleanup_cfg)
                     if combined_text != original_text:
                         self.log(f"✓ Text cleaned ({len(original_text)} → {len(combined_text)} chars)")
+                except RequestAbandoned:
+                    # Retired: nothing to emit for it, the finally's "did not
+                    # complete" included (Sol mac r9). The retirement owns the
+                    # state: each one advances the generation and resets the UI.
+                    emitted = True
+                    return
                 except Exception as e:
                     self.log(f"⚠ Post-processing error: {e}")
                     # Continue with original combined text
@@ -25094,7 +25431,9 @@ class WayfinderApp(ctk.CTk):
             # Same per-session ASR snapshot as chunks: Windows stays on Base
             # CPU while the initial Ultra GPU device selection is unfinished.
             asr_cfg = WayfinderApp._asr_config_for_dictation(self)
-            text = transcribe_with_config(audio_path, asr_cfg)
+            text = transcribe_with_config(
+                audio_path, asr_cfg,
+                request_token=WayfinderApp._dictation_request_token(self, gen))
             trans_elapsed = time_module.perf_counter() - trans_start
             self.log(f"📝 Transcribed in {trans_elapsed:.2f}s: \"{text[:40]}{'...' if len(text) > 40 else ''}\"")
             self.event_queue.put((EventType.TRANSCRIPTION_DONE, (text, gen)))
@@ -25175,6 +25514,13 @@ class WayfinderApp(ctk.CTk):
         # Don't inject for a superseded session (force_reset / a newer recording took over).
         if gen is not None and gen != self.session_generation:
             return
+        from wayfinder.core.injector import InjectionCancelled, cancellable
+
+        def retired():
+            # Asked again right before the paste or a key event, after the
+            # injector's own waits (a held modifier; Sol mac r11).
+            return gen is not None and gen != self.session_generation
+
         try:
             # Guard this boundary too, including callers that bypass the usual
             # transcription-done handoff. Raw preserves other whitespace.
@@ -25244,7 +25590,9 @@ class WayfinderApp(ctk.CTk):
             game_chat = getattr(self, "_inject_into_game_chat", None)
             if ((IS_MACOS or IS_WINDOWS or _IS_LINUX) and game_chat is not None
                     and self.config.get("gamer_mode", True)):
-                if game_chat(text, gen):
+                with cancellable(retired):   # its pastes and keys too
+                    sent = game_chat(text, gen)
+                if sent:
                     self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
                     return
 
@@ -25267,7 +25615,7 @@ class WayfinderApp(ctk.CTk):
                     "(opt-in; Wayland cannot retarget)"
                 )
                 from wayfinder.core.injector import inject_text_clipboard_paste
-                inject_text_clipboard_paste(text)
+                inject_text_clipboard_paste(text, cancelled=retired)
             else:
                 inject_text(
                     text,
@@ -25279,6 +25627,7 @@ class WayfinderApp(ctk.CTk):
                     paste_fallback=bool(
                         self.config.get("game_mode_paste_fallback", True)
                     ),
+                    cancelled=retired,
                 )
             # Opt-in auto-send ("Auto press Enter after dictation"). Injector
             # process exit only proves the events were handed to the OS; the
@@ -25313,14 +25662,20 @@ class WayfinderApp(ctk.CTk):
                             )
                         else:
                             from wayfinder.core.injector import press_enter
-                            press_enter()
+                            press_enter(cancelled=retired)
                             self.log(
                                 f"↵ Auto-Enter sent after "
                                 f"{int(_AUTO_ENTER_SETTLE_S * 1000)}ms settle"
                             )
+                except InjectionCancelled:
+                    return   # retired during the Enter's wait: nothing to report
                 except Exception as _enter_err:
                     self.log(f"⚠ Auto-Enter failed: {_enter_err}")
             self.event_queue.put((EventType.INJECTION_DONE, (None, gen)))
+        except InjectionCancelled:
+            # Retired during the injector's waits: nothing pasted, nothing to
+            # emit. The retirement owns the state and resets the UI itself.
+            return
         except Exception as e:
             self.event_queue.put((EventType.INJECTION_ERROR, (str(e), gen)))
 
@@ -25367,16 +25722,30 @@ class WayfinderApp(ctk.CTk):
 
         The Flatpak ships no clipboard CLI; Tk owns the X11 CLIPBOARD selection
         and serves it to the game (Wine bridges it to the Windows clipboard).
+
+        The Tk thread asks the worker's dictation right before it clears the
+        clipboard, and a write the worker stopped waiting for never runs late
+        (Sol mac r13): a retired dictation's raises InjectionCancelled.
         """
+        from wayfinder.core.injector import InjectionCancelled, current_cancellation
+
+        cancelled = current_cancellation()
         done = threading.Event()
-        ok = [False]
+        step = threading.Lock()
+        state = {"ok": False, "refused": False, "abandoned": False}
 
         def _set():
             try:
-                self.clipboard_clear()
-                self.clipboard_append(text)
-                self.update_idletasks()
-                ok[0] = True
+                with step:
+                    if state["abandoned"]:
+                        return
+                    if cancelled is not None and cancelled():
+                        state["refused"] = True
+                        return
+                    self.clipboard_clear()
+                    self.clipboard_append(text)
+                    self.update_idletasks()
+                    state["ok"] = True
             except Exception:
                 pass
             finally:
@@ -25386,8 +25755,12 @@ class WayfinderApp(ctk.CTk):
             self.after(0, _set)
         except Exception:
             return False
-        done.wait(timeout)
-        return ok[0]
+        if not done.wait(timeout):
+            with step:   # one that already started finishes first
+                state["abandoned"] = True
+        if state["refused"]:
+            raise InjectionCancelled("the dictation was retired: nothing injected")
+        return state["ok"]
 
     def _get_clipboard_from_worker(self, timeout: float = 1.0) -> "str | None":
         """The clipboard's text, read on the Tk thread (None if empty or not
@@ -25721,6 +26094,7 @@ class WayfinderApp(ctk.CTk):
 
         # Invalidate chunk callbacks/results before detaching the recorder.
         self.session_generation += 1
+        _abandon_transcription_requests()
         if self._duration_update_job is not None:
             try:
                 self.after_cancel(self._duration_update_job)
@@ -25762,6 +26136,7 @@ class WayfinderApp(ctk.CTk):
     def _do_force_reset(self):
         # Bump the generation so every in-flight worker + scheduled callback becomes stale.
         self.session_generation += 1
+        _abandon_transcription_requests()
         self.log("🧹 Reset — returning to idle")
 
         # Cancel any pending delayed overlay reset / recording duration timer.
@@ -26018,11 +26393,11 @@ def main():
         # and leak ~1.5GB VRAM (the tray-Quit path already does this).
         try:
             from wayfinder.core.transcriber import WhisperServerBackend
-            WhisperServerBackend.shutdown()
+            WhisperServerBackend.shutdown(terminal=True)
         except:
             pass
         try:
-            _release_cleanup_residency()
+            _release_cleanup_residency(terminal=True)
         except:
             pass
 

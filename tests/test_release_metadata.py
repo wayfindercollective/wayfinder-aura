@@ -1574,3 +1574,35 @@ def test_appimage_container_installs_what_appimagetool_needs():
     packages = release[start:release.index("\n\n", start)].replace("\\\n", " ").split()
     for needed in ("libfuse2", "wget", "file"):
         assert needed in packages, needed
+
+
+def test_the_windows_suite_runs_once_per_commit():
+    """ci.yml's "Windows tests" job covers pushes, PRs and release tags (the
+    release's build-windows needs it), so the installer workflow re-runs the
+    suite only on a manual run: twice on the one Windows runner was the waste.
+
+    run-tests must be declared on both triggers: GitHub's loose comparison makes
+    a missing input equal false, so a manual run would silently skip tests.
+    """
+    build = (REPO / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+    triggers = build[build.index("\non:"):build.index("\n  push:")]
+    call = triggers[triggers.index("  workflow_call:"):triggers.index("  workflow_dispatch:")]
+    dispatch = triggers[triggers.index("  workflow_dispatch:"):]
+    for block in (call, dispatch):
+        assert "      run-tests:" in block and "type: boolean" in block and "default: true" in block
+    step = build[build.index("      - name: Run Windows tests"):]
+    step = step[:step.index("\n      - name:")]
+    assert "        if: inputs.run-tests\n" in step
+
+    release_build = _workflow_job_body("build-windows")
+    assert "needs: [quality, release-readiness]" in release_build
+    assert "      run-tests: false" in release_build
+
+
+def test_release_python_setups_cache_pip():
+    # build-appimage compiles PyGObject and dbus-python from source every run.
+    release = _release_workflow_text()
+    setups = release.split("uses: actions/setup-python@v7")[1:]
+    assert len(setups) == 2
+    for setup in setups:
+        assert "cache: pip" in setup[:setup.index("\n      - ")]

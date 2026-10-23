@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- GPU checks and benchmarks measure the helper's execution time separately
+  from waits to start it. A probe whose execution budget was cut short does
+  not permanently disable GPU acceleration or select a benchmark winner.
+- Windows retains the original clipboard after a failed or busy restore,
+  retries before later pastes, and ignores callbacks from an earlier paste.
+
 ## [1.3.0] — 2026-10-20
 
 ### Added

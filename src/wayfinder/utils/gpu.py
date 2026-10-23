@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List
 
+from wayfinder.utils.child_supervisor import (
+    HelperNotStarted, HelpersClosed, helper_budget_shortened, helper_elapsed, run_tracked,
+)
+
 
 @dataclass
 class GPUInfo:
@@ -366,10 +370,10 @@ def detect_ggml_devices() -> List[GgmlDevice]:
         # We use --no-prints to minimize output but GPU info still appears
         cmd = [whisper_cli, "-m", model_path, "-f", temp_audio, "--no-timestamps"]
         
-        result = subprocess.run(
+        result = run_tracked(
             cmd,
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",   # whisper.cpp's output, any code page
             timeout=30,  # Should be fast with tiny model + minimal audio
         )
         
@@ -407,6 +411,8 @@ def detect_ggml_devices() -> List[GgmlDevice]:
                 except (ValueError, IndexError):
                     continue
         
+    except HelpersClosed:
+        raise   # Quit: no device list, which would read as "no ggml devices"
     except Exception:
         pass
     finally:
@@ -517,7 +523,10 @@ def benchmark_gpu_devices(
     # IMPORTANT: Use ggml's device ordering, NOT vulkaninfo's!
     # ggml may order devices differently than vulkaninfo, so we must
     # detect devices the way ggml sees them to get correct benchmark results.
-    ggml_devices = detect_ggml_devices()
+    try:
+        ggml_devices = detect_ggml_devices()
+    except HelpersClosed:
+        return {"error": "Aura is shutting down", "fastest": "error"}
     
     # Fallback to vulkaninfo if ggml detection fails
     if not ggml_devices:
@@ -581,18 +590,26 @@ def benchmark_gpu_devices(
             
             try:
                 start = time.perf_counter()
-                result = subprocess.run(
+                result = run_tracked(
                     cmd,
                     capture_output=True,
                     timeout=timeout,
                     env=env,
                 )
-                elapsed = time.perf_counter() - start
+                elapsed = helper_elapsed(result, time.perf_counter() - start)
                 
                 if result.returncode == 0:
                     results[device_idx_str] = round(elapsed, 3)
-            except subprocess.TimeoutExpired:
-                results[device_idx_str] = float(timeout)  # Timed out = slow
+            except HelperNotStarted:
+                return {"error": "GPU benchmark could not start a device probe", "fastest": "error"}
+            except subprocess.TimeoutExpired as exc:
+                if helper_budget_shortened(exc, float(timeout)):
+                    return {"error": "GPU benchmark ran out of execution time", "fastest": "error"}
+                results[device_idx_str] = float(timeout)
+            except HelpersClosed:
+                # Quit stopped or refused a device: the rest are no measurement,
+                # and the "fastest" left standing must never be cached.
+                return {"error": "Aura is shutting down", "fastest": "error"}
             except Exception:
                 pass  # Skip failed devices
         

@@ -346,6 +346,22 @@ def save_state(update: dict, path: Optional[Path] = None) -> None:
 # The session
 # --------------------------------------------------------------------------
 
+_before_keys: list = []
+
+
+def check_before_keys(check: Callable[[], None]) -> None:
+    """Run *check* under the type lock, right before any key goes out; it
+    raises to send nothing. A typing that waited for another one to finish is
+    asked again there (the injector registers its cancellation: Sol mac r12)."""
+    if check not in _before_keys:
+        _before_keys.append(check)
+
+
+def _check_before_keys() -> None:
+    for check in _before_keys:
+        check()
+
+
 class PortalKeyboard:
     """One keyboard-only RemoteDesktop session, kept open while the app runs."""
 
@@ -683,6 +699,10 @@ class PortalKeyboard:
 
     # -- keys -----------------------------------------------------------------
     def _notify(self, method: str, value: int, pressed: bool) -> None:
+        # Every press asks, never a release: the D-Bus call for the press
+        # before it (a Shift, a Ctrl) can span a reset (Sol mac r13).
+        if pressed:
+            _check_before_keys()
         bus, session = self._bus, self._session
         if bus is None or not session:
             raise PortalKeyboardError("the portal keyboard is not ready")

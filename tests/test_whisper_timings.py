@@ -234,3 +234,12 @@ class TestMeasureTranscription:
         except Exception:
             raised = True
         assert raised
+
+
+def test_measurement_excludes_helper_admission_without_an_engine_timing_report(monkeypatch):
+    from wayfinder.core import whisper_timings
+    result = SimpleNamespace(returncode=0, stderr=b"", stdout=b"", execution_seconds=0.125)
+    monkeypatch.setattr(whisper_timings, "run_tracked", lambda *_a, **_k: result)
+    measured = whisper_timings.measure_transcription(["whisper-cli"], "audio.wav", None)
+    assert measured.ok
+    assert measured.seconds == pytest.approx(0.125)
