@@ -1180,3 +1180,17 @@ def test_timeout_reports_the_execution_budget_left_after_admission(monkeypatch):
     with pytest.raises(subprocess.TimeoutExpired) as info:
         cs.run_tracked(["helper"], timeout=2.0)
     assert info.value.execution_budget == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("nominal,remaining", [(5.0, 4.99), (30.0, 29.99), (60.0, 59.9)])
+def test_routine_launch_overhead_preserves_timeout_verdict(nominal, remaining):
+    error = subprocess.TimeoutExpired(["helper"], nominal)
+    error.execution_budget = remaining
+    assert not child_supervisor.helper_budget_shortened(error, nominal)
+
+
+@pytest.mark.parametrize("nominal,remaining", [(5.0, 0.1), (30.0, 20.0), (60.0, 30.0)])
+def test_substantial_admission_delay_still_has_no_timeout_verdict(nominal, remaining):
+    error = subprocess.TimeoutExpired(["helper"], nominal)
+    error.execution_budget = remaining
+    assert child_supervisor.helper_budget_shortened(error, nominal)

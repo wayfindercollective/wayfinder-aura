@@ -3211,3 +3211,41 @@ def test_cli_admission_timeout_never_memoizes_cpu_fallback(tmp_path, monkeypatch
     with pytest.raises(transcriber.TranscriptionError):
         backend.transcribe(str(audio))
     assert str(binary) not in transcriber._CPU_FALLBACK_ACTIVE
+
+
+@pytest.mark.parametrize("remaining,expected", [(59.99, False), (0.25, None)])
+def test_recovery_timeout_distinguishes_launch_overhead_from_admission(monkeypatch, remaining, expected):
+    from types import SimpleNamespace
+    from wayfinder.core import transcriber
+    error = subprocess.TimeoutExpired(["whisper-cli"], remaining)
+    error.execution_budget = remaining
+    monkeypatch.setattr(transcriber, "run_tracked", MagicMock(side_effect=error))
+    backend = SimpleNamespace(whisper_binary="unused", model_path="unused")
+    assert transcriber.WhisperCppBackend._gpu_probe_succeeds(backend) is expected
+
+
+def test_normal_gpu_timeout_still_tries_and_remembers_cpu_fallback(tmp_path, monkeypatch):
+    from wayfinder.core import transcriber
+    binary, cpu, model, audio = [tmp_path / name for name in
+                                ("whisper-cli", "whisper-cli-cpu", "model.bin", "audio.wav")]
+    for path in (binary, cpu, model, audio):
+        path.touch()
+    monkeypatch.setattr(transcriber, "_CPU_FALLBACK_ACTIVE", {})
+    backend = transcriber.WhisperCppBackend(whisper_binary=str(binary), model_path=str(model),
+                                            use_gpu=True, timeout=30)
+    attempts = []
+
+    def run(cmd, **kwargs):
+        if "--help" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        attempts.append(cmd[0])
+        if cmd[0] == str(binary):
+            error = subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            error.execution_budget = 29.99
+            raise error
+        return subprocess.CompletedProcess(cmd, 0, "These spoken words survived the fallback.", "")
+
+    monkeypatch.setattr(transcriber, "run_tracked", run)
+    assert "spoken words" in backend.transcribe(str(audio))
+    assert attempts == [str(binary), str(cpu)]
+    assert str(binary) in transcriber._CPU_FALLBACK_ACTIVE

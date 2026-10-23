@@ -2608,10 +2608,7 @@ class LlamaCppCliBackend(PostProcessorBackend):
         except HelperNotStarted:
             return None   # nothing ran: no verdict either way (Sol mac r20)
         except subprocess.TimeoutExpired as exc:
-            spawned_at = getattr(exc, "spawned_at", None)
-            if (helper_budget_shortened(exc, _GPU_PROBE_MAX_SECONDS)
-                    or isinstance(spawned_at, (int, float))
-                    and t0 + limit - spawned_at < _GPU_PROBE_MAX_SECONDS):
+            if helper_budget_shortened(exc, _GPU_PROBE_MAX_SECONDS, deadline=t0 + limit):
                 return None
             return False
         except Exception:

@@ -1781,7 +1781,7 @@ def test_next_paste_waits_for_a_restore_the_timer_is_already_running(monkeypatch
     fake, iw = _real_timer_rig(monkeypatch, "USER")
     pasted = []
     monkeypatch.setattr(iw, "_press_keys", lambda vks: pasted.append(fake.clipboard))
-    real_get = iw._clipboard_get_windows
+    real_get = iw._snapshot_clipboard_text
     started = threading.Event()
 
     def slow_get():
@@ -1790,7 +1790,7 @@ def test_next_paste_waits_for_a_restore_the_timer_is_already_running(monkeypatch
             time.sleep(0.15)                # a slow restore, mid-flight
         return real_get()
 
-    monkeypatch.setattr(iw, "_clipboard_get_windows", slow_get)
+    monkeypatch.setattr(iw, "_snapshot_clipboard_text", slow_get)
     iw.inject_text_paste_windows("part1")
     assert started.wait(iw.RESTORE_DELAY_S + 1)        # the timer restore began
     iw.inject_text_paste_windows("part2")              # lands mid-restore
@@ -3508,4 +3508,64 @@ def test_cancelled_old_callback_cannot_restore_a_new_paste_early(monkeypatch):
     assert fake.clipboard == "second dictation"
     assert current.delay == w.RESTORE_DELAY_S
     current.fire()
+    assert fake.clipboard == "original clipboard"
+
+
+@pytest.mark.parametrize("fault", ["lock", "handle", "size", "format"])
+def test_unreadable_mark_is_unknown_until_a_later_restore(monkeypatch, fault):
+    fake, w, _timers = _manual_restore_rig(monkeypatch)
+    _schedule_manual_paste(w, "first dictation")
+    fmt = fake.RegisterClipboardFormatW(w._OWNER_MARK_FORMAT)
+    with monkeypatch.context() as reading:
+        if fault == "lock":
+            reading.setattr(fake, "on_lock", lambda handle: fake.GlobalSize(handle) == w._OWNER_MARK_BYTES)
+        elif fault == "handle":
+            original = fake.GetClipboardData
+            reading.setattr(fake, "GetClipboardData", lambda kind: 0 if kind == fmt else original(kind))
+        elif fault == "size":
+            original = fake.GlobalSize
+            reading.setattr(fake, "GlobalSize", lambda handle: 0 if original(handle) == w._OWNER_MARK_BYTES else original(handle))
+        else:
+            reading.setattr(fake, "RegisterClipboardFormatW", lambda _name: 0)
+        w._pending_restore.flush()
+        assert fake.clipboard == "first dictation"
+    w._pending_restore.flush()
+    assert fake.clipboard == "original clipboard"
+
+
+def test_one_failed_mark_read_cannot_drop_a_saved_snapshot(monkeypatch):
+    fake, w, _timers = _manual_restore_rig(monkeypatch)
+    _schedule_manual_paste(w, "first dictation")
+    refused = []
+
+    def fail_once(handle):
+        if not refused and fake.GlobalSize(handle) == w._OWNER_MARK_BYTES:
+            refused.append(handle)
+            return True
+        return False
+
+    fake.on_lock = fail_once
+    w._pending_restore.flush()
+    fake.on_lock = None
+    w._pending_restore.flush()
+    assert fake.clipboard == "original clipboard"
+
+
+def test_new_paste_refuses_an_unknown_snapshot_before_emptying_clipboard(monkeypatch):
+    from wayfinder.core.injector import InjectionError
+    fake, w, _timers = _manual_restore_rig(monkeypatch)
+    _previous, old_mark = _schedule_manual_paste(w, "first dictation")
+    fake.on_set = lambda fmt, _handle: fmt == w._CF_UNICODETEXT
+    w._pending_restore.flush()  # still owed, with Aura's mark but no text
+    fake.on_set = None
+    before = list(fake.events)
+    import ctypes
+    fake.on_lock = lambda handle: (fake.GlobalSize(handle) == w._OWNER_MARK_BYTES
+                                    and ctypes.string_at(handle, w._OWNER_MARK_BYTES) == old_mark)
+    with pytest.raises(InjectionError):
+        _schedule_manual_paste(w, "second dictation")
+    assert "empty" not in fake.events[len(before):]
+    fake.on_lock = None
+    _schedule_manual_paste(w, "second dictation")
+    w._pending_restore.flush()
     assert fake.clipboard == "original clipboard"

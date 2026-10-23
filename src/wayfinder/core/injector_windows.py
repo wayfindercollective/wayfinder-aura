@@ -871,7 +871,7 @@ class _DeferredRestore:
         """
         with self._lock:
             job = self._job
-            mark = _clipboard_mark() if job is not None else None
+            mark = _read_open_clipboard_mark() if job is not None else None
             if (job is not None and mark is not None
                     and getattr(job, "mark", None) == mark
                     and current in (None, getattr(job, "text", None))):
@@ -928,22 +928,39 @@ _OWNER_MARK_FORMAT = "WayfinderAuraDictationMark"
 _OWNER_MARK_BYTES = 16
 
 
+def _read_open_clipboard_mark() -> bytes | None:
+    """Read the private mark while holding the clipboard; None means absent.
+
+    A present but unreadable format is an unknown state, never evidence
+    that somebody else copied. Destructive paste callers must refuse it;
+    restore callers keep their original snapshot for another attempt.
+    """
+    fmt = _user32.RegisterClipboardFormatW(_OWNER_MARK_FORMAT)
+    if not fmt:
+        raise InjectionError("Could not inspect the Windows clipboard for paste.")
+    if not _user32.IsClipboardFormatAvailable(fmt):
+        return None
+    handle = _user32.GetClipboardData(fmt)
+    if not handle or _kernel32.GlobalSize(handle) < _OWNER_MARK_BYTES:
+        raise InjectionError("Could not read the Windows clipboard ownership mark.")
+    ptr = _kernel32.GlobalLock(handle)
+    if not ptr:
+        raise InjectionError("Could not read the Windows clipboard ownership mark.")
+    try:
+        return ctypes.string_at(ptr, _OWNER_MARK_BYTES)
+    finally:
+        _kernel32.GlobalUnlock(handle)
+
+
 def _clipboard_mark() -> bytes | None:
-    """The mark on the clipboard now, or None."""
+    """Best-effort mark for diagnostics; restore and paste use the strict reader."""
     with _clipboard_held() as held:
         if not held:
             return None
-        fmt = _user32.RegisterClipboardFormatW(_OWNER_MARK_FORMAT)
-        handle = _user32.GetClipboardData(fmt) if fmt else None
-        if not handle or _kernel32.GlobalSize(handle) < _OWNER_MARK_BYTES:
-            return None
-        ptr = _kernel32.GlobalLock(handle)
-        if not ptr:
-            return None
         try:
-            return ctypes.string_at(ptr, _OWNER_MARK_BYTES)
-        finally:
-            _kernel32.GlobalUnlock(handle)
+            return _read_open_clipboard_mark()
+        except InjectionError:
+            return None
 
 
 def _clipboard_untouched(text: str, mark: bytes) -> bool:
@@ -1127,7 +1144,13 @@ def _restore_clipboard(previous: str, text: str, mark: bytes) -> tuple[bool | No
         if not held:
             _log_no_owner_at_restore()
             return None, False  # could not inspect; ownership is still unknown
-        if not (_clipboard_untouched(text, mark) or _clipboard_emptied_by_us(mark)):
+        try:
+            if _read_open_clipboard_mark() != mark:
+                return False, False
+            current = _snapshot_clipboard_text()
+        except InjectionError:
+            return None, False
+        if current is not None and current != text:
             return False, False
         restored = _restore_open_clipboard(previous, text, mark)
     return True, restored

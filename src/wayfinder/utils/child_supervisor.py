@@ -663,10 +663,20 @@ def helper_elapsed(result, fallback: float) -> float:
     return elapsed if isinstance(elapsed, (int, float)) else fallback
 
 
-def helper_budget_shortened(error, required: float) -> bool:
-    """Whether admission left a timed-out helper less than its verdict window."""
+def helper_budget_shortened(error, required: float, *, deadline=None) -> bool:
+    """Whether admission materially shortened a timed-out helper's window.
+
+    Process creation and the watcher handshake always consume some time.
+    Allow five percent of the nominal window, capped at one second, so an
+    ordinary near-full timeout still drives normal fallback and backoff.
+    """
     budget = getattr(error, "execution_budget", None)
-    return isinstance(budget, (int, float)) and budget < required
+    if not isinstance(budget, (int, float)) and deadline is not None:
+        spawned_at = getattr(error, "spawned_at", None)
+        if isinstance(spawned_at, (int, float)):
+            budget = deadline - spawned_at
+    allowance = min(1.0, required * 0.05)
+    return isinstance(budget, (int, float)) and budget < required - allowance
 
 
 def close_tracked(timeout: float = 6.0) -> None:
