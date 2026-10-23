@@ -1494,7 +1494,6 @@ class TestWhisperArtifactCleanup:
     # artifacts in a subprocess, so a future edit that drifts the two
     # apart fails loudly instead of only matching a value written by hand.
     _CLEANUP_PARITY_INPUTS = (
-        "*args and **kwargs",
         "<|endoftext|> Okay.",
         "<|0.00|> So,",
         "Thank you for watching…",
@@ -1505,6 +1504,17 @@ class TestWhisperArtifactCleanup:
         "Hello *world*, this is *emphasis* right.",
     )
 
+    def test_normal_cleanup_preserves_unclosed_code_arguments(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        # An unmatched run is not a completed annotation. The old regex
+        # paired unrelated widths and deleted "args and" as though wrapped.
+        assert clean_whisper_artifacts("*args and **kwargs") == "args and kwargs"
+
+    def test_normal_cleanup_retains_its_long_annotation_limit(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+        speech = "these are the longer spoken words that must remain in the transcript"
+        assert clean_whisper_artifacts(f"*{speech}*") == speech
+
     def test_normal_cleanup_output_is_unchanged_for_safety_copy_fix_inputs(self):
         """These inputs exercise findings 2, 4 and 5's machinery
         (asterisk handling, special-token stripping, punctuation folding),
@@ -1514,7 +1524,6 @@ class TestWhisperArtifactCleanup:
         from wayfinder.core.transcriber import clean_whisper_artifacts
 
         expected = {
-            "*args and **kwargs": "kwargs",
             "<|endoftext|> Okay.": "Okay.",
             "<|0.00|> So,": "So,",
             "Thank you for watching…": "",
@@ -3808,6 +3817,32 @@ class TestUnpromptedTranscription:
         self.config["raw_transcription"] = raw
         text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
         assert text == ""
+
+    @pytest.mark.parametrize("raw", [False, True])
+    @pytest.mark.parametrize("heard", [
+        "*cough* please open the door *cough*",
+        "♫ la la ♫ please open the door ♬ la la ♬",
+        "**loud *crashing* noise** please open the door *cough*",
+    ])
+    def test_separate_annotations_never_erase_the_speech_between_them(
+        self, prompts, monkeypatch, heard, raw
+    ):
+        from wayfinder.core import transcriber as T
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe",
+                            lambda backend, audio_path, context="", deadline=None: heard)
+        self.config["raw_transcription"] = raw
+        text = T.transcribe_with_config(self.audio, self.config, unprompted=True)
+        assert text == heard if raw else "please open the door" in text.casefold()
+
+    def test_symmetric_wrapper_runs_preserve_every_outside_word(self):
+        from wayfinder.core.transcriber import _noise_check_safety_copy
+        annotations = ["*cough*", "**noise**", "*a **loud** noise*",
+                       "**loud *crashing* noise**", "♫ la la ♬"]
+        for annotation in annotations:
+            for count in (2, 3, 5, 20, 100):
+                outside = [f"spoken{n}" for n in range(count)]
+                text = " ".join(f"{annotation} {word}" for word in outside) + " " + annotation
+                assert _noise_check_safety_copy(text).split() == outside
 
     def test_unprompted_rejection_never_logs_the_recognized_text(
         self, prompts, monkeypatch, capsys
