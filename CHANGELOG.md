@@ -23,6 +23,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   sentences out of fan, hum or hiss noise in testing; the result is used only
   if Whisper hears at least two words. Only near-silent recordings are still
   rejected, and the activity log records the levels behind every rejection.
+- **A chunk no longer repeats the same sentence over and over.** In Auto mode,
+  a chunk prompted with the previous chunk's text could get stuck echoing one
+  sentence or phrase many times instead of hearing the rest of the speech.
+  Five or more word-for-word copies of a sentence or phrase in one chunk now
+  count as a loop: that chunk is heard again without the prompt, and the loop
+  is collapsed to one copy if the retry doesn't help. Saying something three
+  or four times on purpose is left alone, and list items or numbers
+  such as ".5" and "5" are never mistaken for copies.
 
 ## [1.3.0] — 2026-10-20
 

@@ -25023,6 +25023,7 @@ class WayfinderApp(ctk.CTk):
             # Light ASR and first-session Windows GPU preparation are runtime
             # overlays only (never written back to disk).
             asr_cfg = WayfinderApp._asr_config_for_dictation(self)
+            raw_prompted = []
             text = transcribe_with_config(
                 chunk_path,
                 asr_cfg,
@@ -25030,6 +25031,7 @@ class WayfinderApp(ctk.CTk):
                 skip_post_processing=True,
                 request_token=request_token,
                 unprompted=noise,
+                raw_out=raw_prompted,
             )
             if noise and not text.strip():
                 # transcribe_with_config already held the recognizer's own words to
@@ -25043,11 +25045,80 @@ class WayfinderApp(ctk.CTk):
                 # A prompt can make Whisper return a fragment for a whole chunk
                 # of speech; hear it once more without one and keep the fuller.
                 from wayfinder.core.chunking import (
+                    chunk_text_looks_looped,
                     chunk_text_looks_truncated,
                     prefer_fuller_chunk_text,
                 )
 
-                if chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
+                # The loop decision is made on the backend's RAW text
+                # (raw_out, filled before clean_whisper_artifacts runs), not on
+                # `text`: with the default config that cleanup already
+                # collapses a 13-copy loop down to its first sentence, which
+                # then looks like ordinary, properly paced text and would trip
+                # neither check here — the audio would never be re-heard and
+                # the user gets the echoed sentence instead of their speech
+                # (Sol loop r1). It comes before the truncation check: a loop
+                # cleaned down to a few words looked truncated, and that
+                # branch's word-count bar rejected a short correct retry
+                # (Sol loop r2). A loop is never speech, so any non-empty,
+                # non-looped retry wins.
+                raw_prompted_text = raw_prompted[0] if raw_prompted else text
+
+                if chunk_text_looks_looped(raw_prompted_text):
+                    # The prompt made Whisper echo its own last chunk into a stuck
+                    # loop; hear it again without one — same shape as the
+                    # truncated-chunk retry below, same call shape.
+                    raw_retry = []
+                    try:
+                        retry = transcribe_with_config(
+                            chunk_path, asr_cfg, context="", skip_post_processing=True,
+                            request_token=request_token, raw_out=raw_retry,
+                        )
+                    except RequestAbandoned:
+                        raise   # a retirement owns the chunk's outcome
+                    except TranscriptionError as e:
+                        # A failed retry keeps the cleaned prompted text
+                        # rather than lose the chunk to [error] (Sol loop r2).
+                        # The retirement that can land between the prompted
+                        # decode and this failure is rechecked here too, same
+                        # as the success path below — the prompted text must
+                        # never be salvaged for a dictation that no longer
+                        # owns this chunk (Sol loop r4, finding 5).
+                        from wayfinder.core.transcriber import WhisperServerBackend
+
+                        WhisperServerBackend._check_not_abandoned(request_token)
+
+                        self.log(f"🔁 Chunk {chunk_index + 1} loop retry failed "
+                                 f"({type(e).__name__}); keeping prompted text")
+                    else:
+                        # The retry can come back normally even though the
+                        # dictation was retired while it ran; recheck before
+                        # any of its text is trusted (Sol loop r3).
+                        from wayfinder.core.transcriber import WhisperServerBackend
+
+                        WhisperServerBackend._check_not_abandoned(request_token)
+
+                        retry_looped = chunk_text_looks_looped(raw_retry[0] if raw_retry else retry)
+                        # One bar, nothing else (Sol loop r4): a non-empty,
+                        # non-looped retry always replaces the prompted text.
+                        # No word-count comparison — that used to let a
+                        # hypothetically-collapsed word count authorize
+                        # deleting intentional repeats a retry barely matched.
+                        accepted = bool(retry.strip() and not retry_looped)
+                        if accepted:
+                            self.log(f"🔁 Chunk {chunk_index + 1} looped with its prompt; "
+                                     f"retry accepted ({len(text.split())} → {len(retry.split())} words)")
+                            text = retry
+                        else:
+                            # Rejected (empty or still looped): keep the
+                            # prompted rendering as transcribe_with_config
+                            # already cleaned it under the user's own config,
+                            # rather than re-collapsing it by hand and
+                            # ignoring a collapse_whisper_repetitions=False
+                            # the user chose.
+                            self.log(f"🔁 Chunk {chunk_index + 1} looped with its prompt; "
+                                     f"kept prompted text ({len(text.split())} words)")
+                elif chunk_text_looks_truncated(text, get_wav_duration_seconds(chunk_path)):
                     retry = transcribe_with_config(
                         chunk_path, asr_cfg, context="", skip_post_processing=True,
                         request_token=request_token,

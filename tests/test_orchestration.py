@@ -1339,7 +1339,739 @@ class TestChunkRetryAfterReset:
             assert store == ["[error]"]
 
 
+class TestLoopedChunkRetry:
+    @pytest.fixture(autouse=True)
+    def _chunks_carry_speech(self, monkeypatch):
+        # Speech preservation now asks the structured activity analyzer. Keep
+        # these loop tests on the real speech path rather than failing open
+        # on a nonexistent test WAV or leaving a stub on the removed path.
+        from wayfinder.core.recorder import SpeechActivity
+        monkeypatch.setattr(
+            wayfinder_main, "analyze_wav_speech_activity",
+            lambda _path: SpeechActivity("speech", 0.5, 0.05, 0.5),
+        )
+
+    def test_a_looped_prompted_chunk_is_heard_again_without_context(
+        self, app, monkeypatch, tmp_path
+    ):
+        # A chunk prompted with the previous chunk's text can make whisper-
+        # server's decode get stuck looping that prompt; same shape as the
+        # truncated-chunk retry, heard again without the prompt that caused it.
+        # collapse_whisper_repetitions is off here so the loop reaches this
+        # retry logic instead of being cleaned up first (the default path).
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(
+            WApp, "_asr_config_for_dictation",
+            lambda self: {"collapse_whisper_repetitions": False},
+        )
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        sentence = "if the player is level one they are going to be level one."
+        looped = " ".join([sentence] * 14)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return looped if context else sentence
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""   # first heard with the prompt, looped
+        assert contexts_heard[1] == ""   # retried without it
+        # Sentence-case capitalization is applied by post-processing; the
+        # words themselves are the single retried sentence, not 14 repeats.
+        assert store[1].lower() == sentence
+        assert any("looped" in message.lower() for message in app.logs)
+
+    def test_a_looped_prompted_chunk_is_retried_even_with_default_cleanup_on(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r1: with the DEFAULT config (collapse_whisper_repetitions
+        # on), clean_whisper_artifacts already collapses the 13 copies to one
+        # sentence before _transcribe_chunk used to look at it — so the old
+        # check against the CLEANED text never saw a loop and the audio was
+        # never re-heard. The echoed sentence ("if the player...") is wrong:
+        # it is not what the user actually said next ("the actual release
+        # date..."), which only the unprompted re-hear can recover.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        echoed_loop_sentence = "if the player is level one they are going to be level one."
+        real_speech = "the actual release date for the update is next friday afternoon."
+        looped = " ".join([echoed_loop_sentence] * 13)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return looped if context else real_speech
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""   # first heard with the prompt, looped
+        assert contexts_heard[1] == ""   # retried without it despite default cleanup
+        assert store[1].lower() == real_speech
+        assert any("looped" in message.lower() for message in app.logs)
+
+    def test_both_decodes_looping_keeps_the_already_cleaned_prompted_text(
+        self, app, monkeypatch, tmp_path
+    ):
+        # When the unprompted retry loops too, keep the prompted rendering as
+        # transcribe_with_config's own cleanup already left it, rather than
+        # hand-rolling another collapse (which used to run unconditionally,
+        # ignoring a collapse_whisper_repetitions=False the user chose).
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        prompted_sentence = "if the player is level one they are going to be level one."
+        retry_sentence = "we need to update the database before lunch today."
+        prompted_loop = " ".join([prompted_sentence] * 13)
+        retry_loop = " ".join([retry_sentence] * 13)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return prompted_loop if context else retry_loop
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""
+        assert contexts_heard[1] == ""
+        assert store[1].lower() == prompted_sentence
+
+    def test_an_empty_retry_does_not_replace_a_useful_prompted_intro(
+        self, app, monkeypatch, tmp_path
+    ):
+        # "The actual release date is Friday." survived cleanup fine; the
+        # loop that followed it triggered a retry, and an empty unprompted
+        # re-hear must never overwrite the valid introduction with "[empty]".
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        intro = "The actual release date is Friday."
+        loop_sentence = "if the player is level one they are going to be level one."
+        prompted = f"{intro} " + " ".join([loop_sentence] * 13)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return prompted if context else ""
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[1] == ""           # retried
+        assert store[1] != "[empty]"
+        assert "release date" in store[1].lower()  # the valid intro survives
+
+    def test_empty_retry_fallback_respects_collapse_whisper_repetitions_off(
+        self, app, monkeypatch, tmp_path
+    ):
+        # The old manual re-collapse in the "retry didn't help" fallback ran
+        # unconditionally. Falling back to the already-cleaned prompted text
+        # must not apply a collapse the user's own config turned off.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(
+            WApp, "_asr_config_for_dictation",
+            lambda self: {"collapse_whisper_repetitions": False},
+        )
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        loop_sentence = "if the player is level one they are going to be level one."
+        prompted = " ".join([loop_sentence] * 13)
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return prompted if context else ""
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[1] == ""
+        # collapse_whisper_repetitions is off: the fallback keeps all 13
+        # copies rather than quietly collapsing them like the old manual
+        # re-collapse did regardless of this setting.
+        assert len(store[1].split()) == len(prompted.split())
+
+    def test_a_short_correct_loop_retry_beats_a_longer_cleaned_echo(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r2: default cleanup leaves five words, which looked
+        # truncated, and that branch's word-count bar rejected the retry.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 17.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        loop_sentence = "We need to go home."
+        looped = " ".join([loop_sentence] * 13)
+        retry_sentence = "Take the next exit and then turn left."
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return looped if context else retry_sentence
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""   # first heard with the prompt, looped
+        assert contexts_heard[1] == ""   # retried without it
+        assert store[1].lower() == retry_sentence.lower()
+
+    def test_a_failed_loop_retry_keeps_text_and_a_request_abandoned_still_propagates(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r2: a failed retry cost the whole chunk; keeping the
+        # prompted text must not swallow a retirement (RequestAbandoned is a
+        # TranscriptionError).
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+        app.start_recording()
+
+        # --- 1. ordinary retry failure: the cleaned prompted text survives ---
+        intro = "The actual release date is Friday."
+        loop_sentence = "if the player is level one they are going to be level one."
+        prompted = f"{intro} " + " ".join([loop_sentence] * 13)
+        contexts_heard = []
+
+        class CrashingBackend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                if context:
+                    return prompted
+                raise transcriber.TranscriptionError("backend crashed")
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: CrashingBackend())
+        chunk1 = tmp_path / "chunk1.wav"
+        chunk1.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk1), 1, app.session_generation, store)
+
+        assert contexts_heard[1] == ""        # the retry was attempted
+        assert store[1] != "[error]"
+        assert "release date" in store[1].lower()  # the cleaned intro survives
+        retry_failure_logs = [m for m in app.logs if "retry failed" in m.lower()]
+        assert retry_failure_logs
+        # Scoped to the new retry-failure log line itself (Sol loop r3, minor
+        # 5): handle_event separately logs a transcript preview when the
+        # CHUNK_TRANSCRIBED event is processed, which predates this branch
+        # and is out of scope for "no transcript text reaches this log line".
+        assert not any("level one" in message.lower() for message in retry_failure_logs)
+
+        # --- 2. the dictation is retired mid-retry: [error], not a swallow ---
+        built = []
+
+        class AbandoningBackend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                if context:
+                    cls.abandon_requests()   # retirement lands right after the prompted decode
+                    return prompted
+                pytest.fail("the re-hear of a retired dictation got an answer")
+
+        def get_backend(_config):
+            built.append(True)
+            return AbandoningBackend()
+
+        monkeypatch.setattr(transcriber, "get_backend", get_backend)
+        chunk2 = tmp_path / "chunk2.wav"
+        chunk2.write_bytes(b"\x00")
+        # store[1] (kept above) becomes chunk 2's prompt context.
+        app._transcribe_chunk(str(chunk2), 2, app.session_generation, store)
+
+        assert built == [True], "the re-hear of a retired dictation built a backend"
+        assert store[2] == "[error]"
+
+    def test_a_retirement_during_the_retry_itself_is_never_trusted(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r3, minor 4: the test above abandons the PROMPTED decode,
+        # before the retry backend even exists — transcribe_with_config's own
+        # _check_not_abandoned calls (around backend.transcribe) stop the
+        # retry from ever being attempted. This is the gap they didn't cover:
+        # the retry itself returns normally, but the dictation was retired
+        # while it ran. That text must never become the chunk's result or
+        # reach a success event.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+        app.start_recording()
+
+        loop_sentence = "if the player is level one they are going to be level one."
+        prompted = " ".join([loop_sentence] * 13)
+        retry_text = "the actual release date for the update is next friday afternoon."
+
+        class RetiringBackend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                if context:
+                    return prompted
+                cls.abandon_requests()   # retires after the retry decodes, before it is used
+                return retry_text
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: RetiringBackend())
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert store[1] == "[error]"   # never the retry's text, never a swallow
+        assert app.event_queue.empty()  # no success event carrying that text
+        assert not any("release date" in message.lower() for message in app.logs)
+
+    def test_a_closing_quote_boundary_triggers_no_retry(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r3, finding 1: a closing quote right after the sentence
+        # terminator used to defeat sentence splitting, making three quoted
+        # sentences look like one span that a word-window scan then matched
+        # across — which also looked like a loop and triggered an
+        # unnecessary, word-destroying re-hear.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 10.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        text = (
+            '"We need to go home." "We need to go home." '
+            '"We need to go home before dinner."'
+        )
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return text
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(contexts_heard) == 1   # no retry: never looked like a loop
+        assert "before dinner" in store[1]  # the third sentence's words survive
+
+    def test_a_quoted_list_with_no_periods_triggers_no_retry(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r4, finding 3: the same trap one token further out — a
+        # quoted list item with no terminal period at all. _SENTENCE_END
+        # can't split this (it needs [.!?]), so only the phrase-window span
+        # boundary keeps the window scan off the fourth item.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 10.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        item = '"we need to go home",'
+        text = " ".join([item] * 4 + ['"we need to go home before dinner"'])
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return text
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(contexts_heard) == 1   # no retry: never looked like a loop
+        assert "before dinner" in store[1]  # the fourth item's words survive
+
+    def test_a_backtick_quoted_list_triggers_no_retry(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r5, finding 1: _loop_norm stripped backticks but no span
+        # boundary recognised them, so a window ran across the items, the
+        # four-item list looked like a loop, and the re-hear replaced it.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 10.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        item = "`we need to update the database before lunch.`,"
+        text = " ".join([item] * 4 + ["`we need to update the database before lunch tomorrow.`"])
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return text if context else "Lunch."
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(contexts_heard) == 1   # no retry: never looked like a loop
+        assert "before lunch tomorrow" in store[1]  # the last item survives whole
+
+    def test_a_quoted_list_joined_by_or_triggers_no_retry(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r6: four quoted items joined by "or", then a longer fifth
+        # holding "or" itself — its prefix read as a fifth "<item> or", so the
+        # list looked like a loop and a one-word retry replaced all of it.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 10.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        text = " or ".join(['"we need to go home"'] * 4) + ' or "we need to go home or stay here"'
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return text if context else "Leave."
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(contexts_heard) == 1   # no retry: never looked like a loop
+        assert store[1].count("we need to go home") == 5
+        assert "or stay here" in store[1]
+
+    def test_a_possessive_loop_is_retried_and_a_looping_retry_is_rejected(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r5, finding 2: every "players'" ended a phrase span, so
+        # five copies never looked like a loop (no re-hear, no collapse), and
+        # a retry that looped the same way was accepted over the prompted text.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        prompted_copy = "we changed the players' equipment before lunch"
+        retry_copy = "we moved the coaches' meeting before the game"
+        prompted = " ".join([prompted_copy] * 5) + "."
+        retry = " ".join([retry_copy] * 5) + "."
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return prompted if context else retry
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""
+        assert contexts_heard[1:] == [""]   # retried once, without the prompt
+        assert store[1].lower().rstrip(".") == prompted_copy   # looping retry rejected
+
+    def test_a_nonrepeating_chunk_triggers_no_retry_regardless_of_rate(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Word rate is no longer part of loop detection at all (Sol loop
+        # r4) — 31 varied words in a 5 s chunk is fast, but it is not a loop.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 5.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        text = (
+            "Pack my red bag with the clean socks then put that blue coat by "
+            "the front door and leave the keys on top so I can find them "
+            "when I leave."
+        )
+        assert len(text.split()) == 31
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return text
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(contexts_heard) == 1   # no retry at all
+        assert "leave the keys" in store[1]
+
+    @pytest.mark.parametrize("copies", [3, 4])
+    def test_three_and_four_copies_trigger_no_retry_and_text_is_unchanged(
+        self, app, monkeypatch, tmp_path, copies
+    ):
+        # Sol loop r4: one bar now (LOOP_MIN_RUN, 5 FULL copies). Below it
+        # nothing happens at all — no retry, no collapse — however many
+        # times someone says a short sentence on purpose.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 17.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        sentence = "We need to go home."
+        prompted = " ".join([sentence] * copies)
+        calls = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                calls.append(context)
+                return prompted
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(calls) == 1   # the backend was never asked for a retry
+        assert store[1].lower() == prompted.lower()
+
+    def test_five_copies_triggers_retry_and_a_one_copy_retry_is_accepted(
+        self, app, monkeypatch, tmp_path
+    ):
+        # The bar itself: 5 FULL copies suspects a loop and triggers the
+        # re-hear, and a one-copy, non-looped retry is accepted outright —
+        # no word-count comparison against the prompted text at all.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 17.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        sentence = "We need to go home."
+        prompted = " ".join([sentence] * 5)
+        retry_sentence = "Leave."
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return prompted if context else retry_sentence
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[1] == ""        # the retry was attempted
+        assert store[1].lower() == retry_sentence.lower()
+
+    def test_a_retirement_followed_by_a_retry_failure_errors_the_chunk(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Sol loop r4, finding 5: a retirement could land between the
+        # prompted decode and the retry's own failure. The prompted text
+        # used to be salvaged and the chunk still emitted CHUNK_TRANSCRIBED
+        # successfully; it must go [error] via the outer handler instead.
+        from wayfinder.core import transcriber
+        cls = transcriber.WhisperServerBackend
+        monkeypatch.setattr(cls, "_abandoned", cls._abandoned)
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+        app.start_recording()
+
+        loop_sentence = "if the player is level one they are going to be level one."
+        prompted = " ".join([loop_sentence] * 13)
+
+        class RetiringThenCrashingBackend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                if context:
+                    return prompted
+                cls.abandon_requests()   # retires, then the retry itself crashes
+                raise transcriber.TranscriptionError("backend crashed")
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: RetiringThenCrashingBackend())
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert store[1] == "[error]"    # never the stale prompted text
+        assert app.event_queue.empty()  # no success event carrying it
+        assert not any("kept prompted text" in m.lower() for m in app.logs)
+
+    def test_the_reported_shape_is_recovered_end_to_end(
+        self, app, monkeypatch, tmp_path
+    ):
+        # The user's real case, through the full chunk pipeline: 3 copies of
+        # a "level 5" sentence, then a stuck decode — 8 full copies of a
+        # "level 1" sentence, one cut short, then one more full copy. The
+        # whole shape collapses (it is a loop), so it is re-heard, and the
+        # real, different next speech replaces it.
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation", lambda self: {})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+
+        level5 = "If the player is level 5 they're going to be level 1."
+        level1 = "If the player is level 1 they're going to be level 1."
+        level1_cut = "If the player is level 1."
+        looped = " ".join([level5] * 3 + [level1] * 8 + [level1_cut, level1])
+        real_speech = "the actual release date for the update is next friday afternoon."
+        contexts_heard = []
+
+        class Backend:
+            custom_vocabulary = []
+
+            def transcribe(self, audio_path, context=""):
+                contexts_heard.append(context)
+                return looped if context else real_speech
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert contexts_heard[0] != ""   # first heard with the prompt, looped
+        assert contexts_heard[1] == ""   # retried without it
+        assert store[1].lower() == real_speech
+        assert any("looped" in message.lower() for message in app.logs)
+
+
 class TestChunkSilenceGuard:
+    def test_noise_like_speech_is_heard_once_without_prior_context(
+        self, app, monkeypatch, tmp_path
+    ):
+        # Joining the two fixes must not re-prime noise-like audio during a
+        # loop retry. The noise path deliberately has no prior-chunk prompt.
+        chunk = _steady_noise_wav(tmp_path)
+        loop = " ".join(["we need to finish this project today."] * 5)
+        calls = []
+
+        def transcribe(_path, _config, **kwargs):
+            calls.append(kwargs)
+            kwargs["raw_out"].append(loop)
+            return "real words from a noisy recording"
+
+        monkeypatch.setattr(wayfinder_main, "transcribe_with_config", transcribe)
+        store = ["words from the prior chunk"]
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(calls) == 1
+        assert calls[0]["unprompted"] is True
+        assert calls[0]["context"] == ""
+        assert store[1] == "real words from a noisy recording"
+
     def test_silent_trailing_chunk_skips_whisper_and_completes_store(
         self, app, monkeypatch, tmp_path
     ):

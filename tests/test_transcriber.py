@@ -1446,6 +1446,103 @@ class TestWhisperArtifactCleanup:
             "Hello [MUSIC] world.", collapse_repetitions=False
         ) == "Hello world."
 
+    def test_a_sentence_length_repetition_loop_is_collapsed(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # _collapse_whisper_repetitions alone only tries 2-4 word windows, so
+        # a stuck decode looping a whole sentence needs the sibling collapse
+        # that clean_whisper_artifacts also runs under the same switch. Five
+        # copies clears LOOP_MIN_RUN, the one bar cleanup and the chunk-level
+        # re-hear now share (Sol loop r4) — three intentional copies must
+        # survive cleanup; see test_three_ordinary_paced_copies_survive_
+        # cleanup_in_full below.
+        pre = "Let's go over the plan first."
+        loop = "If the player is level one they're going to be level one."
+        looped_text = " ".join([pre, loop, loop, loop, loop, loop])
+        assert clean_whisper_artifacts(looped_text) == f"{pre} {loop}"
+        assert clean_whisper_artifacts(looped_text, collapse_repetitions=False) == looped_text
+
+    def test_three_ordinary_paced_copies_survive_cleanup_in_full(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # Sol loop r3: three intentional, ordinary-paced repeats of a short
+        # sentence used to collapse to one copy even with no chunk timing to
+        # suggest a stuck decode. clean_whisper_artifacts runs at LOOP_MIN_RUN
+        # (5) now, so 3-4 copies survive; only a longer run (5+, see
+        # test_a_sentence_length_repetition_loop_is_collapsed above) is
+        # collapsed outright.
+        sentence = "We need to go home."
+        text = " ".join([sentence] * 3)
+        assert clean_whisper_artifacts(text) == text
+
+    def test_an_unpunctuated_phrase_x3_survives_cleanup_in_full(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        phrase = "we need to go home"
+        text = " ".join([phrase] * 3)
+        assert clean_whisper_artifacts(text) == text
+
+    def test_a_closing_quote_at_a_sentence_boundary_survives_cleanup(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # Sol loop r3, finding 1: a closing quote right after the period used
+        # to defeat sentence splitting and let a window scan delete real
+        # words at the far sentence's end.
+        text = (
+            '"We need to go home." "We need to go home." '
+            '"We need to go home before dinner."'
+        )
+        assert clean_whisper_artifacts(text) == text
+
+    def test_a_phrase_loop_inside_one_sentence_collapses_despite_terminal_punctuation(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # A single terminal period hides the loop from collapse_sentence_loops
+        # (it's all one "sentence"); collapse_phrase_window_loops used to skip
+        # any punctuated text entirely, so this slipped through both. Five
+        # copies clears the one bar, LOOP_MIN_RUN (Sol loop r4).
+        phrase = "we need to update the database before lunch"
+        looped_text = " ".join([phrase] * 5) + "."
+        cleaned = clean_whisper_artifacts(looped_text)
+        assert cleaned != looped_text
+        assert cleaned.count("database") == 1
+
+    def test_prefix_sentences_do_not_inflate_three_full_copies_past_the_bar(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # Sol loop r4, finding 2: three full copies plus two shorter,
+        # distinct sentences that happen to be prefixes of the anchor used
+        # to collapse all five — the prefixes inflated the run's length past
+        # the bar even though full_copies alone (3) never reached it.
+        anchor = "We need to leave this building right now."
+        shorter = "We need to leave this building."
+        shortest = "We need to leave."
+        text = " ".join([anchor] * 3 + [shorter, shortest])
+        assert clean_whisper_artifacts(text) == text
+
+    def test_decimal_sentences_keep_their_numeric_meaning_through_cleanup(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # Sol loop r4, finding 4: _norm stripped a leading decimal point,
+        # equating ".5" and "5" and collapsing distinct sentences into one.
+        decimal = "Please set the scale to .5."
+        whole = "Please set the scale to 5."
+        alternating = " ".join([decimal, whole, decimal, whole, decimal])
+        assert clean_whisper_artifacts(alternating) == alternating
+        assert clean_whisper_artifacts(" ".join([decimal] * 5)) == decimal
+
+    def test_the_reported_shape_collapses_fully_except_the_intentional_copies(self):
+        from wayfinder.core.transcriber import clean_whisper_artifacts
+
+        # The user's real case (Sol loop r4): 3 intentional copies of a
+        # "level 5" sentence, then a stuck decode — 8 full copies of a
+        # "level 1" sentence, one cut short, then one more full copy.
+        level5 = "If the player is level 5 they're going to be level 1."
+        level1 = "If the player is level 1 they're going to be level 1."
+        level1_cut = "If the player is level 1."
+        text = " ".join([level5] * 3 + [level1] * 8 + [level1_cut, level1])
+        assert clean_whisper_artifacts(text) == " ".join([level5] * 3 + [level1])
+
     @pytest.mark.parametrize("text", [
         "I'll see you next time.",
         "We'll see you next time.",
@@ -1740,6 +1837,50 @@ class TestTranscribeWithConfig:
         mock_get_backend.return_value = mock_backend
 
         assert transcribe_with_config(str(sample_audio_file), sample_config) == ""
+
+    @patch("wayfinder.core.transcriber.get_backend")
+    def test_raw_out_captures_the_backends_text_before_cleanup(
+        self, mock_get_backend, sample_config: dict, sample_audio_file: Path
+    ):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        # With the default config, cleanup collapses a 13-copy sentence loop
+        # before returning. A caller deciding "did this chunk loop?" off the
+        # return value alone would never see it — raw_out hands back the
+        # backend's text untouched (Sol loop r1).
+        loop = "if the player is level one they are going to be level one."
+        raw = " ".join([loop] * 13)
+        backend = MagicMock()
+        backend.transcribe.return_value = raw
+        mock_get_backend.return_value = backend
+        sample_config.update({"post_processing_enabled": False})
+
+        raw_out = []
+        result = transcribe_with_config(str(sample_audio_file), sample_config, raw_out=raw_out)
+
+        assert raw_out == [raw]
+        assert len(raw_out[0].split()) == len(raw.split())
+        assert len(result.split()) < len(raw.split())  # the default cleanup collapsed it
+
+    @patch("wayfinder.core.transcriber.get_backend")
+    def test_a_phrase_loop_with_terminal_punctuation_collapses_under_ensure_punctuation(
+        self, mock_get_backend, sample_config: dict, sample_audio_file: Path
+    ):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        # End to end through the ensure_punctuation=True path (the default):
+        # the loop is one "sentence" by punctuation, so it must be caught by
+        # word-window detection, not sentence-level detection. Five copies to
+        # clear the one bar (LOOP_MIN_RUN; Sol loop r4).
+        phrase = "we need to update the database before lunch"
+        backend = MagicMock()
+        backend.transcribe.return_value = " ".join([phrase] * 5) + "."
+        mock_get_backend.return_value = backend
+        sample_config.update({"ensure_punctuation": True, "post_processing_enabled": False})
+
+        result = transcribe_with_config(str(sample_audio_file), sample_config)
+
+        assert result.lower().count("database") == 1
 
 
 @pytest.mark.linux_only

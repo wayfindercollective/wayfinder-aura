@@ -3460,6 +3460,19 @@ def clean_whisper_artifacts(
     # the other artifact/silence guards in this function.
     if collapse_repetitions:
         text = _collapse_whisper_repetitions(text)
+        # _collapse_whisper_repetitions only tries 2-4 word windows, so a stuck
+        # decode that loops a whole SENTENCE (whisper-server runs -nf, so it
+        # never retries a looping decode itself) passes through untouched.
+        # Same one bar as wayfinder_main's chunk_text_looks_looped (Sol loop
+        # r4): LOOP_MIN_RUN FULL copies, so 3-4 copies of an intentionally
+        # repeated sentence or unpunctuated phrase survive cleanup too.
+        from wayfinder.core.chunking import (
+            collapse_phrase_window_loops,
+            collapse_sentence_loops,
+        )
+
+        text = collapse_sentence_loops(text)
+        text = collapse_phrase_window_loops(text)
 
     # Clean up multiple spaces
     text = re.sub(r'\s+', ' ', text)
@@ -3914,12 +3927,13 @@ def ensure_punctuation_postprocess(text: str) -> str:
 
 
 def transcribe_with_config(
-    audio_path: str, 
-    config: dict, 
+    audio_path: str,
+    config: dict,
     context: str = "",
     skip_post_processing: bool = False,
     request_token: Optional[int] = None,
     unprompted: bool = False,
+    raw_out: Optional[list] = None,
 ) -> str:
     """
     Transcribe using settings from config dictionary.
@@ -3940,6 +3954,12 @@ def transcribe_with_config(
             recognizer's own output is then held to the two-word rule (and
             checked for a known hallucination phrase) before anything else —
             including Raw Transcript's early return — can touch it.
+        raw_out: When given, the backend's text is appended to it right after
+            backend.transcribe — before any Aura cleanup. A caller that needs
+            to know whether THIS chunk looped reads raw_out[0] rather than the
+            returned text: with the default config, clean_whisper_artifacts
+            already collapses a repetition loop before returning, so a check
+            against the cleaned text never sees it (Sol loop r1).
 
     Returns:
         Transcribed text string
@@ -3977,6 +3997,9 @@ def transcribe_with_config(
                     heard_by.custom_vocabulary = []
             context = ""
         text = backend.transcribe(audio_path, context=context)
+
+    if raw_out is not None:
+        raw_out.append(text)
 
     if unprompted:
         # Evaluate the RECOGNIZER's own words here, before vocabulary
