@@ -3907,15 +3907,145 @@ def vocabulary_prompt_echo_terms(text: str, custom_vocabulary: list | None = Non
     return []
 
 
-def vocabulary_terms_heard(terms: list, text: str) -> bool:
-    """Whether at least half of *terms* appear as words in *text*."""
-    words = tuple(word for word, _, _ in _echo_words(text))
-    found = 0
-    for term in terms:
-        key = tuple(word for word, _, _ in _echo_words(term))
-        if key and any(words[i:i + len(key)] == key for i in range(len(words))):
-            found += 1
-    return bool(terms) and 2 * found >= len(terms)
+def _sound_key(letters: str) -> str:
+    """A rough English sound key: "arawn" and "aaron" both give "arn"."""
+    import re
+
+    s = letters
+    for pattern, sound in ((r"ph", "f"), (r"ck", "k"), (r"c(?=[eiy])", "s"),
+                           (r"[cq]", "k"), (r"x", "ks"), (r"z", "s"),
+                           (r"dg", "j"), (r"th", "t")):
+        s = re.sub(pattern, sound, s)
+    if not s:
+        return ""
+    key = ("a" if s[0] in "aeiouy" else s[0]) + re.sub(r"[aeiouywh]", "", s[1:])
+    return re.sub(r"(.)\1+", r"\1", key)
+
+
+def _sounds_like(heard: str, term: str) -> bool:
+    """Whether *heard* (letters only) is *term* or a near-miss of it."""
+    from difflib import SequenceMatcher
+
+    if heard == term or SequenceMatcher(None, heard, term).ratio() >= 0.75:
+        return True
+    # Two-letter keys ("ar" for Aura) would match "are", "or" and "air".
+    heard_key, term_key = _sound_key(heard), _sound_key(term)
+    return len(term_key) >= 3 and SequenceMatcher(None, heard_key, term_key).ratio() >= 0.8
+
+
+def vocabulary_echo_reproduced(echoed: list, text: str) -> bool:
+    """Whether *text*, heard without a prompt, says the *echoed* list again.
+
+    That takes a list: two or more of the terms, in their order, one after
+    another (one stray word allowed between), and at least half of them. A
+    term can come back misspelled ("Aaron" for Arawn, "cube cuddle" for
+    kubectl): unprompted Whisper has no spelling for the user's own words.
+    One term inside a sentence ("Open Aura settings.") is not the list.
+    """
+    words = [word for word, _, _ in _echo_words(text)]
+    terms = ["".join(word for word, _, _ in _echo_words(term)) for term in echoed]
+    terms = [term for term in terms if term]
+    if len(terms) < 2:
+        return False
+
+    def term_size(i, q):
+        for size in (1, 2, 3):
+            if i + size <= len(words) and _sounds_like("".join(words[i:i + size]), terms[q]):
+                return size
+        return 0
+
+    best = 0
+    for start in range(len(words)):
+        run, q, i, gap = 0, 0, start, 0
+        while i < len(words) and q < len(terms):
+            for r in range(q, len(terms)):   # Whisper may drop a term
+                size = term_size(i, r)
+                if size:
+                    run, q, i, gap = run + 1, r + 1, i + size, 0
+                    break
+            else:
+                if run == 0 or gap == 1:
+                    break
+                gap += 1
+                i += 1
+        best = max(best, run)
+    return best >= 2 and 2 * best >= len(terms)
+
+
+def _prompt_vocabulary(backend, context: str) -> list:
+    """The vocabulary terms *backend* actually wrote into this request's prompt.
+
+    Every backend joins a contiguous tail of custom_vocabulary with ", " (the
+    server keeps the last 60; Groq drops the list when it would not fit), so
+    the longest such tail found in the built prompt is what Whisper saw.
+    """
+    vocabulary = [str(term) for term in (getattr(backend, "custom_vocabulary", None) or [])]
+    build = getattr(backend, "_build_prompt", None)
+    if not vocabulary or build is None:
+        return []
+    try:
+        prompt = build(context)
+    except Exception:
+        return []
+    for size in range(len(vocabulary), 0, -1):
+        if ", ".join(vocabulary[-size:]) in prompt:
+            return vocabulary[-size:]
+    return []
+
+
+def _transcribe_unprompted(backend, audio_path: str) -> str:
+    """Decode *audio_path* with no prompt, vocabulary or context, then put the
+    backend's own prompt back. A Core ML server not yet loaded hands the audio
+    to its Metal stand-in, which would otherwise prime Whisper with its own."""
+    heard_by = [b for b in (backend, getattr(backend, "_ready_only_fallback", None))
+                if b is not None]
+    saved = [(b, getattr(b, "prompt", ""), getattr(b, "custom_vocabulary", []))
+             for b in heard_by]
+    try:
+        for b in heard_by:
+            b.prompt = ""
+            b.custom_vocabulary = []
+        return backend.transcribe(audio_path, context="")
+    finally:
+        for b, prompt, vocabulary in saved:
+            b.prompt = prompt
+            b.custom_vocabulary = vocabulary
+
+
+def _settle_vocabulary_prompt_echo(backend, audio_path: str, context: str,
+                                   text: str, request_token) -> str:
+    """The recognizer text to keep when *text* may be Whisper writing back its
+    vocabulary prompt ("and Aura, Wayfinder, r.") instead of speech.
+
+    The audio is heard once more without a prompt; this is ASR only, so Aura's
+    cleanup still runs exactly once, on whichever text is kept. When the
+    unprompted pass says the list again, the user said it and the primed
+    spelling stays. Otherwise the unprompted pass is what was said — often
+    nothing, or a known silence phrase, which counts as nothing. Raw
+    Transcript gets this too: the echo is Aura's own input coming back.
+    """
+    echoed = vocabulary_prompt_echo_terms(text, _prompt_vocabulary(backend, context))
+    if not echoed:
+        return text
+    try:
+        unprompted = _transcribe_unprompted(backend, audio_path)
+    except RequestAbandoned:
+        raise
+    except TranscriptionError as exc:
+        # A retirement while the recheck ran owns the outcome (Sol echo r1).
+        WhisperServerBackend._check_not_abandoned(request_token)
+        print(f"[Transcription] Prompt-echo recheck failed ({type(exc).__name__}); "
+              f"kept the prompted text")
+        return text
+    WhisperServerBackend._check_not_abandoned(request_token)
+    if vocabulary_echo_reproduced(echoed, unprompted):
+        return text
+    # Say what happened, never what was heard.
+    print(f"[Transcription] Whisper echoed {len(echoed)} vocabulary terms from its "
+          f"prompt; kept the unprompted pass")
+    if _is_whisper_phrase_hallucination(_noise_check_safety_copy(unprompted), noise_check=True):
+        return ""
+    return unprompted
 
 
 # Acronyms and abbreviations that should stay uppercase
@@ -4108,14 +4238,12 @@ def transcribe_with_config(
         backend = get_backend(config)
         WhisperServerBackend._check_not_abandoned(request_token)
         if unprompted:
-            # A Core ML server not yet loaded hands the audio to its Metal
-            # stand-in, which would otherwise prime Whisper with its own prompt.
-            for heard_by in (backend, getattr(backend, "_ready_only_fallback", None)):
-                if heard_by is not None:
-                    heard_by.prompt = ""
-                    heard_by.custom_vocabulary = []
             context = ""
-        text = backend.transcribe(audio_path, context=context)
+            text = _transcribe_unprompted(backend, audio_path)
+        else:
+            text = backend.transcribe(audio_path, context=context)
+            text = _settle_vocabulary_prompt_echo(
+                backend, audio_path, context, text, request_token)
 
     if raw_out is not None:
         raw_out.append(text)
@@ -4141,36 +4269,6 @@ def transcribe_with_config(
                 or not noise_transcript_has_speech(safety_text)):
             # Say the recording was rejected, never what was heard.
             return ""
-    else:
-        # Whisper can answer a quiet stretch with its own vocabulary prompt
-        # ("and Aura, Wayfinder, r."). That is Aura's input coming back, not
-        # anything the user said, so Raw Transcript gets the check too. Hear
-        # the audio once more without a prompt: if the terms do not come back,
-        # the unprompted pass (held to the noise rules above) is what was said.
-        echoed = vocabulary_prompt_echo_terms(text, getattr(backend, "custom_vocabulary", []))
-        if echoed:
-            unprompted_raw: list = []
-            try:
-                retry = transcribe_with_config(
-                    audio_path, config, context="",
-                    skip_post_processing=skip_post_processing,
-                    request_token=request_token, unprompted=True,
-                    raw_out=unprompted_raw,
-                )
-            except RequestAbandoned:
-                raise
-            except TranscriptionError as exc:
-                # Keep the prompted text: it may be real speech.
-                print(f"[Transcription] Prompt-echo recheck failed ({type(exc).__name__})")
-            else:
-                heard = unprompted_raw[0] if unprompted_raw else ""
-                if not vocabulary_terms_heard(echoed, heard):
-                    # Say what happened, never what was heard.
-                    print(f"[Transcription] Whisper echoed {len(echoed)} vocabulary "
-                          f"terms from its prompt; kept the unprompted pass")
-                    if raw_out:
-                        raw_out[-1] = heard
-                    return retry
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep
     # entitlement checks in get_backend(), but bypass every Aura text rewrite

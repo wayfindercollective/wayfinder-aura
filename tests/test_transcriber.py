@@ -4060,13 +4060,27 @@ class TestVocabularyPromptEcho:
             "Black Mesa, Wayfinder, Arawn", ["Black Mesa", "Wayfinder", "Arawn"])
         assert terms == ["black mesa", "wayfinder", "arawn"]
 
-    def test_terms_heard_needs_half_of_them(self):
-        from wayfinder.core.transcriber import vocabulary_terms_heard
+    @pytest.mark.parametrize("echoed, unprompted", [
+        (["arawn", "aura", "wayfinder"], "Aaron, Aura, Wayfinder."),
+        (["postgresql", "kubernetes", "kubectl"], "Postgres QL, Kubernetes, cube cuddle."),
+        (["rebase", "checkout", "stash"], "rebates, check out, stash"),
+    ])
+    def test_a_list_said_again_without_a_prompt_counts_misspelled(self, echoed, unprompted):
+        from wayfinder.core.transcriber import vocabulary_echo_reproduced
 
-        echoed = ["arawn", "aura", "wayfinder"]
-        assert vocabulary_terms_heard(echoed, "Aaron, Aura, Wayfinder.")
-        assert not vocabulary_terms_heard(echoed, "Aura.")
-        assert not vocabulary_terms_heard(echoed, "")
+        assert vocabulary_echo_reproduced(echoed, unprompted)
+
+    @pytest.mark.parametrize("echoed, unprompted", [
+        (["aura", "wayfinder"], "Open Aura settings."),   # Sol echo r1
+        (["aura", "wayfinder"], "Aura."),
+        (["arawn", "aura", "wayfinder"], ""),
+        (["arawn", "aura", "wayfinder"], "I'm turning it off now."),
+        (["arawn", "aura", "wayfinder"], "Are we going there or not?"),
+    ])
+    def test_one_term_or_none_is_not_the_list(self, echoed, unprompted):
+        from wayfinder.core.transcriber import vocabulary_echo_reproduced
+
+        assert not vocabulary_echo_reproduced(echoed, unprompted)
 
     # -- transcribe_with_config confirms the suspicion by hearing the audio
     # again without a prompt. --
@@ -4158,3 +4172,101 @@ class TestVocabularyPromptEcho:
         self.unprompted_answer = RequestAbandoned("retired")
         with pytest.raises(RequestAbandoned):
             transcribe_with_config(self.audio, self.config)
+
+    # -- Sol echo r1 --
+
+    def test_one_vocabulary_word_in_a_sentence_does_not_keep_the_echo(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "and Aura, Wayfinder, r."
+        self.unprompted_answer = "Open Aura settings."
+        assert transcribe_with_config(self.audio, self.config) == "Open Aura settings."
+
+    def test_a_one_word_answer_survives_the_recheck(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Aura, Wayfinder, r."
+        self.unprompted_answer = "Aura."
+        assert transcribe_with_config(self.audio, self.config) == "Aura."
+
+    def test_a_silence_phrase_from_the_recheck_counts_as_nothing(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.unprompted_answer = "Thank you."
+        assert transcribe_with_config(self.audio, self.config) == ""
+
+    def test_a_misspelled_recheck_keeps_the_primed_list(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["custom_vocabulary"] = ["PostgreSQL", "Kubernetes", "kubectl"]
+        self.prompted_answer = "PostgreSQL, Kubernetes, kubectl."
+        self.unprompted_answer = "Postgres QL, Kubernetes, cube cuddle."
+        # (Caps normalisation lowers "PostgreSQL" either way; the point is
+        # which decode was kept.)
+        kept = transcribe_with_config(self.audio, self.config)
+        assert kept.lower() == "postgresql, kubernetes, kubectl."
+
+    def test_only_the_vocabulary_the_server_sent_is_judged(self, decode, monkeypatch):
+        """The server prompt keeps the last 60 terms; a list of terms it never
+        sent cannot be its echo."""
+        from types import SimpleNamespace
+
+        from wayfinder.core import transcriber as T
+
+        terms = ["rebase", "checkout", "stash"] + [f"Term{n}" for n in range(77)]
+        heard = []
+        server = SimpleNamespace(prompt="Dictation.", custom_vocabulary=list(terms))
+        server._build_prompt = lambda context="": T.WhisperServerBackend._build_prompt(server, context)
+
+        def transcribe(audio_path, context=""):
+            heard.append(server._build_prompt(context))
+            return self.prompted_answer if server.custom_vocabulary else ""
+
+        server.transcribe = transcribe
+        monkeypatch.setattr(T, "get_backend", lambda config: server)
+        self.prompted_answer = "rebase, checkout, stash."
+        assert T.transcribe_with_config(self.audio, self.config) == "Rebase, checkout, stash."
+        assert len(heard) == 1 and "rebase" not in heard[0]
+        # The sent tail is still guarded.
+        self.prompted_answer = "Term70, Term71, Term72."
+        assert T.transcribe_with_config(self.audio, self.config) == ""
+        # The recheck put the server's own prompt back.
+        assert server.prompt == "Dictation." and server.custom_vocabulary == terms
+
+    @pytest.mark.parametrize("prompted, unprompted", [
+        ("Arawn, Aura, Wayfinder.", "Aaron, Aura, Wayfinder."),
+        ("and Aura, Wayfinder, r. I'm turning it off now.", "I'm turning it off now."),
+    ])
+    def test_cleanup_runs_once_on_the_kept_text(self, decode, monkeypatch, prompted, unprompted):
+        from wayfinder.core import postprocessor
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        cleaned = []
+        monkeypatch.setattr(postprocessor, "process_with_config",
+                            lambda text, config, *a, **k: cleaned.append(text) or text)
+        self.config["post_processing_enabled"] = True
+        self.prompted_answer, self.unprompted_answer = prompted, unprompted
+        transcribe_with_config(self.audio, self.config)
+        assert len(cleaned) == 1
+
+    def test_retirement_during_a_failed_recheck_is_not_swallowed(self, decode, monkeypatch):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperServerBackend, "_abandoned", 0)
+
+        class RetiredThenFailed(T.TranscriptionError):
+            def __init__(self):
+                T.WhisperServerBackend.abandon_requests()
+                super().__init__("server gone")
+
+        original = T.WhisperCppBackend.transcribe
+
+        def transcribe(backend, audio_path, context="", deadline=None):
+            if not backend.custom_vocabulary:
+                raise RetiredThenFailed()
+            return original(backend, audio_path, context=context)
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
+        with pytest.raises(T.RequestAbandoned):
+            T.transcribe_with_config(self.audio, self.config,
+                                     request_token=T.WhisperServerBackend.request_token())
