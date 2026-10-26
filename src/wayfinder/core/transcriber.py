@@ -124,6 +124,52 @@ def dictation_requests(token: Optional[int]):
         _dictation.token = None
 
 
+# What one decode sent Whisper, per thread (a dictation's chunks decode on
+# their own threads). Every decoder builds its request prompt through
+# _request_prompt(), so a server, its Core ML stand-in and the whisper-cli
+# fallback all obey one unprompted switch, and whichever of them actually ran
+# reports the prompt and vocabulary it sent (Sol echo r2).
+_decode = threading.local()
+
+
+def _request_prompt(backend, context: str = "") -> str:
+    """The prompt *backend* sends for this request; "" inside _decoding(unprompted=True)."""
+    prompt = "" if getattr(_decode, "unprompted", False) else backend._build_prompt(context)
+    _decode.sent = (prompt, [str(t) for t in (getattr(backend, "custom_vocabulary", None) or [])])
+    return prompt
+
+
+@contextlib.contextmanager
+def _decoding(unprompted: bool = False):
+    """Scope one decode: an unprompted one sends no prompt, vocabulary or
+    context from any decoder it reaches. _sent_vocabulary() then tells what
+    the decoder that ran last actually sent."""
+    previous = getattr(_decode, "unprompted", False)
+    _decode.unprompted = previous or unprompted
+    _decode.sent = None
+    try:
+        yield
+    finally:
+        _decode.unprompted = previous
+
+
+def _sent_vocabulary() -> list:
+    """The vocabulary terms in the prompt of the last decode in this scope.
+
+    Every decoder joins a contiguous tail of its custom_vocabulary with ", "
+    (the server keeps the last 60, whisper-cli all of them, Groq none when
+    they would not fit), so the longest such tail in the sent prompt is it.
+    """
+    sent = getattr(_decode, "sent", None)
+    if not sent:
+        return []
+    prompt, vocabulary = sent
+    for size in range(len(vocabulary), 0, -1):
+        if ", ".join(vocabulary[-size:]) in prompt:
+            return vocabulary[-size:]
+    return []
+
+
 def _retired_dictation() -> bool:
     """Whether this thread runs the requests of a dictation the app retired."""
     token = getattr(_dictation, "token", None)
@@ -582,7 +628,7 @@ class WhisperCppBackend(TranscriptionBackend):
             probe_timeout = max(0.2, min(5.0, remaining))
 
         # Build the final prompt with custom vocabulary and context
-        final_prompt = self._build_prompt(context)
+        final_prompt = _request_prompt(self, context)
 
         # Choose the executable before probing flags. CPU mode probes and executes
         # the dedicated CPU sibling when packaged, so the Vulkan executable is
@@ -1832,7 +1878,7 @@ class WhisperServerBackend(TranscriptionBackend):
         served_by = WhisperServerBackend._server_process
 
         # Build prompt
-        final_prompt = self._build_prompt(context)
+        final_prompt = _request_prompt(self, context)
 
         # Adaptive request timeout (GPU). A healthy GPU transcribes a chunk in a small
         # fraction of its audio length, but under transient GPU contention (e.g. the
@@ -2265,7 +2311,7 @@ class FasterWhisperBackend(TranscriptionBackend):
             language = self.language if self.language.lower() != "auto" else None
             
             # Build prompt with custom vocabulary and context
-            final_prompt = self._build_prompt(context)
+            final_prompt = _request_prompt(self, context)
             
             # Build temperature: use fallback list if temperature_fallback > 0
             temp = self.temperature
@@ -2493,7 +2539,7 @@ class GroqWhisperBackend(TranscriptionBackend):
             client = self._get_client()
             
             # Build prompt with context and vocabulary
-            prompt = self._build_prompt(context)
+            prompt = _request_prompt(self, context)
             
             # Log for debugging
             file_size = Path(audio_path).stat().st_size
@@ -2643,7 +2689,7 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             client = self._get_client()
             
             # Build prompt with context and vocabulary
-            prompt = self._build_prompt(context)
+            prompt = _request_prompt(self, context)
             
             # Log for debugging
             file_size = Path(audio_path).stat().st_size
@@ -3933,98 +3979,99 @@ def _sounds_like(heard: str, term: str) -> bool:
     return len(term_key) >= 3 and SequenceMatcher(None, heard_key, term_key).ratio() >= 0.8
 
 
-def vocabulary_echo_reproduced(echoed: list, text: str) -> bool:
-    """Whether *text*, heard without a prompt, says the *echoed* list again.
+# Word groupings two decodes of one utterance may split differently:
+# "check out" / "checkout", "Postgres QL" / "PostgreSQL".
+_AGREE_MOVES = ((1, 1), (1, 2), (1, 3), (2, 1), (3, 1))
+# Beyond this many word pairs the comparison is skipped (and the decodes are
+# treated as disagreeing): a single decode never carries that much speech.
+_AGREE_MAX_CELLS = 40_000
 
-    That takes a list: two or more of the terms, in their order, one after
-    another (one stray word allowed between), and at least half of them. A
-    term can come back misspelled ("Aaron" for Arawn, "cube cuddle" for
-    kubectl): unprompted Whisper has no spelling for the user's own words.
-    One term inside a sentence ("Open Aura settings.") is not the list.
+
+def vocabulary_echo_reproduced(echoed: list, prompted: str, unprompted: str) -> bool:
+    """Whether the unprompted pass heard the same utterance as the prompted
+    one, so the *echoed* terms in it were really said.
+
+    The two must agree as a whole: every word of an echoed term in the
+    prompted text matched in the unprompted one, and at least 80% of each
+    side's words matched, in order. Words may come back misspelled ("Aaron"
+    for Arawn, "cube cuddle" for kubectl): unprompted Whisper has no spelling
+    for the user's own words. Speech around the terms must match too, so
+    "Push Git to main." cannot vouch for "Git, Main, FoxGrid." and "This was
+    badly coded." cannot vouch for "Baldy, Codex." (Sol echo r2).
     """
-    words = [word for word, _, _ in _echo_words(text)]
-    terms = ["".join(word for word, _, _ in _echo_words(term)) for term in echoed]
-    terms = [term for term in terms if term]
-    if len(terms) < 2:
+    p = [word for word, _, _ in _echo_words(prompted)]
+    u = [word for word, _, _ in _echo_words(unprompted)]
+    n, m = len(p), len(u)
+    if not n or not m or n * m > _AGREE_MAX_CELLS:
         return False
 
-    def term_size(i, q):
-        for size in (1, 2, 3):
-            if i + size <= len(words) and _sounds_like("".join(words[i:i + size]), terms[q]):
-                return size
-        return 0
+    term_words = set()
+    for key in {tuple(w for w, _, _ in _echo_words(term)) for term in echoed}:
+        for i in range(n - len(key) + 1):
+            if tuple(p[i:i + len(key)]) == key:
+                term_words.update(range(i, i + len(key)))
 
-    best = 0
-    for start in range(len(words)):
-        run, q, i, gap = 0, 0, start, 0
-        while i < len(words) and q < len(terms):
-            for r in range(q, len(terms)):   # Whisper may drop a term
-                size = term_size(i, r)
-                if size:
-                    run, q, i, gap = run + 1, r + 1, i + size, 0
-                    break
-            else:
-                if run == 0 or gap == 1:
-                    break
-                gap += 1
-                i += 1
-        best = max(best, run)
-    return best >= 2 and 2 * best >= len(terms)
+    same: dict = {}
 
+    def alike(i, a, j, b):
+        pair = ("".join(p[i:i + a]), "".join(u[j:j + b]))
+        if pair not in same:
+            x, y = pair
+            same[pair] = x == y or (
+                0.6 * max(len(x), len(y)) <= min(len(x), len(y)) and _sounds_like(y, x))
+        return same[pair]
 
-def _prompt_vocabulary(backend, context: str) -> list:
-    """The vocabulary terms *backend* actually wrote into this request's prompt.
+    # score[i][j]: most words matched between p[i:] and u[j:].
+    score = [[0] * (m + 1) for _ in range(n + 1)]
+    move = [[None] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            best, how = score[i + 1][j], "p"
+            if score[i][j + 1] > best:
+                best, how = score[i][j + 1], "u"
+            for a, b in _AGREE_MOVES:
+                if i + a <= n and j + b <= m and a + b + score[i + a][j + b] > best \
+                        and alike(i, a, j, b):
+                    best, how = a + b + score[i + a][j + b], (a, b)
+            score[i][j], move[i][j] = best, how
 
-    Every backend joins a contiguous tail of custom_vocabulary with ", " (the
-    server keeps the last 60; Groq drops the list when it would not fit), so
-    the longest such tail found in the built prompt is what Whisper saw.
-    """
-    vocabulary = [str(term) for term in (getattr(backend, "custom_vocabulary", None) or [])]
-    build = getattr(backend, "_build_prompt", None)
-    if not vocabulary or build is None:
-        return []
-    try:
-        prompt = build(context)
-    except Exception:
-        return []
-    for size in range(len(vocabulary), 0, -1):
-        if ", ".join(vocabulary[-size:]) in prompt:
-            return vocabulary[-size:]
-    return []
+    matched_p, matched_u, i, j = set(), 0, 0, 0
+    while i < n and j < m:
+        how = move[i][j]
+        if how == "p":
+            i += 1
+        elif how == "u":
+            j += 1
+        else:
+            a, b = how
+            matched_p.update(range(i, i + a))
+            matched_u += b
+            i, j = i + a, j + b
+    return (term_words <= matched_p
+            and len(matched_p) >= 0.8 * n and matched_u >= 0.8 * m)
 
 
 def _transcribe_unprompted(backend, audio_path: str) -> str:
-    """Decode *audio_path* with no prompt, vocabulary or context, then put the
-    backend's own prompt back. A Core ML server not yet loaded hands the audio
-    to its Metal stand-in, which would otherwise prime Whisper with its own."""
-    heard_by = [b for b in (backend, getattr(backend, "_ready_only_fallback", None))
-                if b is not None]
-    saved = [(b, getattr(b, "prompt", ""), getattr(b, "custom_vocabulary", []))
-             for b in heard_by]
-    try:
-        for b in heard_by:
-            b.prompt = ""
-            b.custom_vocabulary = []
+    """Decode *audio_path* with no prompt, vocabulary or context — from the
+    backend, its Core ML stand-in or a whisper-cli fallback, whichever runs."""
+    with _decoding(unprompted=True):
         return backend.transcribe(audio_path, context="")
-    finally:
-        for b, prompt, vocabulary in saved:
-            b.prompt = prompt
-            b.custom_vocabulary = vocabulary
 
 
-def _settle_vocabulary_prompt_echo(backend, audio_path: str, context: str,
+def _settle_vocabulary_prompt_echo(backend, audio_path: str, sent_vocabulary: list,
                                    text: str, request_token) -> str:
     """The recognizer text to keep when *text* may be Whisper writing back its
     vocabulary prompt ("and Aura, Wayfinder, r.") instead of speech.
 
     The audio is heard once more without a prompt; this is ASR only, so Aura's
     cleanup still runs exactly once, on whichever text is kept. When the
-    unprompted pass says the list again, the user said it and the primed
-    spelling stays. Otherwise the unprompted pass is what was said — often
-    nothing, or a known silence phrase, which counts as nothing. Raw
+    unprompted pass heard the same utterance, the user said the terms and the
+    primed spelling stays. Otherwise the unprompted pass is what was said —
+    often nothing, or a known silence phrase, which counts as nothing. Raw
     Transcript gets this too: the echo is Aura's own input coming back.
+    *sent_vocabulary* is what the decoder that ran actually put in its prompt.
     """
-    echoed = vocabulary_prompt_echo_terms(text, _prompt_vocabulary(backend, context))
+    echoed = vocabulary_prompt_echo_terms(text, sent_vocabulary)
     if not echoed:
         return text
     try:
@@ -4038,7 +4085,7 @@ def _settle_vocabulary_prompt_echo(backend, audio_path: str, context: str,
               f"kept the prompted text")
         return text
     WhisperServerBackend._check_not_abandoned(request_token)
-    if vocabulary_echo_reproduced(echoed, unprompted):
+    if vocabulary_echo_reproduced(echoed, text, unprompted):
         return text
     # Say what happened, never what was heard.
     print(f"[Transcription] Whisper echoed {len(echoed)} vocabulary terms from its "
@@ -4241,9 +4288,11 @@ def transcribe_with_config(
             context = ""
             text = _transcribe_unprompted(backend, audio_path)
         else:
-            text = backend.transcribe(audio_path, context=context)
+            with _decoding():
+                text = backend.transcribe(audio_path, context=context)
+                sent_vocabulary = _sent_vocabulary()
             text = _settle_vocabulary_prompt_echo(
-                backend, audio_path, context, text, request_token)
+                backend, audio_path, sent_vocabulary, text, request_token)
 
     if raw_out is not None:
         raw_out.append(text)

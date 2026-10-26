@@ -3562,7 +3562,7 @@ class TestUnpromptedTranscription:
         heard = []
 
         def transcribe(backend, audio_path, context="", deadline=None):
-            heard.append(backend._build_prompt(context))
+            heard.append(T._request_prompt(backend, context))
             return "hello there"
 
         monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
@@ -3588,16 +3588,18 @@ class TestUnpromptedTranscription:
         from wayfinder.core import transcriber as T
 
         heard = []
+        # The stand-in builds its request prompt the way every decoder does.
         stand_in = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"])
+        stand_in._build_prompt = lambda context="": f"{context} Use proper punctuation Wayfinder"
         stand_in.transcribe = lambda audio_path, context="": heard.append(
-            (stand_in.prompt, stand_in.custom_vocabulary, context)) or "hello there"
+            T._request_prompt(stand_in, context)) or "hello there"
         server = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"],
                                  _ready_only_fallback=stand_in)
         # Core ML not loaded yet: the dictation goes to the Metal stand-in.
         server.transcribe = lambda audio_path, context="": stand_in.transcribe(audio_path, context)
         monkeypatch.setattr(T, "get_backend", lambda config: server)
         T.transcribe_with_config(self.audio, self.config, context="earlier words", unprompted=True)
-        assert heard == [("", [], "")]
+        assert heard == [""]
 
     def test_unprompted_sends_no_prompt_vocabulary_or_context(self, prompts):
         from wayfinder.core.transcriber import transcribe_with_config
@@ -4060,27 +4062,32 @@ class TestVocabularyPromptEcho:
             "Black Mesa, Wayfinder, Arawn", ["Black Mesa", "Wayfinder", "Arawn"])
         assert terms == ["black mesa", "wayfinder", "arawn"]
 
-    @pytest.mark.parametrize("echoed, unprompted", [
-        (["arawn", "aura", "wayfinder"], "Aaron, Aura, Wayfinder."),
-        (["postgresql", "kubernetes", "kubectl"], "Postgres QL, Kubernetes, cube cuddle."),
-        (["rebase", "checkout", "stash"], "rebates, check out, stash"),
+    @pytest.mark.parametrize("echoed, prompted, unprompted", [
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder.", "Aaron, Aura, Wayfinder."),
+        (["postgresql", "kubernetes", "kubectl"], "PostgreSQL, Kubernetes, kubectl.",
+         "Postgres QL, Kubernetes, cube cuddle."),
+        (["rebase", "checkout", "stash"], "rebase, checkout, stash.", "rebates, check out, stash"),
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, which one should I do first?",
+         "Aaron, Aura, Wayfinder, which one should I do first?"),
     ])
-    def test_a_list_said_again_without_a_prompt_counts_misspelled(self, echoed, unprompted):
+    def test_the_same_utterance_heard_again_counts_misspelled(self, echoed, prompted, unprompted):
         from wayfinder.core.transcriber import vocabulary_echo_reproduced
 
-        assert vocabulary_echo_reproduced(echoed, unprompted)
+        assert vocabulary_echo_reproduced(echoed, prompted, unprompted)
 
-    @pytest.mark.parametrize("echoed, unprompted", [
-        (["aura", "wayfinder"], "Open Aura settings."),   # Sol echo r1
-        (["aura", "wayfinder"], "Aura."),
-        (["arawn", "aura", "wayfinder"], ""),
-        (["arawn", "aura", "wayfinder"], "I'm turning it off now."),
-        (["arawn", "aura", "wayfinder"], "Are we going there or not?"),
+    @pytest.mark.parametrize("echoed, prompted, unprompted", [
+        (["aura", "wayfinder"], "and Aura, Wayfinder, r.", "Open Aura settings."),  # Sol echo r1
+        (["aura", "wayfinder"], "Aura, Wayfinder, r.", "Aura."),
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, Cure, g", ""),
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, Cure, g I'm turning it off now.",
+         "I'm turning it off now."),
+        (["git", "main", "foxgrid"], "Git, Main, FoxGrid.", "Push Git to main."),  # Sol echo r2
+        (["baldy", "codex"], "Baldy, Codex.", "This was badly coded."),             # Sol echo r2
     ])
-    def test_one_term_or_none_is_not_the_list(self, echoed, unprompted):
+    def test_a_different_utterance_does_not_vouch_for_the_terms(self, echoed, prompted, unprompted):
         from wayfinder.core.transcriber import vocabulary_echo_reproduced
 
-        assert not vocabulary_echo_reproduced(echoed, unprompted)
+        assert not vocabulary_echo_reproduced(echoed, prompted, unprompted)
 
     # -- transcribe_with_config confirms the suspicion by hearing the audio
     # again without a prompt. --
@@ -4101,8 +4108,9 @@ class TestVocabularyPromptEcho:
         self.unprompted_answer = ""
 
         def transcribe(backend, audio_path, context="", deadline=None):
-            heard.append(backend._build_prompt(context))
-            if backend.custom_vocabulary:
+            prompt = T._request_prompt(backend, context)
+            heard.append(prompt)
+            if prompt:
                 return self.prompted_answer
             if isinstance(self.unprompted_answer, Exception):
                 raise self.unprompted_answer
@@ -4219,8 +4227,9 @@ class TestVocabularyPromptEcho:
         server._build_prompt = lambda context="": T.WhisperServerBackend._build_prompt(server, context)
 
         def transcribe(audio_path, context=""):
-            heard.append(server._build_prompt(context))
-            return self.prompted_answer if server.custom_vocabulary else ""
+            prompt = T._request_prompt(server, context)
+            heard.append(prompt)
+            return self.prompted_answer if prompt else ""
 
         server.transcribe = transcribe
         monkeypatch.setattr(T, "get_backend", lambda config: server)
@@ -4259,14 +4268,48 @@ class TestVocabularyPromptEcho:
                 T.WhisperServerBackend.abandon_requests()
                 super().__init__("server gone")
 
-        original = T.WhisperCppBackend.transcribe
-
         def transcribe(backend, audio_path, context="", deadline=None):
-            if not backend.custom_vocabulary:
+            if not T._request_prompt(backend, context):
                 raise RetiredThenFailed()
-            return original(backend, audio_path, context=context)
+            return self.prompted_answer
 
         monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
         with pytest.raises(T.RequestAbandoned):
             T.transcribe_with_config(self.audio, self.config,
                                      request_token=T.WhisperServerBackend.request_token())
+
+    # -- Sol echo r2 --
+
+    @pytest.mark.parametrize("vocabulary, prompted, unprompted", [
+        (["Arawn", "Git", "Main", "FoxGrid"], "Git, Main, FoxGrid.", "Push Git to main."),
+        (["Zeathe", "Baldy", "Codex"], "Baldy, Codex.", "This was badly coded."),
+    ])
+    def test_vocabulary_words_in_another_sentence_keep_that_sentence(
+            self, decode, vocabulary, prompted, unprompted):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["custom_vocabulary"] = vocabulary
+        self.prompted_answer, self.unprompted_answer = prompted, unprompted
+        assert transcribe_with_config(self.audio, self.config) == unprompted
+
+    def test_the_decoder_that_ran_is_judged_and_rechecked(self, decode, monkeypatch, tmp_path):
+        """Server disabled: whisper-cli runs with all 80 terms (the server
+        would send 60), and the unprompted recheck must reach that cached CLI,
+        not just the server wrapper (Sol echo r2)."""
+        from wayfinder.core import transcriber as T
+
+        terms = ["main", "dev", "master"] + [f"Term{n}" for n in range(77)]
+        audio = tmp_path / "chunk.wav"
+        audio.write_bytes(b"RIFF")
+        server = T.WhisperServerBackend(prompt="Dictation.", custom_vocabulary=list(terms))
+        monkeypatch.setattr(T.WhisperServerBackend, "_disabled_now",
+                            classmethod(lambda cls: True))
+        monkeypatch.setattr(T.WhisperServerBackend, "_resolve_cli_binary",
+                            lambda self: "/bin/true")
+        monkeypatch.setattr(T, "get_backend", lambda config: server)
+        self.prompted_answer = "main, dev, master."
+
+        assert T.transcribe_with_config(str(audio), self.config) == ""
+        assert len(decode) == 2
+        assert "main, dev, master" in decode[0] and decode[1] == ""
+        assert server._cli_backend.custom_vocabulary == terms   # still primed next time
