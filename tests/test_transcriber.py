@@ -3562,7 +3562,7 @@ class TestUnpromptedTranscription:
         heard = []
 
         def transcribe(backend, audio_path, context="", deadline=None):
-            heard.append(backend._build_prompt(context))
+            heard.append(T._request_prompt(backend, context))
             return "hello there"
 
         monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
@@ -3588,16 +3588,18 @@ class TestUnpromptedTranscription:
         from wayfinder.core import transcriber as T
 
         heard = []
+        # The stand-in builds its request prompt the way every decoder does.
         stand_in = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"])
+        stand_in._build_prompt = lambda context="": f"{context} Use proper punctuation Wayfinder"
         stand_in.transcribe = lambda audio_path, context="": heard.append(
-            (stand_in.prompt, stand_in.custom_vocabulary, context)) or "hello there"
+            T._request_prompt(stand_in, context)) or "hello there"
         server = SimpleNamespace(prompt="Use proper punctuation", custom_vocabulary=["Wayfinder"],
                                  _ready_only_fallback=stand_in)
         # Core ML not loaded yet: the dictation goes to the Metal stand-in.
         server.transcribe = lambda audio_path, context="": stand_in.transcribe(audio_path, context)
         monkeypatch.setattr(T, "get_backend", lambda config: server)
         T.transcribe_with_config(self.audio, self.config, context="earlier words", unprompted=True)
-        assert heard == [("", [], "")]
+        assert heard == [""]
 
     def test_unprompted_sends_no_prompt_vocabulary_or_context(self, prompts):
         from wayfinder.core.transcriber import transcribe_with_config
@@ -4013,3 +4015,595 @@ class TestUnpromptedTranscription:
         out = capsys.readouterr().out
         assert "Secretword" not in out
         assert "Thank" not in out and "watching" not in out
+
+
+class TestVocabularyPromptEcho:
+    """On a quiet stretch Whisper can write back the vocabulary list it was
+    primed with ("and Aura, Wayfinder, r."): 7 times between 2026-09-28 and
+    2026-10-25, typed into the user's window ahead of what they said."""
+
+    VOCABULARY = ["Arawn", "Aura", "Wayfinder", "Cyrus", "Cru", "Git", "Main", "FoxGrid"]
+
+    @pytest.mark.parametrize("echo", [
+        # 2026-10-25: a 15 s quiet chunk, the list twice.
+        "Arawn, Aura, Wayfinder, Cure, g Arawn, Aura, Wayfinder, Cure, g",
+        "and Aura, Wayfinder, Cyrus, Cru, Git, Main",   # 1.2 s one-shot
+        "and Aura, Wayfinder, r.",                      # chunk after a silent one
+        "and Aura, Wayfinder, j.r.a.",                  # 3.6 s one-shot
+        "and Arawn, Aura, Wayfinder, Cure, and Lamp.",  # 2.4 s one-shot
+        "and Aram, Aura, Wayfinder, She",
+    ])
+    def test_observed_echoes_are_suspected(self, echo):
+        from wayfinder.core.transcriber import vocabulary_prompt_echo_terms
+
+        assert vocabulary_prompt_echo_terms(echo, self.VOCABULARY)
+
+    @pytest.mark.parametrize("speech", [
+        "Push to git main.",
+        "I'm working on Arawn, Aura and Wayfinder today.",
+        "Do you have the ability to get all this on Main for Arawn, Aura and the rest?",
+        "Yeah, that sounds good.",
+        "Wayfinder, Arawn, FoxGrid: three repos, three different deploys this week.",
+    ])
+    def test_ordinary_dictation_is_not_suspected(self, speech):
+        from wayfinder.core.transcriber import vocabulary_prompt_echo_terms
+
+        assert vocabulary_prompt_echo_terms(speech, self.VOCABULARY) == []
+
+    def test_nothing_is_suspected_without_vocabulary(self):
+        from wayfinder.core.transcriber import vocabulary_prompt_echo_terms
+
+        assert vocabulary_prompt_echo_terms("and Aura, Wayfinder, r.", []) == []
+
+    def test_multi_word_terms_match_whole(self):
+        from wayfinder.core.transcriber import vocabulary_prompt_echo_terms
+
+        terms = vocabulary_prompt_echo_terms(
+            "Black Mesa, Wayfinder, Arawn", ["Black Mesa", "Wayfinder", "Arawn"])
+        assert terms == ["black mesa", "wayfinder", "arawn"]
+
+    @pytest.mark.parametrize("echoed, prompted, unprompted", [
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder.", "Arawn, Aura, Way finder."),
+        (["postgresql", "kubernetes", "kubectl"], "PostgreSQL, Kubernetes, kubectl.",
+         "Postgres QL, Kubernetes, kube ctl."),
+        (["rebase", "checkout", "stash"], "rebase, checkout, stash.", "rebase, check out, stash"),
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, which one should I do first?",
+         "Arawn, Aura, Wayfinder, which one should I do furst?"),
+        (["black mesa", "wayfinder"], "Black Mesa, Wayfinder.", "Blackmesa, Wayfinder."),
+        # 8 of 9 and 7 of 8 words: one alignment clears both bars, though a
+        # tie on the summed count is short on the prompted side (Sol echo r7).
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, which one should I do first.",
+         "Arawn Aura Wayfinder which one I to first."),
+    ])
+    def test_the_same_utterance_heard_again_counts(self, echoed, prompted, unprompted):
+        """Every term spelled the same, word splits aside; only the words
+        around the terms may come back as near-misses."""
+        from wayfinder.core.transcriber import vocabulary_echo_reproduced
+
+        assert vocabulary_echo_reproduced(echoed, prompted, unprompted)
+
+    @pytest.mark.parametrize("echoed, prompted, unprompted", [
+        (["aura", "wayfinder"], "and Aura, Wayfinder, r.", "Open Aura settings."),  # Sol echo r1
+        (["aura", "wayfinder"], "Aura, Wayfinder, r.", "Aura."),
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, Cure, g", ""),
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, Cure, g I'm turning it off now.",
+         "I'm turning it off now."),
+        (["git", "main", "foxgrid"], "Git, Main, FoxGrid.", "Push Git to main."),  # Sol echo r2
+        (["baldy", "codex"], "Baldy, Codex.", "This was badly coded."),             # Sol echo r2
+        (["baldy", "codex"], "Baldy, Codex.", "badly coded."),                      # Sol echo r3
+        (["zeathe", "baldy", "codex"], "Zeathe, Baldy, Codex.", "Zeathe badly coded."),  # r4
+        (["black mesa", "wayfinder"], "Black Mesa, Wayfinder.", "Black Messa, Wayfender."),  # r4
+        (["git", "main"], "Git, Main.", "Push Git to main."),
+        # A misspelled term is no evidence, even in the same utterance: the
+        # unprompted words are typed instead (Sol echo r4).
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder.", "Aaron, Aura, Wayfinder."),
+        (["postgresql", "kubernetes", "kubectl"], "PostgreSQL, Kubernetes, kubectl.",
+         "Postgres QL, Kubernetes, cube cuddle."),
+        (["rebase", "checkout", "stash"], "rebase, checkout, stash.", "rebates, check out, stash"),
+    ])
+    def test_a_different_utterance_does_not_vouch_for_the_terms(self, echoed, prompted, unprompted):
+        from wayfinder.core.transcriber import vocabulary_echo_reproduced
+
+        assert not vocabulary_echo_reproduced(echoed, prompted, unprompted)
+
+    # -- transcribe_with_config confirms the suspicion by hearing the audio
+    # again without a prompt. --
+
+    @pytest.fixture
+    def decode(self, monkeypatch, tmp_path):
+        """Whisper that echoes its vocabulary when primed with one and
+        otherwise answers self.unprompted_answer. Returns the prompts heard."""
+        from types import SimpleNamespace
+
+        import wayfinder.license as lic
+        from wayfinder.core import transcriber as T
+
+        gate = SimpleNamespace(is_premium=True, has_feature=lambda f: True)
+        monkeypatch.setattr(lic, "get_feature_gate", lambda *a, **k: gate)
+        heard = []
+        self.prompted_answer = "Arawn, Aura, Wayfinder, Cure, g Arawn, Aura, Wayfinder, Cure, g"
+        self.unprompted_answer = ""
+
+        def transcribe(backend, audio_path, context="", deadline=None):
+            prompt = T._request_prompt(backend, context)
+            heard.append(prompt)
+            if prompt:
+                return self.prompted_answer
+            if isinstance(self.unprompted_answer, Exception):
+                raise self.unprompted_answer
+            return self.unprompted_answer
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
+        model = tmp_path / "ggml-base.en.bin"
+        model.write_bytes(b"\0")
+        self.config = {"transcription_backend": "whisper_cpp", "model_path": str(model),
+                       "whisper_server_mode": False, "post_processing_enabled": False,
+                       "output_tone": "professional",
+                       "custom_vocabulary": list(self.VOCABULARY)}
+        self.audio = str(tmp_path / "a.wav")
+        return heard
+
+    def test_echo_on_a_quiet_chunk_is_dropped(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        assert transcribe_with_config(self.audio, self.config, skip_post_processing=True) == ""
+        assert len(decode) == 2 and decode[1] == ""
+
+    def test_echo_ahead_of_speech_keeps_only_the_speech(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = ("Arawn, Aura, Wayfinder, Cure, g Arawn, Aura, Wayfinder, "
+                                "Cure, g I'm turning it off now.")
+        self.unprompted_answer = "I'm turning it off now."
+        assert transcribe_with_config(self.audio, self.config) == "I'm turning it off now."
+
+    def test_a_list_the_user_said_is_kept_as_primed(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Arawn, Aura, Wayfinder."
+        self.unprompted_answer = "Arawn, Aura, Way finder."
+        assert transcribe_with_config(self.audio, self.config) == "Arawn, Aura, Wayfinder."
+
+    def test_a_list_the_recheck_misspells_is_typed_as_heard(self, decode):
+        """The words still arrive, without the user's spelling (Sol echo r4)."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Arawn, Aura, Wayfinder."
+        self.unprompted_answer = "Aaron, Aura, Wayfinder."
+        assert transcribe_with_config(self.audio, self.config) == "Aaron, Aura, Wayfinder."
+
+    def test_ordinary_dictation_is_heard_once(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Yeah, that sounds good."
+        assert transcribe_with_config(self.audio, self.config) == "Yeah, that sounds good."
+        assert len(decode) == 1
+
+    def test_raw_out_keeps_the_first_decode_and_echo_out_says_what_happened(self, decode):
+        """raw_out stays the first decode's text (its loop-check contract);
+        echo_out tells the caller the audio was already heard unprompted."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        raw, outcome = [], []
+        assert transcribe_with_config(self.audio, self.config, raw_out=raw, echo_out=outcome) == ""
+        assert raw == [self.prompted_answer] and outcome == ["replaced"]
+
+        self.prompted_answer, self.unprompted_answer = "Arawn, Aura, Wayfinder.", "Arawn, Aura, Way finder."
+        outcome.clear()
+        transcribe_with_config(self.audio, self.config, echo_out=outcome)
+        assert outcome == ["kept"]
+
+        self.prompted_answer, outcome[:] = "Yeah, that sounds good.", []
+        transcribe_with_config(self.audio, self.config, echo_out=outcome)
+        assert outcome == []
+
+    def test_raw_transcript_drops_the_echo_too(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["raw_transcription"] = True
+        assert transcribe_with_config(self.audio, self.config) == ""
+
+    def test_failed_recheck_keeps_the_prompted_text(self, decode):
+        from wayfinder.core.transcriber import TranscriptionError, transcribe_with_config
+
+        self.prompted_answer = "and Aura, Wayfinder, r."
+        self.unprompted_answer = TranscriptionError("server gone")
+        assert transcribe_with_config(self.audio, self.config) == "And Aura, Wayfinder, r."
+
+    def test_retired_dictation_during_recheck_propagates(self, decode):
+        from wayfinder.core.transcriber import RequestAbandoned, transcribe_with_config
+
+        self.unprompted_answer = RequestAbandoned("retired")
+        with pytest.raises(RequestAbandoned):
+            transcribe_with_config(self.audio, self.config)
+
+    # -- Sol echo r1 --
+
+    def test_one_vocabulary_word_in_a_sentence_does_not_keep_the_echo(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "and Aura, Wayfinder, r."
+        self.unprompted_answer = "Open Aura settings."
+        assert transcribe_with_config(self.audio, self.config) == "Open Aura settings."
+
+    def test_a_one_word_answer_survives_the_recheck(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Aura, Wayfinder, r."
+        self.unprompted_answer = "Aura."
+        assert transcribe_with_config(self.audio, self.config) == "Aura."
+
+    def test_a_silence_phrase_from_the_recheck_counts_as_nothing(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.unprompted_answer = "Thank you."
+        assert transcribe_with_config(self.audio, self.config) == ""
+
+    def test_a_recheck_that_splits_the_terms_keeps_the_primed_list(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["custom_vocabulary"] = ["PostgreSQL", "Kubernetes", "kubectl"]
+        self.prompted_answer = "PostgreSQL, Kubernetes, kubectl."
+        self.unprompted_answer = "Postgres QL, Kubernetes, kube ctl."
+        # (Caps normalisation lowers "PostgreSQL" either way; the point is
+        # which decode was kept.)
+        kept = transcribe_with_config(self.audio, self.config)
+        assert kept.lower() == "postgresql, kubernetes, kubectl."
+
+    def test_only_the_vocabulary_the_server_sent_is_judged(self, decode, monkeypatch):
+        """The server prompt keeps the last 60 terms; a list of terms it never
+        sent cannot be its echo."""
+        from types import SimpleNamespace
+
+        from wayfinder.core import transcriber as T
+
+        terms = ["rebase", "checkout", "stash"] + [f"Term{n}" for n in range(77)]
+        heard = []
+        server = SimpleNamespace(prompt="Dictation.", custom_vocabulary=list(terms))
+        server._build_prompt = lambda context="": T.WhisperServerBackend._build_prompt(server, context)
+
+        def transcribe(audio_path, context=""):
+            prompt = T._request_prompt(server, context)
+            heard.append(prompt)
+            return self.prompted_answer if prompt else ""
+
+        server.transcribe = transcribe
+        monkeypatch.setattr(T, "get_backend", lambda config: server)
+        self.prompted_answer = "rebase, checkout, stash."
+        assert T.transcribe_with_config(self.audio, self.config) == "Rebase, checkout, stash."
+        assert len(heard) == 1 and "rebase" not in heard[0]
+        # The sent tail is still guarded.
+        self.prompted_answer = "Term70, Term71, Term72."
+        assert T.transcribe_with_config(self.audio, self.config) == ""
+        # The recheck put the server's own prompt back.
+        assert server.prompt == "Dictation." and server.custom_vocabulary == terms
+
+    @pytest.mark.parametrize("prompted, unprompted", [
+        ("Arawn, Aura, Wayfinder.", "Arawn, Aura, Way finder."),
+        ("Arawn, Aura, Wayfinder.", "Aaron, Aura, Wayfinder."),
+        ("and Aura, Wayfinder, r. I'm turning it off now.", "I'm turning it off now."),
+    ])
+    def test_cleanup_runs_once_on_the_kept_text(self, decode, monkeypatch, prompted, unprompted):
+        from wayfinder.core import postprocessor
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        cleaned = []
+        monkeypatch.setattr(postprocessor, "process_with_config",
+                            lambda text, config, *a, **k: cleaned.append(text) or text)
+        self.config["post_processing_enabled"] = True
+        self.prompted_answer, self.unprompted_answer = prompted, unprompted
+        transcribe_with_config(self.audio, self.config)
+        assert len(cleaned) == 1
+
+    def test_retirement_during_a_failed_recheck_is_not_swallowed(self, decode, monkeypatch):
+        from wayfinder.core import transcriber as T
+
+        monkeypatch.setattr(T.WhisperServerBackend, "_abandoned", 0)
+
+        class RetiredThenFailed(T.TranscriptionError):
+            def __init__(self):
+                T.WhisperServerBackend.abandon_requests()
+                super().__init__("server gone")
+
+        def transcribe(backend, audio_path, context="", deadline=None):
+            if not T._request_prompt(backend, context):
+                raise RetiredThenFailed()
+            return self.prompted_answer
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
+        with pytest.raises(T.RequestAbandoned):
+            T.transcribe_with_config(self.audio, self.config,
+                                     request_token=T.WhisperServerBackend.request_token())
+
+    # -- Sol echo r2 --
+
+    @pytest.mark.parametrize("vocabulary, prompted, unprompted", [
+        (["Arawn", "Git", "Main", "FoxGrid"], "Git, Main, FoxGrid.", "Push Git to main."),
+        (["Zeathe", "Baldy", "Codex"], "Baldy, Codex.", "This was badly coded."),
+        (["Zeathe", "Baldy", "Codex"], "Baldy, Codex.", "Badly coded."),   # Sol echo r3
+    ])
+    def test_vocabulary_words_in_another_sentence_keep_that_sentence(
+            self, decode, vocabulary, prompted, unprompted):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["custom_vocabulary"] = vocabulary
+        self.prompted_answer, self.unprompted_answer = prompted, unprompted
+        assert transcribe_with_config(self.audio, self.config) == unprompted
+
+    def test_the_decoder_that_ran_is_judged_and_rechecked(self, decode, monkeypatch, tmp_path):
+        """Server disabled: whisper-cli runs with all 80 terms (the server
+        would send 60), and the unprompted recheck must reach that cached CLI,
+        not just the server wrapper (Sol echo r2)."""
+        from wayfinder.core import transcriber as T
+
+        terms = ["main", "dev", "master"] + [f"Term{n}" for n in range(77)]
+        audio = tmp_path / "chunk.wav"
+        audio.write_bytes(b"RIFF")
+        server = T.WhisperServerBackend(prompt="Dictation.", custom_vocabulary=list(terms))
+        monkeypatch.setattr(T.WhisperServerBackend, "_disabled_now",
+                            classmethod(lambda cls: True))
+        monkeypatch.setattr(T.WhisperServerBackend, "_resolve_cli_binary",
+                            lambda self: "/bin/true")
+        monkeypatch.setattr(T, "get_backend", lambda config: server)
+        self.prompted_answer = "main, dev, master."
+
+        assert T.transcribe_with_config(str(audio), self.config) == ""
+        assert len(decode) == 2
+        assert "main, dev, master" in decode[0] and decode[1] == ""
+        assert server._cli_backend.custom_vocabulary == terms   # still primed next time
+
+    # -- Sol echo r3 --
+
+    @pytest.mark.parametrize("silence", [".", "[BLANK_AUDIO]", " ... ", "(silence)"])
+    def test_raw_transcript_types_nothing_for_a_wordless_recheck(self, decode, silence):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["raw_transcription"] = True
+        self.prompted_answer, self.unprompted_answer = "Arawn, Aura, Wayfinder.", silence
+        assert transcribe_with_config(self.audio, self.config) == ""
+
+    def test_failed_recheck_is_reported(self, decode):
+        from wayfinder.core.transcriber import TranscriptionError, transcribe_with_config
+
+        outcome = []
+        self.unprompted_answer = TranscriptionError("server gone")
+        transcribe_with_config(self.audio, self.config, echo_out=outcome)
+        assert outcome == ["failed"]
+
+    def test_only_every_term_spelled_the_same_vouches_for_an_echo(self):
+        """Class property (Sol echo r2, r3, r4): the unprompted pass confirms
+        an echo only when it spells EVERY echoed term the same (word splits
+        aside). Near-misses never count, however closely they line up and
+        whichever other terms came back exact; the same words heard again,
+        split anywhere, always do."""
+        import random
+
+        from wayfinder.core.transcriber import vocabulary_echo_reproduced
+
+        vocabulary = ["Arawn", "Aura", "Wayfinder", "Black Mesa", "Cyrus", "Cru", "Git",
+                      "Main", "FoxGrid", "Zeathe", "Baldy", "Codex", "Kubernetes"]
+        rng = random.Random(20261025)
+
+        def near_miss(word):
+            letters = list(word.lower())
+            at = rng.randrange(len(letters))
+            change = rng.choice(("swap", "drop", "add", "replace"))
+            if change == "swap" and at + 1 < len(letters) and letters[at] != letters[at + 1]:
+                letters[at], letters[at + 1] = letters[at + 1], letters[at]
+            elif change == "drop" and len(letters) > 3:
+                del letters[at]
+            elif change == "add":
+                letters.insert(at, rng.choice("aeioulnrst"))
+            else:
+                letters[at] = rng.choice([c for c in "aeioulnrst" if c != letters[at]])
+            return "".join(letters)
+
+        def split(word):
+            if len(word) < 4 or rng.random() < 0.5:
+                return [word]
+            at = rng.randrange(2, len(word) - 1)
+            return [word[:at], word[at:]]
+
+        def heard_exactly(term):
+            return [part for word in term.lower().split() for part in split(word)]
+
+        def spans(words):
+            return {"".join(words[i:j]) for i in range(len(words))
+                    for j in range(i + 1, len(words) + 1)}
+
+        confirmed = refused = 0
+        while refused < 300:
+            start = rng.randrange(len(vocabulary) - 1)
+            terms = vocabulary[start:start + rng.randint(2, 4)]
+            filler = rng.choice(["", "this was ", "and the ", "okay "])
+            end = rng.choice([".", "", " now."])
+            prompted = filler + ", ".join(terms) + end
+            echoed = [term.lower() for term in terms]
+
+            missed = set(rng.sample(range(len(terms)), rng.randint(1, len(terms))))
+            heard = []
+            for index, term in enumerate(terms):
+                if index in missed:
+                    words = term.lower().split()
+                    at = rng.randrange(len(words))
+                    words[at] = near_miss(words[at])
+                    heard.extend(words)
+                else:
+                    heard.extend(heard_exactly(term))
+            missed_spellings = {"".join(terms[i].lower().split()) for i in missed}
+            if spans(heard) & missed_spellings:
+                continue  # the near-miss happens to spell the term after all
+            unprompted = filler + " ".join(heard) + end
+            assert not vocabulary_echo_reproduced(echoed, prompted, unprompted), unprompted
+            refused += 1
+
+            same = filler + " ".join(w for t in terms for w in heard_exactly(t)) + end
+            assert vocabulary_echo_reproduced(echoed, prompted, same), same
+            confirmed += 1
+        assert confirmed == refused == 300
+
+    def test_whisper_annotations_count_as_nothing_but_bracketed_words_do_not(self, decode):
+        """Sol echo r4: the audio behind a suspected echo may be speech, so
+        only Whisper's own annotations are set aside, Raw Transcript included."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Arawn, Aura, Wayfinder."
+        for raw in (False, True):
+            self.config["raw_transcription"] = raw
+            for silence in (".", "[BLANK_AUDIO]", "(silence)", "[Music]", "*sighs*", "♪"):
+                self.unprompted_answer = silence
+                assert transcribe_with_config(self.audio, self.config) == "", (raw, silence)
+        self.config["raw_transcription"] = True
+        for speech in ("(yes)", "[approved]", "{value}", "*args"):
+            self.unprompted_answer = speech
+            assert transcribe_with_config(self.audio, self.config) == speech
+
+    @pytest.mark.parametrize("unprompted", ["(silence) [Music]", "*silence* [MUSIC] ♪"])
+    def test_annotations_from_the_recheck_never_vouch_for_the_terms(self, decode, unprompted):
+        """Whisper's annotations are set aside before the decodes are
+        compared, so they cannot confirm an echo of vocabulary that happens
+        to spell them; Raw Transcript included (Sol echo r5)."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["custom_vocabulary"] = ["silence", "music"]
+        self.prompted_answer, self.unprompted_answer = "silence, music.", unprompted
+        for raw in (False, True):
+            self.config["raw_transcription"] = raw
+            outcome = []
+            assert transcribe_with_config(self.audio, self.config, echo_out=outcome) == ""
+            assert outcome == ["replaced"]
+
+    @pytest.mark.parametrize("raw, unprompted, typed", [
+        # A catch-phrase never confirms the terms it spells (Sol echo r5) ...
+        (False, "Thanks for watching. Please subscribe.", "Thanks for watching. Please subscribe."),
+        (True, "Thanks for watching. Please subscribe.", "Thanks for watching. Please subscribe."),
+        # ... and then meets the usual rules: normal cleanup drops a lone
+        # one, Raw Transcript types what Whisper heard (Sol echo r6).
+        (False, "Thanks for watching!", ""),
+        (True, "Thanks for watching!", "Thanks for watching!"),
+    ])
+    def test_a_catch_phrase_from_the_recheck_never_vouches_for_the_terms(
+            self, decode, raw, unprompted, typed):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["custom_vocabulary"] = ["thanks for watching", "please subscribe"]
+        self.config["raw_transcription"] = raw
+        self.prompted_answer = "Thanks for watching, please subscribe."
+        self.unprompted_answer = unprompted
+        outcome = []
+        assert transcribe_with_config(self.audio, self.config, echo_out=outcome) == typed
+        assert outcome == ["replaced"]
+
+    @pytest.mark.parametrize("raw, unprompted, typed", [
+        (False, "Thank you. We'll be right back.", "Thank you. We'll be right back."),  # Sol echo r6
+        (True, "Thank you. We'll be right back.", "Thank you. We'll be right back."),
+        (False, "Thank you.", ""),
+        (True, "Thank you.", "Thank you."),
+    ])
+    def test_speech_the_recheck_recovers_meets_the_usual_rules(self, decode, raw, unprompted, typed):
+        """The guard drops only what has no words; a catch-phrase opening real
+        speech is speech, and a lone one is left to cleanup's own rule."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["raw_transcription"] = raw
+        self.prompted_answer, self.unprompted_answer = "Arawn, Aura, Wayfinder.", unprompted
+        assert transcribe_with_config(self.audio, self.config) == typed
+
+    def test_a_list_said_in_a_sentence_keeps_the_sentence(self, decode):
+        """Sol echo r7: the recheck dropped "should" and mis-heard "do"; the
+        two decodes still agree, so the fuller prompted sentence is kept."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Arawn, Aura, Wayfinder, which one should I do first."
+        self.unprompted_answer = "Arawn Aura Wayfinder which one I to first."
+        outcome = []
+        assert transcribe_with_config(self.audio, self.config, echo_out=outcome) == \
+            "Arawn, Aura, Wayfinder, which one should I do first."
+        assert outcome == ["kept"]
+
+    def test_agreement_finds_any_alignment_that_clears_both_bars(self):
+        """Sol echo r7: checked against an exhaustive search that keeps every
+        reachable (prompted, unprompted) count pair, uncapped and unpruned,
+        over 500 seeded small cases built to tie."""
+        import functools
+        import random
+
+        from wayfinder.core import transcriber as T
+
+        def words(text):
+            return [w for w, _, _ in T._echo_words(text)]
+
+        def exhaustive(echoed, prompted, unprompted):
+            p, u = words(prompted), words(unprompted)
+            n, m = len(p), len(u)
+            if not n or not m:
+                return False
+            keys = sorted({tuple(words(t)) for t in echoed}, key=len, reverse=True)
+            units, i = [], 0
+            while i < n:
+                key = next((k for k in keys if k and tuple(p[i:i + len(k)]) == k), None)
+                units.append(("".join(key), len(key), True) if key else (p[i], 1, False))
+                i += len(key) if key else 1
+            if not any(unit[2] for unit in units):
+                return False
+
+            def alike(k, a, j, b):
+                heard = "".join(u[j:j + b])
+                if units[k][2]:
+                    return units[k][0] == heard
+                said = "".join(unit[0] for unit in units[k:k + a])
+                return said == heard or (
+                    0.6 * max(len(said), len(heard)) <= min(len(said), len(heard))
+                    and T._sounds_like(heard, said))
+
+            @functools.lru_cache(maxsize=None)
+            def reach(k, j):
+                if k == len(units):
+                    return frozenset({(0, 0)})
+                out = set()
+                if j < m:
+                    out |= reach(k, j + 1)
+                if not units[k][2]:
+                    out |= reach(k + 1, j)
+                if units[k][2]:
+                    steps = [(1, b) for b in range(1, units[k][1] + 3)]
+                else:
+                    steps = [(a, b) for a, b in T._AGREE_MOVES
+                             if not any(unit[2] for unit in units[k:k + a])]
+                for a, b in steps:
+                    if k + a <= len(units) and j + b <= m and alike(k, a, j, b):
+                        said = sum(unit[1] for unit in units[k:k + a])
+                        out |= {(x + said, y + b) for x, y in reach(k + a, j + b)}
+                return frozenset(out)
+
+            return any(x >= 0.8 * n and y >= 0.8 * m for x, y in reach(0, 0))
+
+        rng = random.Random(20261026)
+        terms = ["Arawn", "Aura", "Wayfinder", "Black Mesa"]
+        filler = ["which", "one", "should", "I", "do", "first", "to", "the", "now"]
+        misheard = {"arawn": "aaron", "wayfinder": "wayfender", "should": "shud",
+                    "first": "furst", "the": "a", "do": "to"}
+        verdicts = []
+        for _ in range(500):
+            said = rng.sample(terms, rng.randint(2, 3))
+            prompted = ", ".join(said) + " " + " ".join(rng.choices(filler, k=rng.randint(4, 8)))
+            heard = []
+            for word in words(prompted):
+                roll = rng.random()
+                if roll < 0.08:
+                    continue
+                if roll < 0.23:
+                    heard.append(misheard.get(word, rng.choice(filler)))
+                elif roll < 0.33 and len(word) > 4:
+                    heard += [word[:2], word[2:]]
+                else:
+                    heard.append(word)
+                if rng.random() < 0.1:
+                    heard.append(rng.choice(filler))
+            unprompted = " ".join(heard)
+            echoed = [t.lower() for t in said]
+            expected = exhaustive(echoed, prompted, unprompted)
+            assert T.vocabulary_echo_reproduced(echoed, prompted, unprompted) == expected, \
+                (prompted, unprompted)
+            verdicts.append(expected)
+        assert 50 < sum(verdicts) < 450

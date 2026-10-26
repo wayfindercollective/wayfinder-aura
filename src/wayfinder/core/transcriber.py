@@ -124,6 +124,52 @@ def dictation_requests(token: Optional[int]):
         _dictation.token = None
 
 
+# What one decode sent Whisper, per thread (a dictation's chunks decode on
+# their own threads). Every decoder builds its request prompt through
+# _request_prompt(), so a server, its Core ML stand-in and the whisper-cli
+# fallback all obey one unprompted switch, and whichever of them actually ran
+# reports the prompt and vocabulary it sent (Sol echo r2).
+_decode = threading.local()
+
+
+def _request_prompt(backend, context: str = "") -> str:
+    """The prompt *backend* sends for this request; "" inside _decoding(unprompted=True)."""
+    prompt = "" if getattr(_decode, "unprompted", False) else backend._build_prompt(context)
+    _decode.sent = (prompt, [str(t) for t in (getattr(backend, "custom_vocabulary", None) or [])])
+    return prompt
+
+
+@contextlib.contextmanager
+def _decoding(unprompted: bool = False):
+    """Scope one decode: an unprompted one sends no prompt, vocabulary or
+    context from any decoder it reaches. _sent_vocabulary() then tells what
+    the decoder that ran last actually sent."""
+    previous = getattr(_decode, "unprompted", False)
+    _decode.unprompted = previous or unprompted
+    _decode.sent = None
+    try:
+        yield
+    finally:
+        _decode.unprompted = previous
+
+
+def _sent_vocabulary() -> list:
+    """The vocabulary terms in the prompt of the last decode in this scope.
+
+    Every decoder joins a contiguous tail of its custom_vocabulary with ", "
+    (the server keeps the last 60, whisper-cli all of them, Groq none when
+    they would not fit), so the longest such tail in the sent prompt is it.
+    """
+    sent = getattr(_decode, "sent", None)
+    if not sent:
+        return []
+    prompt, vocabulary = sent
+    for size in range(len(vocabulary), 0, -1):
+        if ", ".join(vocabulary[-size:]) in prompt:
+            return vocabulary[-size:]
+    return []
+
+
 def _retired_dictation() -> bool:
     """Whether this thread runs the requests of a dictation the app retired."""
     token = getattr(_dictation, "token", None)
@@ -582,7 +628,7 @@ class WhisperCppBackend(TranscriptionBackend):
             probe_timeout = max(0.2, min(5.0, remaining))
 
         # Build the final prompt with custom vocabulary and context
-        final_prompt = self._build_prompt(context)
+        final_prompt = _request_prompt(self, context)
 
         # Choose the executable before probing flags. CPU mode probes and executes
         # the dedicated CPU sibling when packaged, so the Vulkan executable is
@@ -1832,7 +1878,7 @@ class WhisperServerBackend(TranscriptionBackend):
         served_by = WhisperServerBackend._server_process
 
         # Build prompt
-        final_prompt = self._build_prompt(context)
+        final_prompt = _request_prompt(self, context)
 
         # Adaptive request timeout (GPU). A healthy GPU transcribes a chunk in a small
         # fraction of its audio length, but under transient GPU contention (e.g. the
@@ -2265,7 +2311,7 @@ class FasterWhisperBackend(TranscriptionBackend):
             language = self.language if self.language.lower() != "auto" else None
             
             # Build prompt with custom vocabulary and context
-            final_prompt = self._build_prompt(context)
+            final_prompt = _request_prompt(self, context)
             
             # Build temperature: use fallback list if temperature_fallback > 0
             temp = self.temperature
@@ -2493,7 +2539,7 @@ class GroqWhisperBackend(TranscriptionBackend):
             client = self._get_client()
             
             # Build prompt with context and vocabulary
-            prompt = self._build_prompt(context)
+            prompt = _request_prompt(self, context)
             
             # Log for debugging
             file_size = Path(audio_path).stat().st_size
@@ -2643,7 +2689,7 @@ class OpenAIWhisperBackend(TranscriptionBackend):
             client = self._get_client()
             
             # Build prompt with context and vocabulary
-            prompt = self._build_prompt(context)
+            prompt = _request_prompt(self, context)
             
             # Log for debugging
             file_size = Path(audio_path).stat().st_size
@@ -3799,6 +3845,308 @@ def drop_whisper_prompt_leak(text: str, custom_vocabulary: list | None = None) -
     return text
 
 
+# Words that join real speech but never sit between the comma-joined terms of
+# the vocabulary prompt, so one of them ends an echo run. A leading "and" needs
+# no entry: observed echoes start "and Aura, Wayfinder, ..." and the run
+# simply begins at the first term.
+_ECHO_RUN_BREAKERS = frozenset({
+    "a", "an", "and", "the", "or", "but", "so", "to", "of", "in", "on", "at",
+    "for", "with", "from", "by", "is", "are", "was", "be", "it", "this", "that",
+    "then", "also", "plus", "i", "you", "we", "my", "our", "your",
+    "um", "uh", "hmm", "er", "ah", "like", "okay", "ok", "yeah",
+})
+# Garbled terms Whisper may leave inside or after an echo run ("Cure, g" for
+# "Cyrus, Cru, Git"): up to this many words in a row.
+_ECHO_MAX_GAP = 2
+
+
+def _echo_words(text: str) -> list:
+    """(lowercased word, start, end) for every word of *text*."""
+    import re
+
+    return [(m.group(0).lower(), m.start(), m.end())
+            for m in re.finditer(r"[^\W_]+(?:['’][^\W_]+)*", text or "")]
+
+
+def _echo_term_keys(custom_vocabulary) -> list:
+    """Each vocabulary term as a word tuple, in prompt order, first kept."""
+    keys, seen = [], set()
+    for term in custom_vocabulary or []:
+        key = tuple(word for word, _, _ in _echo_words(str(term)))
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def vocabulary_prompt_echo_terms(text: str, custom_vocabulary: list | None = None) -> list:
+    """The vocabulary terms *text* echoes from Whisper's prompt, or [].
+
+    On a quiet stretch, Whisper can write back the vocabulary list it was
+    primed with instead of the speech: "and Aura, Wayfinder, r." for a 1-4 s
+    recording, or "Arawn, Aura, Wayfinder, Cure, g" twice for a 15 s quiet
+    chunk (7 times between 2026-09-28 and 2026-10-25). Each echo is a
+    comma-separated run of the user's terms in their prompt order, with a few
+    garbled terms mixed in.
+
+    Text alone cannot tell that from a user who says "Arawn, Aura, Wayfinder."
+    on purpose, so this is only the suspicion; transcribe_with_config confirms
+    it by hearing the audio again without a prompt. The bar is set to fire on
+    every observed echo and stay quiet on ordinary dictation: a run needs two
+    terms that are neighbours in the prompt with a comma between them, and
+    then either three terms or at least half of the text.
+    """
+    words = _echo_words(text)
+    keys = _echo_term_keys(custom_vocabulary)
+    if not words or not keys:
+        return []
+
+    by_first: dict = {}
+    for index, key in enumerate(keys):
+        by_first.setdefault(key[0], []).append((key, index))
+    for candidates in by_first.values():
+        candidates.sort(key=lambda pair: -len(pair[0]))
+
+    def term_at(i):
+        for key, index in by_first.get(words[i][0], ()):
+            if tuple(word for word, _, _ in words[i:i + len(key)]) == key:
+                return index, len(key)
+        return None
+
+    def comma_between(left_word, right_word):
+        return "," in text[words[left_word][2]:words[right_word][1]]
+
+    i = 0
+    while i < len(words):
+        found = term_at(i)
+        if found is None:
+            i += 1
+            continue
+        hits = [(found[0], i, i + found[1])]   # (term index, first word, word after)
+        j = last_end = i + found[1]
+        gap = 0
+        while j < len(words):
+            found = term_at(j)
+            if found is not None:
+                hits.append((found[0], j, j + found[1]))
+                j = last_end = j + found[1]
+                gap = 0
+                continue
+            if gap == _ECHO_MAX_GAP or words[j][0] in _ECHO_RUN_BREAKERS:
+                break
+            gap += 1
+            j += 1
+        # Garbled terms after the last exact one, still in its comma list.
+        end = last_end
+        while (end < len(words) and end - last_end < _ECHO_MAX_GAP
+               and words[end][0] not in _ECHO_RUN_BREAKERS
+               and comma_between(end - 1, end)):
+            end += 1
+
+        neighbours = sum(
+            1 for (left, _, left_end), (right, right_start, _) in zip(hits, hits[1:])
+            if right == left + 1 and comma_between(left_end - 1, right_start)
+        )
+        if neighbours and (len(hits) >= 3 or 2 * (end - i) >= len(words)):
+            return [" ".join(keys[index]) for index in dict.fromkeys(h[0] for h in hits)]
+        i = max(end, i + 1)
+    return []
+
+
+def _sound_key(letters: str) -> str:
+    """A rough English sound key: "arawn" and "aaron" both give "arn"."""
+    import re
+
+    s = letters
+    for pattern, sound in ((r"ph", "f"), (r"ck", "k"), (r"c(?=[eiy])", "s"),
+                           (r"[cq]", "k"), (r"x", "ks"), (r"z", "s"),
+                           (r"dg", "j"), (r"th", "t")):
+        s = re.sub(pattern, sound, s)
+    if not s:
+        return ""
+    key = ("a" if s[0] in "aeiouy" else s[0]) + re.sub(r"[aeiouywh]", "", s[1:])
+    return re.sub(r"(.)\1+", r"\1", key)
+
+
+def _sounds_like(heard: str, term: str) -> bool:
+    """Whether *heard* (letters only) is *term* or a near-miss of it."""
+    from difflib import SequenceMatcher
+
+    if heard == term or SequenceMatcher(None, heard, term).ratio() >= 0.75:
+        return True
+    # Two-letter keys ("ar" for Aura) would match "are", "or" and "air".
+    heard_key, term_key = _sound_key(heard), _sound_key(term)
+    return len(term_key) >= 3 and SequenceMatcher(None, heard_key, term_key).ratio() >= 0.8
+
+
+# Word groupings two decodes of one utterance may split differently:
+# "check out" / "checkout", "Postgres QL" / "PostgreSQL".
+_AGREE_MOVES = ((1, 1), (1, 2), (1, 3), (2, 1), (3, 1))
+# Beyond this many word pairs the comparison is skipped (and the decodes are
+# treated as disagreeing): a single decode never carries that much speech.
+_AGREE_MAX_CELLS = 40_000
+
+
+def vocabulary_echo_reproduced(echoed: list, prompted: str, unprompted: str) -> bool:
+    """Whether the unprompted pass heard the same utterance as the prompted
+    one, so the *echoed* terms in it were really said.
+
+    Every echoed term in the prompted text must come back spelled the same,
+    word splits aside ("Postgres QL" for PostgreSQL, "check out" for
+    checkout), and the whole utterance must agree: at least 80% of each
+    side's words matched, in order. Only the words around the terms may
+    come back as near-misses ("turnin" for turning).
+
+    An echoed term never matches a near-miss. Fuzzy evidence for the terms
+    themselves kept confirming other speech: "badly coded." for "Baldy,
+    Codex.", then an exact "Zeathe" vouching for the rest (Sol echo r2-r4).
+    So each term is one unit, matched exactly or not at all. A list the
+    user really said and the unprompted pass misspells ("Aaron" for Arawn)
+    is typed as that pass heard it: the words arrive, without the user's
+    spelling. "Push Git to main." still cannot vouch for "Git, Main,
+    FoxGrid.", nor "Git, Main." pass for it.
+    """
+    import math
+
+    p = [word for word, _, _ in _echo_words(prompted)]
+    u = [word for word, _, _ in _echo_words(unprompted)]
+    n, m = len(p), len(u)
+    if not n or not m or n * m > _AGREE_MAX_CELLS:
+        return False
+
+    # The prompted words as units: each echoed term found in them (longest
+    # first, left to right) is one unit, every other word its own.
+    keys = sorted({key for key in (tuple(w for w, _, _ in _echo_words(t)) for t in echoed)
+                   if key}, key=len, reverse=True)
+    units = []  # (letters, words, is_term)
+    i = 0
+    while i < n:
+        key = next((k for k in keys if tuple(p[i:i + len(k)]) == k), None)
+        if key:
+            units.append(("".join(key), len(key), True))
+            i += len(key)
+        else:
+            units.append((p[i], 1, False))
+            i += 1
+    if not any(unit[2] for unit in units):
+        return False
+    count = len(units)
+
+    same: dict = {}
+
+    def alike(k, a, j, b):
+        """Units k..k+a against words j..j+b; a term only exactly."""
+        if units[k][2]:
+            return units[k][0] == "".join(u[j:j + b])
+        pair = ("".join(unit[0] for unit in units[k:k + a]), "".join(u[j:j + b]))
+        if pair not in same:
+            x, y = pair
+            same[pair] = x == y or (
+                0.6 * max(len(x), len(y)) <= min(len(x), len(y)) and _sounds_like(y, x))
+        return same[pair]
+
+    def moves(k, j):
+        if units[k][2]:
+            # One term unit; the unprompted pass may split its words further.
+            return [(1, b) for b in range(1, min(m - j, units[k][1] + 2) + 1)]
+        return [(a, b) for a, b in _AGREE_MOVES if k + a <= count and j + b <= m
+                and not any(unit[2] for unit in units[k:k + a])]
+
+    # Is there ONE alignment that matches every term unit and at least 80%
+    # of each side's words? Summing both sides into one score let a tie pick
+    # an alignment short on one side over one that clears both (Sol echo
+    # r7), so each cell keeps every (prompted, unprompted) count pair no
+    # other pair beats on both sides, capped at the bars, and a term unit is
+    # never skipped.
+    need_p, need_u = math.ceil(0.8 * n), math.ceil(0.8 * m)
+
+    def frontier(pairs):
+        kept, most_u = [], -1
+        for pair in sorted(set(pairs), reverse=True):
+            if pair[1] > most_u:
+                kept.append(pair)
+                most_u = pair[1]
+        return kept
+
+    # reach[k][j]: the count pairs units[k:] and u[j:] can reach.
+    reach = [[[] for _ in range(m + 1)] for _ in range(count + 1)]
+    for j in range(m + 1):
+        reach[count][j] = [(0, 0)]
+    for k in range(count - 1, -1, -1):
+        reach[k][m] = reach[k + 1][m] if not units[k][2] else []
+        for j in range(m - 1, -1, -1):
+            pairs = list(reach[k][j + 1])
+            if not units[k][2]:
+                pairs += reach[k + 1][j]
+            for a, b in moves(k, j):
+                rest = reach[k + a][j + b]
+                if rest and alike(k, a, j, b):
+                    words = sum(unit[1] for unit in units[k:k + a])
+                    pairs += [(min(need_p, x + words), min(need_u, y + b)) for x, y in rest]
+            reach[k][j] = frontier(pairs)
+    return (need_p, need_u) in reach[0][0]
+
+
+def _transcribe_unprompted(backend, audio_path: str) -> str:
+    """Decode *audio_path* with no prompt, vocabulary or context — from the
+    backend, its Core ML stand-in or a whisper-cli fallback, whichever runs."""
+    with _decoding(unprompted=True):
+        return backend.transcribe(audio_path, context="")
+
+
+def _settle_vocabulary_prompt_echo(backend, audio_path: str, sent_vocabulary: list,
+                                   text: str, request_token) -> tuple:
+    """The recognizer text to keep when *text* may be Whisper writing back its
+    vocabulary prompt ("and Aura, Wayfinder, r.") instead of speech.
+
+    The audio is heard once more without a prompt; this is ASR only, so Aura's
+    cleanup still runs exactly once, on whichever text is kept. When the
+    unprompted pass heard the same utterance, the user said the terms and the
+    primed spelling stays. Otherwise the unprompted pass is what was said —
+    often nothing, or a known silence phrase, which counts as nothing. Raw
+    Transcript gets this too: the echo is Aura's own input coming back.
+    *sent_vocabulary* is what the decoder that ran actually put in its prompt.
+
+    Returns (text, outcome): outcome is None when nothing was suspected, else
+    "kept" (the decodes agreed), "replaced" (the unprompted pass won) or
+    "failed" (the recheck failed; the prompted text stays).
+    """
+    echoed = vocabulary_prompt_echo_terms(text, sent_vocabulary)
+    if not echoed:
+        return text, None
+    try:
+        unprompted = _transcribe_unprompted(backend, audio_path)
+    except RequestAbandoned:
+        raise
+    except TranscriptionError as exc:
+        # A retirement while the recheck ran owns the outcome (Sol echo r1).
+        WhisperServerBackend._check_not_abandoned(request_token)
+        print(f"[Transcription] Prompt-echo recheck failed ({type(exc).__name__}); "
+              f"kept the prompted text")
+        return text, "failed"
+    WhisperServerBackend._check_not_abandoned(request_token)
+    # One ordered pass over what could be speech. Whisper's own annotations
+    # are set aside first; this audio may be speech, so "(yes)" or
+    # "[approved]" is a word (Sol echo r4). Nothing left (".",
+    # "[BLANK_AUDIO]") is nothing to type, Raw Transcript included (Sol echo
+    # r3), and never evidence for the terms, even when the vocabulary holds
+    # "silence" or "music" (Sol echo r5).
+    heard = _strip_non_speech_markers(unprompted)
+    if not _echo_words(heard):
+        return "", "replaced"
+    # A silence catch-phrase is no evidence either, but it may open real
+    # speech ("Thank you. We'll be right back."), so it is not dropped here:
+    # the kept text meets the usual cleanup and Raw Transcript rules
+    # (Sol echo r6). One word is an answer.
+    if (not _is_whisper_phrase_hallucination(heard, noise_check=True)
+            and vocabulary_echo_reproduced(echoed, text, heard)):
+        return text, "kept"
+    # Say what happened, never what was heard.
+    print(f"[Transcription] Whisper echoed {len(echoed)} vocabulary terms from its "
+          f"prompt; kept the unprompted pass")
+    return unprompted, "replaced"
+
+
 # Acronyms and abbreviations that should stay uppercase
 _PRESERVE_CAPS = {
     'I', 'OK', 'API', 'HTML', 'CSS', 'JSON', 'XML', 'YAML', 'TOML',
@@ -3934,6 +4282,7 @@ def transcribe_with_config(
     request_token: Optional[int] = None,
     unprompted: bool = False,
     raw_out: Optional[list] = None,
+    echo_out: Optional[list] = None,
 ) -> str:
     """
     Transcribe using settings from config dictionary.
@@ -3959,7 +4308,14 @@ def transcribe_with_config(
             to know whether THIS chunk looped reads raw_out[0] rather than the
             returned text: with the default config, clean_whisper_artifacts
             already collapses a repetition loop before returning, so a check
-            against the cleaned text never sees it (Sol loop r1).
+            against the cleaned text never sees it (Sol loop r1). It is the
+            FIRST decode's text, even when the prompt-echo guard then kept
+            an unprompted one (see echo_out).
+        echo_out: When given, the prompt-echo guard's outcome is appended if
+            it heard the audio again without a prompt: "kept", "replaced" or
+            "failed". The audio is then settled; a caller must not hear it
+            once more with a prompt, which could bring the echo back
+            (Sol echo r3).
 
     Returns:
         Transcribed text string
@@ -3988,18 +4344,21 @@ def transcribe_with_config(
         WhisperServerBackend._check_not_abandoned(request_token)
         backend = get_backend(config)
         WhisperServerBackend._check_not_abandoned(request_token)
+        echo_outcome = None
         if unprompted:
-            # A Core ML server not yet loaded hands the audio to its Metal
-            # stand-in, which would otherwise prime Whisper with its own prompt.
-            for heard_by in (backend, getattr(backend, "_ready_only_fallback", None)):
-                if heard_by is not None:
-                    heard_by.prompt = ""
-                    heard_by.custom_vocabulary = []
             context = ""
-        text = backend.transcribe(audio_path, context=context)
+            text = first_text = _transcribe_unprompted(backend, audio_path)
+        else:
+            with _decoding():
+                text = first_text = backend.transcribe(audio_path, context=context)
+                sent_vocabulary = _sent_vocabulary()
+            text, echo_outcome = _settle_vocabulary_prompt_echo(
+                backend, audio_path, sent_vocabulary, text, request_token)
 
     if raw_out is not None:
-        raw_out.append(text)
+        raw_out.append(first_text)
+    if echo_out is not None and echo_outcome is not None:
+        echo_out.append(echo_outcome)
 
     if unprompted:
         # Evaluate the RECOGNIZER's own words here, before vocabulary

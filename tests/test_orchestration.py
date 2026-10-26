@@ -1339,6 +1339,45 @@ class TestChunkRetryAfterReset:
             assert store == ["[error]"]
 
 
+
+    def test_a_settled_echo_chunk_is_not_re_heard_with_a_prompt(self, app, monkeypatch, tmp_path):
+        """Sol echo r3: a quiet 15 s chunk after real speech came back as the
+        vocabulary prompt; the echo guard heard it unprompted ("."), and the
+        truncation retry then heard it AGAIN with the prompt, which can bring
+        the echo back. Only the prompted and the unprompted request may run."""
+        from wayfinder.core import transcriber
+        monkeypatch.setattr(WApp, "_asr_config_for_dictation",
+                            lambda self: {"custom_vocabulary": ["Arawn", "Aura", "Wayfinder"]})
+        monkeypatch.setattr(wayfinder_main, "get_wav_duration_seconds", lambda _p: 15.0)
+        monkeypatch.setattr(app.recorder, "start", lambda: None)
+        monkeypatch.setattr(transcriber, "_has_feature", lambda _f: True, raising=False)
+        prompts_sent = []
+
+        class Backend:
+            prompt = "Dictation with natural speech."
+            custom_vocabulary = ["Arawn", "Aura", "Wayfinder"]
+
+            def _build_prompt(self, context=""):
+                return f"{context or self.prompt} {', '.join(self.custom_vocabulary)}"
+
+            def transcribe(self, audio_path, context=""):
+                prompt = transcriber._request_prompt(self, context)
+                prompts_sent.append(prompt)
+                return "Arawn, Aura, Wayfinder." if prompt else "."
+
+        monkeypatch.setattr(transcriber, "get_backend", lambda _config: Backend())
+        app.start_recording()
+        chunk = tmp_path / "chunk.wav"
+        chunk.write_bytes(b"\x00")
+        store = ["the previous chunk ended mid sentence here"]
+
+        app._transcribe_chunk(str(chunk), 1, app.session_generation, store)
+
+        assert len(prompts_sent) == 2
+        assert "Arawn, Aura, Wayfinder" in prompts_sent[0] and prompts_sent[1] == ""
+        assert store[1] == "[empty]"
+        assert any("echo check (replaced)" in message for message in app.logs)
+
 class TestLoopedChunkRetry:
     @pytest.fixture(autouse=True)
     def _chunks_carry_speech(self, monkeypatch):
