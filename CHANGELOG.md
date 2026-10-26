@@ -7,6 +7,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Your custom vocabulary no longer gets typed in place of silence.** On a
+  quiet stretch, Whisper sometimes wrote back the vocabulary list Aura gives
+  it ("and Aura, Wayfinder, r.") instead of what you said, and Aura typed it
+  into your window. When a transcript looks like your vocabulary list, Aura
+  now listens to that audio again without the list. If your terms don't come
+  back, it keeps that second result, which is usually nothing. If you really
+  did say them, your words stay as they were.
+
 ## [1.3.1] — 2026-10-23
 
 ### Fixed

@@ -3799,6 +3799,125 @@ def drop_whisper_prompt_leak(text: str, custom_vocabulary: list | None = None) -
     return text
 
 
+# Words that join real speech but never sit between the comma-joined terms of
+# the vocabulary prompt, so one of them ends an echo run. A leading "and" needs
+# no entry: observed echoes start "and Aura, Wayfinder, ..." and the run
+# simply begins at the first term.
+_ECHO_RUN_BREAKERS = frozenset({
+    "a", "an", "and", "the", "or", "but", "so", "to", "of", "in", "on", "at",
+    "for", "with", "from", "by", "is", "are", "was", "be", "it", "this", "that",
+    "then", "also", "plus", "i", "you", "we", "my", "our", "your",
+    "um", "uh", "hmm", "er", "ah", "like", "okay", "ok", "yeah",
+})
+# Garbled terms Whisper may leave inside or after an echo run ("Cure, g" for
+# "Cyrus, Cru, Git"): up to this many words in a row.
+_ECHO_MAX_GAP = 2
+
+
+def _echo_words(text: str) -> list:
+    """(lowercased word, start, end) for every word of *text*."""
+    import re
+
+    return [(m.group(0).lower(), m.start(), m.end())
+            for m in re.finditer(r"[^\W_]+(?:['’][^\W_]+)*", text or "")]
+
+
+def _echo_term_keys(custom_vocabulary) -> list:
+    """Each vocabulary term as a word tuple, in prompt order, first kept."""
+    keys, seen = [], set()
+    for term in custom_vocabulary or []:
+        key = tuple(word for word, _, _ in _echo_words(str(term)))
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
+
+
+def vocabulary_prompt_echo_terms(text: str, custom_vocabulary: list | None = None) -> list:
+    """The vocabulary terms *text* echoes from Whisper's prompt, or [].
+
+    On a quiet stretch, Whisper can write back the vocabulary list it was
+    primed with instead of the speech: "and Aura, Wayfinder, r." for a 1-4 s
+    recording, or "Arawn, Aura, Wayfinder, Cure, g" twice for a 15 s quiet
+    chunk (7 times between 2026-09-28 and 2026-10-25). Each echo is a
+    comma-separated run of the user's terms in their prompt order, with a few
+    garbled terms mixed in.
+
+    Text alone cannot tell that from a user who says "Arawn, Aura, Wayfinder."
+    on purpose, so this is only the suspicion; transcribe_with_config confirms
+    it by hearing the audio again without a prompt. The bar is set to fire on
+    every observed echo and stay quiet on ordinary dictation: a run needs two
+    terms that are neighbours in the prompt with a comma between them, and
+    then either three terms or at least half of the text.
+    """
+    words = _echo_words(text)
+    keys = _echo_term_keys(custom_vocabulary)
+    if not words or not keys:
+        return []
+
+    by_first: dict = {}
+    for index, key in enumerate(keys):
+        by_first.setdefault(key[0], []).append((key, index))
+    for candidates in by_first.values():
+        candidates.sort(key=lambda pair: -len(pair[0]))
+
+    def term_at(i):
+        for key, index in by_first.get(words[i][0], ()):
+            if tuple(word for word, _, _ in words[i:i + len(key)]) == key:
+                return index, len(key)
+        return None
+
+    def comma_between(left_word, right_word):
+        return "," in text[words[left_word][2]:words[right_word][1]]
+
+    i = 0
+    while i < len(words):
+        found = term_at(i)
+        if found is None:
+            i += 1
+            continue
+        hits = [(found[0], i, i + found[1])]   # (term index, first word, word after)
+        j = last_end = i + found[1]
+        gap = 0
+        while j < len(words):
+            found = term_at(j)
+            if found is not None:
+                hits.append((found[0], j, j + found[1]))
+                j = last_end = j + found[1]
+                gap = 0
+                continue
+            if gap == _ECHO_MAX_GAP or words[j][0] in _ECHO_RUN_BREAKERS:
+                break
+            gap += 1
+            j += 1
+        # Garbled terms after the last exact one, still in its comma list.
+        end = last_end
+        while (end < len(words) and end - last_end < _ECHO_MAX_GAP
+               and words[end][0] not in _ECHO_RUN_BREAKERS
+               and comma_between(end - 1, end)):
+            end += 1
+
+        neighbours = sum(
+            1 for (left, _, left_end), (right, right_start, _) in zip(hits, hits[1:])
+            if right == left + 1 and comma_between(left_end - 1, right_start)
+        )
+        if neighbours and (len(hits) >= 3 or 2 * (end - i) >= len(words)):
+            return [" ".join(keys[index]) for index in dict.fromkeys(h[0] for h in hits)]
+        i = max(end, i + 1)
+    return []
+
+
+def vocabulary_terms_heard(terms: list, text: str) -> bool:
+    """Whether at least half of *terms* appear as words in *text*."""
+    words = tuple(word for word, _, _ in _echo_words(text))
+    found = 0
+    for term in terms:
+        key = tuple(word for word, _, _ in _echo_words(term))
+        if key and any(words[i:i + len(key)] == key for i in range(len(words))):
+            found += 1
+    return bool(terms) and 2 * found >= len(terms)
+
+
 # Acronyms and abbreviations that should stay uppercase
 _PRESERVE_CAPS = {
     'I', 'OK', 'API', 'HTML', 'CSS', 'JSON', 'XML', 'YAML', 'TOML',
@@ -4022,6 +4141,36 @@ def transcribe_with_config(
                 or not noise_transcript_has_speech(safety_text)):
             # Say the recording was rejected, never what was heard.
             return ""
+    else:
+        # Whisper can answer a quiet stretch with its own vocabulary prompt
+        # ("and Aura, Wayfinder, r."). That is Aura's input coming back, not
+        # anything the user said, so Raw Transcript gets the check too. Hear
+        # the audio once more without a prompt: if the terms do not come back,
+        # the unprompted pass (held to the noise rules above) is what was said.
+        echoed = vocabulary_prompt_echo_terms(text, getattr(backend, "custom_vocabulary", []))
+        if echoed:
+            unprompted_raw: list = []
+            try:
+                retry = transcribe_with_config(
+                    audio_path, config, context="",
+                    skip_post_processing=skip_post_processing,
+                    request_token=request_token, unprompted=True,
+                    raw_out=unprompted_raw,
+                )
+            except RequestAbandoned:
+                raise
+            except TranscriptionError as exc:
+                # Keep the prompted text: it may be real speech.
+                print(f"[Transcription] Prompt-echo recheck failed ({type(exc).__name__})")
+            else:
+                heard = unprompted_raw[0] if unprompted_raw else ""
+                if not vocabulary_terms_heard(echoed, heard):
+                    # Say what happened, never what was heard.
+                    print(f"[Transcription] Whisper echoed {len(echoed)} vocabulary "
+                          f"terms from its prompt; kept the unprompted pass")
+                    if raw_out:
+                        raw_out[-1] = heard
+                    return retry
 
     # Raw Transcript is an explicit opt-in to the recognizer's output. Keep
     # entitlement checks in get_backend(), but bypass every Aura text rewrite

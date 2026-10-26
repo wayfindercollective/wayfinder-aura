@@ -4013,3 +4013,148 @@ class TestUnpromptedTranscription:
         out = capsys.readouterr().out
         assert "Secretword" not in out
         assert "Thank" not in out and "watching" not in out
+
+
+class TestVocabularyPromptEcho:
+    """On a quiet stretch Whisper can write back the vocabulary list it was
+    primed with ("and Aura, Wayfinder, r."): 7 times between 2026-09-28 and
+    2026-10-25, typed into the user's window ahead of what they said."""
+
+    VOCABULARY = ["Arawn", "Aura", "Wayfinder", "Cyrus", "Cru", "Git", "Main", "FoxGrid"]
+
+    @pytest.mark.parametrize("echo", [
+        # 2026-10-25: a 15 s quiet chunk, the list twice.
+        "Arawn, Aura, Wayfinder, Cure, g Arawn, Aura, Wayfinder, Cure, g",
+        "and Aura, Wayfinder, Cyrus, Cru, Git, Main",   # 1.2 s one-shot
+        "and Aura, Wayfinder, r.",                      # chunk after a silent one
+        "and Aura, Wayfinder, j.r.a.",                  # 3.6 s one-shot
+        "and Arawn, Aura, Wayfinder, Cure, and Lamp.",  # 2.4 s one-shot
+        "and Aram, Aura, Wayfinder, She",
+    ])
+    def test_observed_echoes_are_suspected(self, echo):
+        from wayfinder.core.transcriber import vocabulary_prompt_echo_terms
+
+        assert vocabulary_prompt_echo_terms(echo, self.VOCABULARY)
+
+    @pytest.mark.parametrize("speech", [
+        "Push to git main.",
+        "I'm working on Arawn, Aura and Wayfinder today.",
+        "Do you have the ability to get all this on Main for Arawn, Aura and the rest?",
+        "Yeah, that sounds good.",
+        "Wayfinder, Arawn, FoxGrid: three repos, three different deploys this week.",
+    ])
+    def test_ordinary_dictation_is_not_suspected(self, speech):
+        from wayfinder.core.transcriber import vocabulary_prompt_echo_terms
+
+        assert vocabulary_prompt_echo_terms(speech, self.VOCABULARY) == []
+
+    def test_nothing_is_suspected_without_vocabulary(self):
+        from wayfinder.core.transcriber import vocabulary_prompt_echo_terms
+
+        assert vocabulary_prompt_echo_terms("and Aura, Wayfinder, r.", []) == []
+
+    def test_multi_word_terms_match_whole(self):
+        from wayfinder.core.transcriber import vocabulary_prompt_echo_terms
+
+        terms = vocabulary_prompt_echo_terms(
+            "Black Mesa, Wayfinder, Arawn", ["Black Mesa", "Wayfinder", "Arawn"])
+        assert terms == ["black mesa", "wayfinder", "arawn"]
+
+    def test_terms_heard_needs_half_of_them(self):
+        from wayfinder.core.transcriber import vocabulary_terms_heard
+
+        echoed = ["arawn", "aura", "wayfinder"]
+        assert vocabulary_terms_heard(echoed, "Aaron, Aura, Wayfinder.")
+        assert not vocabulary_terms_heard(echoed, "Aura.")
+        assert not vocabulary_terms_heard(echoed, "")
+
+    # -- transcribe_with_config confirms the suspicion by hearing the audio
+    # again without a prompt. --
+
+    @pytest.fixture
+    def decode(self, monkeypatch, tmp_path):
+        """Whisper that echoes its vocabulary when primed with one and
+        otherwise answers self.unprompted_answer. Returns the prompts heard."""
+        from types import SimpleNamespace
+
+        import wayfinder.license as lic
+        from wayfinder.core import transcriber as T
+
+        gate = SimpleNamespace(is_premium=True, has_feature=lambda f: True)
+        monkeypatch.setattr(lic, "get_feature_gate", lambda *a, **k: gate)
+        heard = []
+        self.prompted_answer = "Arawn, Aura, Wayfinder, Cure, g Arawn, Aura, Wayfinder, Cure, g"
+        self.unprompted_answer = ""
+
+        def transcribe(backend, audio_path, context="", deadline=None):
+            heard.append(backend._build_prompt(context))
+            if backend.custom_vocabulary:
+                return self.prompted_answer
+            if isinstance(self.unprompted_answer, Exception):
+                raise self.unprompted_answer
+            return self.unprompted_answer
+
+        monkeypatch.setattr(T.WhisperCppBackend, "transcribe", transcribe)
+        model = tmp_path / "ggml-base.en.bin"
+        model.write_bytes(b"\0")
+        self.config = {"transcription_backend": "whisper_cpp", "model_path": str(model),
+                       "whisper_server_mode": False, "post_processing_enabled": False,
+                       "output_tone": "professional",
+                       "custom_vocabulary": list(self.VOCABULARY)}
+        self.audio = str(tmp_path / "a.wav")
+        return heard
+
+    def test_echo_on_a_quiet_chunk_is_dropped(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        assert transcribe_with_config(self.audio, self.config, skip_post_processing=True) == ""
+        assert len(decode) == 2 and decode[1] == ""
+
+    def test_echo_ahead_of_speech_keeps_only_the_speech(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = ("Arawn, Aura, Wayfinder, Cure, g Arawn, Aura, Wayfinder, "
+                                "Cure, g I'm turning it off now.")
+        self.unprompted_answer = "I'm turning it off now."
+        assert transcribe_with_config(self.audio, self.config) == "I'm turning it off now."
+
+    def test_a_list_the_user_said_is_kept_as_primed(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Arawn, Aura, Wayfinder."
+        self.unprompted_answer = "Aaron, Aura, Wayfinder."
+        assert transcribe_with_config(self.audio, self.config) == "Arawn, Aura, Wayfinder."
+
+    def test_ordinary_dictation_is_heard_once(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Yeah, that sounds good."
+        assert transcribe_with_config(self.audio, self.config) == "Yeah, that sounds good."
+        assert len(decode) == 1
+
+    def test_raw_out_reports_the_text_that_was_kept(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        raw = []
+        transcribe_with_config(self.audio, self.config, raw_out=raw)
+        assert raw == [""]
+
+    def test_raw_transcript_drops_the_echo_too(self, decode):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["raw_transcription"] = True
+        assert transcribe_with_config(self.audio, self.config) == ""
+
+    def test_failed_recheck_keeps_the_prompted_text(self, decode):
+        from wayfinder.core.transcriber import TranscriptionError, transcribe_with_config
+
+        self.prompted_answer = "and Aura, Wayfinder, r."
+        self.unprompted_answer = TranscriptionError("server gone")
+        assert transcribe_with_config(self.audio, self.config) == "And Aura, Wayfinder, r."
+
+    def test_retired_dictation_during_recheck_propagates(self, decode):
+        from wayfinder.core.transcriber import RequestAbandoned, transcribe_with_config
+
+        self.unprompted_answer = RequestAbandoned("retired")
+        with pytest.raises(RequestAbandoned):
+            transcribe_with_config(self.audio, self.config)
