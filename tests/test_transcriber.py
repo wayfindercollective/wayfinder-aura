@@ -4070,6 +4070,10 @@ class TestVocabularyPromptEcho:
         (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, which one should I do first?",
          "Arawn, Aura, Wayfinder, which one should I do furst?"),
         (["black mesa", "wayfinder"], "Black Mesa, Wayfinder.", "Blackmesa, Wayfinder."),
+        # 8 of 9 and 7 of 8 words: one alignment clears both bars, though a
+        # tie on the summed count is short on the prompted side (Sol echo r7).
+        (["arawn", "aura", "wayfinder"], "Arawn, Aura, Wayfinder, which one should I do first.",
+         "Arawn Aura Wayfinder which one I to first."),
     ])
     def test_the_same_utterance_heard_again_counts(self, echoed, prompted, unprompted):
         """Every term spelled the same, word splits aside; only the words
@@ -4504,3 +4508,102 @@ class TestVocabularyPromptEcho:
         self.config["raw_transcription"] = raw
         self.prompted_answer, self.unprompted_answer = "Arawn, Aura, Wayfinder.", unprompted
         assert transcribe_with_config(self.audio, self.config) == typed
+
+    def test_a_list_said_in_a_sentence_keeps_the_sentence(self, decode):
+        """Sol echo r7: the recheck dropped "should" and mis-heard "do"; the
+        two decodes still agree, so the fuller prompted sentence is kept."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.prompted_answer = "Arawn, Aura, Wayfinder, which one should I do first."
+        self.unprompted_answer = "Arawn Aura Wayfinder which one I to first."
+        outcome = []
+        assert transcribe_with_config(self.audio, self.config, echo_out=outcome) == \
+            "Arawn, Aura, Wayfinder, which one should I do first."
+        assert outcome == ["kept"]
+
+    def test_agreement_finds_any_alignment_that_clears_both_bars(self):
+        """Sol echo r7: checked against an exhaustive search that keeps every
+        reachable (prompted, unprompted) count pair, uncapped and unpruned,
+        over 500 seeded small cases built to tie."""
+        import functools
+        import random
+
+        from wayfinder.core import transcriber as T
+
+        def words(text):
+            return [w for w, _, _ in T._echo_words(text)]
+
+        def exhaustive(echoed, prompted, unprompted):
+            p, u = words(prompted), words(unprompted)
+            n, m = len(p), len(u)
+            if not n or not m:
+                return False
+            keys = sorted({tuple(words(t)) for t in echoed}, key=len, reverse=True)
+            units, i = [], 0
+            while i < n:
+                key = next((k for k in keys if k and tuple(p[i:i + len(k)]) == k), None)
+                units.append(("".join(key), len(key), True) if key else (p[i], 1, False))
+                i += len(key) if key else 1
+            if not any(unit[2] for unit in units):
+                return False
+
+            def alike(k, a, j, b):
+                heard = "".join(u[j:j + b])
+                if units[k][2]:
+                    return units[k][0] == heard
+                said = "".join(unit[0] for unit in units[k:k + a])
+                return said == heard or (
+                    0.6 * max(len(said), len(heard)) <= min(len(said), len(heard))
+                    and T._sounds_like(heard, said))
+
+            @functools.lru_cache(maxsize=None)
+            def reach(k, j):
+                if k == len(units):
+                    return frozenset({(0, 0)})
+                out = set()
+                if j < m:
+                    out |= reach(k, j + 1)
+                if not units[k][2]:
+                    out |= reach(k + 1, j)
+                if units[k][2]:
+                    steps = [(1, b) for b in range(1, units[k][1] + 3)]
+                else:
+                    steps = [(a, b) for a, b in T._AGREE_MOVES
+                             if not any(unit[2] for unit in units[k:k + a])]
+                for a, b in steps:
+                    if k + a <= len(units) and j + b <= m and alike(k, a, j, b):
+                        said = sum(unit[1] for unit in units[k:k + a])
+                        out |= {(x + said, y + b) for x, y in reach(k + a, j + b)}
+                return frozenset(out)
+
+            return any(x >= 0.8 * n and y >= 0.8 * m for x, y in reach(0, 0))
+
+        rng = random.Random(20261026)
+        terms = ["Arawn", "Aura", "Wayfinder", "Black Mesa"]
+        filler = ["which", "one", "should", "I", "do", "first", "to", "the", "now"]
+        misheard = {"arawn": "aaron", "wayfinder": "wayfender", "should": "shud",
+                    "first": "furst", "the": "a", "do": "to"}
+        verdicts = []
+        for _ in range(500):
+            said = rng.sample(terms, rng.randint(2, 3))
+            prompted = ", ".join(said) + " " + " ".join(rng.choices(filler, k=rng.randint(4, 8)))
+            heard = []
+            for word in words(prompted):
+                roll = rng.random()
+                if roll < 0.08:
+                    continue
+                if roll < 0.23:
+                    heard.append(misheard.get(word, rng.choice(filler)))
+                elif roll < 0.33 and len(word) > 4:
+                    heard += [word[:2], word[2:]]
+                else:
+                    heard.append(word)
+                if rng.random() < 0.1:
+                    heard.append(rng.choice(filler))
+            unprompted = " ".join(heard)
+            echoed = [t.lower() for t in said]
+            expected = exhaustive(echoed, prompted, unprompted)
+            assert T.vocabulary_echo_reproduced(echoed, prompted, unprompted) == expected, \
+                (prompted, unprompted)
+            verdicts.append(expected)
+        assert 50 < sum(verdicts) < 450

@@ -4006,6 +4006,8 @@ def vocabulary_echo_reproduced(echoed: list, prompted: str, unprompted: str) -> 
     spelling. "Push Git to main." still cannot vouch for "Git, Main,
     FoxGrid.", nor "Git, Main." pass for it.
     """
+    import math
+
     p = [word for word, _, _ in _echo_words(prompted)]
     u = [word for word, _, _ in _echo_words(unprompted)]
     n, m = len(p), len(u)
@@ -4026,8 +4028,7 @@ def vocabulary_echo_reproduced(echoed: list, prompted: str, unprompted: str) -> 
         else:
             units.append((p[i], 1, False))
             i += 1
-    terms = sum(1 for unit in units if unit[2])
-    if not terms:
+    if not any(unit[2] for unit in units):
         return False
     count = len(units)
 
@@ -4051,37 +4052,39 @@ def vocabulary_echo_reproduced(echoed: list, prompted: str, unprompted: str) -> 
         return [(a, b) for a, b in _AGREE_MOVES if k + a <= count and j + b <= m
                 and not any(unit[2] for unit in units[k:k + a])]
 
-    # score[k][j]: (most terms matched, then most words matched) between
-    # units[k:] and u[j:].
-    score = [[(0, 0)] * (m + 1) for _ in range(count + 1)]
-    move = [[None] * (m + 1) for _ in range(count + 1)]
-    for k in range(count - 1, -1, -1):
-        for j in range(m - 1, -1, -1):
-            best, how = score[k + 1][j], "p"
-            if score[k][j + 1] > best:
-                best, how = score[k][j + 1], "u"
-            for a, b in moves(k, j):
-                rest_terms, rest_words = score[k + a][j + b]
-                words = sum(unit[1] for unit in units[k:k + a]) + b
-                candidate = (rest_terms + int(units[k][2]), rest_words + words)
-                if candidate > best and alike(k, a, j, b):
-                    best, how = candidate, (a, b)
-            score[k][j], move[k][j] = best, how
+    # Is there ONE alignment that matches every term unit and at least 80%
+    # of each side's words? Summing both sides into one score let a tie pick
+    # an alignment short on one side over one that clears both (Sol echo
+    # r7), so each cell keeps every (prompted, unprompted) count pair no
+    # other pair beats on both sides, capped at the bars, and a term unit is
+    # never skipped.
+    need_p, need_u = math.ceil(0.8 * n), math.ceil(0.8 * m)
 
-    matched_p = matched_u = k = j = 0
-    while k < count and j < m:
-        how = move[k][j]
-        if how == "p":
-            k += 1
-        elif how == "u":
-            j += 1
-        else:
-            a, b = how
-            matched_p += sum(unit[1] for unit in units[k:k + a])
-            matched_u += b
-            k, j = k + a, j + b
-    return (score[0][0][0] == terms
-            and matched_p >= 0.8 * n and matched_u >= 0.8 * m)
+    def frontier(pairs):
+        kept, most_u = [], -1
+        for pair in sorted(set(pairs), reverse=True):
+            if pair[1] > most_u:
+                kept.append(pair)
+                most_u = pair[1]
+        return kept
+
+    # reach[k][j]: the count pairs units[k:] and u[j:] can reach.
+    reach = [[[] for _ in range(m + 1)] for _ in range(count + 1)]
+    for j in range(m + 1):
+        reach[count][j] = [(0, 0)]
+    for k in range(count - 1, -1, -1):
+        reach[k][m] = reach[k + 1][m] if not units[k][2] else []
+        for j in range(m - 1, -1, -1):
+            pairs = list(reach[k][j + 1])
+            if not units[k][2]:
+                pairs += reach[k + 1][j]
+            for a, b in moves(k, j):
+                rest = reach[k + a][j + b]
+                if rest and alike(k, a, j, b):
+                    words = sum(unit[1] for unit in units[k:k + a])
+                    pairs += [(min(need_p, x + words), min(need_u, y + b)) for x, y in rest]
+            reach[k][j] = frontier(pairs)
+    return (need_p, need_u) in reach[0][0]
 
 
 def _transcribe_unprompted(backend, audio_path: str) -> str:
