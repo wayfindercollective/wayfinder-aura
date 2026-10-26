@@ -15,7 +15,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   into your window. When a transcript looks like your vocabulary list, Aura
   now listens to that audio again without the list. If your terms don't come
   back, it keeps that second result, which is usually nothing. If you really
-  did say them, your words stay as they were.
+  did say them, they are still typed, in your spelling when the second
+  listen hears every term the same.
 
 ## [1.3.1] — 2026-10-23
 

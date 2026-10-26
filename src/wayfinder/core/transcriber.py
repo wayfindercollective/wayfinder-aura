@@ -3991,14 +3991,20 @@ def vocabulary_echo_reproduced(echoed: list, prompted: str, unprompted: str) -> 
     """Whether the unprompted pass heard the same utterance as the prompted
     one, so the *echoed* terms in it were really said.
 
-    The two must agree as a whole: every word of an echoed term in the
-    prompted text matched in the unprompted one, at least one echoed term
-    spelled the same, and at least 80% of each side's words matched, in
-    order. Other words may come back misspelled ("Aaron" for Arawn, "cube
-    cuddle" for kubectl): unprompted Whisper has no spelling for the user's
-    own words. Speech around the terms must match too, so
-    "Push Git to main." cannot vouch for "Git, Main, FoxGrid." and "This was
-    badly coded." cannot vouch for "Baldy, Codex." (Sol echo r2).
+    Every echoed term in the prompted text must come back spelled the same,
+    word splits aside ("Postgres QL" for PostgreSQL, "check out" for
+    checkout), and the whole utterance must agree: at least 80% of each
+    side's words matched, in order. Only the words around the terms may
+    come back as near-misses ("turnin" for turning).
+
+    An echoed term never matches a near-miss. Fuzzy evidence for the terms
+    themselves kept confirming other speech: "badly coded." for "Baldy,
+    Codex.", then an exact "Zeathe" vouching for the rest (Sol echo r2-r4).
+    So each term is one unit, matched exactly or not at all. A list the
+    user really said and the unprompted pass misspells ("Aaron" for Arawn)
+    is typed as that pass heard it: the words arrive, without the user's
+    spelling. "Push Git to main." still cannot vouch for "Git, Main,
+    FoxGrid.", nor "Git, Main." pass for it.
     """
     p = [word for word, _, _ in _echo_words(prompted)]
     u = [word for word, _, _ in _echo_words(unprompted)]
@@ -4006,65 +4012,76 @@ def vocabulary_echo_reproduced(echoed: list, prompted: str, unprompted: str) -> 
     if not n or not m or n * m > _AGREE_MAX_CELLS:
         return False
 
-    term_words = set()
-    for key in {tuple(w for w, _, _ in _echo_words(term)) for term in echoed}:
-        for i in range(n - len(key) + 1):
-            if tuple(p[i:i + len(key)]) == key:
-                term_words.update(range(i, i + len(key)))
+    # The prompted words as units: each echoed term found in them (longest
+    # first, left to right) is one unit, every other word its own.
+    keys = sorted({key for key in (tuple(w for w, _, _ in _echo_words(t)) for t in echoed)
+                   if key}, key=len, reverse=True)
+    units = []  # (letters, words, is_term)
+    i = 0
+    while i < n:
+        key = next((k for k in keys if tuple(p[i:i + len(k)]) == k), None)
+        if key:
+            units.append(("".join(key), len(key), True))
+            i += len(key)
+        else:
+            units.append((p[i], 1, False))
+            i += 1
+    terms = sum(1 for unit in units if unit[2])
+    if not terms:
+        return False
+    count = len(units)
 
     same: dict = {}
 
-    def alike(i, a, j, b):
-        pair = ("".join(p[i:i + a]), "".join(u[j:j + b]))
+    def alike(k, a, j, b):
+        """Units k..k+a against words j..j+b; a term only exactly."""
+        if units[k][2]:
+            return units[k][0] == "".join(u[j:j + b])
+        pair = ("".join(unit[0] for unit in units[k:k + a]), "".join(u[j:j + b]))
         if pair not in same:
             x, y = pair
             same[pair] = x == y or (
                 0.6 * max(len(x), len(y)) <= min(len(x), len(y)) and _sounds_like(y, x))
         return same[pair]
 
-    def exact_term(i, a, j, b):
-        return (not term_words.isdisjoint(range(i, i + a))
-                and "".join(p[i:i + a]) == "".join(u[j:j + b]))
+    def moves(k, j):
+        if units[k][2]:
+            # One term unit; the unprompted pass may split its words further.
+            return [(1, b) for b in range(1, min(m - j, units[k][1] + 2) + 1)]
+        return [(a, b) for a, b in _AGREE_MOVES if k + a <= count and j + b <= m
+                and not any(unit[2] for unit in units[k:k + a])]
 
-    # score[i][j]: (most words matched, then most echoed terms spelled the
-    # same) between p[i:] and u[j:]. The tie-break keeps "Kubernetes" paired
-    # with "Kubernetes" rather than with "QL Kubernetes".
-    score = [[(0, 0)] * (m + 1) for _ in range(n + 1)]
-    move = [[None] * (m + 1) for _ in range(n + 1)]
-    for i in range(n - 1, -1, -1):
+    # score[k][j]: (most terms matched, then most words matched) between
+    # units[k:] and u[j:].
+    score = [[(0, 0)] * (m + 1) for _ in range(count + 1)]
+    move = [[None] * (m + 1) for _ in range(count + 1)]
+    for k in range(count - 1, -1, -1):
         for j in range(m - 1, -1, -1):
-            best, how = score[i + 1][j], "p"
-            if score[i][j + 1] > best:
-                best, how = score[i][j + 1], "u"
-            for a, b in _AGREE_MOVES:
-                if i + a > n or j + b > m:
-                    continue
-                words, exact = score[i + a][j + b]
-                if (a + b + words, exact + 1) > best and alike(i, a, j, b):
-                    candidate = (a + b + words, exact + exact_term(i, a, j, b))
-                    if candidate > best:
-                        best, how = candidate, (a, b)
-            score[i][j], move[i][j] = best, how
+            best, how = score[k + 1][j], "p"
+            if score[k][j + 1] > best:
+                best, how = score[k][j + 1], "u"
+            for a, b in moves(k, j):
+                rest_terms, rest_words = score[k + a][j + b]
+                words = sum(unit[1] for unit in units[k:k + a]) + b
+                candidate = (rest_terms + int(units[k][2]), rest_words + words)
+                if candidate > best and alike(k, a, j, b):
+                    best, how = candidate, (a, b)
+            score[k][j], move[k][j] = best, how
 
-    matched_p, matched_u, i, j = set(), 0, 0, 0
-    term_heard_exactly = False
-    while i < n and j < m:
-        how = move[i][j]
+    matched_p = matched_u = k = j = 0
+    while k < count and j < m:
+        how = move[k][j]
         if how == "p":
-            i += 1
+            k += 1
         elif how == "u":
             j += 1
         else:
             a, b = how
-            matched_p.update(range(i, i + a))
+            matched_p += sum(unit[1] for unit in units[k:k + a])
             matched_u += b
-            term_heard_exactly = term_heard_exactly or exact_term(i, a, j, b)
-            i, j = i + a, j + b
-    # Near-misses alone are no evidence: "badly coded." lines up with
-    # "Baldy, Codex." word for word (Sol echo r3). One echoed term must come
-    # back spelled the same, word splits aside ("Postgres QL").
-    return (term_heard_exactly and term_words <= matched_p
-            and len(matched_p) >= 0.8 * n and matched_u >= 0.8 * m)
+            k, j = k + a, j + b
+    return (score[0][0][0] == terms
+            and matched_p >= 0.8 * n and matched_u >= 0.8 * m)
 
 
 def _transcribe_unprompted(backend, audio_path: str) -> str:
@@ -4112,7 +4129,9 @@ def _settle_vocabulary_prompt_echo(backend, audio_path: str, sent_vocabulary: li
           f"prompt; kept the unprompted pass")
     # Silence comes back as ".", "[BLANK_AUDIO]" or a catch-phrase: no words
     # to type, Raw Transcript included (Sol echo r3). One word is an answer.
-    safety_text = _noise_check_safety_copy(unprompted)
+    # Only Whisper's own annotations are set aside: this audio may be speech,
+    # so "(yes)" or "[approved]" is a word (Sol echo r4).
+    safety_text = _strip_non_speech_markers(unprompted)
     if (not _echo_words(safety_text)
             or _is_whisper_phrase_hallucination(safety_text, noise_check=True)):
         return "", "replaced"
