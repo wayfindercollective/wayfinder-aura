@@ -4453,3 +4453,24 @@ class TestVocabularyPromptEcho:
         for speech in ("(yes)", "[approved]", "{value}", "*args"):
             self.unprompted_answer = speech
             assert transcribe_with_config(self.audio, self.config) == speech
+
+    @pytest.mark.parametrize("vocabulary, prompted, unprompted", [
+        (["silence", "music"], "silence, music.", "(silence) [Music]"),          # Sol echo r5
+        (["silence", "music"], "silence, music.", "*silence* [MUSIC] ♪"),
+        (["thanks for watching", "please subscribe"],
+         "Thanks for watching, please subscribe.", "Thanks for watching. Please subscribe."),
+    ])
+    def test_silence_from_the_recheck_never_vouches_for_the_terms(
+            self, decode, vocabulary, prompted, unprompted):
+        """Whisper's annotations and catch-phrases are set aside before the
+        decodes are compared, so they cannot confirm an echo of vocabulary
+        that happens to spell them; Raw Transcript included."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["custom_vocabulary"] = vocabulary
+        self.prompted_answer, self.unprompted_answer = prompted, unprompted
+        for raw in (False, True):
+            self.config["raw_transcription"] = raw
+            outcome = []
+            assert transcribe_with_config(self.audio, self.config, echo_out=outcome) == ""
+            assert outcome == ["replaced"]

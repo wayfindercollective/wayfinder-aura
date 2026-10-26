@@ -4122,20 +4122,22 @@ def _settle_vocabulary_prompt_echo(backend, audio_path: str, sent_vocabulary: li
               f"kept the prompted text")
         return text, "failed"
     WhisperServerBackend._check_not_abandoned(request_token)
-    if vocabulary_echo_reproduced(echoed, text, unprompted):
+    # One ordered pass over what could be speech. Whisper's own annotations
+    # are set aside first; this audio may be speech, so "(yes)" or
+    # "[approved]" is a word (Sol echo r4). Silence then comes back as ".",
+    # "[BLANK_AUDIO]" or a catch-phrase: nothing to type, Raw Transcript
+    # included (Sol echo r3), and never evidence for the terms, even when
+    # the vocabulary holds "silence" or "music" (Sol echo r5). One word is
+    # an answer.
+    heard = _strip_non_speech_markers(unprompted)
+    silent = (not _echo_words(heard)
+              or _is_whisper_phrase_hallucination(heard, noise_check=True))
+    if not silent and vocabulary_echo_reproduced(echoed, text, heard):
         return text, "kept"
     # Say what happened, never what was heard.
     print(f"[Transcription] Whisper echoed {len(echoed)} vocabulary terms from its "
           f"prompt; kept the unprompted pass")
-    # Silence comes back as ".", "[BLANK_AUDIO]" or a catch-phrase: no words
-    # to type, Raw Transcript included (Sol echo r3). One word is an answer.
-    # Only Whisper's own annotations are set aside: this audio may be speech,
-    # so "(yes)" or "[approved]" is a word (Sol echo r4).
-    safety_text = _strip_non_speech_markers(unprompted)
-    if (not _echo_words(safety_text)
-            or _is_whisper_phrase_hallucination(safety_text, noise_check=True)):
-        return "", "replaced"
-    return unprompted, "replaced"
+    return ("" if silent else unprompted), "replaced"
 
 
 # Acronyms and abbreviations that should stay uppercase
