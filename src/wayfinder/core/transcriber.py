@@ -4124,20 +4124,24 @@ def _settle_vocabulary_prompt_echo(backend, audio_path: str, sent_vocabulary: li
     WhisperServerBackend._check_not_abandoned(request_token)
     # One ordered pass over what could be speech. Whisper's own annotations
     # are set aside first; this audio may be speech, so "(yes)" or
-    # "[approved]" is a word (Sol echo r4). Silence then comes back as ".",
-    # "[BLANK_AUDIO]" or a catch-phrase: nothing to type, Raw Transcript
-    # included (Sol echo r3), and never evidence for the terms, even when
-    # the vocabulary holds "silence" or "music" (Sol echo r5). One word is
-    # an answer.
+    # "[approved]" is a word (Sol echo r4). Nothing left (".",
+    # "[BLANK_AUDIO]") is nothing to type, Raw Transcript included (Sol echo
+    # r3), and never evidence for the terms, even when the vocabulary holds
+    # "silence" or "music" (Sol echo r5).
     heard = _strip_non_speech_markers(unprompted)
-    silent = (not _echo_words(heard)
-              or _is_whisper_phrase_hallucination(heard, noise_check=True))
-    if not silent and vocabulary_echo_reproduced(echoed, text, heard):
+    if not _echo_words(heard):
+        return "", "replaced"
+    # A silence catch-phrase is no evidence either, but it may open real
+    # speech ("Thank you. We'll be right back."), so it is not dropped here:
+    # the kept text meets the usual cleanup and Raw Transcript rules
+    # (Sol echo r6). One word is an answer.
+    if (not _is_whisper_phrase_hallucination(heard, noise_check=True)
+            and vocabulary_echo_reproduced(echoed, text, heard)):
         return text, "kept"
     # Say what happened, never what was heard.
     print(f"[Transcription] Whisper echoed {len(echoed)} vocabulary terms from its "
           f"prompt; kept the unprompted pass")
-    return ("" if silent else unprompted), "replaced"
+    return unprompted, "replaced"
 
 
 # Acronyms and abbreviations that should stay uppercase

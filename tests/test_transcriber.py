@@ -4454,23 +4454,53 @@ class TestVocabularyPromptEcho:
             self.unprompted_answer = speech
             assert transcribe_with_config(self.audio, self.config) == speech
 
-    @pytest.mark.parametrize("vocabulary, prompted, unprompted", [
-        (["silence", "music"], "silence, music.", "(silence) [Music]"),          # Sol echo r5
-        (["silence", "music"], "silence, music.", "*silence* [MUSIC] ♪"),
-        (["thanks for watching", "please subscribe"],
-         "Thanks for watching, please subscribe.", "Thanks for watching. Please subscribe."),
-    ])
-    def test_silence_from_the_recheck_never_vouches_for_the_terms(
-            self, decode, vocabulary, prompted, unprompted):
-        """Whisper's annotations and catch-phrases are set aside before the
-        decodes are compared, so they cannot confirm an echo of vocabulary
-        that happens to spell them; Raw Transcript included."""
+    @pytest.mark.parametrize("unprompted", ["(silence) [Music]", "*silence* [MUSIC] ♪"])
+    def test_annotations_from_the_recheck_never_vouch_for_the_terms(self, decode, unprompted):
+        """Whisper's annotations are set aside before the decodes are
+        compared, so they cannot confirm an echo of vocabulary that happens
+        to spell them; Raw Transcript included (Sol echo r5)."""
         from wayfinder.core.transcriber import transcribe_with_config
 
-        self.config["custom_vocabulary"] = vocabulary
-        self.prompted_answer, self.unprompted_answer = prompted, unprompted
+        self.config["custom_vocabulary"] = ["silence", "music"]
+        self.prompted_answer, self.unprompted_answer = "silence, music.", unprompted
         for raw in (False, True):
             self.config["raw_transcription"] = raw
             outcome = []
             assert transcribe_with_config(self.audio, self.config, echo_out=outcome) == ""
             assert outcome == ["replaced"]
+
+    @pytest.mark.parametrize("raw, unprompted, typed", [
+        # A catch-phrase never confirms the terms it spells (Sol echo r5) ...
+        (False, "Thanks for watching. Please subscribe.", "Thanks for watching. Please subscribe."),
+        (True, "Thanks for watching. Please subscribe.", "Thanks for watching. Please subscribe."),
+        # ... and then meets the usual rules: normal cleanup drops a lone
+        # one, Raw Transcript types what Whisper heard (Sol echo r6).
+        (False, "Thanks for watching!", ""),
+        (True, "Thanks for watching!", "Thanks for watching!"),
+    ])
+    def test_a_catch_phrase_from_the_recheck_never_vouches_for_the_terms(
+            self, decode, raw, unprompted, typed):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["custom_vocabulary"] = ["thanks for watching", "please subscribe"]
+        self.config["raw_transcription"] = raw
+        self.prompted_answer = "Thanks for watching, please subscribe."
+        self.unprompted_answer = unprompted
+        outcome = []
+        assert transcribe_with_config(self.audio, self.config, echo_out=outcome) == typed
+        assert outcome == ["replaced"]
+
+    @pytest.mark.parametrize("raw, unprompted, typed", [
+        (False, "Thank you. We'll be right back.", "Thank you. We'll be right back."),  # Sol echo r6
+        (True, "Thank you. We'll be right back.", "Thank you. We'll be right back."),
+        (False, "Thank you.", ""),
+        (True, "Thank you.", "Thank you."),
+    ])
+    def test_speech_the_recheck_recovers_meets_the_usual_rules(self, decode, raw, unprompted, typed):
+        """The guard drops only what has no words; a catch-phrase opening real
+        speech is speech, and a lone one is left to cleanup's own rule."""
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["raw_transcription"] = raw
+        self.prompted_answer, self.unprompted_answer = "Arawn, Aura, Wayfinder.", unprompted
+        assert transcribe_with_config(self.audio, self.config) == typed
