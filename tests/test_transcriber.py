@@ -4083,6 +4083,7 @@ class TestVocabularyPromptEcho:
          "I'm turning it off now."),
         (["git", "main", "foxgrid"], "Git, Main, FoxGrid.", "Push Git to main."),  # Sol echo r2
         (["baldy", "codex"], "Baldy, Codex.", "This was badly coded."),             # Sol echo r2
+        (["baldy", "codex"], "Baldy, Codex.", "badly coded."),                      # Sol echo r3
     ])
     def test_a_different_utterance_does_not_vouch_for_the_terms(self, echoed, prompted, unprompted):
         from wayfinder.core.transcriber import vocabulary_echo_reproduced
@@ -4154,12 +4155,23 @@ class TestVocabularyPromptEcho:
         assert transcribe_with_config(self.audio, self.config) == "Yeah, that sounds good."
         assert len(decode) == 1
 
-    def test_raw_out_reports_the_text_that_was_kept(self, decode):
+    def test_raw_out_keeps_the_first_decode_and_echo_out_says_what_happened(self, decode):
+        """raw_out stays the first decode's text (its loop-check contract);
+        echo_out tells the caller the audio was already heard unprompted."""
         from wayfinder.core.transcriber import transcribe_with_config
 
-        raw = []
-        transcribe_with_config(self.audio, self.config, raw_out=raw)
-        assert raw == [""]
+        raw, outcome = [], []
+        assert transcribe_with_config(self.audio, self.config, raw_out=raw, echo_out=outcome) == ""
+        assert raw == [self.prompted_answer] and outcome == ["replaced"]
+
+        self.prompted_answer, self.unprompted_answer = "Arawn, Aura, Wayfinder.", "Aaron, Aura, Wayfinder."
+        outcome.clear()
+        transcribe_with_config(self.audio, self.config, echo_out=outcome)
+        assert outcome == ["kept"]
+
+        self.prompted_answer, outcome[:] = "Yeah, that sounds good.", []
+        transcribe_with_config(self.audio, self.config, echo_out=outcome)
+        assert outcome == []
 
     def test_raw_transcript_drops_the_echo_too(self, decode):
         from wayfinder.core.transcriber import transcribe_with_config
@@ -4283,6 +4295,7 @@ class TestVocabularyPromptEcho:
     @pytest.mark.parametrize("vocabulary, prompted, unprompted", [
         (["Arawn", "Git", "Main", "FoxGrid"], "Git, Main, FoxGrid.", "Push Git to main."),
         (["Zeathe", "Baldy", "Codex"], "Baldy, Codex.", "This was badly coded."),
+        (["Zeathe", "Baldy", "Codex"], "Baldy, Codex.", "Badly coded."),   # Sol echo r3
     ])
     def test_vocabulary_words_in_another_sentence_keep_that_sentence(
             self, decode, vocabulary, prompted, unprompted):
@@ -4313,3 +4326,65 @@ class TestVocabularyPromptEcho:
         assert len(decode) == 2
         assert "main, dev, master" in decode[0] and decode[1] == ""
         assert server._cli_backend.custom_vocabulary == terms   # still primed next time
+
+    # -- Sol echo r3 --
+
+    @pytest.mark.parametrize("silence", [".", "[BLANK_AUDIO]", " ... ", "(silence)"])
+    def test_raw_transcript_types_nothing_for_a_wordless_recheck(self, decode, silence):
+        from wayfinder.core.transcriber import transcribe_with_config
+
+        self.config["raw_transcription"] = True
+        self.prompted_answer, self.unprompted_answer = "Arawn, Aura, Wayfinder.", silence
+        assert transcribe_with_config(self.audio, self.config) == ""
+
+    def test_failed_recheck_is_reported(self, decode):
+        from wayfinder.core.transcriber import TranscriptionError, transcribe_with_config
+
+        outcome = []
+        self.unprompted_answer = TranscriptionError("server gone")
+        transcribe_with_config(self.audio, self.config, echo_out=outcome)
+        assert outcome == ["failed"]
+
+    def test_near_misses_alone_never_vouch_for_an_echo(self):
+        """Class property (Sol echo r2, r3): an unprompted pass that spells no
+        echoed term the same never confirms an echo, however closely it lines
+        up; the same words heard again always do."""
+        import random
+
+        from wayfinder.core.transcriber import vocabulary_echo_reproduced
+
+        vocabulary = ["Arawn", "Aura", "Wayfinder", "Cyrus", "Cru", "Git", "Main",
+                      "FoxGrid", "Zeathe", "Baldy", "Codex", "Kubernetes"]
+        spellings = {term.lower() for term in vocabulary}
+        rng = random.Random(20261025)
+
+        def near_miss(word):
+            letters = list(word.lower())
+            at = rng.randrange(len(letters))
+            change = rng.choice(("swap", "drop", "add", "replace"))
+            if change == "swap" and at + 1 < len(letters):
+                letters[at], letters[at + 1] = letters[at + 1], letters[at]
+            elif change == "drop" and len(letters) > 3:
+                del letters[at]
+            elif change == "add":
+                letters.insert(at, rng.choice("aeioulnrst"))
+            else:
+                letters[at] = rng.choice("aeioulnrst")
+            return "".join(letters)
+
+        checked = 0
+        while checked < 300:
+            start = rng.randrange(len(vocabulary) - 1)
+            terms = vocabulary[start:start + rng.randint(2, 4)]
+            prompted = ", ".join(terms) + "."
+            heard = [near_miss(term) for term in terms]
+            joined = {"".join(heard[i:j]) for i in range(len(heard))
+                      for j in range(i + 1, len(heard) + 1)}
+            if joined & spellings:
+                continue
+            filler = rng.choice(["", "this was ", "and the ", "okay "])
+            unprompted = filler + " ".join(heard) + rng.choice([".", "", " now."])
+            echoed = [term.lower() for term in terms]
+            assert not vocabulary_echo_reproduced(echoed, prompted, unprompted), unprompted
+            assert vocabulary_echo_reproduced(echoed, prompted, prompted)
+            checked += 1

@@ -25024,6 +25024,7 @@ class WayfinderApp(ctk.CTk):
             # overlays only (never written back to disk).
             asr_cfg = WayfinderApp._asr_config_for_dictation(self)
             raw_prompted = []
+            echo_checked = []
             text = transcribe_with_config(
                 chunk_path,
                 asr_cfg,
@@ -25032,7 +25033,14 @@ class WayfinderApp(ctk.CTk):
                 request_token=request_token,
                 unprompted=noise,
                 raw_out=raw_prompted,
+                echo_out=echo_checked,
             )
+            if echo_checked:
+                # Whisper may have written back its vocabulary prompt; the
+                # guard already heard this chunk without one. Outcome only,
+                # never the words.
+                self.log(f"🔁 Chunk {chunk_index + 1}: vocabulary echo check "
+                         f"({echo_checked[0]})")
             if noise and not text.strip():
                 # transcribe_with_config already held the recognizer's own words to
                 # the two-word rule (and checked for a known hallucination phrase)
@@ -25041,7 +25049,9 @@ class WayfinderApp(ctk.CTk):
                 self.log(f"🔇 Chunk {chunk_index + 1}: noise-like audio produced "
                          f"0 usable words, dropped")
             raw_session = WayfinderApp._raw_session_enabled(self)
-            if context and not raw_session:
+            # A chunk the echo guard already heard without a prompt is settled:
+            # a prompted re-hear here could bring the echo back (Sol echo r3).
+            if context and not raw_session and not echo_checked:
                 # A prompt can make Whisper return a fragment for a whole chunk
                 # of speech; hear it once more without one and keep the fuller.
                 from wayfinder.core.chunking import (
@@ -25534,11 +25544,15 @@ class WayfinderApp(ctk.CTk):
             # Same per-session ASR snapshot as chunks: Windows stays on Base
             # CPU while the initial Ultra GPU device selection is unfinished.
             asr_cfg = WayfinderApp._asr_config_for_dictation(self)
+            echo_checked = []
             text = transcribe_with_config(
                 audio_path, asr_cfg,
                 request_token=WayfinderApp._dictation_request_token(self, gen),
-                unprompted=noise)
+                unprompted=noise, echo_out=echo_checked)
             trans_elapsed = time_module.perf_counter() - trans_start
+            if echo_checked:
+                # Outcome only, never the words.
+                self.log(f"🔁 Vocabulary echo check ({echo_checked[0]})")
             # transcribe_with_config already held a noise-verdict recording's own
             # recognizer words to the two-word rule before this point, so a rejected
             # one comes back as "" here — never logged as recognized text.
