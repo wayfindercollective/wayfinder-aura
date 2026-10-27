@@ -75,9 +75,13 @@ Tk 9.0 throws unexpected exceptions during rapid canvas redraws and window destr
 ### 11. All font sizes / radii / colors / spacing go through design tokens
 Use `self.font_sizes[...]`, `RADIUS[...]`, `SPACING[...]`, `COLORS[...]` — never bare `font=("Inter", 13)` or `corner_radius=12`. Tokens are mirrored in `src/wayfinder/ui/theme.py` (keep the two mirrors in sync). `tests/test_design_ratchet.py` enforces this: hardcoded font/radius literals fail CI unless they carry a sanctioned whitelist comment (`# optical glyph size` for single-glyph buttons and hero numerals, `# module-scope: no font_sizes access` / `# module-scope squircle: no matching token` for module-level helper classes outside `WayfinderApp`, `# pill: height/2` and `# mic meter: intentional` for the two off-ramp shapes). Icons come from `wayfinder.ui.icons` (tinted Lucide PNGs) — no emoji as UI chrome; log lines and the 😇/🎭 personality strings are the only sanctioned emoji.
 
+### 12. Fix the root cause where it lives; don't overbuild
+When a model misbehaves (a small model ignoring the output format, a missing chat template, a prompt that invites echoes), fix it at the model level first: chat template, prompt, stop tokens, model choice or tier cap. Code-side handling stays a small guard whose failure is safe: when unsure, type the speaker's words. Don't write parsers that repair arbitrary model output; every heuristic invites a new counterexample, and more tests and review rounds don't converge. Size each fix to a failure seen in real use (captured output, a field report), not to inputs built to break it. If two review rounds pass without the real-world measure moving, reassess the design before patching again. (2026-10: a fix for Gemma 3 1B typing its own "Explanation:" grew to 3,300 lines over 25 review rounds; the real incident needed a 20-line guard that types the speaker's words.)
+
 ## First Principles Checklist
 Before any change, ask:
 - **Single source of truth?** Don't duplicate state, config, or logic across files.
+- **Root cause or symptom?** If the model, prompt or config causes it, fix it there before adding code.
 - **Simplest approach?** If you're writing a custom widget, timer, or abstraction — the standard one probably works.
 - **Tested the matrix?** Tones, intensities, X11/Wayland, idle CPU — the bugs hide in the combinations.
 - **Reversible?** If a perf optimization degrades UX, can you revert cleanly?
