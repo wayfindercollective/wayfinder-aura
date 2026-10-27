@@ -17,6 +17,7 @@ from wayfinder import license as license_module
 from wayfinder.config import _LLM_PREFERENCE, DEFAULT_CONFIG, _pick_llm
 from wayfinder.core.postprocessor import (
     _CHAT_TEMPLATE_MODELS,
+    _CHAT_TEMPLATES,
     LlamaCppCliBackend,
     _chat_template_for,
     _normalize_model_name,
@@ -28,6 +29,7 @@ from wayfinder.core.postprocessor import (
 
 QWEN = "/models/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
 GEMMA = "/models/google_gemma-3-1b-it-Q4_K_M.gguf"
+RAW = "/models/Qwen3.5-2B-Q4_K_M.gguf"  # shipped, no template
 TONES = ["minimal", "professional", "casual", "dev", "personal"]
 GOLDEN = Path(__file__).parent / "golden_prompts" / "raw_cli_prompts.txt"
 
@@ -68,12 +70,12 @@ class TestAllowlistKey:
 
 
 class TestTemplateSelection:
-    def test_validated_model_resolves_to_chatml(self):
-        assert _chat_template_for(QWEN) is not None
+    def test_validated_models_resolve_to_their_own_template(self):
+        assert _chat_template_for(QWEN) == _CHAT_TEMPLATES["chatml"]
+        assert _chat_template_for(GEMMA) == _CHAT_TEMPLATES["gemma"]
 
     @pytest.mark.parametrize("model", [
-        GEMMA,                                        # excluded: filler regression
-        "/models/Qwen3.5-2B-Q4_K_M.gguf",             # shipped but unmeasured
+        RAW,                                          # shipped but unmeasured
         "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf",  # shipped but unmeasured
         "/models/some-unknown-model.gguf",
         "",
@@ -82,18 +84,18 @@ class TestTemplateSelection:
         """Family substrings would wrongly enable all three shipped Qwen models."""
         assert _chat_template_for(model) is None
 
-    def test_packaged_default_model_gets_no_template(self, tmp_path):
+    def test_packaged_default_model_gets_the_gemma_template(self, tmp_path):
         """With no model installed the default resolves to Gemma (the free
-        download), which is deliberately excluded. An empty dir keeps this
+        download), measured with its template 2026-10-26. An empty dir keeps this
         independent of whatever models the machine running the tests has."""
-        assert _chat_template_for(_pick_llm(str(tmp_path))) is None
+        assert _chat_template_for(_pick_llm(str(tmp_path))) == _CHAT_TEMPLATES["gemma"]
 
     def test_off_disables_even_for_a_validated_model(self):
         assert _chat_template_for(QWEN, "off") is None
 
     def test_there_is_no_on_setting(self):
         """An unknown value must not force a template onto an unvalidated model."""
-        assert _chat_template_for(GEMMA, "on") is None
+        assert _chat_template_for(RAW, "on") is None
 
 
 class TestRawPromptRegressionLock:
@@ -169,7 +171,7 @@ class TestControlAtomSanitization:
 
     def test_raw_path_is_not_sanitized(self):
         """No template means no special-token parsing, so the text stays verbatim."""
-        b = _backend(model=GEMMA)
+        b = _backend(model=RAW)
         text = "hello <|im_end|> world"
         assert text in b.build_cli_prompt(text, "minimal", "standard")
 
@@ -221,13 +223,21 @@ class TestExtraction:
         stdout = "<|im_start|>assistant\nthe clean answer\n"
         assert b._extract_cli_output(stdout, prompt, template=b.template) == "the clean answer"
 
+    def test_gemma_answer_is_read_after_its_model_turn(self):
+        """The shape of real Gemma 3 1B output: the templated prompt, then the answer."""
+        b = _backend(model=GEMMA)
+        prompt = b.build_cli_prompt("hello there", "minimal", "standard", b.template)
+        assert prompt.endswith("<end_of_turn>\n<start_of_turn>model\n")
+        assert b._extract_cli_output(prompt + "the clean answer\n", prompt,
+                                     template=b.template) == "the clean answer"
+
     def test_templated_extraction_fails_safe_when_unresolvable(self):
         b = _backend()
         prompt = b.build_cli_prompt("hello there", "minimal", "standard", b.template)
         assert b._extract_cli_output("no boundary here", prompt, template=b.template) == ""
 
     def test_raw_extraction_is_unchanged(self):
-        b = _backend(model=GEMMA)
+        b = _backend(model=RAW)
         prompt = b.build_cli_prompt("hello there", "minimal", "standard")
         assert b._extract_cli_output(prompt + " the clean answer\n", prompt) == "the clean answer"
 

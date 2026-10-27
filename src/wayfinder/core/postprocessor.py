@@ -2188,6 +2188,11 @@ _RESTATEMENT_RE = re.compile(
 # models and only Qwen3-4B has been measured across the tone matrix. Qwen 3.5 2B is
 # already recorded as inconsistent (config.py) and is a reasoning model whose
 # <think> prefill interacts with the template, so it stays on raw completion.
+#
+# Gemma 3 1B (Normal only) measured 2026-10-26 on 205 captured Normal cleanups:
+# the template removed every "Explanation:" note (5 raw), cut the median from
+# 1.8 s to 1.2 s and typed fewer answers unchanged (95 vs 120), with no filler
+# left behind. Known slip: "Push it to main" became "Push it main".
 
 # name -> (user_prefix, user_suffix, assistant_prefix, control_atoms)
 _CHAT_TEMPLATES: Dict[str, tuple] = {
@@ -2196,6 +2201,12 @@ _CHAT_TEMPLATES: Dict[str, tuple] = {
         "<|im_end|>\n",
         "<|im_start|>assistant\n",
         ("<|im_start|>", "<|im_end|>"),
+    ),
+    "gemma": (
+        "<start_of_turn>user\n",
+        "<end_of_turn>\n",
+        "<start_of_turn>model\n",
+        ("<start_of_turn>", "<end_of_turn>"),
     ),
 }
 
@@ -2211,6 +2222,8 @@ _CHAT_TEMPLATES: Dict[str, tuple] = {
 _CHAT_TEMPLATE_MODELS: Dict[str, str] = {
     # Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf
     "qwenqwen34binstruct2507q4km": "chatml",
+    # google_gemma-3-1b-it-Q4_K_M.gguf
+    "googlegemma31bitq4km": "gemma",
 }
 
 _ECHO_TOKEN_RE = re.compile(r"[a-z0-9']+")

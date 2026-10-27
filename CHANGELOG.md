@@ -17,6 +17,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   back, it keeps that second result, which is usually nothing. If you really
   did say them, they are still typed, in your spelling when the second
   listen hears every term the same.
+- **Cleanup no longer types the model's own notes.** A small cleanup model
+  sometimes added "Explanation: …" or "Note: …" about its answer, and Aura
+  typed that too. Now, when the answer carries a note or label, Aura types
+  your words instead.
+
+### Changed
+
+- **Gemma 3 1B cleans up faster and more often.** Aura now talks to Gemma in
+  the chat format it was trained on. In testing, typical cleanup time fell
+  from 1.8 s to 1.2 s, and it fixed more dictations instead of handing them
+  back unchanged.
 
 ## [1.3.1] — 2026-10-23
 
