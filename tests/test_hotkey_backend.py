@@ -91,7 +91,7 @@ def test_portal_retry_delay_doubles_then_caps():
 
 def test_portal_retry_delay_saturates_without_overflow():
     # 10.0 * 2**1024 raises OverflowError on float conversion; a week-long
-    # portal outage must not permanently disable retries (Codex review).
+    # portal outage must not permanently disable retries (code review).
     from wayfinder_main import portal_retry_delay
 
     assert portal_retry_delay(1024) == 600.0

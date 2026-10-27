@@ -172,7 +172,7 @@ pre-empts it (`on_hotkey`). All darwin-gated.
 - **Evidence (macOS):** main process 5.5% CPU idle on the Dictate tab vs 1.8%
   with the hero paused (Settings tab). The window was in the background.
 - **Linux check:** measure idle CPU with the window unfocused / covered /
-  minimized (CLAUDE.md target: < 2%).
+  minimized (ARCHITECTURE.md target: < 2%).
 - **Fix sketch:** pause or slow the idle breath when the window is not focused
   or is occluded; resume on focus.
 

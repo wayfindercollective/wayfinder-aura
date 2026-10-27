@@ -93,7 +93,7 @@ network and not perf"`) passes on a headless node; Ruff's CI classes and
   installs.
 - Windows still runs llama-server without a key.
 - Linux renders the Mac shader ribbon and runs the recording ribbon at 30 fps
-  on desktops (15 fps on Steam hardware); CLAUDE.md rules 1 and 9 now say so
+  on desktops (15 fps on Steam hardware); ARCHITECTURE.md rules 1 and 9 now say so
   (2026-10-04). Still measure focused-idle CPU at HiDPI
   (`top -p $(pgrep -f wayfinder)`, rule 1 budget 2%).
 - macOS: bare permission prompts for returning users at launch (hotkey

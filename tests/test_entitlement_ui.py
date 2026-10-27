@@ -390,7 +390,7 @@ def test_benchmark_can_compare_gpu_while_free_pipeline_remains_cpu():
 def test_your_setup_never_headlines_the_inactive_processor():
     """Free (use_gpu=False) with the CPU test failed and the GPU Ultra
     preview succeeded: the old fallback headlined the preview as 'your
-    setup' — a speed Free does not deliver (Codex review)."""
+    setup' — a speed Free does not deliver (code review)."""
     summary = wayfinder_main.BenchmarkRunner.build_pipeline_summary(
         asr_model_id="base.en",
         asr_model_name="Base",

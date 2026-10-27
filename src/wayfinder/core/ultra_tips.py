@@ -70,7 +70,7 @@ def underutilization_signals(config, gate, has_gpu: bool) -> "list[str]":
             # Under-utilizing only when the CURRENT cleanup model would run on
             # the Free tier. The shared tier logic also recognizes custom
             # 3B+/4B models as premium — the catalog marker alone misses
-            # those, since Browse stores it as None for custom paths (Codex
+            # those, since Browse stores it as None for custom paths (code
             # review).
             if cleanup_model_allowed(
                 str(config.get("llama_cpp_model_path", "") or ""),

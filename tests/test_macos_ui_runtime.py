@@ -182,7 +182,7 @@ def test_macos_status_menu_defers_until_native_menu_unwinds(monkeypatch):
 
 def test_macos_idle_poll_is_a_backstop_once_the_event_pipe_is_attached(monkeypatch):
     monkeypatch.setattr(wayfinder_main, "IS_MACOS", True)
-    assert wayfinder_main._MACOS_IDLE_SAFETY_POLL_MS >= 500  # CLAUDE.md rule 1
+    assert wayfinder_main._MACOS_IDLE_SAFETY_POLL_MS >= 500  # ARCHITECTURE.md rule 1
 
     def next_poll(**attrs):
         scheduled = []

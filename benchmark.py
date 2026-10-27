@@ -210,7 +210,7 @@ class BenchmarkSuite:
             if r.error:
                 continue
             # Catalog model id ("base.en"), NOT the display name — tooltips
-            # and the model picker look results up by id (Codex review).
+            # and the model picker look results up by id (code review).
             key = (r.extra or {}).get("model_id") or r.name.lower().replace(" ", "_")
             if key not in transcription:
                 # Warm contract marker: the timed runs follow a warmup and

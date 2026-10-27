@@ -2,7 +2,7 @@
 
 This document tracks the migration from the monolithic `wayfinder_main.py` to the modular package structure.
 
-> **For AI Agents**: See [../../AGENTS.md](../../AGENTS.md) for comprehensive technical documentation.
+See [../../ARCHITECTURE.md](../../ARCHITECTURE.md) for comprehensive technical documentation.
 
 ## Current Status
 
@@ -44,7 +44,7 @@ After all extractions, `wayfinder_main.py` should contain only:
 - WayfinderApp class (coordinating all components)
 - Event loop and state management
 
-## For AI Agents
+## Contributor Guidelines
 
 When making changes:
 1. **Always edit** files in `src/wayfinder/` for core functionality

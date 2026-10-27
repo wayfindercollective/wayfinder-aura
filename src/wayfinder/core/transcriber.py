@@ -1405,7 +1405,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 # An adopted pre-existing server's actual spawn flags are
                 # unknowable — record honest-unknown (None). _server_reusable
                 # treats None as never-matching, so the next start re-probes
-                # adoption instead of trusting an unverified mode (Codex
+                # adoption instead of trusting an unverified mode (code
                 # review; adoption also leaves _server_process None, so the
                 # in-memory reuse fast path never applied to it anyway).
                 WhisperServerBackend._server_use_gpu = None
@@ -1602,7 +1602,7 @@ class WhisperServerBackend(TranscriptionBackend):
                 pass
         # Identity clears even when no local Popen exists (adopted server /
         # already-reaped process) — stale identity must never satisfy a future
-        # reuse check for a server we do not control (Codex review).
+        # reuse check for a server we do not control (code review).
         cls._server_process = None
         cls._server_model_path = ""
         cls._server_binary = None

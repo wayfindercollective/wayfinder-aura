@@ -332,7 +332,7 @@ def test_secure_input_probe_is_safe():
 
 def test_supervisor_loop_idles_slowly_until_a_hotkey_is_held():
     # Nothing held: the Secure Input / event-tap checks run twice a second.
-    assert pl._DARWIN_IDLE_TICK_S >= 0.5  # CLAUDE.md rule 1 idle floor
+    assert pl._DARWIN_IDLE_TICK_S >= 0.5  # ARCHITECTURE.md rule 1 idle floor
     assert pl._listener_tick_s(False, "darwin") == pl._DARWIN_IDLE_TICK_S
     # A held hotkey keeps the 100 ms lost-key-up reconcile.
     assert pl._listener_tick_s(True, "darwin") == 0.1

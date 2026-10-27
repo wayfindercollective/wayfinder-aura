@@ -1,6 +1,6 @@
 # Implementation Plan: Security Hardening Tier A (+ B2/B3 hygiene)
 
-**Status:** Codex **APPROVED** (gpt-5.5, 2026-07-09, review id `2304586e`, session `019f4805-9de8-72d3-a033-572257b23948`)  
+**Status:** Approved (2026-07-09)  
 **Source:** `docs/SECURITY-REVIEW.md` (F1–F8; Flatpak cross-check)  
 **Out of scope this PR:** model SHA digests (B1), socket auth token (B4), OS keyring (C1), Flatpak network split (C3), DRM.
 
@@ -8,7 +8,7 @@ Non-goals (do not re-litigate): plaintext API keys with 0600, client-side licens
 
 ---
 
-## Codex R1 → R2
+## Review Notes
 
 R1 **REVISE** (all accepted): live socket duplicate in `wayfinder_main.py`; all `pkill -f overlay.py` sites; log rollover modes; F6 app-owned temp dir; tone matrix test run; atomic 0600 writes; parent chmod guard; both overlay modules for F8.
 

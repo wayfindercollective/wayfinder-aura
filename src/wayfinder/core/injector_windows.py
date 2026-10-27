@@ -1343,7 +1343,7 @@ def _inject_text_paste_windows(text: str, cancelled=None) -> None:
 # names and timings, never the dictated or clipboard text.
 
 _paste_reporter = None
-_watch_reads = False   # the 0.5 ms clipboard-read watcher: opt-in (CLAUDE.md rule 1)
+_watch_reads = False   # the 0.5 ms clipboard-read watcher: opt-in (ARCHITECTURE.md rule 1)
 _WATCH_SECONDS = 1.5
 
 if _user32 is not None:

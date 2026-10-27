@@ -54,7 +54,7 @@ class TestParseTimings:
 
     def test_partial_final_block_does_not_mix_with_previous(self):
         # A truncated second report must not donate its load while the first
-        # block donates its total — that would mix two runs (Codex review).
+        # block donates its total — that would mix two runs (code review).
         text = REAL_STDERR + "whisper_print_timings:     load time =    10.00 ms\n"
         timings = parse_timings(text)
         assert timings["load"] == pytest.approx(0.07308)

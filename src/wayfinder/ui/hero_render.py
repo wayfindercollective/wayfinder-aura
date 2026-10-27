@@ -13,7 +13,7 @@ breath ``0.26 + 0.09*sin``, the amplitude/brightness morph curves) are
 USER-APPROVED and reproduced here verbatim.
 
 Cost model (see plan): per frame = 10 opaque ``draw.line`` polylines (sampled
-every 6px, NO ``joint="curve"`` — Codex benchmarked that at ~8.3ms/frame) + one
+every 6px, NO ``joint="curve"`` — benchmarked that at ~8.3ms/frame) + one
 ``Image.composite`` through a baked edge-fade L mask + one 1px top-highlight
 line. Alpha is pre-blended over the opaque bg into solid RGBs (no per-segment
 RGBA compositing, no per-frame blur/supersample). All per-(w,h,color,bg)

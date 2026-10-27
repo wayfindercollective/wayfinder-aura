@@ -44,8 +44,7 @@ between the repo and a live listing.
 
 ## Remaining for Flathub submission (in order)
 
-See **`docs/FLATHUB-HANDOFF.md`** for the full owner checklist (AI exception,
-reviewer Ultra keys, human PR only).
+See `flatpak/BUILDING.md` for the full Flathub submission and build checklist.
 
 ### 1. Production license + storefront
 - ✅ Production activation URL is set (`shiny-goshawk-432`).

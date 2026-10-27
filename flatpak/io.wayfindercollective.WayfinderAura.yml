@@ -1,5 +1,5 @@
 # Flatpak manifest for Wayfinder Aura
-# 
+#
 # Quick test build:
 #   flatpak-builder --user --install --force-clean --jobs=2 build-dir io.wayfindercollective.WayfinderAura.yml
 #
@@ -8,13 +8,7 @@
 #   2. Generate release/io.wayfindercollective.WayfinderAura.yml with
 #      flatpak/prepare-release-manifest.py --tag vX.Y.Z
 #   3. Build the release manifest with --force-clean
-#   4. Submit the release manifest plus generated python-deps.json and flathub.json
-#      to Flathub
-#
-# App ID Guidelines:
-#   - For personal projects: io.github.YOURUSERNAME.WayfinderAura
-#   - For organization: com.yourorg.WayfinderAura
-#   - Update all references below when changing
+#   4. Submit the release manifest and generated source files to Flathub
 
 app-id: io.wayfindercollective.WayfinderAura
 runtime: org.kde.Platform
@@ -559,9 +553,9 @@ modules:
       - install -Dm755 main.py ${FLATPAK_DEST}/lib/wayfinder-aura/main.py
       - install -Dm644 wayfinder_main.py ${FLATPAK_DEST}/lib/wayfinder-aura/wayfinder_main.py
       
-      # trigger_record.py is the only root-level module still present — the recorder/
+      # trigger_record.py is the only root-level module still present; the recorder/
       # transcriber/injector/postprocessor/license root shims were deleted (code now lives
-      # under src/wayfinder/; CLAUDE.md Rule #4). Installing them would fail the build.
+      # under src/wayfinder/). Installing them would fail the build.
       - install -Dm644 trigger_record.py ${FLATPAK_DEST}/lib/wayfinder-aura/trigger_record.py
 
       # Package structure: mkdir the dest first so `cp -r src/wayfinder .../src/` lands at

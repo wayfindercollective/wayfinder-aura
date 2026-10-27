@@ -45,7 +45,7 @@ def parse_timings(stderr_text: str) -> dict:
     Matches are grouped into report blocks (a repeated key starts a new
     block) and the LAST COMPLETE block wins — a truncated final report must
     not donate one value while the previous block donates the other, mixing
-    two different runs into one measurement (Codex review).
+    two different runs into one measurement (code review).
     """
     blocks = [{}]
     for name, ms in _TIMING_RE.findall(stderr_text or ""):
@@ -114,7 +114,7 @@ class MeasureResult:
     wall_seconds: Optional[float] = None  # full process wall clock
     returncode: Optional[int] = None
     stderr_tail: str = ""                 # for diagnostics on failure
-    # Provenance (Codex review): "report" = load-free number from the
+    # Provenance (code review): "report" = load-free number from the
     # binary's timing report; "wall" = fallback wall clock (load included).
     timing_source: str = ""
     warmed_ok: bool = False               # the warmup pass actually succeeded

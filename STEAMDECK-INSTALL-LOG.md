@@ -678,7 +678,7 @@ The repo already has `flatpak/io.github.user.WayfinderAura.yml`, `flatpak/BUILDI
 
 ## Update — 2026-05-31: Flatpak v2 built + Steam-Deck-Optimized polish pass (all validated on the Deck)
 
-The `integration/flatpak-v2` branch now **builds, installs, transcribes, and runs end-to-end** on the Deck (SteamOS 3.7.25, KDE/X11). The first build closed the structural blockers (#1 glibc, #5/#6/#7 headers, #13/Crit-2 SIGILL, #16 no-Linux-binaries) — `whisper-cli base.en` runs **EXIT 0** on the Zen 2 APU (re-confirmed this build: 261 ms on 1 s audio, no SIGILL). This pass then closed the three remaining sandbox-integration regressions plus reliability hardening. Plan was Codex-reviewed (gpt-5.5, 3 rounds).
+The `integration/flatpak-v2` branch now **builds, installs, transcribes, and runs end-to-end** on the Deck (SteamOS 3.7.25, KDE/X11). The first build closed the structural blockers (#1 glibc, #5/#6/#7 headers, #13/Crit-2 SIGILL, #16 no-Linux-binaries) — `whisper-cli base.en` runs **EXIT 0** on the Zen 2 APU (re-confirmed this build: 261 ms on 1 s audio, no SIGILL). This pass then closed the three remaining sandbox-integration regressions plus reliability hardening.
 
 ### What was fixed (all proven on-device)
 

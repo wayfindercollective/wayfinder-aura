@@ -1,6 +1,6 @@
 """Every config key the app reads by name is declared in DEFAULT_CONFIG.
 
-CLAUDE.md: config keys live only in src/wayfinder/config.py DEFAULT_CONFIG.
+ARCHITECTURE.md: config keys live only in src/wayfinder/config.py DEFAULT_CONFIG.
 A key read with an inline fallback but never declared has no single default,
 and two readers can (and did) disagree about it.
 """

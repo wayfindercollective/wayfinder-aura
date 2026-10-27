@@ -8,7 +8,7 @@ registered with ``createfilehandler`` wakes Tk as soon as ``put()`` runs
 way, so the idle poll is only a 1 s safety net (_MACOS_IDLE_SAFETY_POLL_MS).
 
 There is no timer involved: the pipe only becomes readable when an event
-arrives, so idle CPU is unchanged (CLAUDE.md rule 1).
+arrives, so idle CPU is unchanged (ARCHITECTURE.md rule 1).
 """
 
 from __future__ import annotations

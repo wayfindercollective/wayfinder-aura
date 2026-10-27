@@ -1,6 +1,6 @@
-# Plan: Wayfinder Aura Pre-Launch Presentation Refinement (v3 — post-Codex R2)
+# Plan: Wayfinder Aura Pre-Launch Presentation Refinement (v3)
 
-**Status:** Implemented in-tree (2026-07-08), including **5 store screenshots** via `scripts/capture_store_screenshots.py`. Codex review: APPROVED. Web `/aura` + checkout left to product owner.
+**Status:** Implemented in-tree (2026-07-08), including **5 store screenshots** via `scripts/capture_store_screenshots.py`. Web `/aura` + checkout left to product owner.
 
 **Project:** `/var/home/bazzite/Dev/wayfinder-aura`  
 **Goal:** Refine how the app *presents* itself before paid public launch — store surfaces, first-open UX, brand consistency, and conversion copy.  
@@ -27,7 +27,7 @@
 3. **Calm free tier, celebrate Ultra.**
 4. **Returning users open ready-to-speak** (Dictate), not Settings.
 5. **Do not touch settings scroll behavior** — hard no-hunks rule (below).
-6. **CLAUDE.md icon rules:** Lucide icons only for decorative chrome; sanctioned exceptions 😇 (Ultra) and 🎭 (caricature). Touched UI must not introduce or leave decorative emoji (e.g. 💡 Quick Tips, ⚡/☁ benefit row) — replace with Lucide or plain text.
+6. **ARCHITECTURE.md icon rules:** Lucide icons only for decorative chrome; sanctioned exceptions 😇 (Ultra) and 🎭 (caricature). Touched UI must not introduce or leave decorative emoji (e.g. 💡 Quick Tips, ⚡/☁ benefit row) — replace with Lucide or plain text.
 
 ---
 
@@ -109,7 +109,7 @@ Profile flags by shot (welcome is incompatible with a completed welcome flag):
 
 ### D. Dictate first-open + returning default (high)
 
-**Corrected target (Codex R1):**
+**Corrected target:**
 - First-run welcome **already** lands on Dictate while the pane is active.
 - **Required change:** when `setup_completed=true` **and** `welcome_completed=true`, **app startup lands on Dictate**, not Settings (`_switch_tab("dictate")` instead of `"settings"` at init).
 

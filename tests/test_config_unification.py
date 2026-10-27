@@ -1,7 +1,7 @@
 """Config single-source unification tests (Phase 1b of the premium polish pass).
 
 wayfinder_main.py used to carry its own DEFAULT_CONFIG + load_config +
-save_config — the duplicate that CLAUDE.md rule 3 warns about, and the one the
+save_config — the duplicate that ARCHITECTURE.md rule 3 warns about, and the one the
 running app actually loaded (bypassing config.py's protective migrations).
 Phase 1b deletes that duplicate; wayfinder_main.py now imports everything from
 wayfinder.config, so config.py is the single source of truth.
@@ -37,7 +37,7 @@ MAIN_SRC = (REPO / "wayfinder_main.py").read_text(encoding="utf-8")
 def test_main_has_no_default_config_literal():
     assert re.search(r"(?m)^DEFAULT_CONFIG\s*=\s*\{", MAIN_SRC) is None, (
         "wayfinder_main.py still defines its own DEFAULT_CONFIG dict — it must "
-        "import it from wayfinder.config (single source, CLAUDE.md rule 3)."
+        "import it from wayfinder.config (single source, ARCHITECTURE.md rule 3)."
     )
 
 

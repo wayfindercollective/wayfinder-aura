@@ -224,7 +224,7 @@ def check_text_injection() -> DependencyStatus:
     UI doesn't report injection broken when a working backend exists — or OK when it doesn't.
     Linux/Wayland prefers wtype (sandbox-safe, no uinput); X11 prefers xdotool; ydotool is the
     fallback and additionally needs its daemon + /dev/uinput (the old code wrongly treated a
-    bundled ydotool binary as sufficient — Codex review / STEAMDECK-INSTALL-LOG Issue 4).
+    bundled ydotool binary as sufficient — code review / STEAMDECK-INSTALL-LOG Issue 4).
     """
     if sys.platform == "darwin":
         # Injection posts Cmd+V / Return through Quartz (core/macos_paste);
@@ -267,7 +267,7 @@ def check_text_injection() -> DependencyStatus:
         # Honest status: with wtype as the ONLY backend there is no automatic
         # desktop-mode fallback if the compositor refuses it (GNOME always
         # does; KWin can revoke mid-session) — say so instead of promising a
-        # clipboard path that only Game Mode has (Codex review).
+        # clipboard path that only Game Mode has (code review).
         return DependencyStatus(True, detail="wtype (Wayland)",
                                 warning="wtype only — some desktops refuse it; "
                                         "install ydotool for reliable typing")
@@ -288,7 +288,7 @@ def check_text_injection() -> DependencyStatus:
                 error="Installing background typing service (one-click, no password)",
             )
         # Keep the gold warning badge, but flag it blocking so Setup won't claim
-        # "All set!" while typing is broken (Codex review F11).
+        # "All set!" while typing is broken (code review F11).
         return DependencyStatus(True, detail="ydotool installed",
                                 warning="ydotoold daemon not running", blocking_warning=True)
     return DependencyStatus(False, error="No text injection backend (install wtype or xdotool)")
@@ -355,7 +355,7 @@ def install_ydotoold_user_service(log: 'LogCallback', done: 'DoneCallback') -> N
             # Respect an EXISTING user ydotoold.service (theirs, not ours):
             # never overwrite it — try starting it first; only if that fails do
             # we install our own APP-OWNED unit under a distinct name, which is
-            # always safe to (re)write (Codex review). NOTE: no socket cleanup
+            # always safe to (re)write (code review). NOTE: no socket cleanup
             # before this — the unit may already be ACTIVE (enable --now won't
             # restart it) and unlinking its live socket would orphan it; it may
             # also use a different socket path entirely.
@@ -408,7 +408,7 @@ def install_ydotoold_user_service(log: 'LogCallback', done: 'DoneCallback') -> N
             # direct-uinput fallback. The socket is FORCED to the one OUR
             # daemon owns — _get_ydotool_env's priority order could otherwise
             # select an inherited/system socket and verify the wrong daemon
-            # (Codex review).
+            # (code review).
             log("Verifying typing backend…")
             import time as _time
             from wayfinder.core.injector import (
@@ -424,7 +424,7 @@ def install_ydotoold_user_service(log: 'LogCallback', done: 'DoneCallback') -> N
                 if unit_name == "wayfinder-ydotoold.service":
                     # OUR daemon owns the user socket: verify exactly that one —
                     # env priority could otherwise select an inherited/system
-                    # socket and verify the wrong daemon (Codex review).
+                    # socket and verify the wrong daemon (code review).
                     if not _probe_unix_socket(str(sock)):
                         _time.sleep(0.25)
                         continue
@@ -1027,7 +1027,7 @@ def download_whisper_model(
     other model is Ultra (``large_models``, the same rule as
     license.is_free_transcription_model) and comes only from the Models CDN
     with the licence bearer, exactly like the app's model manager: never from
-    a public mirror (CLAUDE.md, models_cdn). Without the licence the download
+    a public mirror (ARCHITECTURE.md, models_cdn). Without the licence the download
     is refused.
 
     Args:
@@ -1336,7 +1336,7 @@ def is_steam_deck() -> bool:
     """True on Steam Deck hardware (LCD 'Jupiter' or OLED 'Galileo').
 
     Kept separate from _detect_gpu_vendor() so its callers that branch on vendor values
-    ('amd', etc.) are unaffected (Codex review). Used only to pick a default model.
+    ('amd', etc.) are unaffected (code review). Used only to pick a default model.
     """
     try:
         product = Path("/sys/class/dmi/id/product_name").read_text().strip().lower()

@@ -1903,7 +1903,7 @@ def test_a_copy_between_deferred_retries_drops_the_pending_restore(monkeypatch):
 
 
 def test_clipboard_read_watcher_is_off_unless_asked_for(monkeypatch):
-    """It polls every 0.5 ms for 1.5 s per paste (CLAUDE.md rule 1): the
+    """It polls every 0.5 ms for 1.5 s per paste (ARCHITECTURE.md rule 1): the
     paste_diagnostics_watch setting turns it on while chasing a report."""
     from wayfinder.config import DEFAULT_CONFIG
     from wayfinder.core import injector_windows as iw
