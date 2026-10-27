@@ -4184,6 +4184,26 @@ def _unshout(text: str, original: str) -> str:
     return "".join(parts)
 
 
+# Labels and notes a cleanup model writes about its own answer ("Explanation:",
+# "Here is the cleaned text:", "Final Answer:", a code fence). Anchored to a line
+# start so a mid-sentence "the answer: yes" is never matched.
+_MODEL_META_RE = re.compile(
+    r"(?im)^[ \t>*#_\-]*(explanation|notes?|changes(?: made)?|final answer|answer"
+    r"|cleaned text|corrected text|revised text|output"
+    r"|here(?:'s| is) the (?:cleaned|corrected|revised)[^:\n]{0,30})[ \t*]*:|```"
+)
+
+
+def model_added_meta(result: str, original: str) -> bool:
+    """True when the model's answer carries a label or note the speaker didn't say.
+
+    Such an answer is not a cleanup of the speech, and cutting it apart is
+    guesswork, so the caller types the speaker's words instead.
+    """
+    m = _MODEL_META_RE.search(result or "")
+    return bool(m) and (m.group(1) or "```").lower() not in (original or "").lower()
+
+
 def post_llm_hygiene(result: str, original: str) -> str:
     """Deterministic clean-up of a non-caricature cleanup-model result."""
     if not result or not result.strip():
@@ -4426,6 +4446,10 @@ def _process_with_config(text: str, config: dict) -> str:
         start_time = time.time()
         result = backend.process(text, prompt)
         elapsed = time.time() - start_time
+
+        if model_added_meta(result, text):
+            print("[Post-processing] ⚠ Model added its own notes; typing your words")
+            return text
 
         # Strip trailing LLM self-annotations in parentheses
         # Small models add commentary like "(no filler words, correct grammar)"
