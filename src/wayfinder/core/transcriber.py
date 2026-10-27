@@ -3642,8 +3642,11 @@ def apply_vocabulary_replacements(text: str, replacements, terms=(), style_terms
             target.setdefault(" ".join(write.lower().split()), write)
             target.setdefault(" ".join(heard.lower().split()), write)
         phrases = sorted(target, key=len, reverse=True)
+        # A contraction is one word: "Don -> Daan" must not turn "don't" into
+        # "Daan't". Only a possessive "'s" may follow ("Don's" -> "Daan's").
+        end = r"(?!\w|['’](?!s\b)\w)"
         pattern = re.compile(
-            "|".join(r"(?<!\w)" + r"\s+".join(re.escape(w) for w in phrase.split()) + r"(?!\w)"
+            "|".join(r"(?<!\w)" + r"\s+".join(re.escape(w) for w in phrase.split()) + end
                      for phrase in phrases),
             re.IGNORECASE)
         text = pattern.sub(lambda m: target[" ".join(m.group(0).lower().split())], text)

@@ -17,6 +17,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   back, it keeps that second result, which is usually nothing. If you really
   did say them, they are still typed, in your spelling when the second
   listen hears every term the same.
+- **Corrections no longer change part of a contraction.** A correction like
+  "Don → Daan" turned every "don't" into "Daan't". Corrections now only
+  replace whole words, and "don't" counts as one word. A name's possessive
+  still changes: "Don's" becomes "Daan's".
 - **Cleanup no longer types the model's own notes.** A small cleanup model
   sometimes added "Explanation: …" or "Note: …" about its answer, and Aura
   typed that too. Now, when the answer carries a note or label, Aura types

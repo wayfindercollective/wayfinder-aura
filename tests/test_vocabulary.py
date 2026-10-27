@@ -72,6 +72,19 @@ def test_replacements_match_whole_words_in_any_case_and_spacing():
     assert out == "I love Wayfinder and Aura, not auras."
 
 
+@pytest.mark.parametrize("said,typed", [
+    # Field report 2026-10-27: "Don -> Daan" (a name) turned every "don't" into "Daan't".
+    ("I don't know", "I don't know"),
+    ("Don't ship it", "Don't ship it"),
+    ("I don’t know", "I don’t know"),  # curly apostrophe
+    ("ask Don about it", "ask Daan about it"),
+    ("Don's branch", "Daan's branch"),  # the name's possessive is still the name
+    ("Don, can you look", "Daan, can you look"),
+])
+def test_a_contraction_is_one_word_and_is_not_corrected(said, typed):
+    assert T.apply_vocabulary_replacements(said, [["Don", "Daan"]]) == typed
+
+
 def test_longest_phrase_wins():
     pairs = [["way finder", "Wayfinder"], ["way finder aura", "Wayfinder Aura"]]
     assert T.apply_vocabulary_replacements("open way finder aura now", pairs) == \
