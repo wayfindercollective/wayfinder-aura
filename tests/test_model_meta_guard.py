@@ -44,6 +44,12 @@ def test_an_answer_with_the_models_notes_types_the_speech(monkeypatch, answer):
     assert _run(monkeypatch, answer) == SAID
 
 
+def test_the_speakers_own_label_does_not_hide_a_later_note(monkeypatch):
+    said = f"note {SAID}"
+    answer = f"Note: {CLEAN}\nExplanation: I fixed the punctuation."
+    assert _run(monkeypatch, answer, said) == said
+
+
 @pytest.mark.parametrize("said,answer", [
     (SAID, CLEAN),
     ("note buy milk and eggs tonight", "Note: buy milk and eggs tonight."),  # the speaker's label

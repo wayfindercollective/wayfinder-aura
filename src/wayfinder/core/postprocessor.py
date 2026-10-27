@@ -4200,8 +4200,9 @@ def model_added_meta(result: str, original: str) -> bool:
     Such an answer is not a cleanup of the speech, and cutting it apart is
     guesswork, so the caller types the speaker's words instead.
     """
-    m = _MODEL_META_RE.search(result or "")
-    return bool(m) and (m.group(1) or "```").lower() not in (original or "").lower()
+    said = (original or "").lower()
+    return any((m.group(1) or "```").lower() not in said
+               for m in _MODEL_META_RE.finditer(result or ""))
 
 
 def post_llm_hygiene(result: str, original: str) -> str:
