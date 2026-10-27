@@ -127,6 +127,16 @@
   </supports>
 
   <releases>
+    <release version="1.3.2-beta.4" date="2026-10-27" type="development">
+      <description>
+        <p>Beta built from main on 2026-10-27. Changes since the last stable release:</p>
+        <ul>
+          <li>Your custom vocabulary no longer gets typed in place of silence.</li>
+          <li>Cleanup no longer types the model's own notes.</li>
+          <li>Gemma 3 1B cleans up faster and more often.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.1" date="2026-10-23">
       <description>
         <p>Wayfinder Aura 1.3.1:</p>
