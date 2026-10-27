@@ -35,6 +35,7 @@ def _run(monkeypatch, answer, said=SAID):
 @pytest.mark.parametrize("answer", [
     "Explanation: I removed the filler words.",  # the field report: a label at the start
     f"{CLEAN}\n\nExplanation: fixed the punctuation.",
+    f"{CLEAN} **Explanation:** I fixed the punctuation.",  # a backend joined the lines
     f"Here is the cleaned text: {CLEAN}",
     f"**Final Answer:** {CLEAN}",
     f"{CLEAN}\nNote: I kept it concise.",
@@ -44,16 +45,28 @@ def test_an_answer_with_the_models_notes_types_the_speech(monkeypatch, answer):
     assert _run(monkeypatch, answer) == SAID
 
 
-def test_the_speakers_own_label_does_not_hide_a_later_note(monkeypatch):
-    said = f"note {SAID}"
-    answer = f"Note: {CLEAN}\nExplanation: I fixed the punctuation."
+@pytest.mark.parametrize("said,answer", [
+    # Saying the word doesn't excuse the model's label; typing the speech is safe.
+    ("please send an explanation to the client about the delayed delivery",
+     "Explanation: Please send an explanation to the client about the delayed delivery."),
+    (f"note {SAID}", f"Note: {CLEAN}\nExplanation: I fixed the punctuation."),
+    ("note buy milk and eggs tonight", "Note: buy milk and eggs tonight."),
+])
+def test_a_label_the_speaker_also_said_still_types_the_speech(monkeypatch, said, answer):
     assert _run(monkeypatch, answer, said) == said
 
 
 @pytest.mark.parametrize("said,answer", [
     (SAID, CLEAN),
-    ("note buy milk and eggs tonight", "Note: buy milk and eggs tonight."),  # the speaker's label
-    ("we ship friday and the answer is yes", "We ship Friday, and the answer: yes."),
+    ("here's the plan ship it friday", "Here's the plan: ship it Friday."),
 ])
-def test_a_clean_answer_or_the_speakers_own_label_is_kept(monkeypatch, said, answer):
+def test_a_clean_answer_is_kept(monkeypatch, said, answer):
     assert _run(monkeypatch, answer, said) == answer
+
+
+def test_a_note_the_cli_backend_joined_onto_the_answer_is_caught():
+    said = "um so send the quarterly report to uh the whole team"
+    prompt = "Text: " + said + "\n\nCleaned text:"
+    stdout = prompt + " Send the quarterly report to the whole team.\n**Explanation:** I removed the filler words."
+    answer = P.LlamaCppCliBackend()._extract_cli_output(stdout, prompt, said)
+    assert "\n" not in answer and P.model_added_meta(answer)
