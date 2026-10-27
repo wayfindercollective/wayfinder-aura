@@ -567,6 +567,17 @@ not check", so a run that reached nothing never reads as a clean bill of health.
 
 ---
 
+## Reviews (Codex / Terra)
+
+Every review judges proportion as well as correctness (CLAUDE.md rule 12):
+
+- **Overbuilding is a finding.** Flag as MUST-FIX a change far larger or more complex than the real failure it fixes, or code that works around a cause that lives elsewhere (the model, its chat template, the prompt, config). Name the simpler fix at the root.
+- **Model-level causes get model-level fixes.** When output is wrong because of how a model behaves, the fix belongs in the template, prompt, stop tokens or model choice. Code-side handling stays a small guard that fails safe (type the speaker's words). Don't ask for heuristics that repair arbitrary model output.
+- **Realistic triggers only.** A MUST-FIX needs an input that a real model, user or system produces. Inputs built only to defeat a heuristic go under known limits unless they lose user data, crash, or hang.
+- **Stop when it stops paying.** If two rounds pass without the real-world measure moving (replayed captures, field reports), say so and recommend rethinking the design rather than another patch.
+
+---
+
 ## Related Documentation
 
 - [README.md](README.md) - User-facing documentation
