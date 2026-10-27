@@ -9,7 +9,7 @@ is sound. These cues mark the dictation lifecycle:
     done   -> text was injected successfully
     error  -> dictation failed / nothing landed
 
-Design constraints (see docs/superpowers/specs and CLAUDE.md):
+Design constraints (see ARCHITECTURE.md):
 
 * Must work INSIDE the Flatpak sandbox. The pinned runtime supplies ``paplay``,
   which reaches the host PipeWire graph through ``--socket=pulseaudio``.

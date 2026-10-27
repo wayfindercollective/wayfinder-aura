@@ -645,7 +645,7 @@ class TestUncertainDelivery:
 
 @pytest.mark.linux_only
 class TestSocketSelectionPrefersConnectable:
-    """A stale system socket FILE must not mask a live user socket (Codex P1)."""
+    """A stale system socket FILE must not mask a live user socket (review P1)."""
 
     def test_stale_system_socket_does_not_mask_live_user_socket(
         self, monkeypatch, temp_dir
@@ -1338,7 +1338,7 @@ class TestLinuxTypingInPieces:
 
     def test_the_schedule_counts_every_sleep(self):
         # Sol mac r14: an alternating "aA" piece slept 1.8 s between its keys.
-        # Codex finding 4: the warm-up `key` tap and both Shift-release
+        # Review finding 4: the warm-up `key` tap and both Shift-release
         # `keyup` sweeps also cost xdotool's own 12ms-per-key default, which
         # the estimator used to skip entirely.
         import wayfinder.core.injector as injector
@@ -1364,7 +1364,7 @@ class TestLinuxTypingInPieces:
 
     def test_very_slow_ydotool_pieces_stay_within_the_budget(self, monkeypatch):
         # Sol mac r14: a 16-character floor made a very slow piece 2.4 s.
-        # Codex finding 7: this must force ydotool selection explicitly — on
+        # Review finding 7: this must force ydotool selection explicitly — on
         # a host that also has xdotool, get_text_injector() would prefer it,
         # silently exercising the WRONG budget math (xdotool's, not
         # ydotool's key_delay+key_hold) and this test would pass for the
@@ -1536,7 +1536,7 @@ def _xdotool_commands(argv):
     key/keyup/keydown boundary found by scanning the whole list up front.
     A structurally different first step than xdotool_scheduled_seconds's
     own single running index, so the oracle built on it below cannot
-    retrace that loop and inherit the same mistake (Codex review finding
+    retrace that loop and inherit the same mistake (code review finding
     4b: the previous "independent" model was a byte-for-byte copy of the
     estimator's parser).
 
@@ -1600,7 +1600,7 @@ def _independent_xdotool_seconds(argv) -> float:
 
 
 class TestXdotoolScheduledSecondsKeyCommands:
-    """Codex review finding 4: key/keyup/keydown delays were omitted
+    """code review finding 4: key/keyup/keydown delays were omitted
     entirely from the estimator, so the warm-up tap and the Shift-release
     sweeps build_xdotool_type_command emits were free. Hand-written argv,
     hand-computed expected seconds — never calling the estimator to check
@@ -1645,7 +1645,7 @@ class TestXdotoolScheduledSecondsKeyCommands:
 
 
 class TestXdotoolPieceBudgetIndependentModel:
-    """Codex review finding 4b: a piece built by typing_chunks using the real
+    """code review finding 4b: a piece built by typing_chunks using the real
     estimator must also respect the budget under an INDEPENDENTLY DERIVED
     model — not a second copy of xdotool_scheduled_seconds's own parsing
     loop — otherwise a shared mistake in the estimator and its "independent"
@@ -1806,7 +1806,7 @@ class TestXdotoolPieceBudgetIndependentModel:
 
 
 class TestIsPreTypingRefusal:
-    """Codex review finding 3: the short-list of failures proven to precede
+    """code review finding 3: the short-list of failures proven to precede
     any delivery, so piece zero may still fall back to another tool."""
 
     @pytest.mark.parametrize("detail", [
@@ -1837,7 +1837,7 @@ class TestIsPreTypingRefusal:
 
 
 class TestFirstPieceProvenPreDelivery:
-    """Codex review finding 3: piece zero is NOT exempt. A timeout or an
+    """code review finding 3: piece zero is NOT exempt. A timeout or an
     unrecognised non-zero exit on the very first piece must be uncertain,
     exactly like any later piece, because the tool run may already have
     typed something before it failed. Only a failure PROVEN to precede any

@@ -160,7 +160,7 @@ def test_radius_literals_are_whitelisted():
 # ---------------------------------------------------------------------------
 # CustomTkinter's CTkProgressBar indeterminate `.start()` re-arms via an
 # internal `self.after(20, ...)` loop (verified in CTk 5.2.2) — that violates
-# CLAUDE.md rule 1 (no timers < 100ms). Ban `.start()` on any variable whose
+# ARCHITECTURE.md rule 1 (no timers < 100ms). Ban `.start()` on any variable whose
 # name contains "progress" (progress/progressbar/progress_bar/...). Thread
 # `.start()` calls (progress_thread.start()) are intentionally NOT excluded:
 # there are none in the file today, and if one were added we'd rather see it
@@ -264,7 +264,7 @@ def test_no_new_sub100_self_rearming_timers():
 
 def test_animation_cadences_are_pinned():
     """The hero and tray loops take their interval from helpers, which the
-    literal-interval lint above cannot see. Pin the exact cadences (CLAUDE.md
+    literal-interval lint above cannot see. Pin the exact cadences (ARCHITECTURE.md
     rules 1 and 9): faster costs CPU, slower degrades the animation, so either
     is a reviewed change."""
     import wayfinder_main as wm
@@ -301,7 +301,7 @@ def test_spacing_mirror_parity():
 
 
 # ---------------------------------------------------------------------------
-# (f) No-popup-dialogs enforcement — CLAUDE.md rule 2
+# (f) No-popup-dialogs enforcement — ARCHITECTURE.md rule 2
 # ---------------------------------------------------------------------------
 # Every settings/confirm UI must be an inline CTkFrame panel (via
 # _show_inline_panel) or an in-place control, NOT a spawned Toplevel. The only
@@ -345,13 +345,13 @@ def test_toplevels_only_in_sanctioned_classes():
 
     assert not offenders, (
         "Toplevel/CTkToplevel instantiated outside ToolTip/FloatingIndicator "
-        "(CLAUDE.md rule 2: no popup dialogs — use an inline _show_inline_panel "
+        "(ARCHITECTURE.md rule 2: no popup dialogs — use an inline _show_inline_panel "
         f"CTkFrame instead). Offenders (line, src): {offenders}"
     )
 
 
 # The no-Toplevel rule extends to the ENTIRE src/wayfinder package (all new code,
-# CLAUDE.md rule 4). Same allowance as wayfinder_main.py and NOTHING more: the
+# ARCHITECTURE.md rule 4). Same allowance as wayfinder_main.py and NOTHING more: the
 # only Toplevels permitted app-wide are the ToolTip hover bubble and the
 # FloatingIndicator overlay (transient chrome that genuinely can't live inline).
 # Any other Toplevel under src/** fails CI — which is what proves the old modal
@@ -375,7 +375,7 @@ def test_no_toplevels_in_src_package_outside_sanctioned_classes():
 
     assert not offenders, (
         "Toplevel/CTkToplevel instantiated in src/wayfinder/** outside the "
-        "sanctioned ToolTip/FloatingIndicator hover/overlay chrome (CLAUDE.md "
+        "sanctioned ToolTip/FloatingIndicator hover/overlay chrome (ARCHITECTURE.md "
         "rule 2: no popup dialogs — build a place()'d inline CTkFrame pane like "
         f"wayfinder.ui.setup_pane instead). Offenders (file, line, src): {offenders}"
     )
@@ -387,7 +387,7 @@ def test_no_grab_set_call_sites():
         for m in GRAB_SET_RE.finditer(MAIN_SRC)
     ]
     assert not hits, (
-        "`.grab_set()` is banned (CLAUDE.md rule 2 — modal Toplevels caused the "
+        "`.grab_set()` is banned (ARCHITECTURE.md rule 2 — modal Toplevels caused the "
         f"Wayland focus/sizing bugs). Hits: {hits}"
     )
 

@@ -436,7 +436,7 @@ def describe_failure(url: str, result: OpenResult) -> list[str]:
     """Log lines explaining a failed open, newest evidence included.
 
     Lives here rather than in the app so the second caller that needs to open a
-    URL does not re-derive the reporting (CLAUDE.md rule 4).
+    URL does not re-derive the reporting (ARCHITECTURE.md rule 4).
     """
     lines = [f"⚠ Couldn't open {url}"]
     if result.detail:

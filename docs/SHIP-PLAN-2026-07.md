@@ -10,7 +10,7 @@ The license UI Activate bug from June notes is ALREADY FIXED in current code
 
 ## Ground rules (every item)
 
-- Obey `CLAUDE.md` in full: design tokens only (`self.font_sizes`/`RADIUS`/
+- Obey `ARCHITECTURE.md` in full: design tokens only (`self.font_sizes`/`RADIUS`/
   `SPACING`/`COLORS` — `tests/test_design_ratchet.py` fails bare literals), NO
   new `CTkToplevel`/`grab_set` (CI-enforced), no repeating timers <100ms, no
   `unbind_all` in wayfinder_main.py (CI-enforced), standard CTk widgets,

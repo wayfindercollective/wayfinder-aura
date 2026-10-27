@@ -214,7 +214,7 @@ Source anchors:
 - [x] B2/B3 hygiene (pkill removal + shell=True)  
 - [ ] B4 socket auth token (deferred)  
 
-Implementation plan (Codex-approved): `docs/SECURITY-HARDENING-PLAN.md`.
+Implementation plan: `docs/SECURITY-HARDENING-PLAN.md`.
 
 ---
 

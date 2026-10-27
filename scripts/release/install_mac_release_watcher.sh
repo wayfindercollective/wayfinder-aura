@@ -6,7 +6,7 @@
 # job never runs code it fetches), then checks every 10 minutes with launchd.
 # Each check is two GitHub API calls; a build (about once a day, as soon as the
 # nightly beta is tagged)
-# runs at background priority on the efficiency cores, only when Fox Grid's
+# runs at background priority on the efficiency cores, only when the host's
 # Mac admission rule leaves room for it and the Mac CI queue is not held by
 # someone else (mac_release_watcher.py).
 # Re-run after changing either script.

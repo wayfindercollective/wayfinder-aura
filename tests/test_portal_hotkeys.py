@@ -457,7 +457,7 @@ def test_cancelled_bind_keeps_listening(monkeypatch):
     the listener every 10s and re-pop the compositor's confirmation dialog.
     And the session must stay LIVE — a binding made later in System Settings
     delivers Activated on it, so an activation after the cancel must still
-    reach the event queue (Codex review)."""
+    reach the event queue (code review)."""
     logs = []
     bus = _FakeBus(bind_code=1, activations=[(SESSION_HANDLE, "record-toggle")])
     result, events = _run(_install_fake_gi(monkeypatch, bus), logs=logs)
@@ -569,7 +569,7 @@ def test_session_closed_returns_false_for_restart(monkeypatch):
     """Session.Closed is the spec's termination signal. The listener must exit
     False so the supervisor can build a fresh session — a dead session can
     never deliver another Activated, and 'still listening' would leave the
-    hotkeys silently broken until app restart (Codex review)."""
+    hotkeys silently broken until app restart (code review)."""
     logs = []
     bus = _FakeBus(activations=[(SESSION_HANDLE, "record-toggle")], close_session=True)
     result, events = _run(_install_fake_gi(monkeypatch, bus), logs=logs)
@@ -607,7 +607,7 @@ def test_portal_first_ownership_is_not_a_loss(monkeypatch):
 def test_bus_connection_closed_returns_false_for_restart(monkeypatch):
     """A dead private connection delivers nothing — including Closed and
     NameOwnerChanged — so its own "closed" GObject signal must end the
-    listener with False (Codex review: this handler had no direct test)."""
+    listener with False (code review: this handler had no direct test)."""
 
     class _ClosingConnBus(_FakeBus):
         def dispatch(self):
@@ -653,7 +653,7 @@ def test_poll_ends_the_untimed_bind_wait(monkeypatch):
     """REAL GLib contexts, loops and timers; fake bus. The bind Response never
     arrives, so the untimed bind wait can only end via the 500ms poll — this
     proves the poll actually fires on the listener's private context and keeps
-    the untimed wait interruptible (Codex review). The create Response is
+    the untimed wait interruptible (code review). The create Response is
     delivered through the real context, exercising genuine source dispatch.
     """
     import threading
@@ -738,7 +738,7 @@ def test_session_closed_ends_real_blocking_listen_loop(monkeypatch):
     """REAL GLib loops: the steady-state listen loop genuinely blocks, and only
     a Closed delivery may end it here (no stop_event). Proves the liveness fix
     end-to-end under real dispatch semantics — a fake loop that returns after
-    one dispatch cannot (Codex review)."""
+    one dispatch cannot (code review)."""
     import time
 
     real_glib = pytest.importorskip("gi.repository.GLib")

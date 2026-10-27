@@ -310,7 +310,7 @@ macOS uses `~/Library/Application Support/wayfinder-aura/config.json`.
 ## For developers
 
 - Run: `python main.py` · Test: `python3 -m pytest tests/ -v`
-- Architecture and contribution notes: [AGENTS.md](AGENTS.md)
+- Architecture and contribution notes: [ARCHITECTURE.md](ARCHITECTURE.md)
 - macOS app/DMG build: [packaging/macos/README.md](packaging/macos/README.md)
 - Windows installer build: [packaging/windows/README.md](packaging/windows/README.md)
 - Packaging and store submission: [SHIPPING.md](SHIPPING.md) and

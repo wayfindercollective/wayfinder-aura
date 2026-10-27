@@ -131,7 +131,7 @@ class TestConfigFormatContract:
             _tx("Tiny", "cpu", 30, 6.0),
             _tx("Tiny", "gpu", 30, 1.5),
             # Catalog id differs from the name-derived key — the config must
-            # use "base.en", not "base_english" (Codex review).
+            # use "base.en", not "base_english" (code review).
             _tx("Base English", "cpu", 10, 4.0, model_id="base.en", timing="wall"),
             _tx("Broken", "cpu", 10, 0.0, error="crashed"),  # must be excluded
         ]
@@ -187,7 +187,7 @@ class TestConfigFormatContract:
         assert tiny["method"] == "warm"
         assert tiny["cpu_timing"] == "report"
         # Keyed by CATALOG id, not the display-name-derived slug — tooltips
-        # and the model picker look results up by id (Codex review).
+        # and the model picker look results up by id (code review).
         assert "base.en" in out["benchmark_results"]
         assert "base_english" not in out["benchmark_results"]
         assert out["benchmark_results"]["base.en"]["cpu_timing"] == "wall"

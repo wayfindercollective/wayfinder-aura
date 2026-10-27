@@ -15,7 +15,7 @@ Two layers, matching ``welcome.py``:
   drives the SAME setup engine in ``core.setup`` (checks, install-all,
   whisper.cpp build, model download) via background threads marshalled back to
   the Tk main loop through a queue polled with ``app.after`` (>=100ms cadence,
-  per CLAUDE.md rule 1). customtkinter is imported lazily inside the pane, so
+  per ARCHITECTURE.md rule 1). customtkinter is imported lazily inside the pane, so
   importing this module and using ``SetupFlow`` works without a display.
 
 Engine ownership: ``core/setup.py`` is untouched — this module only calls its
@@ -219,7 +219,7 @@ def all_required_ok(deps) -> bool:
     A required dep whose status carries a *blocking* warning (e.g. the ydotool
     binary is installed but its daemon is down, so text injection will actually
     fail) does NOT count as OK — otherwise Setup would declare "All set!" while
-    typing is silently broken (Codex review F11). The row still shows its gold
+    typing is silently broken (code review F11). The row still shows its gold
     warning badge; only the top-level gate treats it as not-ok.
     """
     return all(
@@ -370,7 +370,7 @@ class _DepRow:
 
         # Progress bar (hidden until a download reports progress). Driven only
         # via .set() from the worker marshaling — never .start() (its 20ms
-        # internal loop is banned by CLAUDE.md rule 1).
+        # internal loop is banned by ARCHITECTURE.md rule 1).
         self._progress = ctk.CTkProgressBar(
             text_frame,
             height=3,

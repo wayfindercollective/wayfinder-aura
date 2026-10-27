@@ -71,8 +71,8 @@ although 174 of its 179 commits were already on `main`.
   the 2026-09-21 decision; its change was redone from `main` when Windows went
   public (2026-10-04, `publish-windows`). A machine with unpushed work on
   one of them rebases that work onto `main` in a new task branch.
-- **AI agents.** One git worktree per task, created from the latest
-  `origin/main`, and a pull request back. Do not reuse another session's branch
+- **Worktrees.** One git worktree per task, created from the latest
+  `origin/main`, and a pull request back. Do not reuse another branch
   or worktree.
 
 ## Change workflow

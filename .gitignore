@@ -43,9 +43,8 @@ squashfs-root/
 # Tone eval harness generated reports
 scripts/tone_eval/results/
 
-# Local dev tooling (machine-specific paths, MCP server keys)
+# Local dev tooling
 .mcp.json
-.claude/
 flatpak/repo/
 flatpak/build-dir/
 flatpak/build-verify-dir/
@@ -56,7 +55,6 @@ flatpak/release/
 # Flatpak/ostree build repo
 repo/
 .tmp-flatpak-repo/
-.tmp-flathub-handoff/
 venv-fresh/
 venv-brew/
 venv-ubuntu/

@@ -17,12 +17,12 @@ Keychain: no signing secret is uploaded anywhere. Each run:
 4. gives up on a tag after 3 failed builds (the state file records them).
 
 The Mac is shared with a local model (memory guard up to 160 GiB) and the Fox
-Grid VM, so a build is admitted the way Fox Grid admits Mac CI jobs
+Grid VM, so a build is admitted the way the host admits Mac CI jobs
 (docs/CI.md): available memory (anonymous + wired + compressed pages count as
 used) minus the model's unused allowance, minus the VM's unused commitment,
 minus the 24 GiB protected headroom, must still cover BUILD_BYTES. The model's
-allowance is its 160 GiB guard ceiling unless Fox Grid publishes a grant for
-the model that is loaded right now (GRANT, written by Fox Grid; its smaller
+allowance is its 160 GiB guard ceiling unless the host publishes a grant for
+the model that is loaded right now (GRANT, written by the host; its smaller
 measured reserve then applies). Memory pressure must be normal, no Mac CI job
 may be running, and nobody else may hold the Mac CI queue.
 
@@ -70,7 +70,7 @@ WINDOW_DAYS = 7
 GIB = 1024 ** 3
 PROTECTED_HEADROOM = 24 * GIB   # docs/CI.md
 MODEL_CEILING = 160 * GIB       # the local model's memory-guard ceiling
-VM_COMMITMENT = 66 * GIB        # the Fox Grid VM: 64 GiB guest + host overhead
+VM_COMMITMENT = 66 * GIB        # the the host VM: 64 GiB guest + host overhead
 BUILD_BYTES = 2 * GIB           # admission size for one build (measured peak 0.42 GB)
 BUILD_CAP_BYTES = 4 * GIB       # the build is stopped above this
 BUILD_TIMEOUT_S = 2 * 3600      # notarytool's own wait is capped at 60 min
@@ -193,7 +193,7 @@ def save_state(state: dict) -> None:
     STATE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-# --- host readings (the same counters Fox Grid's Mac admission uses) -------------------
+# --- host readings (the same counters the host's Mac admission uses) -------------------
 
 # struct rusage_info_v4 (<libproc.h>) is a 16-byte UUID followed by 36 uint64
 # counters (296 bytes). Read into a larger zeroed buffer so a newer kernel can
@@ -244,7 +244,7 @@ def _positive_int(value) -> int | None:
 
 
 def model_reserve(reading: dict, grant_path: Path = GRANT) -> int:
-    """The model's full allowance: the 160 GiB guard, or Fox Grid's measured
+    """The model's full allowance: the 160 GiB guard, or the host's measured
     reserve when its grant (owner-only, under a day old, well-formed) names
     the model process loaded right now. Anything else gets the guard."""
     try:
@@ -266,7 +266,7 @@ def model_reserve(reading: dict, grant_path: Path = GRANT) -> int:
 
 
 def spare_bytes(reading: dict, reserve: int, job_bytes: int = BUILD_BYTES) -> int:
-    """Fox Grid's admission sum; negative means the build does not fit."""
+    """the host's admission sum; negative means the build does not fit."""
     model_growth = max(0, reserve - reading["modelFootprintBytes"])
     vm_growth = max(0, VM_COMMITMENT - reading["vmFootprintBytes"])
     return (reading["availableBytes"] - model_growth - vm_growth

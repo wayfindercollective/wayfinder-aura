@@ -307,7 +307,7 @@ _SECURE_INPUT_FN = None
 # macOS supervisor-loop cadence. While a hotkey is held, lost key-ups are
 # reconciled against Quartz every 100 ms. With nothing held no latch can be
 # lost, so only the Secure Input notice and the event-tap check run, and they
-# can wait half a second: 2 wakeups/s instead of 10 (CLAUDE.md rule 1).
+# can wait half a second: 2 wakeups/s instead of 10 (ARCHITECTURE.md rule 1).
 _DARWIN_IDLE_TICK_S = 0.5
 # A refused event tap is retried this often (fast for the first minute after
 # launch or a grant, then slower), so a permission takes effect by itself.

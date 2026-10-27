@@ -149,7 +149,7 @@ def encode_trigger(key_code: object, modifiers: object) -> str:
         return ""
     # Config merges user JSON blindly, so modifiers can be any type. A string
     # is deliberately rejected too — iterating "ctrl" yields characters, not
-    # modifier names (Codex review).
+    # modifier names (code review).
     if not isinstance(modifiers, (list, tuple, set, frozenset)) and modifiers is not None:
         return ""
     tokens = []
@@ -419,7 +419,7 @@ def wayland_hotkey_listener(
             # Filter on our session UNCONDITIONALLY: the subscription exists
             # before CreateSession, so until our handle is known ("" matches
             # nothing) another session's record-toggle must not start a
-            # recording here (Codex review).
+            # recording here (code review).
             if session_handle != state["session_handle"]:
                 return
             spec = specs.get(shortcut_id)
@@ -461,7 +461,7 @@ def wayland_hotkey_listener(
             _on_shortcuts_changed,
         )
 
-        # A dead session must not be listened to forever (Codex review): the
+        # A dead session must not be listened to forever (code review): the
         # compositor can close it, and a portal restart silently voids it while
         # this loop would keep "listening" and the supervisor would believe the
         # hotkeys are healthy. Three watchers, all present BEFORE CreateSession

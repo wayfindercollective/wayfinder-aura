@@ -1,6 +1,6 @@
 # Wayfinder Aura - Development Guide
 
-> **For AI Agents**: See [AGENTS.md](AGENTS.md) for comprehensive technical documentation including architecture diagrams, module guides, and common pitfalls.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for comprehensive technical documentation including architecture diagrams, module guides, and common pitfalls.
 
 ## Project Overview
 

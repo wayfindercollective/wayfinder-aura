@@ -173,10 +173,10 @@ the first check after the release appears (re-checked by Gatekeeper and the
 stapled ticket first; no build, so no hold). It builds one tag per run and
 gives a tag 3 tries.
 
-It shares the Mac with the local model and the Fox Grid VM, so it is admitted
-the way Fox Grid admits Mac CI jobs ([CI.md](CI.md)): available memory, minus
+It shares the Mac with the local model and the host VM, so it is admitted
+the way the host admits Mac CI jobs ([CI.md](CI.md)): available memory, minus
 the model's unused allowance (its 160 GiB guard, or the smaller reserve in
-Fox Grid's grant for the model loaded right now), minus the VM's unused
+the host grant for the model loaded right now), minus the VM's unused
 commitment and the 24 GiB protected headroom, must still cover the 2 GiB
 build; memory pressure must be normal, no Mac CI job running, and the Mac CI
 queue not held by someone else. It holds the queue while it builds. Every

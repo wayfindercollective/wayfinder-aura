@@ -24,7 +24,7 @@
       remote-control portal (the desktop asks once; GNOME 45+ is expected to work but is not
       yet verified). No cloud required: by default,
       speech-to-text transcription runs
-      offline on your device with whisper.cpp — in local mode your voice never leaves your
+      offline on your device with whisper.cpp. In local mode your voice never leaves your
       computer.
       Optional cloud transcription backends are available if you choose to enable them, and the
       app checks online for model updates (this can be turned off in config.json).
@@ -40,17 +40,17 @@
     </p>
     <p>Features:</p>
     <ul>
-      <li>Local-first &amp; Private — transcribed on your device by default; optional cloud backends if you choose them</li>
-      <li>Hotkey Triggered — Press a key to start/stop recording</li>
-      <li>Wayland &amp; X11 Support — X11 and XWayland apps directly; native Wayland apps on KDE Plasma through the desktop's remote-control portal (GNOME 45+ not yet verified)</li>
-      <li>System Tray Integration — Runs quietly in the background</li>
-      <li>Base Dictation — Free local CPU transcription with optional minimal cleanup</li>
-      <li>Ultra Acceleration — GPU inference, additional models, styles, and long-form chunking</li>
-      <li>Configurable Typing Speed — Instant paste or simulated typing</li>
+      <li>Local-first &amp; Private: transcribed on your device by default; optional cloud backends if you choose them</li>
+      <li>Hotkey Triggered: press a key to start/stop recording</li>
+      <li>Wayland &amp; X11 Support: X11 and XWayland apps directly; native Wayland apps on KDE Plasma through the desktop's remote-control portal (GNOME 45+ not yet verified)</li>
+      <li>System Tray Integration: runs quietly in the background</li>
+      <li>Base Dictation: free local CPU transcription with optional minimal cleanup</li>
+      <li>Ultra Acceleration: GPU inference, additional models, styles, and long-form chunking</li>
+      <li>Configurable Typing Speed: instant paste or simulated typing</li>
     </ul>
     <p>
-      Perfect for writing emails, documents, code comments, chat messages, or any
-      situation where speaking is faster than typing.
+      Use it for writing emails, documents, code comments, terminal commands, and chat messages
+      across your desktop or handheld without switching windows.
     </p>
   </description>
 
@@ -58,11 +58,11 @@
 
   <screenshots>
     <screenshot type="default">
-      <caption>Dictate into X11, XWayland and KDE Wayland apps — hotkey recording with live waveform feedback</caption>
+      <caption>Dictate into X11, XWayland and KDE Wayland apps: hotkey recording with live waveform feedback</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/main-window.png</image>
     </screenshot>
     <screenshot>
-      <caption>Private local processing — microphone and audio settings on free tier</caption>
+      <caption>Private local processing: microphone and audio settings on free tier</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/settings.png</image>
     </screenshot>
     <screenshot>
@@ -70,11 +70,11 @@
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/overlay.png</image>
     </screenshot>
     <screenshot>
-      <caption>Ultra tone-aware cleanup — Normal, Professional, Casual, Dev, and more</caption>
+      <caption>Ultra tone-aware cleanup: Normal, Professional, Casual, Dev, and more</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/style.png</image>
     </screenshot>
     <screenshot>
-      <caption>Guided first run — calm three-step welcome tour</caption>
+      <caption>Guided first run: calm three-step welcome tour</caption>
       <image>https://raw.githubusercontent.com/wayfindercollective/wayfinder-aura/main/screenshots/welcome.png</image>
     </screenshot>
   </screenshots>
@@ -274,8 +274,8 @@
           <li>Light, Medium, and Heavy audio processing now have distinct, package-tested behavior and clearer guidance</li>
           <li>One-shot transcription is the accuracy-first default; optional Ultra chunking uses a tested 15-second/2-second-overlap profile</li>
           <li>Steam Deck setup and back-button guidance are rootless, hardware-aware, and work with Desktop and Game Mode</li>
-          <li>Fixed text rendering roughly twice as large as intended on HiDPI (150–200%) desktops; the interface now looks identical on every display</li>
-          <li>The interface typeface now ships with the app instead of depending on what each distribution substitutes — the same build looks the same everywhere</li>
+          <li>Fixed text rendering roughly twice as large as intended on HiDPI (150-200%) desktops; the interface now looks identical on every display</li>
+          <li>The interface typeface now ships with the app instead of depending on what each distribution substitutes, so the same build looks the same everywhere</li>
           <li>Fixed the status overlay getting stuck mid-screen on KDE, and the placement and position controls that did nothing with it</li>
           <li>Fixed system tools (typing service setup, browser links, microphone listing) being launched with the app's bundled libraries on newer distributions</li>
           <li>UI scale buttons now step 25% per click, so large adjustments take a couple of clicks instead of a dozen</li>
@@ -293,7 +293,7 @@
     </release>
     <release version="1.1.3" date="2026-07-30">
       <description>
-        <p>Major reliability release — install-and-it-works on modern Linux desktops:</p>
+        <p>Major reliability release for modern Linux desktops:</p>
         <ul>
           <li>Fixed startup crash on newer distributions (GLib 2.88, e.g. Fedora 44 / Bazzite)</li>
           <li>Typing now sets itself up: one-click background typing service, no terminal needed</li>
@@ -332,7 +332,7 @@
       <description>
         <p>First public release of Wayfinder Aura</p>
         <ul>
-          <li>Press Super+F2 to dictate — your words appear at the cursor in X11 and XWayland apps, and in native Wayland apps on KDE Plasma</li>
+          <li>Press Super+F2 to dictate: your words appear at the cursor in X11 and XWayland apps, and in native Wayland apps on KDE Plasma</li>
           <li>Local-first transcription with whisper.cpp; optional tone cleanup on-device</li>
           <li>Works on Wayland and X11; native Wayland injection is verified on KDE Plasma</li>
           <li>Game-aware hotkeys pause while a GameMode game is running</li>

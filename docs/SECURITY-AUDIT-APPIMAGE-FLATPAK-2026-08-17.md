@@ -1,7 +1,6 @@
 # Security audit: Wayfinder Aura AppImage + Flatpak (v1.1.8-beta.9)
 
 **Date:** 2026-08-17  
-**Auditor:** Grok 4.6 (first pass + self-adversarial disproof)  
 **Scope:** Public `v1.1.8-beta.9` AppImage and Flatpak, the GitHub `releases/latest` install path, and the in-app model/catalog/TLS/socket code those packages run.  
 **Not in scope:** Flathub review (not listed), dependency CVE bulk scan, license DRM, writing exploit PoCs.  
 **Prior art:** `docs/SECURITY-REVIEW.md` (2026-07-09). Several items below are that review’s still-open F2/F3/F11, re-checked against the shipping packages.
@@ -10,7 +9,7 @@
 
 ---
 
-## 0. Implementation status (2026-08-17, Claude)
+## 0. Implementation status (2026-08-17)
 
 All five surviving findings were implemented in the order §7 recommended. Suite
 after the change: **1937 passed / 17 skipped** (was 1878/17; +59 tests).
@@ -32,7 +31,7 @@ load-bearing step 3.
 
 ### 0.0 Review round — seven defects found in the fixes themselves
 
-The remediation went through Codex **Sol xhigh** (the standing pre-commit gate).
+The remediation went through pre-commit security review.
 It found seven issues in my own patch; all seven were fixed before commit except
 F-F, which is a genuinely new finding recorded below rather than a defect in the
 patch:

@@ -198,7 +198,7 @@ def test_xdotool_failures_never_carry_the_dictated_text(monkeypatch):
     assert "secret" not in str(exc.value)
 
 
-# -- Codex review finding 3: _xdotool's own refusals, piece zero included --
+# -- code review finding 3: _xdotool's own refusals, piece zero included --
 # (type_text's per-piece use of _piece_of_a_typing is covered end-to-end in
 # test_injector.py's TestFirstPieceProvenPreDelivery; these test _xdotool's
 # OWN classification of a failure as proven-pre-delivery or not, straight

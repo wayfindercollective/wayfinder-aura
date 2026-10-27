@@ -625,8 +625,7 @@ of 1.1.4 (download from the site → run) on a 200%-scale KDE desktop.
 
 Field-driven reliability release: a full "act as a customer" session on a
 Fedora Atomic (Bazzite) machine surfaced and fixed every barrier between
-downloading the app and dictating with it. Independently reviewed (Codex,
-3 rounds) and live-verified end to end. 1461 tests.
+downloading the app and dictating with it. Reviewed and live-verified end to end. 1461 tests.
 
 ### Fixed
 

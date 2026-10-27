@@ -125,7 +125,7 @@ def typing_chunks(text: str, seconds) -> list:
 # --delay (cmd_key.c / cmd_type.c): 12ms per key event. The estimator below
 # must charge this even for commands build_xdotool_type_command never passes
 # --delay to itself (the warm-up `key` tap, the Shift-release `keyup` sweeps):
-# those were previously free, undercounting the real xdotool run (Codex
+# those were previously free, undercounting the real xdotool run (code
 # review finding 4).
 _XDOTOOL_DEFAULT_DELAY_MS = 12
 _XDOTOOL_KEY_COMMANDS = ("key", "keyup", "keydown")
@@ -141,7 +141,7 @@ def xdotool_scheduled_seconds(argv) -> float:
     (again 12ms by default) plus a millisecond each — a chorded key-sequence
     argument such as ``"shift+a"`` counts every key in it. Each command's
     ``--delay`` applies only to that one command; nothing carries across
-    commands (Codex review finding 4: key/keyup/keydown were not counted at
+    commands (code review finding 4: key/keyup/keydown were not counted at
     all, so the warm-up tap and the Shift-release sweeps were free)."""
     total = 0.0
     i, n = 1, len(argv)   # argv[0] is "xdotool"
@@ -196,7 +196,7 @@ def xdotool_scheduled_seconds(argv) -> float:
 def _piece_of_a_typing(index: int):
     """Every piece is uncertain once its tool run may already have typed
     something — piece zero included: no fallback may then type or paste the
-    whole transcript again, since that would double whatever landed (Codex
+    whole transcript again, since that would double whatever landed (code
     review finding 3; before this fix piece zero was always treated as safe,
     however it failed, which let a timeout or an unknown error after a
     partial type double the text).
@@ -256,7 +256,7 @@ def _is_pre_typing_refusal(detail: str) -> bool:
     setups deny it), no display/compositor connection at all (xdotool or
     wtype with no live session), or ydotool's socket connection to a dead
     ydotoold. Piece zero of a typing run may still fall back to another tool
-    for these (Codex review finding 3); anything else — a timeout, or an
+    for these (code review finding 3); anything else — a timeout, or an
     unrecognised non-zero exit — might mean the tool already started typing,
     so it stays uncertain instead."""
     low = (detail or "").lower()
@@ -291,7 +291,7 @@ def _get_ydotool_binary() -> "str | None":
     unavailable", silently switched to a throwaway direct-uinput device, and
     exited 0 while nothing reached the compositor. Worse, the CI (jammy) build
     would bundle ydotool 0.1.8, whose CLI predates the code's `key code:state`
-    / `--key-hold` syntax entirely (Codex review). Policy: use the host's
+    / `--key-hold` syntax entirely (code review). Policy: use the host's
     client, which matches the host's daemon, or report ydotool unavailable so
     selection uses wtype / the Setup wizard self-provisions.
     """
@@ -322,7 +322,7 @@ def _get_ydotool_env() -> dict:
 
     Selection prefers a socket something actually LISTENS on: a stale
     system-socket FILE must not mask a live user socket (e.g. right after
-    Setup self-provisions the user service — Codex review). Falls back to the
+    Setup self-provisions the user service — code review). Falls back to the
     first existing path when nothing is connectable, so error messages still
     name a concrete socket.
 
@@ -506,7 +506,7 @@ def _check_ydotool_result(result, action: str) -> None:
     registers it — observed as "typed nothing" in the field) but it is NOT
     provably a no-op: delivery is UNCERTAIN. Raise with `uncertain=True` so
     callers surface the problem WITHOUT auto-retrying another injector —
-    a retry after partial delivery would duplicate text (Codex review).
+    a retry after partial delivery would duplicate text (code review).
     """
     stderr = _to_text(result.stderr).strip()
     stdout = _to_text(result.stdout).strip()
@@ -566,7 +566,7 @@ def check_ydotool_ready() -> tuple[bool, str]:
     # A socket FILE can outlive a dead daemon (stale after a stop/crash), and a
     # process check can't tell WHICH socket a live ydotoold owns. Probe the
     # exact selected socket by CONNECTING (no input events, microseconds):
-    # only a daemon actually listening there counts as ready (Codex review).
+    # only a daemon actually listening there counts as ready (code review).
     if not _probe_unix_socket(socket_path):
         restarted, restart_message = _restart_ydotool_user_service_once()
         if restarted:
@@ -1110,7 +1110,7 @@ class _XcbGetModifierMappingReply(ctypes.Structure):
 
 # Lazy singleton: (libxcb, libc) or None. Loaded at most once per process —
 # repeated CDLL() would leak dlopen refs and find_library() shells out to
-# ldconfig (~2ms) on every call (Codex review).
+# ldconfig (~2ms) on every call (code review).
 _XCB_HANDLES = None
 _XCB_LOAD_ATTEMPTED = False
 
@@ -2169,7 +2169,7 @@ def _inject_text(text, typing_speed, target_window, game_mode, paste_fallback, c
     except InjectionError as e:
         # Uncertain delivery (ydotool direct-uinput fallback engaged): the text
         # MAY have partially landed — a paste retry could duplicate it. Surface
-        # the error instead of retrying (Codex review).
+        # the error instead of retrying (code review).
         if getattr(e, "uncertain_delivery", False):
             raise
         if not (game_mode and paste_fallback):

@@ -47,7 +47,7 @@ from tone_eval.corpus import CORPUS, CORPUS_VERSION                   # noqa: E4
 from tone_eval import metrics as M                                    # noqa: E402
 from tone_eval import report as R                                     # noqa: E402
 
-# CLAUDE.md rule 5 names FIVE tones; "personal" was missing, so it was never
+# ARCHITECTURE.md rule 5 names FIVE tones; "personal" was missing, so it was never
 # exercised by this harness.
 ALL_TONES = ["minimal", "dev", "casual", "professional", "personal"]
 

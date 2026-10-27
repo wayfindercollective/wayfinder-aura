@@ -1021,7 +1021,7 @@ def main():
         # ─── First-run flow: dependency setup (inline pane) → welcome tour ───
         # The dependency setup is now an IN-WINDOW pane (src/wayfinder/ui/setup_pane.py)
         # placed over the tab content — no more modal SetupWizard CTkToplevel /
-        # grab_set (CLAUDE.md rule 2). All app subsystems (hotkey listener, warm
+        # grab_set (ARCHITECTURE.md rule 2). All app subsystems (hotkey listener, warm
         # mic, overlay) already start in WayfinderApp.__init__ regardless of the
         # wizard, so nothing here gates them — the old wizard only blocked the
         # mainloop start via wait_window(), which the inline pane doesn't need.

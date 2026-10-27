@@ -247,21 +247,6 @@ adding a label; sharing hardware requires a separate registration coordinated
 under the same resource admission policy. Native Windows packaging likewise
 requires Windows execution, not the WSL Linux runner.
 
-Fox Grid's CI adapter source is at
-`PersonalOS-harness-release-6134576/docs/ci-resource-admission.md`. It currently
-needs a same-user systemd manager; its notes explicitly identify cross-user,
-cross-distro admission as an activation gate. Do not start another systemd in
-the new CI distro or assume GitHub's idle-runner matching implements these leases.
-
-The active harness owner is the Steam Machine Codex session titled
-`Investigate PersonalOS agent hang` (session
-`01a0eb16-e7f8-7703-a17c-16d88d32ffd2`). Its shared infrastructure handoff is
-`/home/deck/dev/personal/PersonalOS/workspace/projects/fox-grid-ci-runner-awareness-handoff-2026-09-30.md`
-on Steam Machine. Consult its newest dated section; early sections describe the
-superseded systemd setup. The v217 adapter passed a disposable live completion
-and descendant-cleanup check, but that is not whole-fleet activation evidence.
-Cross-user reservations, WSL accounting and pre-intake eligibility still need
-coordinated deployment. The Arawn registration cannot substitute for Aura's.
 
 Package maintenance must preserve running jobs. Mini-inf has a needrestart
 exclusion for `actions.runner.*.service` after an apt transaction restarted an

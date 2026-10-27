@@ -560,7 +560,7 @@ def _model_recommendations_text() -> str:
 class TestRecommendationsMatchTheLineup:
     """Sync points 3 and 5 — the two the ratchet used to miss.
 
-    `AGENTS.md` claims every sync point a model swap touches is ratcheted here.
+    `ARCHITECTURE.md` claims every sync point a model swap touches is ratcheted here.
     Before this class that was false for `config._LLM_PREFERENCE` and for the
     recommendation surfaces, so a refresh could retire a model and still leave
     the app recommending it.
@@ -814,7 +814,7 @@ class TestDocsMatchTheRatchet:
 
     A wrong count or a citation of a test class that no longer exists makes the
     checklist worse than none, because it reads as authoritative. Review found
-    `AGENTS.md` claiming "five data sites plus two watchers ... every one
+    `ARCHITECTURE.md` claiming "five data sites plus two watchers ... every one
     ratcheted" while the table listed four and two, and two of them had no
     ratchet at all. These tests keep the claim honest.
     """
@@ -893,9 +893,9 @@ class TestDocsMatchTheRatchet:
             "test_every_monitored_repo_id_matches_the_pinned_download_url enforces it"
         )
 
-    def test_agents_md_matches_the_playbook_count(self):
-        agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        assert "five data sites plus two watchers" in agents, (
-            "AGENTS.md sync-point count changed; keep it in step with the "
+    def test_architecture_md_matches_the_playbook_count(self):
+        arch = (REPO_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        assert "five data sites plus two watchers" in arch, (
+            "ARCHITECTURE.md sync-point count changed; keep it in step with the "
             "playbook table (five data sites + two watchers)"
         )

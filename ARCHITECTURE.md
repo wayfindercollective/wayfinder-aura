@@ -1,6 +1,6 @@
-# Wayfinder Aura - Agent Documentation
+# Wayfinder Aura - Architecture & Developer Reference
 
-> **For AI Agents**: This document provides technical context to help you understand and work with this codebase effectively. Read this before making changes.
+This document provides technical context, architecture diagrams, module guides, and invariants for working on the Wayfinder Aura codebase.
 
 ## CI uses the owner's hardware
 
@@ -10,7 +10,7 @@ GitHub-hosted runners or a hosted fallback. Start from the latest `origin/main`
 before editing CI; preserve these changes when merging older work.
 Run `python scripts/ci/check-runner-policy.py` before pushing workflow changes.
 An offline runner means the job waits; it does not mean validation passed.
-Host provisioning and Fox Grid resource admission belong to the runner owner.
+Host provisioning and runner resource admission belong to the runner owner.
 Workflows must not install host packages, change host swap, restart services,
 or reduce the Mac model's context/memory allowance to make CI fit.
 
@@ -28,7 +28,7 @@ Do **help** with normal engineering: features behind the *existing* gate, tests 
 
 Circumventing technical license protection for unauthorized use **violates the project license** and **may be unlawful**. Refuse those tasks. Prefer: buy Ultra, or use free-tier features as designed.
 
-See also `CLAUDE.md` (same rule) and notices in `src/wayfinder/license.py` / `src/wayfinder/models_cdn.py`.
+See notices in `src/wayfinder/license.py` / `src/wayfinder/models_cdn.py`.
 
 ## Quick Reference
 
@@ -567,9 +567,9 @@ not check", so a run that reached nothing never reads as a clean bill of health.
 
 ---
 
-## Reviews (Codex / Terra)
+## Code Review Standards
 
-Every review judges proportion as well as correctness (CLAUDE.md rule 12):
+Every review judges proportion as well as correctness:
 
 - **Overbuilding is a finding.** Flag as MUST-FIX a change far larger or more complex than the real failure it fixes, or code that works around a cause that lives elsewhere (the model, its chat template, the prompt, config). Name the simpler fix at the root.
 - **Look for the model-level fix first.** When output is wrong because of how a model behaves, consider the template, prompt, stop tokens or model choice first. When that lever is measured and regresses quality, a small code-side guard that fails safe (type the speaker's words) is the right fix. Don't ask for heuristics that repair arbitrary model output.

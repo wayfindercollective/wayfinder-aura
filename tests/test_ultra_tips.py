@@ -69,7 +69,7 @@ class TestUnderutilizationSignals:
         # Browse stores the catalog marker as None for CUSTOM models, but the
         # shared tier logic still recognizes 3B+/4B names as premium — a user
         # already running one is utilizing Ultra, not under-utilizing it
-        # (Codex review regression).
+        # (code review regression).
         cfg = dict(FRESH_ULTRA_CONFIG)
         cfg["llama_cpp_model_path"] = "/models/custom-Qwen3-4B-Instruct.gguf"
         cfg["llama_cpp_model_requires_feature"] = None

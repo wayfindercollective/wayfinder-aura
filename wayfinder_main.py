@@ -1624,7 +1624,7 @@ class BenchmarkRunner:
         STRICTLY the active processor's result (use_gpu). No cross-processor
         fallback: on Free (use_gpu=False) with the CPU test failed and the
         GPU Ultra-preview succeeded, the old fallback headlined the preview
-        as "your setup" — a speed the Free tier does not deliver (Codex
+        as "your setup" — a speed the Free tier does not deliver (code
         review). The alternate processor's number belongs only in the
         comparison section.
         """
@@ -3208,7 +3208,7 @@ def portal_retry_delay(failures: int) -> float:
     int 2**failures never overflows, but multiplying it by 10.0 converts to
     float and raises OverflowError around failure 1024, which would kill the
     wrapper's finally block mid-flight and permanently disable retries
-    (Codex review). Pure/headless.
+    (code review). Pure/headless.
     """
     return min(600.0, 10.0 * (2 ** min(max(failures, 1), 6)))
 
@@ -6300,7 +6300,7 @@ class WayfinderApp(ctk.CTk):
         the toplevel (self) bindtag, which precedes the bind_all("all") wheel
         pipeline in every child's bindtags — so a wheel over another frame both
         scrolls it AND dismisses the panel. Handlers no-op while no panel is
-        open. Per CLAUDE.md we never unbind_all; these stay bound for the app's
+        open. Per ARCHITECTURE.md we never unbind_all; these stay bound for the app's
         life and gate on _active_dropdown_panel."""
         if getattr(self, "_dropdown_dismiss_bound", False):
             return
@@ -8409,7 +8409,7 @@ class WayfinderApp(ctk.CTk):
 
     def show_setup_pane(self, on_done=None) -> None:
         """Show the first-run dependency setup as an inline pane over the tab
-        content (replaces the old modal SetupWizard Toplevel — CLAUDE.md rule 2:
+        content (replaces the old modal SetupWizard Toplevel — ARCHITECTURE.md rule 2:
         no popup dialogs). Same dependency engine (core.setup), now inline with
         no grab_set. ``on_done(result)`` fires once when the user completes
         (result=True) or skips (result=False); main.py uses it to chain the
@@ -8486,7 +8486,7 @@ class WayfinderApp(ctk.CTk):
         # Inline banners live at the top of the Dictate tab so runtime problems are
         # visible on the main screen (not just buried in the History/Activity log).
         # Built now, hidden until _show_error_banner()/_maybe_show_setup_cue() pack
-        # them (see CLAUDE.md rule 2: inline CTkFrame panels, never popups).
+        # them (see ARCHITECTURE.md rule 2: inline CTkFrame panels, never popups).
         self._dictate_banner_anchor = trans_card
         self._dictate_transcription_card = trans_card
 
@@ -9875,7 +9875,7 @@ class WayfinderApp(ctk.CTk):
                         f"  model load (at startup or when switching models): {' · '.join(loads)}",
                         muted=True,
                     )
-                # Honesty qualifiers (Codex review): the caption promises warm,
+                # Honesty qualifiers (code review): the caption promises warm,
                 # load-free numbers — say so when a side couldn't deliver that.
                 wall_sides = [
                     side.upper() for side in ("gpu", "cpu")
@@ -16340,7 +16340,7 @@ class WayfinderApp(ctk.CTk):
                 # listener that can't run without Gio, log spam + wasted portal attempts), and
                 # not pynput as a blind else (Flatpak-Wayland without PyGObject resolved to
                 # "unavailable" at startup; starting pynput there burns a thread on an XRecord
-                # grab Wayland never delivers) (Codex review).
+                # grab Wayland never delivers) (code review).
                 flatpak_backend = resolve_hotkey_backend(
                     sys.platform, IS_FLATPAK, self._flatpak_portal_hotkeys(),
                     self._hotkey_session_type(),
@@ -18424,7 +18424,7 @@ class WayfinderApp(ctk.CTk):
 
     # Ultra benefits are rendered in two places (the upgrade panel and the Settings
     # License tile) — one list so the copy never drifts. Lucide row markers
-    # (CLAUDE.md: no decorative emoji as UI chrome).
+    # (ARCHITECTURE.md: no decorative emoji as UI chrome).
     # Claims are measured (docs/EVAL-2026-09-24.md): Turbo Q5 6.6% vs Base 11.5%
     # WER, at Base's CPU speed on the GPU; Qwen3 4B was the most reliable cleanup
     # model in every style and kept meaning (Professional/Standard scored C on
@@ -23932,7 +23932,7 @@ class WayfinderApp(ctk.CTk):
         # Both global shortcuts, triggers encoded from config by the protocol
         # encoder — the UI display label is presentation, not protocol. Built
         # BEFORE the started flag: if this raises, the flag must not be left
-        # set with no thread running (Codex review).
+        # set with no thread running (code review).
         from wayfinder.hotkeys.dbus import shortcut_specs_from_config
         shortcuts = shortcut_specs_from_config(self.config)
         settled = getattr(self, "_portal_bind_settled", None)
@@ -23961,7 +23961,7 @@ class WayfinderApp(ctk.CTk):
                 # that is down stays down for a while, and unbounded 10s churn
                 # is pure log spam. A listener that ran for a minute had a
                 # working session, so its eventual death resets the backoff
-                # rather than compounding it (Codex review).
+                # rather than compounding it (code review).
                 if not self.stop_event.is_set():
                     if clean_stop or time.monotonic() - started_at > 60:
                         self._portal_failures = 0
@@ -24147,7 +24147,7 @@ class WayfinderApp(ctk.CTk):
         self._drain_tray_actions()
         # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
         # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
-        # While Settings → Detect is armed, use the CLAUDE.md floor (100ms) so the
+        # While Settings → Detect is armed, use the ARCHITECTURE.md floor (100ms) so the
         # capture is applied promptly without a sub-100ms self-rearming poll.
         if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
             interval = 100
