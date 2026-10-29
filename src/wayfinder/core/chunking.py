@@ -322,15 +322,77 @@ def collapse_phrase_window_loops(text: str) -> str:
     return "".join(parts) if changed_any else text
 
 
+# A loop stuck on ONE word: whisper-server runs -nf, so a decode that locks on
+# a syllable never retries. 29 Oct (Windows, base.en, music in the room):
+# "make sure that's rekka-kook-kook-kook-…" — 60 copies hyphen-joined into a
+# single "word", ~330 characters that the sentence and phrase scans (5+ word
+# phrases) and the 2-4 word collapse never saw, and that cost the chunk its
+# last words. Nobody says one word eight times running, so a run of
+# WORD_LOOP_MIN_RUN identical words, space- or hyphen-separated, is a loop.
+WORD_LOOP_MIN_RUN = 8
+_HYPHEN = re.compile(r"(-+)")
+
+
+def _word_key(word: str) -> str:
+    return word.strip(".,!?;:\"'`“”‘’()[]").lower()
+
+
+def _collapse_runs(items: list[str]) -> tuple[list[str], bool]:
+    """Keep one copy of every run of WORD_LOOP_MIN_RUN+ equal items, and drop
+    the cut-off copy a loop often ends on ("kook-kook-k")."""
+    out: list[str] = []
+    changed = False
+    i = 0
+    while i < len(items):
+        key = _word_key(items[i])
+        j = i + 1
+        while j < len(items) and key and _word_key(items[j]) == key:
+            j += 1
+        if key and j - i >= WORD_LOOP_MIN_RUN:
+            out.append(items[i])
+            changed = True
+            if j < len(items) and _word_key(items[j]) and key.startswith(_word_key(items[j])):
+                j += 1
+        else:
+            out.extend(items[i:j])
+        i = j
+    return out, changed
+
+
+def collapse_word_loops(text: str) -> str:
+    """Collapse a single word stuck in a loop to one copy, whether repeated as
+    separate words or joined by hyphens into one long token. Text with no such
+    run comes back as the same object."""
+    if not text:
+        return text
+    changed_any = False
+    tokens = re.split(r"(\s+)", text)   # [word, space, word, ...]
+    for i in range(0, len(tokens), 2):
+        if "-" not in tokens[i]:
+            continue
+        pieces = _HYPHEN.split(tokens[i])  # [part, "-", part, ...]
+        parts, changed = _collapse_runs(pieces[0::2])
+        if changed:
+            changed_any = True
+            tokens[i] = "-".join(parts)
+    words = [tokens[i] for i in range(0, len(tokens), 2) if tokens[i]]
+    collapsed, changed = _collapse_runs(words)
+    if changed:
+        return " ".join(collapsed)
+    return "".join(tokens) if changed_any else text
+
+
 def chunk_text_looks_looped(text: str) -> bool:
-    """Whether collapsing ``text`` at the one loop bar (LOOP_MIN_RUN) would
-    change it — the same check wayfinder_main uses to suspect a prompted
-    chunk's raw text and transcriber.py's clean_whisper_artifacts uses to
-    collapse it, so a chunk flagged here is the same chunk cleanup collapses.
+    """Whether collapsing ``text`` at the one loop bar (LOOP_MIN_RUN, or
+    WORD_LOOP_MIN_RUN for a single word) would change it — the same check
+    wayfinder_main uses to suspect a prompted chunk's raw text and
+    transcriber.py's clean_whisper_artifacts uses to collapse it, so a chunk
+    flagged here is the same chunk cleanup collapses.
     """
     if not text:
         return False
-    return collapse_phrase_window_loops(collapse_sentence_loops(text)) != text
+    return collapse_word_loops(
+        collapse_phrase_window_loops(collapse_sentence_loops(text))) != text
 
 
 def find_text_overlap(

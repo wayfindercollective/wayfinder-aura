@@ -693,3 +693,44 @@ def test_the_reported_shape_collapses_fully_except_the_intentional_copies():
     text = " ".join([level5] * 3 + [level1] * 8 + [level1_cut, level1])
     assert chunk_text_looks_looped(text)
     assert collapse_sentence_loops(text) == " ".join([level5] * 3 + [level1])
+
+
+# --- one word stuck in a loop (29 Oct 2026, Windows, base.en, music playing) ---
+
+from wayfinder.core.chunking import (  # noqa: E402
+    WORD_LOOP_MIN_RUN, chunk_text_looks_looped, collapse_word_loops)
+
+KOOK = "other thing wants has changed, make sure that's rekka-" + "kook-" * 60 + "k"
+
+
+def test_a_hyphen_joined_word_loop_collapses_to_one_copy():
+    assert collapse_word_loops(KOOK) == "other thing wants has changed, make sure that's rekka-kook"
+
+
+def test_a_hyphen_joined_word_loop_is_heard_again():
+    # The same bar sends the prompted chunk back for an unprompted re-hear.
+    assert chunk_text_looks_looped(KOOK)
+
+
+def test_a_spaced_word_loop_collapses_to_one_copy():
+    assert collapse_word_loops("so " + "no " * 10 + "way") == "so no way"
+
+
+@pytest.mark.parametrize("text", [
+    "ha-ha-ha, very funny",
+    "a well-known state-of-the-art thing",
+    " ".join(["no"] * (WORD_LOOP_MIN_RUN - 1)),
+    "very very very much",
+    "1-2-3-4-5-6-7-8-9",
+    "count 1 1 1 2 2 2",
+    "re-re-re-record it",
+])
+def test_ordinary_repetition_comes_back_as_the_same_object(text):
+    assert collapse_word_loops(text) is text
+    assert not chunk_text_looks_looped(text)
+
+
+def test_the_cleanup_collapses_the_word_loop_before_pasting():
+    from wayfinder.core.transcriber import clean_whisper_artifacts
+
+    assert "kook-kook" not in clean_whisper_artifacts(KOOK)

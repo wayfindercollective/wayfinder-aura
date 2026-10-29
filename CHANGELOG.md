@@ -9,6 +9,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A word Whisper gets stuck on is no longer typed dozens of times.** With
+  music in the room, a dictation ended "make sure that's rekka-kook-kook-kook-…",
+  about 330 characters of one syllable joined by hyphens. Aura now spots a word
+  repeated eight or more times in a row, hears that part again, and keeps one
+  copy if the loop is still there.
+
 - **Your custom vocabulary no longer gets typed in place of silence.** On a
   quiet stretch, Whisper sometimes wrote back the vocabulary list Aura gives
   it ("and Aura, Wayfinder, r.") instead of what you said, and Aura typed it
