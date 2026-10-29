@@ -750,6 +750,7 @@ def test_a_real_word_after_the_loop_is_never_taken_for_its_cut_off_copy():
     "-".join(["kook"] * (WORD_LOOP_MIN_RUN - 1)),    # one short of the bar
     " ".join(["no"] * 12),                           # spaced runs belong to the older collapse
     "https://x.com/a-a-a-a-a-a-a-a-b",
+    "https://x.com/abc-abc-abc-abc-abc-abc-abc-abc-abc",
     "is is is is is is is is I think",
     "line one\nline-two\tthree -- four",
 ])

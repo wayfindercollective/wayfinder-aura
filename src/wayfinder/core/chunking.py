@@ -388,7 +388,7 @@ def collapse_word_loops(text: str) -> str:
     parts = re.split(r"(\s+)", text)   # [token, space, token, ...]; join restores it
     changed = False
     for i in range(0, len(parts), 2):
-        if "-" in parts[i]:
+        if "-" in parts[i] and "/" not in parts[i]:   # never inside a URL or path
             collapsed = _collapse_hyphen_token(parts[i])
             if collapsed is not parts[i]:
                 parts[i] = collapsed
