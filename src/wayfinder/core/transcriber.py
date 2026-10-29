@@ -3515,10 +3515,13 @@ def clean_whisper_artifacts(
         from wayfinder.core.chunking import (
             collapse_phrase_window_loops,
             collapse_sentence_loops,
+            collapse_word_loops,
         )
 
         text = collapse_sentence_loops(text)
         text = collapse_phrase_window_loops(text)
+        # One word stuck in a loop, hyphen-joined or not (29 Oct "kook-kook-…").
+        text = collapse_word_loops(text)
 
     # Clean up multiple spaces
     text = re.sub(r'\s+', ' ', text)

@@ -2,7 +2,14 @@
 
 import pytest
 
-from wayfinder.core.chunking import deduplicate_overlap_text, find_text_overlap, join_raw_chunks
+from wayfinder.core.chunking import (
+    WORD_LOOP_MIN_RUN,
+    chunk_text_looks_looped,
+    collapse_word_loops,
+    deduplicate_overlap_text,
+    find_text_overlap,
+    join_raw_chunks,
+)
 
 
 def test_exact_overlap_ignores_case_and_punctuation():
@@ -693,3 +700,64 @@ def test_the_reported_shape_collapses_fully_except_the_intentional_copies():
     text = " ".join([level5] * 3 + [level1] * 8 + [level1_cut, level1])
     assert chunk_text_looks_looped(text)
     assert collapse_sentence_loops(text) == " ".join([level5] * 3 + [level1])
+
+
+# --- one word stuck in a loop (29 Oct 2026, Windows, base.en, music playing) ---
+
+KOOK = "other thing wants has changed, make sure that's rekka-" + "kook-" * 60 + "k"
+
+
+def test_a_hyphen_joined_word_loop_collapses_to_one_copy():
+    assert collapse_word_loops(KOOK) == "other thing wants has changed, make sure that's rekka-kook"
+
+
+def test_a_hyphen_joined_word_loop_is_heard_again():
+    # The same bar sends the prompted chunk back for an unprompted re-hear.
+    assert chunk_text_looks_looped(KOOK)
+
+
+def test_the_cleanup_pastes_one_copy():
+    from wayfinder.core.transcriber import clean_whisper_artifacts
+
+    assert clean_whisper_artifacts(KOOK) == (
+        "other thing wants has changed, make sure that's rekka-kook")
+
+
+def test_the_cleanup_opt_out_leaves_the_loop():
+    from wayfinder.core.transcriber import clean_whisper_artifacts
+
+    assert "kook-kook-kook" in clean_whisper_artifacts(KOOK, collapse_repetitions=False)
+
+
+def test_punctuation_after_the_loop_is_kept():
+    loop = "-".join(["kook"] * 10)
+    assert collapse_word_loops(loop + ", then we go") == "kook, then we go"
+    assert collapse_word_loops("(" + loop + ".) Yes") == "(kook.) Yes"
+
+
+def test_a_real_word_after_the_loop_is_never_taken_for_its_cut_off_copy():
+    loop = "-".join(["kook"] * 10)
+    assert collapse_word_loops(loop + "-ko") == "kook"          # cut-off end of the token
+    assert collapse_word_loops(loop + "-ko-ok") == "kook-ko-ok"  # not the end: kept
+    assert collapse_word_loops(loop + " k is next") == "kook k is next"   # a separate word
+
+
+@pytest.mark.parametrize("text", [
+    "ha-ha-ha-ha-ha-ha-ha-ha-ha, very funny",       # two letters: not a loop piece
+    "ID 7-7-7-7-7-7-7-7-7",                          # digits
+    "x1-x1-x1-x1-x1-x1-x1-x1-x1",
+    "a well-known state-of-the-art thing",
+    "-".join(["kook"] * (WORD_LOOP_MIN_RUN - 1)),    # one short of the bar
+    " ".join(["no"] * 12),                           # spaced runs belong to the older collapse
+    "https://x.com/a-a-a-a-a-a-a-a-b",
+    "https://x.com/abc-abc-abc-abc-abc-abc-abc-abc-abc",
+    "is is is is is is is is I think",
+    "line one\nline-two\tthree -- four",
+])
+def test_ordinary_text_comes_back_as_the_same_object(text):
+    assert collapse_word_loops(text) is text
+
+
+def test_whitespace_around_a_collapsed_token_is_kept():
+    loop = "-".join(["kook"] * 10)
+    assert collapse_word_loops("a\n" + loop + "\tb") == "a\nkook\tb"
