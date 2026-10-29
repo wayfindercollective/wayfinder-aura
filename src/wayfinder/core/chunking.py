@@ -325,61 +325,75 @@ def collapse_phrase_window_loops(text: str) -> str:
 # A loop stuck on ONE word: whisper-server runs -nf, so a decode that locks on
 # a syllable never retries. 29 Oct (Windows, base.en, music in the room):
 # "make sure that's rekka-kook-kook-kook-…" — 60 copies hyphen-joined into a
-# single "word", ~330 characters that the sentence and phrase scans (5+ word
-# phrases) and the 2-4 word collapse never saw, and that cost the chunk its
-# last words. Nobody says one word eight times running, so a run of
-# WORD_LOOP_MIN_RUN identical words, space- or hyphen-separated, is a loop.
+# single token, ~330 characters that the sentence and phrase scans (5+ word
+# phrases) and the 2-4 word collapse never see, and that cost the chunk its
+# last words. Only hyphen-joined runs are handled here: spaced repeats are
+# already cut by _collapse_whisper_repetitions, and keeping this narrow keeps
+# it from touching speech. A run is WORD_LOOP_MIN_RUN+ copies of one piece of
+# at least WORD_LOOP_MIN_LETTERS letters and no digits, so IDs (7-7-7-…) and
+# short laughs (ha-ha-…) are left alone.
 WORD_LOOP_MIN_RUN = 8
-_HYPHEN = re.compile(r"(-+)")
+WORD_LOOP_MIN_LETTERS = 3
+_HYPHENS = re.compile(r"-+")
+_EDGE = ".,!?;:\"'`“”‘’()[]"
 
 
-def _word_key(word: str) -> str:
-    return word.strip(".,!?;:\"'`“”‘’()[]").lower()
+def _piece_key(piece: str) -> str:
+    core = piece.strip(_EDGE).lower()
+    if any(ch.isdigit() for ch in core) or sum(ch.isalpha() for ch in core) < WORD_LOOP_MIN_LETTERS:
+        return ""  # never a loop piece
+    return core
 
 
-def _collapse_runs(items: list[str]) -> tuple[list[str], bool]:
-    """Keep one copy of every run of WORD_LOOP_MIN_RUN+ equal items, and drop
-    the cut-off copy a loop often ends on ("kook-kook-k")."""
+def _collapse_hyphen_token(token: str) -> str:
+    """One hyphen-joined token with any 8+ run of one piece cut to a single
+    copy. The run keeps its first copy's leading and its last copy's trailing
+    punctuation; a shorter cut-off copy ends the run only as the token's last
+    piece ("kook-kook-k"). Returns ``token`` itself when nothing changes."""
+    pieces = _HYPHENS.split(token)
+    if len(pieces) < WORD_LOOP_MIN_RUN:
+        return token
     out: list[str] = []
     changed = False
     i = 0
-    while i < len(items):
-        key = _word_key(items[i])
+    while i < len(pieces):
+        key = _piece_key(pieces[i])
         j = i + 1
-        while j < len(items) and key and _word_key(items[j]) == key:
+        while key and j < len(pieces) and pieces[j].strip(_EDGE).lower() == key:
             j += 1
         if key and j - i >= WORD_LOOP_MIN_RUN:
-            out.append(items[i])
             changed = True
-            if j < len(items) and _word_key(items[j]) and key.startswith(_word_key(items[j])):
-                j += 1
+            first, last = pieces[i], pieces[j - 1]
+            lead = first[: len(first) - len(first.lstrip(_EDGE))]
+            core = first.strip(_EDGE)
+            tail = last[len(last.rstrip(_EDGE)):]
+            if j == len(pieces) - 1:   # a cut-off copy as the token's very end
+                cut = pieces[j].strip(_EDGE).lower()
+                if cut and len(cut) < len(key) and key.startswith(cut):
+                    tail = pieces[j][len(pieces[j].rstrip(_EDGE)):] or tail
+                    j += 1
+            out.append(lead + core + tail)
         else:
-            out.extend(items[i:j])
+            out.extend(pieces[i:j])
         i = j
-    return out, changed
+    return "-".join(out) if changed else token
 
 
 def collapse_word_loops(text: str) -> str:
-    """Collapse a single word stuck in a loop to one copy, whether repeated as
-    separate words or joined by hyphens into one long token. Text with no such
-    run comes back as the same object."""
-    if not text:
+    """Collapse a word Whisper got stuck on, hyphen-joining copy after copy
+    into one long token, to a single copy. Text with no such run comes back
+    as the same object."""
+    if not text or "-" not in text:
         return text
-    changed_any = False
-    tokens = re.split(r"(\s+)", text)   # [word, space, word, ...]
-    for i in range(0, len(tokens), 2):
-        if "-" not in tokens[i]:
-            continue
-        pieces = _HYPHEN.split(tokens[i])  # [part, "-", part, ...]
-        parts, changed = _collapse_runs(pieces[0::2])
-        if changed:
-            changed_any = True
-            tokens[i] = "-".join(parts)
-    words = [tokens[i] for i in range(0, len(tokens), 2) if tokens[i]]
-    collapsed, changed = _collapse_runs(words)
-    if changed:
-        return " ".join(collapsed)
-    return "".join(tokens) if changed_any else text
+    parts = re.split(r"(\s+)", text)   # [token, space, token, ...]; join restores it
+    changed = False
+    for i in range(0, len(parts), 2):
+        if "-" in parts[i]:
+            collapsed = _collapse_hyphen_token(parts[i])
+            if collapsed is not parts[i]:
+                parts[i] = collapsed
+                changed = True
+    return "".join(parts) if changed else text
 
 
 def chunk_text_looks_looped(text: str) -> bool:
