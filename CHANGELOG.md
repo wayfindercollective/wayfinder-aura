@@ -10,10 +10,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - **Windows: Aura restarts itself when it stops answering the hotkey.** A
-  hotkey press 30 seconds into a freeze, or any freeze of two minutes, now
+  hotkey press a minute into a freeze, or any freeze of two minutes, now
   restarts Aura without a dialog to click (one waited unseen for 75 minutes).
   It never happens in the first three minutes after Aura starts, and at most
   once every ten minutes; after that the Restart dialog is offered instead.
+- **Windows: one error can no longer switch the hotkey off.** An error while
+  handling one event used to stop Aura checking for the hotkey until it was
+  restarted. Aura now reports the error and keeps listening.
 
 - **Your custom vocabulary no longer gets typed in place of silence.** On a
   quiet stretch, Whisper sometimes wrote back the vocabulary list Aura gives

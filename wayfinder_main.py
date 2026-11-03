@@ -24130,34 +24130,46 @@ class WayfinderApp(ctk.CTk):
     def poll_events(self):
         # Heartbeat for the Windows poll watchdog (_start_windows_poll_watchdog).
         self._poll_heartbeat = time.monotonic()
-        if IS_MACOS and not getattr(self, "_event_wakeup_attached", False):
-            attach = getattr(self.event_queue, "attach", None)
-            self._event_wakeup_attached = bool(
-                attach is not None and attach(self, self._drain_event_queue_now)
-            )
-        if IS_MACOS and getattr(self, "_draining_events", False):
-            pass  # a wake-up drain is running further up this stack
-        else:
-            try:
-                while True:
-                    event_type, data = self.event_queue.get_nowait()
-                    self.handle_event(event_type, data)
-            except queue.Empty:
-                pass
-        self._drain_tray_actions()
-        # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
-        # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
-        # While Settings → Detect is armed, use the ARCHITECTURE.md floor (100ms) so the
-        # capture is applied promptly without a sub-100ms self-rearming poll.
-        if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
-            interval = 100
-        elif getattr(self, "_event_wakeup_attached", False):
-            # macOS: worker events and menu actions wake Tk through the event
-            # pipe as they are queued, so idle polling is only a safety net.
-            interval = _MACOS_IDLE_SAFETY_POLL_MS
-        else:
-            interval = 250
-        self._poll_after_id = self.after(interval, self.poll_events)
+        # Re-armed in `finally`, and every event handled on its own: one event
+        # that raises must never end the chain. 3 Nov: a lazy import failed
+        # (Defender had deleted the frozen exe the import reads from), the
+        # exception escaped poll_events before it re-armed, and every hotkey
+        # press after that was queued and never handled - the watchdog's
+        # "poll timer NOT scheduled" stall, same signature as 8 Oct.
+        interval = 250
+        try:
+            if IS_MACOS and not getattr(self, "_event_wakeup_attached", False):
+                attach = getattr(self.event_queue, "attach", None)
+                self._event_wakeup_attached = bool(
+                    attach is not None and attach(self, self._drain_event_queue_now)
+                )
+            if IS_MACOS and getattr(self, "_draining_events", False):
+                pass  # a wake-up drain is running further up this stack
+            else:
+                try:
+                    while True:
+                        event_type, data = self.event_queue.get_nowait()
+                        try:
+                            self.handle_event(event_type, data)
+                        except Exception:
+                            # Report it as Tk would (log + crash report) and
+                            # carry on with the next event.
+                            self.report_callback_exception(*sys.exc_info())
+                except queue.Empty:
+                    pass
+            self._drain_tray_actions()
+            # Adaptive polling: slow when idle (saves CPU), fast when active (responsive)
+            # 250ms idle = imperceptible hotkey delay, 60% less CPU than 100ms.
+            # While Settings → Detect is armed, use the ARCHITECTURE.md floor (100ms) so the
+            # capture is applied promptly without a sub-100ms self-rearming poll.
+            if _HOTKEY_CAPTURE.get("armed") or self.app_state != AppState.IDLE:
+                interval = 100
+            elif getattr(self, "_event_wakeup_attached", False):
+                # macOS: worker events and menu actions wake Tk through the event
+                # pipe as they are queued, so idle polling is only a safety net.
+                interval = _MACOS_IDLE_SAFETY_POLL_MS
+        finally:
+            self._poll_after_id = self.after(interval, self.poll_events)
 
     def _start_windows_poll_watchdog(self) -> None:
         """Windows: log (and offer a restart) if poll_events stops running.

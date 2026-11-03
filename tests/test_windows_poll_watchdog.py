@@ -529,3 +529,60 @@ def test_only_one_restart_runs(wm, monkeypatch):
 def test_automatic_restart_is_only_wired_in_the_installed_app():
     src = (ROOT / "wayfinder_main.py").read_text(encoding="utf-8")
     assert 'if getattr(sys, "frozen", False) else None),' in src
+
+
+def test_one_failing_event_never_ends_the_poll_chain(wm):
+    """3 Nov: a lazy import inside handle_event raised (Defender had deleted
+    the frozen exe) and the exception skipped the re-arm: hotkey dead."""
+    handled, reported, scheduled = [], [], []
+
+    class App:
+        event_queue = queue.Queue()
+        app_state = wm.AppState.IDLE
+
+        def handle_event(self, event_type, data):
+            if data == "boom":
+                raise OSError(22, "Invalid argument")
+            handled.append(data)
+
+        def report_callback_exception(self, *exc):
+            reported.append(exc[0])
+
+        def _drain_tray_actions(self):
+            pass
+
+        def after(self, ms, fn):
+            scheduled.append(ms)
+            return "after#1"
+
+        def poll_events(self):
+            pass
+
+    app = App()
+    for data in ("boom", "next"):
+        app.event_queue.put((wm.EventType.HOTKEY_PRESSED, data))
+    wm.WayfinderApp.poll_events(app)
+    assert handled == ["next"]            # the event after the failure still runs
+    assert reported == [OSError]          # and the failure is reported, not swallowed
+    assert scheduled == [250]             # and the chain re-arms
+
+
+def test_the_poll_chain_re_arms_even_if_the_tray_drain_raises(wm):
+    scheduled = []
+
+    class App:
+        event_queue = queue.Queue()
+        app_state = wm.AppState.IDLE
+
+        def _drain_tray_actions(self):
+            raise RuntimeError("tray")
+
+        def after(self, ms, fn):
+            scheduled.append(ms)
+
+        def poll_events(self):
+            pass
+
+    with pytest.raises(RuntimeError):
+        wm.WayfinderApp.poll_events(App())
+    assert scheduled == [250]
