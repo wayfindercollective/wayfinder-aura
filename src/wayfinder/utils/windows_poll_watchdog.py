@@ -38,11 +38,14 @@ _MAX_SAMPLES_DURING = 6   # distinct stacks logged while it lasts
 PROMPT_AFTER_S = 30.0
 # Recovery without a dialog (3 Nov: a 75-minute stall sat behind a restart
 # dialog Nathan never saw). A hotkey press this long into a stall restarts
-# Aura at once; with no press, a stall this long restarts it anyway. Never
-# within AUTO_RESTART_MIN_UPTIME_S of the watchdog starting, where 19-45 s
-# start-up stalls recover by themselves; the app also rate-limits restarts
-# (auto_restart_allowed) and falls back to the dialog when it says no.
-PRESS_RESTART_AFTER_S = 30.0
+# Aura at once; with no press, a stall this long restarts it anyway. Both
+# count AWAKE seconds only: monotonic time runs on through sleep, and a short
+# hiccup on wake must not read as an hours-long stall. Never within
+# AUTO_RESTART_MIN_UPTIME_S of the watchdog starting, where 19-45 s start-up
+# stalls recover by themselves, and never after the user declined the dialog
+# for this stall; the app also refuses (rate limit, dictation in progress),
+# and the dialog is offered instead.
+PRESS_RESTART_AFTER_S = 60.0
 IDLE_RESTART_AFTER_S = 120.0
 AUTO_RESTART_MIN_UPTIME_S = 180.0
 # A tick gap this long means the machine slept or this thread was starved:
@@ -87,6 +90,7 @@ class PollWatchdog:
         self._auto_restart = auto_restart
         self._auto_restart_allowed = auto_restart_allowed
         self._restarting = False
+        self._declined = False
         self._stack = stack
         self._clock = clock
         self._spawn = spawn or _spawn_daemon
@@ -133,6 +137,8 @@ class PollWatchdog:
         if beat > self._stalled_at:
             self._log(f"✓ Hotkey checks resumed after {beat - self._stalled_at:.0f}s")
             self._stalled_at = None
+            self._restarting = False
+            self._declined = False
             try:
                 self._on_recover()  # e.g. take down a restart offer still on screen
             except Exception:
@@ -146,24 +152,40 @@ class PollWatchdog:
         if self._restarting:
             return
         pressed = _safe_bool(self._pending_hotkey)
-        if (self._auto_restart is not None
-                and now - self._started >= AUTO_RESTART_MIN_UPTIME_S
-                and ((pressed and quiet >= PRESS_RESTART_AFTER_S)
-                     or quiet >= IDLE_RESTART_AFTER_S)
-                and _safe_bool(self._auto_restart_allowed)):
+        awake_quiet = now - max(beat, self._awake_since)
+        # When an automatic restart is possible it is the answer, and the
+        # dialog isn't shown first; otherwise the dialog, as before.
+        auto_possible = (self._auto_restart is not None and not self._declined
+                         and now - self._started >= AUTO_RESTART_MIN_UPTIME_S
+                         and _safe_bool(self._auto_restart_allowed))
+        if auto_possible and ((pressed and awake_quiet >= PRESS_RESTART_AFTER_S)
+                              or awake_quiet >= IDLE_RESTART_AFTER_S):
             self._restarting = True
-            reason = (f"stuck {quiet:.0f}s and the hotkey was pressed" if pressed
-                      else f"stuck {quiet:.0f}s")
+            reason = (f"stuck {awake_quiet:.0f}s and the hotkey was pressed" if pressed
+                      else f"stuck {awake_quiet:.0f}s")
             self._log(f"🔄 Restarting Aura automatically ({reason})")
             self._log(f"   main thread at {quiet:.0f}s: {_safe(self._stack)}")
-            restart = self._auto_restart
-            self._spawn(lambda: restart(reason), "poll-watchdog-auto-restart")
+            restart, offer = self._auto_restart, self._offer_restart
+
+            def run() -> None:
+                # Returns only when it did NOT restart (else the process is gone):
+                # offer the dialog instead, so the stall is never left silent.
+                if not _safe_bool(lambda: restart(reason)):
+                    self._log("   automatic restart not possible — offering a restart")
+                    self._offered = True
+                    offer()
+            self._spawn(run, "poll-watchdog-auto-restart")
             return
-        if not self._offered and quiet >= PROMPT_AFTER_S and pressed:
+        if not auto_possible and not self._offered and quiet >= PROMPT_AFTER_S and pressed:
             self._offered = True
             self._log("⚠ Hotkey pressed while Aura was stuck — offering a restart")
             self._log(f"   main thread at {quiet:.0f}s: {_safe(self._stack)}")
             self._spawn(self._offer_restart, "poll-watchdog-restart")
+
+    def note_declined(self) -> None:
+        """The user said No to the restart dialog: no automatic restart for
+        this stall (the next stall starts fresh)."""
+        self._declined = True
 
     def start(self) -> "PollWatchdog":
         def run() -> None:

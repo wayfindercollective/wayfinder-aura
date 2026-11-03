@@ -24170,6 +24170,7 @@ class WayfinderApp(ctk.CTk):
             from wayfinder.utils.windows_poll_watchdog import PollWatchdog
 
             self._restart_offer_lock = threading.Lock()
+            self._restart_now_lock = threading.Lock()
             self._poll_watchdog = PollWatchdog(
                 heartbeat=lambda: getattr(self, "_poll_heartbeat", None),
                 log=self.log,
@@ -24177,7 +24178,10 @@ class WayfinderApp(ctk.CTk):
                 pending_hotkey=self._hotkey_press_waiting,
                 offer_restart=self._offer_windows_restart,
                 on_recover=self._dismiss_windows_restart_offer,
-                auto_restart=self._auto_restart_windows,
+                # Installed app only: from source there is nothing to relaunch,
+                # and a run there must not touch the installed app's marker.
+                auto_restart=(self._auto_restart_windows
+                              if getattr(sys, "frozen", False) else None),
                 auto_restart_allowed=self._auto_restart_allowed,
             ).start()
         except Exception as exc:
@@ -24242,6 +24246,8 @@ class WayfinderApp(ctk.CTk):
             if answer != 6:  # IDYES
                 self.log("ℹ Restart declined — the hotkey does nothing until Aura "
                          "recovers or is restarted")
+                # No automatic restart for this stall either.
+                getattr(watchdog, "note_declined", lambda: None)()
                 return
             self.log("🔄 Restarting Aura (hotkey checks had stopped)")
             self._restart_windows_now()
@@ -24260,26 +24266,42 @@ class WayfinderApp(ctk.CTk):
         return get_cache_dir() / "last-auto-restart"
 
     def _auto_restart_allowed(self) -> bool:
-        """Windows: no automatic restart in the last 10 minutes."""
+        """Windows: no automatic restart in the last 10 minutes (a clock set
+        back by over a minute makes the age negative: allowed, rather than off
+        for hours; a few ms ahead is just file-time rounding)."""
         try:
             last = self._auto_restart_marker().stat().st_mtime
         except OSError:
             return True
-        return time.time() - last >= self._AUTO_RESTART_EVERY_S
+        age = time.time() - last
+        return age < -60 or age >= self._AUTO_RESTART_EVERY_S
 
-    def _auto_restart_windows(self, reason: str) -> None:
+    def _auto_restart_windows(self, reason: str) -> bool:
         """Watchdog thread: restart a stuck Aura without asking (3 Nov: a
-        75-minute stall waited behind a dialog nobody saw)."""
+        75-minute stall waited behind a dialog nobody saw). Returns False,
+        without restarting, when a dictation is in progress (the dialog warns
+        it will be lost) or the rate-limit marker can't be written (the
+        relaunched copy couldn't see it and might loop); the watchdog then
+        offers the dialog."""
+        if getattr(self, "app_state", AppState.IDLE) != AppState.IDLE:
+            self.log("ℹ Dictation in progress — asking before restarting")
+            return False
         try:
             marker = self._auto_restart_marker()
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(reason, encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as exc:
+            self.log(f"ℹ Can't record the restart ({exc}) — asking instead")
+            return False
         self._restart_windows_now()
+        return False   # only reached when the restart didn't happen
 
     def _restart_windows_now(self) -> None:
-        """Relaunch Aura and exit this (stuck) process. Off the Tk thread."""
+        """Relaunch Aura and exit this (stuck) process. Off the Tk thread.
+        Once only: the dialog and the automatic path can't both relaunch."""
+        lock = getattr(self, "_restart_now_lock", None)
+        if lock is not None and not lock.acquire(blocking=False):
+            return
         try:
             if not getattr(sys, "frozen", False):
                 self.log("ℹ Running from source: restart Aura yourself")
@@ -24306,6 +24328,11 @@ class WayfinderApp(ctk.CTk):
             os._exit(0)
         except Exception as exc:
             self.log(f"⚠ Restart failed: {exc}")
+        finally:
+            # Only reached when not restarted (os._exit skips it): a later
+            # attempt may try again.
+            if lock is not None:
+                lock.release()
 
     def _dismiss_windows_restart_offer(self) -> None:
         """The poll recovered: answer an open restart dialog "No"."""

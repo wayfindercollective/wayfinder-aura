@@ -298,12 +298,17 @@ def test_short_freeze_is_sampled_but_never_reported():
 
 # --- automatic restart (3 Nov: a 75-minute stall waited behind an unseen dialog) ---
 
-def make_auto(clock, beat, pending=lambda: False, allowed=lambda: True):
+def make_auto(clock, beat, pending=lambda: False, allowed=lambda: True, restarted=True):
     lines, restarts, offers = [], [], []
+
+    def auto_restart(reason):
+        restarts.append(reason)
+        return restarted   # True stands for "the process is gone"
+
     dog = wd.PollWatchdog(
         heartbeat=lambda: beat[0], log=lines.append, probe=lambda: "p",
         pending_hotkey=pending, offer_restart=lambda: offers.append(1),
-        auto_restart=restarts.append, auto_restart_allowed=allowed,
+        auto_restart=auto_restart, auto_restart_allowed=allowed,
         stack=lambda: "mainloop (__init__.py:1505)", clock=clock,
         spawn=lambda fn, name: fn(),
     )
@@ -384,3 +389,143 @@ def test_app_rate_limits_automatic_restarts(wm, tmp_path, monkeypatch):
     old = time.time() - 700
     os.utime(tmp_path / "last-auto-restart", (old, old))
     assert wm.WayfinderApp._auto_restart_allowed(app)
+
+
+def test_a_hiccup_after_sleep_never_restarts():
+    """Monotonic time runs through sleep: 8 h asleep + an 8 s hiccup on wake
+    must not read as an 8-hour stall (review r1, finding 1)."""
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, _ = make_auto(clock, beat)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    clock.t += 8 * 3600          # asleep: no ticks, no beats
+    run_for(dog, clock, 8)       # awake, main thread busy for 8 s
+    beat[0] = clock.t
+    run_for(dog, clock, 30, beat, alive=True)
+    assert restarts == []
+
+
+def test_a_starved_watchdog_restarts_the_awake_count():
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, _ = make_auto(clock, beat)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    run_for(dog, clock, 100)
+    clock.t += 600               # watchdog thread starved / machine asleep
+    run_for(dog, clock, 100)     # 100 awake seconds since: under the 120 s bar
+    assert restarts == []
+    run_for(dog, clock, 30)
+    assert len(restarts) == 1
+
+
+def test_a_failed_automatic_restart_offers_the_dialog():
+    clock = Clock()
+    beat = [clock.t]
+    dog, lines, restarts, offers = make_auto(clock, beat, restarted=False)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    run_for(dog, clock, wd.IDLE_RESTART_AFTER_S + 5)
+    assert len(restarts) == 1 and offers == [1]
+    assert any("automatic restart not possible" in l for l in lines)
+
+
+def test_after_recovery_the_next_stall_can_restart_again():
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, _ = make_auto(clock, beat, restarted=False)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    run_for(dog, clock, wd.IDLE_RESTART_AFTER_S + 5)
+    beat[0] = clock.t
+    run_for(dog, clock, 10, beat, alive=True)
+    run_for(dog, clock, wd.IDLE_RESTART_AFTER_S + 5)
+    assert len(restarts) == 2
+
+
+def test_declining_the_dialog_stops_the_automatic_restart_for_that_stall():
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, offers = make_auto(clock, beat, pending=lambda: True)
+    run_for(dog, clock, wd.PROMPT_AFTER_S + 2)          # inside the start-up grace
+    assert offers == [1]
+    dog.note_declined()
+    run_for(dog, clock, wd.AUTO_RESTART_MIN_UPTIME_S + wd.IDLE_RESTART_AFTER_S)
+    assert restarts == []
+
+
+def test_a_slow_but_working_moment_under_a_minute_does_not_restart():
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, _ = make_auto(clock, beat, pending=lambda: True)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    run_for(dog, clock, 45)       # e.g. Settings building on a starved laptop
+    assert restarts == []
+
+
+@windows_only
+def test_app_refuses_to_restart_mid_dictation_or_without_its_marker(wm, tmp_path, monkeypatch):
+    calls = []
+
+    class App:
+        app_state = wm.AppState.RECORDING
+        lines = []
+
+        def log(self, line):
+            self.lines.append(line)
+
+        def _auto_restart_marker(self):
+            return tmp_path / "sub" / "last-auto-restart"
+
+        def _restart_windows_now(self):
+            calls.append(1)
+
+    app = App()
+    assert wm.WayfinderApp._auto_restart_windows(app, "stuck") is False
+    assert calls == [] and "Dictation in progress" in app.lines[-1]
+    app.app_state = wm.AppState.IDLE
+    (tmp_path / "sub").write_text("a file where the folder should be")
+    assert wm.WayfinderApp._auto_restart_windows(app, "stuck") is False
+    assert calls == [] and "asking instead" in app.lines[-1]
+
+
+@windows_only
+def test_app_rate_limit_allows_a_clock_set_back(wm, tmp_path):
+    class App:
+        _AUTO_RESTART_EVERY_S = wm.WayfinderApp._AUTO_RESTART_EVERY_S
+
+        def _auto_restart_marker(self):
+            return tmp_path / "m"
+
+    (tmp_path / "m").write_text("x")
+    future = time.time() + 3600
+    os.utime(tmp_path / "m", (future, future))
+    assert wm.WayfinderApp._auto_restart_allowed(App())
+
+
+@windows_only
+def test_only_one_restart_runs(wm, monkeypatch):
+    starts = []
+    monkeypatch.setattr(wm.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(wm.subprocess, "Popen", lambda *a, **k: starts.append(1))
+    monkeypatch.setattr(wm.os, "_exit", lambda code: None)
+    monkeypatch.setattr(wm, "_flush_windows_clipboard_restore", lambda: None)
+
+    class App:
+        _restart_now_lock = threading.Lock()
+
+        def log(self, line):
+            pass
+
+        def _close_audio_ducking(self):
+            pass
+
+    app = App()
+    app._restart_now_lock.acquire()          # another path is already restarting
+    wm.WayfinderApp._restart_windows_now(app)
+    assert starts == []
+    app._restart_now_lock.release()
+    wm.WayfinderApp._restart_windows_now(app)
+    assert starts == [1]
+
+
+def test_automatic_restart_is_only_wired_in_the_installed_app():
+    src = (ROOT / "wayfinder_main.py").read_text(encoding="utf-8")
+    assert 'if getattr(sys, "frozen", False) else None),' in src
