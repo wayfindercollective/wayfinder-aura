@@ -36,6 +36,15 @@ _MAX_SAMPLES_DURING = 6   # distinct stacks logged while it lasts
 # 19-34 s start-up stalls seen on a memory-starved laptop (settings preload),
 # which recover by themselves.
 PROMPT_AFTER_S = 30.0
+# Recovery without a dialog (3 Nov: a 75-minute stall sat behind a restart
+# dialog Nathan never saw). A hotkey press this long into a stall restarts
+# Aura at once; with no press, a stall this long restarts it anyway. Never
+# within AUTO_RESTART_MIN_UPTIME_S of the watchdog starting, where 19-45 s
+# start-up stalls recover by themselves; the app also rate-limits restarts
+# (auto_restart_allowed) and falls back to the dialog when it says no.
+PRESS_RESTART_AFTER_S = 30.0
+IDLE_RESTART_AFTER_S = 120.0
+AUTO_RESTART_MIN_UPTIME_S = 180.0
 # A tick gap this long means the machine slept or this thread was starved:
 # the poll needs a moment after that before its silence means anything.
 _ASLEEP_GAP_S = 5.0
@@ -63,6 +72,8 @@ class PollWatchdog:
         pending_hotkey: Callable[[], bool],
         offer_restart: Callable[[], None],
         on_recover: Callable[[], None] = lambda: None,
+        auto_restart: Optional[Callable[[str], None]] = None,
+        auto_restart_allowed: Callable[[], bool] = lambda: True,
         stack: Callable[[], str] = main_thread_stack,
         clock: Callable[[], float] = time.monotonic,
         spawn: Optional[Callable[[Callable[[], None], str], None]] = None,
@@ -73,11 +84,15 @@ class PollWatchdog:
         self._pending_hotkey = pending_hotkey
         self._offer_restart = offer_restart
         self._on_recover = on_recover
+        self._auto_restart = auto_restart
+        self._auto_restart_allowed = auto_restart_allowed
+        self._restarting = False
         self._stack = stack
         self._clock = clock
         self._spawn = spawn or _spawn_daemon
         self._last_tick: Optional[float] = None
         self._awake_since = clock()
+        self._started = clock()
         self._stalled_at: Optional[float] = None   # heartbeat value when the stall began
         self._offered = False
         self._samples: list[tuple[float, str]] = []   # (seconds quiet, stack) this quiet spell
@@ -128,7 +143,23 @@ class PollWatchdog:
             if not self._samples or self._samples[-1][1] != stack:
                 self._samples.append((quiet, stack))
                 self._log(f"   main thread at {quiet:.0f}s: {stack}")
-        if not self._offered and quiet >= PROMPT_AFTER_S and _safe_bool(self._pending_hotkey):
+        if self._restarting:
+            return
+        pressed = _safe_bool(self._pending_hotkey)
+        if (self._auto_restart is not None
+                and now - self._started >= AUTO_RESTART_MIN_UPTIME_S
+                and ((pressed and quiet >= PRESS_RESTART_AFTER_S)
+                     or quiet >= IDLE_RESTART_AFTER_S)
+                and _safe_bool(self._auto_restart_allowed)):
+            self._restarting = True
+            reason = (f"stuck {quiet:.0f}s and the hotkey was pressed" if pressed
+                      else f"stuck {quiet:.0f}s")
+            self._log(f"🔄 Restarting Aura automatically ({reason})")
+            self._log(f"   main thread at {quiet:.0f}s: {_safe(self._stack)}")
+            restart = self._auto_restart
+            self._spawn(lambda: restart(reason), "poll-watchdog-auto-restart")
+            return
+        if not self._offered and quiet >= PROMPT_AFTER_S and pressed:
             self._offered = True
             self._log("⚠ Hotkey pressed while Aura was stuck — offering a restart")
             self._log(f"   main thread at {quiet:.0f}s: {_safe(self._stack)}")

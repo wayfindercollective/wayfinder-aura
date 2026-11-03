@@ -1,8 +1,9 @@
 """Windows poll watchdog: logs a stalled poll_events chain (8 Oct 2026: hotkey
 presses queued and never handled after a sleep/wake, with nothing logged)."""
+import os
 import queue
-
 import threading
+import time
 from pathlib import Path
 
 from wayfinder.utils import windows_poll_watchdog as wd
@@ -293,3 +294,93 @@ def test_short_freeze_is_sampled_but_never_reported():
     beat[0] = clock.t
     run_for(dog, clock, 20, beat, alive=True)
     assert lines == []
+
+
+# --- automatic restart (3 Nov: a 75-minute stall waited behind an unseen dialog) ---
+
+def make_auto(clock, beat, pending=lambda: False, allowed=lambda: True):
+    lines, restarts, offers = [], [], []
+    dog = wd.PollWatchdog(
+        heartbeat=lambda: beat[0], log=lines.append, probe=lambda: "p",
+        pending_hotkey=pending, offer_restart=lambda: offers.append(1),
+        auto_restart=restarts.append, auto_restart_allowed=allowed,
+        stack=lambda: "mainloop (__init__.py:1505)", clock=clock,
+        spawn=lambda fn, name: fn(),
+    )
+    return dog, lines, restarts, offers
+
+
+def settle(clock, beat, dog, seconds):
+    """Healthy running time before the stall (past the start-up grace)."""
+    run_for(dog, clock, seconds, beat, alive=True)
+
+
+def test_a_press_during_a_stall_restarts_without_a_dialog():
+    clock = Clock()
+    beat = [clock.t]
+    dog, lines, restarts, offers = make_auto(clock, beat, pending=lambda: True)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    run_for(dog, clock, wd.PRESS_RESTART_AFTER_S + 2)
+    assert len(restarts) == 1 and "hotkey was pressed" in restarts[0]
+    assert offers == []
+    assert any(l.startswith("🔄 Restarting Aura automatically") for l in lines)
+    run_for(dog, clock, 300)
+    assert len(restarts) == 1                      # once per stall
+
+
+def test_a_long_stall_restarts_even_with_no_press():
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, _ = make_auto(clock, beat)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    run_for(dog, clock, wd.IDLE_RESTART_AFTER_S - 5)
+    assert restarts == []
+    run_for(dog, clock, 10)
+    assert len(restarts) == 1
+
+
+def test_no_automatic_restart_during_start_up():
+    """19-45 s start-up stalls recover by themselves: the old dialog path only."""
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, offers = make_auto(clock, beat, pending=lambda: True)
+    run_for(dog, clock, wd.PRESS_RESTART_AFTER_S + 5)
+    assert restarts == [] and offers == [1]
+
+
+def test_rate_limited_restart_falls_back_to_the_dialog():
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, offers = make_auto(clock, beat, pending=lambda: True,
+                                         allowed=lambda: False)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    run_for(dog, clock, wd.IDLE_RESTART_AFTER_S + 10)
+    assert restarts == [] and offers == [1]
+
+
+def test_a_recovered_stall_never_restarts():
+    clock = Clock()
+    beat = [clock.t]
+    dog, _, restarts, _ = make_auto(clock, beat)
+    settle(clock, beat, dog, wd.AUTO_RESTART_MIN_UPTIME_S)
+    run_for(dog, clock, 20)                         # stalled, not long enough
+    beat[0] = clock.t
+    run_for(dog, clock, 200, beat, alive=True)
+    assert restarts == []
+
+
+@windows_only
+def test_app_rate_limits_automatic_restarts(wm, tmp_path, monkeypatch):
+    class App:
+        _AUTO_RESTART_EVERY_S = wm.WayfinderApp._AUTO_RESTART_EVERY_S
+
+        def _auto_restart_marker(self):
+            return tmp_path / "last-auto-restart"
+
+    app = App()
+    assert wm.WayfinderApp._auto_restart_allowed(app)
+    (tmp_path / "last-auto-restart").write_text("x")
+    assert not wm.WayfinderApp._auto_restart_allowed(app)
+    old = time.time() - 700
+    os.utime(tmp_path / "last-auto-restart", (old, old))
+    assert wm.WayfinderApp._auto_restart_allowed(app)

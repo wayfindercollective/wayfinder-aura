@@ -24177,6 +24177,8 @@ class WayfinderApp(ctk.CTk):
                 pending_hotkey=self._hotkey_press_waiting,
                 offer_restart=self._offer_windows_restart,
                 on_recover=self._dismiss_windows_restart_offer,
+                auto_restart=self._auto_restart_windows,
+                auto_restart_allowed=self._auto_restart_allowed,
             ).start()
         except Exception as exc:
             self.log(f"⚠ Hotkey watchdog unavailable: {exc}")
@@ -24241,10 +24243,47 @@ class WayfinderApp(ctk.CTk):
                 self.log("ℹ Restart declined — the hotkey does nothing until Aura "
                          "recovers or is restarted")
                 return
+            self.log("🔄 Restarting Aura (hotkey checks had stopped)")
+            self._restart_windows_now()
+        finally:
+            self._restart_offer_thread = None
+            lock.release()
+
+    # A restart the watchdog makes by itself is allowed once per this long, so
+    # a stall that comes straight back after relaunch can't loop (the dialog
+    # is offered instead). Kept in a file: the relaunched process must see it.
+    _AUTO_RESTART_EVERY_S = 600.0
+
+    def _auto_restart_marker(self):
+        from wayfinder.utils.platform import get_cache_dir
+
+        return get_cache_dir() / "last-auto-restart"
+
+    def _auto_restart_allowed(self) -> bool:
+        """Windows: no automatic restart in the last 10 minutes."""
+        try:
+            last = self._auto_restart_marker().stat().st_mtime
+        except OSError:
+            return True
+        return time.time() - last >= self._AUTO_RESTART_EVERY_S
+
+    def _auto_restart_windows(self, reason: str) -> None:
+        """Watchdog thread: restart a stuck Aura without asking (3 Nov: a
+        75-minute stall waited behind a dialog nobody saw)."""
+        try:
+            marker = self._auto_restart_marker()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(reason, encoding="utf-8")
+        except OSError:
+            pass
+        self._restart_windows_now()
+
+    def _restart_windows_now(self) -> None:
+        """Relaunch Aura and exit this (stuck) process. Off the Tk thread."""
+        try:
             if not getattr(sys, "frozen", False):
                 self.log("ℹ Running from source: restart Aura yourself")
                 return
-            self.log("🔄 Restarting Aura (hotkey checks had stopped)")
             # Relaunch after this process has gone, or the new copy would find
             # the old one still answering and just raise its window.
             subprocess.Popen(
@@ -24265,9 +24304,8 @@ class WayfinderApp(ctk.CTk):
                 pass
             _flush_windows_clipboard_restore()
             os._exit(0)
-        finally:
-            self._restart_offer_thread = None
-            lock.release()
+        except Exception as exc:
+            self.log(f"⚠ Restart failed: {exc}")
 
     def _dismiss_windows_restart_offer(self) -> None:
         """The poll recovered: answer an open restart dialog "No"."""
