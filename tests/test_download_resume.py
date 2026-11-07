@@ -746,6 +746,27 @@ def test_cleanup_full_disk_is_settled_and_frees_the_partial(cleanup_model, monke
     assert not partial.exists() and not dest.exists()
 
 
+def test_cleanup_404_on_a_resume_keeps_the_partial(cleanup_model):
+    server, info, dest, partial = cleanup_model("404")
+    partial.write_bytes(PAYLOAD[:MB])
+    app = _CleanupApp(info)
+
+    app._download_selected_llamacpp_model()
+
+    assert partial.read_bytes() == PAYLOAD[:MB]
+    assert not dest.exists()
+
+
+def test_cleanup_401_on_a_resume_drops_the_partial(cleanup_model):
+    server, info, dest, partial = cleanup_model("401")
+    partial.write_bytes(PAYLOAD[:MB])
+    app = _CleanupApp(info)
+
+    app._download_selected_llamacpp_model()
+
+    assert not partial.exists() and not dest.exists()
+
+
 def test_cleanup_4xx_after_a_drop_keeps_the_partial(cleanup_model):
     server, info, dest, partial = cleanup_model(f"cut:{MB}", "404")
     app = _CleanupApp(info)

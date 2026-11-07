@@ -15840,6 +15840,10 @@ class WayfinderApp(ctk.CTk):
                             if status < 500 and status != 429:
                                 if transport_error is not None:
                                     break  # see the whisper path
+                                if status not in (401, 403) and can_resume(
+                                    DownloadBounds(size_bound).trusted_size, expected_sha
+                                ):
+                                    temp_path = None  # see the whisper path
                                 raise  # settled answer — do not ask twice
                             transport_error = e
                         except (DownloadSizeMismatch, requests.RequestException, OSError) as e:
