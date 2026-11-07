@@ -9,6 +9,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Closing Aura no longer throws away a model download.** Upgrading to Ultra
+  downloads Large v3 Turbo Q5 in the background, and it was easy to close the
+  app without noticing. That lost all the progress and, because the Ultra setup
+  only runs once, nothing ever fetched the model again. Now a download that gets
+  cut off keeps what it already has and asks only for the rest next time, and
+  the Ultra download continues by itself the next time you open Aura. The banner
+  says it's in the background and safe to close. Every finished model is still
+  checked against its known checksum before it can load. Pressing Cancel still
+  deletes the partial file.
 - **Your custom vocabulary no longer gets typed in place of silence.** On a
   quiet stretch, Whisper sometimes wrote back the vocabulary list Aura gives
   it ("and Aura, Wayfinder, r.") instead of what you said, and Aura typed it
