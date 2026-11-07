@@ -5,6 +5,7 @@
  *   - Public objects (PUBLIC_OBJECTS): no auth
  *   - Everything else: Authorization: Bearer <Ed25519 license token>
  *     Token is the same offline token from Convex /activate (v2+ includes features).
+ *   - A single Range is honored after those checks, so a download can resume.
  *
  * R2 binding: MODELS
  * Secret: LICENSE_PUBLIC_KEY_HEX  (same as desktop WAYFINDER_LICENSE_PUBKEY)
@@ -16,6 +17,7 @@
 
 import { ed25519 } from "@noble/curves/ed25519";
 import { isEffectivelyPublic, tokenAllowsObject } from "./auth";
+import { serveObject, type ObjectBucket } from "./range";
 
 export interface Env {
   MODELS: R2Bucket;
@@ -310,25 +312,12 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json({ error: "server_misconfigured", reason: "missing_r2_binding" }, 500);
   }
 
-  const obj = await env.MODELS.get(objectKey);
-  if (!obj) {
-    return json({ error: "object_not_found", key: objectKey }, 404);
-  }
-
-  const headers = new Headers();
-  obj.writeHttpMetadata(headers);
-  headers.set("etag", obj.httpEtag);
-  headers.set("cache-control", isPublic ? "public, max-age=86400" : "private, no-store");
-  headers.set("access-control-allow-origin", "*");
-  if (obj.size != null) {
-    headers.set("content-length", String(obj.size));
-  }
   const base = objectKey.split("/").pop() || "model.bin";
-  headers.set("content-disposition", `attachment; filename="${base}"`);
-
-  if (request.method === "HEAD") {
-    return new Response(null, { status: 200, headers });
-  }
-
-  return new Response(obj.body, { status: 200, headers });
+  // Only reached once the checks above have passed: a Range request gets no
+  // bytes that the same request without Range would not have got.
+  return serveObject(request, env.MODELS as unknown as ObjectBucket, objectKey, {
+    "cache-control": isPublic ? "public, max-age=86400" : "private, no-store",
+    "access-control-allow-origin": "*",
+    "content-disposition": `attachment; filename="${base}"`,
+  });
 }

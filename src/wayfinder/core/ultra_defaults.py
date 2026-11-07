@@ -17,6 +17,8 @@ On the first switch to Ultra this turns on what the evaluation says helps
 - Large v3 Turbo Q5 as the speech model when the GPU is on (on the CPU it is
   about 9x slower than Base): straight away if it is on disk, otherwise the
   app downloads it and switches once it lands (wants_recommended_speech_model).
+  That download outlives the launch that started it: ULTRA_MODEL_PENDING_KEY
+  stays set until it lands or is refused, and the next launch continues it.
 
 It runs once per install. Every later change is the user's, so nothing here is
 reapplied on launch. An install that was already Ultra before this existed
@@ -33,6 +35,17 @@ from pathlib import Path
 # False: seen on Free, so the next switch to Ultra applies the defaults.
 # True: done (or already Ultra before this existed). Never reapplied.
 ULTRA_DEFAULTS_KEY = "ultra_defaults_applied"
+
+# True from before the Turbo Q5 download starts until it lands, the user picks
+# another model, or the download is refused. ULTRA_DEFAULTS_KEY is already True
+# by then, so this is the only record that the setup still owes the model.
+ULTRA_MODEL_PENDING_KEY = "ultra_model_download_pending"
+
+# Failed attempts since the download last started fresh. A launch that merely
+# quit part-way does not count: only an attempt that ended in an error does, and
+# after ULTRA_MODEL_MAX_FAILURES the setup stops trying and says so.
+ULTRA_MODEL_FAILURES_KEY = "ultra_model_download_failures"
+ULTRA_MODEL_MAX_FAILURES = 5
 
 RECOMMENDED_SPEECH_MODEL = "ggml-large-v3-turbo-q5_0.bin"
 RECOMMENDED_SPEECH_MODEL_ID = "large-v3-turbo-q5_0"  # WHISPER_CPP_MODELS key
@@ -88,6 +101,35 @@ def wants_recommended_speech_model(config: dict, gate) -> bool:
         return not current or is_free_transcription_model(current)
     except Exception:
         return False
+
+
+def pending_speech_model_action(config: dict, gate, *, on_disk: bool) -> str:
+    """What this launch owes an interrupted Turbo Q5 download.
+
+    "none", "clear" (the user moved on), "activate" (the file landed but the
+    switch never happened) or "download". A license that is not Ultra right now
+    downloads nothing but keeps the marker: it may only be lapsed for the moment.
+    """
+    if not config.get(ULTRA_MODEL_PENDING_KEY):
+        return "none"
+    try:
+        if not getattr(gate, "is_premium", False):
+            return "none"
+    except Exception:
+        return "none"
+    if not wants_recommended_speech_model(config, gate):
+        return "clear"
+    return "activate" if on_disk else "download"
+
+
+def ultra_model_download_text(pct: int | None = None) -> str:
+    """The Ultra banner while Turbo Q5 downloads."""
+    progress = f" ({pct}%)" if pct is not None else "…"
+    return (
+        f"welcome to ultra 😇 — downloading Large v3 Turbo Q5{progress} in the "
+        "background. It's safe to close Aura: it tries again next time, though it "
+        "may have to start over."
+    )
 
 
 def apply_ultra_defaults(
