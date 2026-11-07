@@ -1019,6 +1019,8 @@ def test_finishing_clears_the_marker_when_the_user_picked_a_model(monkeypatch):
 def test_banner_text_says_background_and_safe_to_close():
     text = ultra_model_download_text(42)
     assert "42%" in text and "background" in text and "safe to close" in text
+    # The models server may not resume yet, so it can't promise to carry on.
+    assert "may have to start over" in text
     assert "%" not in ultra_model_download_text()
 
 
@@ -1235,10 +1237,15 @@ def test_launch_sweep_skips_in_flight_and_marker_owned_partials(tmp_path, monkey
     monkeypatch.setattr(wayfinder_main.ModelDownloader, "_in_flight", {"small.en"})
     owned = whisper / f"{RECOMMENDED_SPEECH_MODEL}.downloading"
     in_flight = whisper / f"{in_flight_name}.downloading"
-    stale = whisper / "ggml-stale.bin.downloading"
-    stale_llm = llm / "stale.tmp"
+    stale_name = wayfinder_main.WHISPER_CPP_MODELS["tiny.en"]["filename"]
+    stale = whisper / f"{stale_name}.downloading"
+    llm_name = next(iter(wayfinder_main.LLM_GGUF_MODELS.values()))["filename"]
+    stale_llm = llm / Path(llm_name).with_suffix(".tmp").name
+    # The whisper directory can be shared: another program's files aren't ours.
+    foreign = whisper / "another-programs-file.bin.downloading"
+    foreign_llm = llm / "another-programs-file.tmp"
     old = _time.time() - 31 * 86400
-    for path in (owned, in_flight, stale, stale_llm):
+    for path in (owned, in_flight, stale, stale_llm, foreign, foreign_llm):
         path.write_bytes(b"x")
         os.utime(path, (old, old))
 
@@ -1247,6 +1254,7 @@ def test_launch_sweep_skips_in_flight_and_marker_owned_partials(tmp_path, monkey
 
     assert owned.exists() and in_flight.exists()
     assert not stale.exists() and not stale_llm.exists()
+    assert foreign.exists() and foreign_llm.exists()
 
     # Without the marker the same partial is fair game.
     app = SimpleNamespace(config=_free_config(), log=lambda _m: None)
@@ -1262,7 +1270,8 @@ def test_launch_sweep_leaves_cleanup_partials_during_a_cleanup_download(tmp_path
     llm.mkdir()
     monkeypatch.setattr(wayfinder_main, "_get_whisper_models_dir", lambda: tmp_path / "w")
     monkeypatch.setattr(wayfinder_main, "_get_llm_models_dir", lambda: llm)
-    part = llm / "m.tmp"
+    llm_name = next(iter(wayfinder_main.LLM_GGUF_MODELS.values()))["filename"]
+    part = llm / Path(llm_name).with_suffix(".tmp").name
     part.write_bytes(b"x")
     old = _time.time() - 31 * 86400
     os.utime(part, (old, old))

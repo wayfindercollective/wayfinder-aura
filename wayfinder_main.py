@@ -2468,6 +2468,10 @@ class ModelDownloader:
                                     # the bytes the dropped attempt already has.
                                     break
                                 self.last_error_retryable = e.code not in (401, 403)
+                                if self.last_error_retryable and can_resume(
+                                    DownloadBounds(size_bound).trusted_size, expected_sha
+                                ):
+                                    temp_path = None  # the retry can still use these bytes
                                 raise
                             transport_error = e
                         except (
@@ -14497,17 +14501,26 @@ class WayfinderApp(ctk.CTk):
             ULTRA_MODEL_PENDING_KEY,
         )
 
-        keep = set()
+        speech = {
+            f"{info['filename']}.downloading"
+            for info in WHISPER_CPP_MODELS.values()
+            if info.get("filename")
+        }
         with ModelDownloader._in_flight_lock:
             for model_id in ModelDownloader._in_flight:
                 filename = (WHISPER_CPP_MODELS.get(model_id) or {}).get("filename")
                 if filename:
-                    keep.add(f"{filename}.downloading")
+                    speech.discard(f"{filename}.downloading")
         if self.config.get(ULTRA_MODEL_PENDING_KEY):
-            keep.add(f"{RECOMMENDED_SPEECH_MODEL}.downloading")
-        removed = sweep_stale_partials(_get_whisper_models_dir(), ".downloading", keep=keep)
+            speech.discard(f"{RECOMMENDED_SPEECH_MODEL}.downloading")
+        removed = sweep_stale_partials(_get_whisper_models_dir(), speech)
         if not getattr(self, "_inline_download_active", False):
-            removed += sweep_stale_partials(_get_llm_models_dir(), ".tmp")
+            cleanup = {
+                Path(info["filename"]).with_suffix(".tmp").name
+                for info in LLM_GGUF_MODELS.values()
+                if info.get("filename")
+            }
+            removed += sweep_stale_partials(_get_llm_models_dir(), cleanup)
         if removed:
             self.log(f"🧹 Removed {len(removed)} unfinished model download(s) older than 30 days")
 
@@ -14538,7 +14551,8 @@ class WayfinderApp(ctk.CTk):
         verb = "Continuing the" if resuming else "Ultra setup: downloading"
         self.log(
             f"⬇ {verb} Large v3 Turbo Q5 ({info.get('size', '574 MB')}) in the background. "
-            "You can keep dictating, and it's safe to close Aura: it continues next time."
+            "You can keep dictating, and it's safe to close Aura: it tries again next time, "
+            "though it may have to start over."
         )
         if hasattr(self, "model_btn"):
             try:
@@ -14594,7 +14608,7 @@ class WayfinderApp(ctk.CTk):
                 self.log(
                     f"⚠ Large v3 Turbo Q5 download: {message}. "
                     + (
-                        "Aura continues it next time you open it."
+                        "Aura tries again next time you open it."
                         if self.config.get(ULTRA_MODEL_PENDING_KEY)
                         else "Get it any time in Settings ▸ Whisper Model."
                     )
@@ -23102,7 +23116,7 @@ class WayfinderApp(ctk.CTk):
         """Note a model download cut short by quitting; its bytes stay on disk."""
         if getattr(self, "_ultra_model_downloading", False):
             self.log(
-                "⏸ Quitting mid-download: Large v3 Turbo Q5 continues next time you open Aura."
+                "⏸ Quitting mid-download: Aura tries Large v3 Turbo Q5 again next time you open it."
             )
             return
         with ModelDownloader._in_flight_lock:

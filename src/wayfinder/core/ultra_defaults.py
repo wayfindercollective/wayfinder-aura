@@ -127,7 +127,8 @@ def ultra_model_download_text(pct: int | None = None) -> str:
     progress = f" ({pct}%)" if pct is not None else "…"
     return (
         f"welcome to ultra 😇 — downloading Large v3 Turbo Q5{progress} in the "
-        "background. It's safe to close Aura: it continues next time."
+        "background. It's safe to close Aura: it tries again next time, though it "
+        "may have to start over."
     )
 
 

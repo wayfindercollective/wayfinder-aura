@@ -140,22 +140,21 @@ def can_resume(expected_size: Optional[int], expected_sha256: Optional[str]) -> 
     return bool(expected_size and safe_sha256(expected_sha256))
 
 
-def sweep_stale_partials(
-    directory: Path, suffix: str, *, keep: frozenset[str] | set[str] = frozenset()
-) -> list[Path]:
+def sweep_stale_partials(directory: Path, names: set[str]) -> list[Path]:
     """Delete old partial downloads in *directory*; returns what went.
 
     Interrupted transfers now stay on disk, and a model nobody downloads again
-    would otherwise hold that space forever. ``keep`` names files still in use.
+    would otherwise hold that space forever. Only the files in ``names`` are
+    touched: the directory can be shared with other programs.
     """
     removed: list[Path] = []
     cutoff = time.time() - STALE_PARTIAL_SECONDS
     try:
-        candidates = list(Path(directory).glob(f"*{suffix}"))
+        candidates = list(Path(directory).iterdir())
     except OSError:
         return removed
     for path in candidates:
-        if path.name in keep:
+        if path.name not in names:
             continue
         try:
             if path.is_file() and path.stat().st_mtime < cutoff:

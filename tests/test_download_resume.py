@@ -425,6 +425,20 @@ def test_a_404_keeps_the_marker_alive_but_a_401_or_403_does_not(tmp_path, serve,
         assert len(server.ranges) == 1
 
 
+def test_a_404_on_a_resume_keeps_the_partial_for_the_retry_it_promises(tmp_path, serve, monkeypatch):
+    server = serve("404")
+    entry = _pin_whisper(monkeypatch, server.url)
+    dest, partial = _paths(tmp_path, entry)
+    partial.write_bytes(PAYLOAD[:MB])
+
+    outcome = _run_whisper(tmp_path)
+
+    assert outcome.errors
+    assert outcome.downloader.last_error_retryable is True
+    assert partial.read_bytes() == PAYLOAD[:MB]
+    assert not dest.exists()
+
+
 def test_a_4xx_after_a_dropped_attempt_keeps_the_partial_and_the_transport_error(
     tmp_path, serve, monkeypatch
 ):
@@ -827,27 +841,25 @@ def _aged(path, days):
     os.utime(path, (old, old))
 
 
-def test_sweep_removes_only_old_partials_it_does_not_have_to_keep(tmp_path):
+def test_sweep_removes_only_old_partials_it_was_named(tmp_path):
     old = tmp_path / "ggml-a.bin.downloading"
     recent = tmp_path / "ggml-b.bin.downloading"
-    owned = tmp_path / "ggml-c.bin.downloading"
-    finished = tmp_path / "ggml-d.bin"
-    other_kind = tmp_path / "ggml-e.tmp"
-    for path in (old, recent, owned, finished, other_kind):
+    foreign = tmp_path / "another-programs-file.bin.downloading"
+    for path in (old, recent, foreign):
         path.write_bytes(b"x")
-    for path in (old, owned, finished, other_kind):
+    for path in (old, foreign):
         _aged(path, 31)
     _aged(recent, 29)
 
-    removed = sweep_stale_partials(tmp_path, ".downloading", keep={owned.name})
+    removed = sweep_stale_partials(tmp_path, {old.name, recent.name})
 
     assert removed == [old]
     assert not old.exists()
-    assert recent.exists() and owned.exists() and finished.exists() and other_kind.exists()
+    assert recent.exists() and foreign.exists()
 
 
 def test_sweep_tolerates_a_missing_directory(tmp_path):
-    assert sweep_stale_partials(tmp_path / "nope", ".tmp") == []
+    assert sweep_stale_partials(tmp_path / "nope", {"a.tmp"}) == []
 
 
 def test_is_disk_full_only_for_a_full_disk():
