@@ -16,6 +16,8 @@ from wayfinder.core.ultra_defaults import (
     RECOMMENDED_SPEECH_MODEL,
     RECOMMENDED_SPEECH_MODEL_ID,
     ULTRA_DEFAULTS_KEY,
+    ULTRA_MODEL_FAILURES_KEY,
+    ULTRA_MODEL_MAX_FAILURES,
     ULTRA_MODEL_PENDING_KEY,
     pending_speech_model_action,
     ultra_model_download_text,
@@ -1039,3 +1041,231 @@ def test_quit_stays_quiet_with_no_download(monkeypatch):
     app = SimpleNamespace(log=logs.append, _inline_download_active=False)
     wayfinder_main.WayfinderApp._log_downloads_on_quit(app)
     assert logs == []
+
+
+def test_a_failed_marker_save_still_starts_the_download(monkeypatch):
+    app, _saved, _logs = _download_app(monkeypatch)
+    monkeypatch.setattr(
+        wayfinder_main, "save_config",
+        lambda _cfg: (_ for _ in ()).throw(OSError(28, "No space left on device")),
+    )
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app)
+    assert _ScriptedDownloader.instances[-1].callbacks
+
+
+def test_a_failed_marker_clear_does_not_raise(monkeypatch):
+    monkeypatch.setattr(
+        wayfinder_main, "save_config",
+        lambda _cfg: (_ for _ in ()).throw(OSError(28, "No space left on device")),
+    )
+    app = SimpleNamespace(config=_pending_config())
+    wayfinder_main.WayfinderApp._clear_recommended_speech_model_pending(app)
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is False
+
+
+def test_a_broken_continue_cannot_abort_the_ultra_check(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    app, _events = _resume_app(_gate(), _pending_config())
+    monkeypatch.setattr(
+        wayfinder_main.WayfinderApp,
+        "_continue_recommended_speech_model",
+        lambda self, gate: (_ for _ in ()).throw(OSError("boom")),
+    )
+    assert wayfinder_main.WayfinderApp._apply_ultra_defaults(app) == []
+
+
+def test_startup_survives_a_failing_ultra_setup():
+    import inspect
+
+    source = inspect.getsource(wayfinder_main.WayfinderApp.__init__)
+    head = source[: source.index("self._apply_ultra_defaults()")]
+    assert head.rstrip().endswith("try:")
+
+
+def _pick_app(config, **extra):
+    return SimpleNamespace(
+        config=config,
+        feature_gate=SimpleNamespace(has_feature=lambda _f: True),
+        log=lambda _m: None,
+        get_display=lambda: "",
+        get_model_display=lambda: "",
+        **extra,
+    )
+
+
+def test_picking_a_model_clears_the_marker(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_retire_coreml_preparation", lambda self: None)
+    app = _pick_app(_pending_config())
+    wayfinder_main.WayfinderApp._set_active_whisper_model(app, "/m/ggml-base.en.bin")
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is False
+
+
+def test_picking_base_during_the_download_stops_the_switch_when_it_lands(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_retire_coreml_preparation", lambda self: None)
+    activated = []
+    logs = []
+    app = _pick_app(
+        _pending_config(),
+        _ultra_model_downloading=True,
+        _activate_downloaded_model=lambda *a: activated.append(a) or "active",
+    )
+    app.log = logs.append
+    wayfinder_main.WayfinderApp._set_active_whisper_model(app, "/m/ggml-base.en.bin")
+    # Base is still "the Free model", so only the recorded pick can keep it.
+    assert wants_recommended_speech_model(app.config, _gate())
+
+    wayfinder_main.WayfinderApp._finish_recommended_speech_model(app, "/m/" + RECOMMENDED_SPEECH_MODEL)
+
+    assert activated == []
+    assert "keeping the model you chose" in logs[-1]
+
+
+def test_a_pick_queued_mid_dictation_also_counts(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    app = _pick_app(_pending_config(), app_state=wayfinder_main.AppState.PROCESSING)
+    wayfinder_main.WayfinderApp._set_active_whisper_model(app, "/m/ggml-base.en.bin")
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is False
+
+
+def test_the_deferred_switch_clears_the_marker_when_it_applies(monkeypatch, tmp_path):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_retire_coreml_preparation", lambda self: None)
+    model = tmp_path / RECOMMENDED_SPEECH_MODEL
+    model.write_bytes(b"x")
+    gate = _gate()
+    gate.has_feature = lambda _f: True
+    app = _pick_app(
+        _pending_config(),
+        app_state=wayfinder_main.AppState.IDLE,
+        _pending_model_activations={"whisper": (str(model), None)},
+        _pending_model_pick=None,
+    )
+    app.feature_gate = gate
+    app._apply_downloaded_model = lambda role, path, info=None: (
+        wayfinder_main.WayfinderApp._apply_downloaded_model(app, role, path, info)
+    )
+    app._set_active_whisper_model = lambda path: (
+        wayfinder_main.WayfinderApp._set_active_whisper_model(app, path)
+    )
+    wayfinder_main.WayfinderApp._flush_pending_model_activations(app)
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is False
+
+
+def test_removing_turbo_q5_clears_the_marker_but_another_model_does_not(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    app = _pick_app(_pending_config())
+    wayfinder_main.WayfinderApp._on_speech_model_removed(app, "small.en")
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is True
+    wayfinder_main.WayfinderApp._on_speech_model_removed(app, RECOMMENDED_SPEECH_MODEL_ID)
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is False
+
+
+def test_the_panel_clears_the_marker_on_complete_and_on_remove():
+    import inspect
+
+    source = inspect.getsource(wayfinder_main.WayfinderApp.open_model_settings)
+    complete = source[source.index("def on_complete("):source.index("def on_error(")]
+    assert "_clear_recommended_speech_model_pending" in complete
+    uninstall = source[source.index("def do_uninstall("):source.index("def do_download(")]
+    assert "_on_speech_model_removed" in uninstall
+
+
+def _failing_download(monkeypatch, app):
+    downloader = _ScriptedDownloader.instances[-1]
+    downloader.last_error_retryable = True
+    downloader.callbacks["error_callback"]("connection dropped")
+
+
+def test_retries_stop_after_the_limit_with_a_clear_line(monkeypatch):
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    app, saved, logs = _download_app(monkeypatch)
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app)
+    for attempt in range(1, ULTRA_MODEL_MAX_FAILURES):
+        _failing_download(monkeypatch, app)
+        assert app.config[ULTRA_MODEL_PENDING_KEY] is True
+        assert saved[-1][ULTRA_MODEL_FAILURES_KEY] == attempt
+        wayfinder_main.WayfinderApp._download_recommended_speech_model(app, resuming=True)
+
+    _failing_download(monkeypatch, app)
+
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is False
+    assert app.config[ULTRA_MODEL_FAILURES_KEY] == 0
+    assert "Stopped trying" in logs[-1] and "Settings" in logs[-1]
+
+
+def test_a_fresh_start_resets_the_failure_count(monkeypatch):
+    app, _saved, _logs = _download_app(monkeypatch)
+    app.config[ULTRA_MODEL_FAILURES_KEY] = 3
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app)
+    assert app.config[ULTRA_MODEL_FAILURES_KEY] == 0
+
+    app.config[ULTRA_MODEL_FAILURES_KEY] = 3
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app, resuming=True)
+    assert app.config[ULTRA_MODEL_FAILURES_KEY] == 3
+
+
+def test_a_refused_duplicate_is_not_a_failure(monkeypatch):
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    app, _saved, _logs = _download_app(monkeypatch)
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app, resuming=True)
+    downloader = _ScriptedDownloader.instances[-1]
+    downloader.last_error_retryable = True
+    downloader.last_error_duplicate = True
+    downloader.callbacks["error_callback"]("This model is already downloading")
+    assert app.config.get(ULTRA_MODEL_FAILURES_KEY, 0) == 0
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is True
+
+
+def test_launch_sweep_skips_in_flight_and_marker_owned_partials(tmp_path, monkeypatch):
+    import os
+    import time as _time
+
+    whisper = tmp_path / "whisper"
+    llm = tmp_path / "llm"
+    whisper.mkdir()
+    llm.mkdir()
+    monkeypatch.setattr(wayfinder_main, "_get_whisper_models_dir", lambda: whisper)
+    monkeypatch.setattr(wayfinder_main, "_get_llm_models_dir", lambda: llm)
+    in_flight_name = wayfinder_main.WHISPER_CPP_MODELS["small.en"]["filename"]
+    monkeypatch.setattr(wayfinder_main.ModelDownloader, "_in_flight", {"small.en"})
+    owned = whisper / f"{RECOMMENDED_SPEECH_MODEL}.downloading"
+    in_flight = whisper / f"{in_flight_name}.downloading"
+    stale = whisper / "ggml-stale.bin.downloading"
+    stale_llm = llm / "stale.tmp"
+    old = _time.time() - 31 * 86400
+    for path in (owned, in_flight, stale, stale_llm):
+        path.write_bytes(b"x")
+        os.utime(path, (old, old))
+
+    app = SimpleNamespace(config=_pending_config(), log=lambda _m: None)
+    wayfinder_main.WayfinderApp._sweep_stale_download_partials(app)
+
+    assert owned.exists() and in_flight.exists()
+    assert not stale.exists() and not stale_llm.exists()
+
+    # Without the marker the same partial is fair game.
+    app = SimpleNamespace(config=_free_config(), log=lambda _m: None)
+    wayfinder_main.WayfinderApp._sweep_stale_download_partials(app)
+    assert not owned.exists()
+
+
+def test_launch_sweep_leaves_cleanup_partials_during_a_cleanup_download(tmp_path, monkeypatch):
+    import os
+    import time as _time
+
+    llm = tmp_path / "llm"
+    llm.mkdir()
+    monkeypatch.setattr(wayfinder_main, "_get_whisper_models_dir", lambda: tmp_path / "w")
+    monkeypatch.setattr(wayfinder_main, "_get_llm_models_dir", lambda: llm)
+    part = llm / "m.tmp"
+    part.write_bytes(b"x")
+    old = _time.time() - 31 * 86400
+    os.utime(part, (old, old))
+    app = SimpleNamespace(config=_free_config(), log=lambda _m: None, _inline_download_active=True)
+    wayfinder_main.WayfinderApp._sweep_stale_download_partials(app)
+    assert part.exists()

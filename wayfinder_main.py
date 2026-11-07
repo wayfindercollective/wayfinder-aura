@@ -5471,7 +5471,14 @@ class WayfinderApp(ctk.CTk):
             )
         # One-time Ultra setup, for a license that turned Ultra outside the app
         # (the in-app activation runs it directly). Settles the record on Free.
-        self._apply_ultra_defaults()
+        try:
+            self._apply_ultra_defaults()
+        except Exception as exc:
+            print(f"[license] Ultra setup failed at launch: {exc}", flush=True)
+        try:
+            WayfinderApp._sweep_stale_download_partials(self)
+        except Exception as exc:
+            print(f"[models] Could not sweep old partial downloads: {exc}", flush=True)
 
         # Resolve audio device (intelligent selection if not explicitly set). This is a
         # RUNTIME value only — do NOT write it back into config["audio_device"]. Persisting
@@ -14395,7 +14402,10 @@ class WayfinderApp(ctk.CTk):
         if due and wants_recommended_speech_model(self.config, gate):
             self._download_recommended_speech_model()
         elif self.config.get(ULTRA_MODEL_PENDING_KEY):
-            WayfinderApp._continue_recommended_speech_model(self, gate)
+            try:
+                WayfinderApp._continue_recommended_speech_model(self, gate)
+            except Exception as exc:
+                print(f"[license] Could not continue the model download: {exc}", flush=True)
         if not changed:
             return []
         save_config(self.config)
@@ -14442,13 +14452,64 @@ class WayfinderApp(ctk.CTk):
         elif action == "clear":
             WayfinderApp._clear_recommended_speech_model_pending(self)
 
+    def _save_recommended_speech_model_state(self) -> None:
+        """A failed config write must not take the app down with it (full disk):
+        the worst case is one more or one fewer retry at the next launch."""
+        try:
+            save_config(self.config)
+        except Exception as exc:
+            print(f"[license] Could not save the model download state: {exc}", flush=True)
+
     def _clear_recommended_speech_model_pending(self) -> None:
         """The Ultra setup no longer owes this install the Turbo Q5 download."""
-        from wayfinder.core.ultra_defaults import ULTRA_MODEL_PENDING_KEY
+        from wayfinder.core.ultra_defaults import (
+            ULTRA_MODEL_FAILURES_KEY,
+            ULTRA_MODEL_PENDING_KEY,
+        )
 
         if self.config.get(ULTRA_MODEL_PENDING_KEY):
             self.config[ULTRA_MODEL_PENDING_KEY] = False
-            save_config(self.config)
+            self.config[ULTRA_MODEL_FAILURES_KEY] = 0
+            WayfinderApp._save_recommended_speech_model_state(self)
+
+    def _note_speech_model_pick(self) -> None:
+        """The user chose a speech model, so the Ultra setup stops choosing for them.
+
+        Base looks the same as "never chose" to wants_recommended_speech_model,
+        so a pick during the download has to be recorded for _finish to see it.
+        """
+        if getattr(self, "_ultra_model_downloading", False):
+            self._ultra_model_user_picked = True
+        WayfinderApp._clear_recommended_speech_model_pending(self)
+
+    def _on_speech_model_removed(self, model_id: str) -> None:
+        """Removing Turbo Q5 (or its partial) means don't fetch it again."""
+        from wayfinder.core.ultra_defaults import RECOMMENDED_SPEECH_MODEL_ID
+
+        if model_id == RECOMMENDED_SPEECH_MODEL_ID:
+            WayfinderApp._clear_recommended_speech_model_pending(self)
+
+    def _sweep_stale_download_partials(self) -> None:
+        """Launch: drop partials nobody has resumed in a month, keeping any in use."""
+        from wayfinder.core.download_guard import sweep_stale_partials
+        from wayfinder.core.ultra_defaults import (
+            RECOMMENDED_SPEECH_MODEL,
+            ULTRA_MODEL_PENDING_KEY,
+        )
+
+        keep = set()
+        with ModelDownloader._in_flight_lock:
+            for model_id in ModelDownloader._in_flight:
+                filename = (WHISPER_CPP_MODELS.get(model_id) or {}).get("filename")
+                if filename:
+                    keep.add(f"{filename}.downloading")
+        if self.config.get(ULTRA_MODEL_PENDING_KEY):
+            keep.add(f"{RECOMMENDED_SPEECH_MODEL}.downloading")
+        removed = sweep_stale_partials(_get_whisper_models_dir(), ".downloading", keep=keep)
+        if not getattr(self, "_inline_download_active", False):
+            removed += sweep_stale_partials(_get_llm_models_dir(), ".tmp")
+        if removed:
+            self.log(f"🧹 Removed {len(removed)} unfinished model download(s) older than 30 days")
 
     def _download_recommended_speech_model(self, *, resuming: bool = False) -> None:
         """Ultra setup: download Large v3 Turbo Q5, then switch to it.
@@ -14460,15 +14521,20 @@ class WayfinderApp(ctk.CTk):
         """
         from wayfinder.core.ultra_defaults import (
             RECOMMENDED_SPEECH_MODEL_ID,
+            ULTRA_MODEL_FAILURES_KEY,
+            ULTRA_MODEL_MAX_FAILURES,
             ULTRA_MODEL_PENDING_KEY,
         )
 
         info = WHISPER_CPP_MODELS.get(RECOMMENDED_SPEECH_MODEL_ID) or {}
         self._ultra_model_downloading = True
+        self._ultra_model_user_picked = False
         self._ultra_model_pct = -1
         # On disk first: quitting from here on must not lose the setup's promise.
         self.config[ULTRA_MODEL_PENDING_KEY] = True
-        save_config(self.config)
+        if not resuming:
+            self.config[ULTRA_MODEL_FAILURES_KEY] = 0
+        WayfinderApp._save_recommended_speech_model_state(self)
         verb = "Continuing the" if resuming else "Ultra setup: downloading"
         self.log(
             f"⬇ {verb} Large v3 Turbo Q5 ({info.get('size', '574 MB')}) in the background. "
@@ -14497,22 +14563,39 @@ class WayfinderApp(ctk.CTk):
 
         def _error(message: str) -> None:
             retryable = bool(getattr(downloader, "last_error_retryable", False))
+            duplicate = bool(getattr(downloader, "last_error_duplicate", False))
 
             def _handle_error():
                 self._ultra_model_downloading = False
+                gave_up = False
                 if not retryable:
                     WayfinderApp._clear_recommended_speech_model_pending(self)
+                elif not duplicate and self.config.get(ULTRA_MODEL_PENDING_KEY):
+                    failures = int(self.config.get(ULTRA_MODEL_FAILURES_KEY) or 0) + 1
+                    self.config[ULTRA_MODEL_FAILURES_KEY] = failures
+                    gave_up = failures >= ULTRA_MODEL_MAX_FAILURES
+                    if gave_up:
+                        WayfinderApp._clear_recommended_speech_model_pending(self)
+                    else:
+                        WayfinderApp._save_recommended_speech_model_state(self)
                 WayfinderApp._refresh_basic_settings(self)
                 if hasattr(self, "model_btn"):
                     try:
                         self.model_btn.configure(text=self.get_model_display())
                     except Exception:
                         pass
+                if gave_up:
+                    self.log(
+                        f"⚠ Large v3 Turbo Q5 download: {message}. Stopped trying after "
+                        f"{ULTRA_MODEL_MAX_FAILURES} failed attempts. "
+                        "Get it any time in Settings ▸ Whisper Model."
+                    )
+                    return
                 self.log(
                     f"⚠ Large v3 Turbo Q5 download: {message}. "
                     + (
                         "Aura continues it next time you open it."
-                        if retryable
+                        if self.config.get(ULTRA_MODEL_PENDING_KEY)
                         else "Get it any time in Settings ▸ Whisper Model."
                     )
                 )
@@ -14557,13 +14640,15 @@ class WayfinderApp(ctk.CTk):
         )
 
         self._ultra_model_downloading = False
+        user_picked = getattr(self, "_ultra_model_user_picked", False)
+        self._ultra_model_user_picked = False
         label = getattr(self, "_ultra_banner_label", None)
         if label is not None:
             try:
                 label.configure(text="welcome to ultra 😇 — Large v3 Turbo Q5 ready")
             except Exception:
                 pass
-        if not wants_recommended_speech_model(self.config, self.feature_gate):
+        if user_picked or not wants_recommended_speech_model(self.config, self.feature_gate):
             WayfinderApp._refresh_basic_settings(self)
             if hasattr(self, "model_btn"):
                 try:
@@ -21387,6 +21472,7 @@ class WayfinderApp(ctk.CTk):
         whisper-server is keyed by model path. Mid-dictation it is queued
         until IDLE (_defer_model_selection).
         """
+        WayfinderApp._note_speech_model_pick(self)
         if WayfinderApp._defer_model_selection(self, path):
             return
         store = str(path)
@@ -21920,6 +22006,18 @@ class WayfinderApp(ctk.CTk):
                         )
                         name_lbl.pack(side="left", fill="x", expand=True)
 
+                        if downloader.has_only_partial(model_id):
+                            # An interrupted download: Get continues it, this drops it.
+                            ctk.CTkButton(
+                                top, text="Discard partial", width=92, height=24,
+                                font=(fam, fs["caption"]),
+                                corner_radius=RADIUS["xs"],
+                                fg_color=COLORS["bg_elevated"],
+                                hover_color=COLORS["danger_bg_hover"],
+                                text_color=COLORS["text_secondary"],
+                                command=lambda mid=model_id: do_uninstall(mid),
+                            ).pack(side="right", padx=(4, 0))
+
                         if badge and not is_installed:
                             chip_accent = badge in ("Balanced", "Best", "Free default")
                             ctk.CTkLabel(
@@ -22094,6 +22192,7 @@ class WayfinderApp(ctk.CTk):
                 if result.get("ok"):
                     n = len(result.get("removed") or [])
                     self.log(f"🗑 Removed {title} ({n} file{'s' if n != 1 else ''})")
+                    WayfinderApp._on_speech_model_removed(self, model_id)
                     _clear_model_path_if_deleted(model_id)
                     show_download()
                 else:
@@ -22177,6 +22276,7 @@ class WayfinderApp(ctk.CTk):
                         # model now (queued until IDLE if a dictation is running),
                         # instead of making them hunt for it under Installed.
                         outcome = self._activate_downloaded_model("whisper", path)
+                        WayfinderApp._clear_recommended_speech_model_pending(self)
                         # macOS/Windows: a first-run Welcome waiting on this download resumes.
                         if ((IS_MACOS or IS_WINDOWS) and outcome == "active"
                                 and self._on_whisper_model_ready()):

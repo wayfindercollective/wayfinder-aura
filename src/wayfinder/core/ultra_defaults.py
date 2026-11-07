@@ -41,6 +41,12 @@ ULTRA_DEFAULTS_KEY = "ultra_defaults_applied"
 # by then, so this is the only record that the setup still owes the model.
 ULTRA_MODEL_PENDING_KEY = "ultra_model_download_pending"
 
+# Failed attempts since the download last started fresh. A launch that merely
+# quit part-way does not count: only an attempt that ended in an error does, and
+# after ULTRA_MODEL_MAX_FAILURES the setup stops trying and says so.
+ULTRA_MODEL_FAILURES_KEY = "ultra_model_download_failures"
+ULTRA_MODEL_MAX_FAILURES = 5
+
 RECOMMENDED_SPEECH_MODEL = "ggml-large-v3-turbo-q5_0.bin"
 RECOMMENDED_SPEECH_MODEL_ID = "large-v3-turbo-q5_0"  # WHISPER_CPP_MODELS key
 
