@@ -16,10 +16,17 @@ three copies that drift:
 
 Neither guard replaces the digest check — they bound the damage a bad origin can
 do before the digest gets a chance to reject it.
+
+An interrupted transfer keeps its bytes so the next attempt can ask for only the
+rest (`resume_offset` + `resume_start`). Resuming is only ever offered when the
+model has both a size and a digest: the digest still covers the whole final file,
+so a bad splice is caught before anything is loaded.
 """
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -34,6 +41,10 @@ class DownloadSizeMismatch(ValueError):
     This is a *transport* failure — unlike a digest mismatch it is worth one
     automatic retry, because a truncated body is usually a dropped connection.
     """
+
+
+class ResumeRejected(DownloadSizeMismatch):
+    """The server's answer to a Range request is not the continuation we asked for."""
 
 
 def require_https(url: str) -> None:
@@ -101,6 +112,58 @@ class DownloadBounds:
                 f"incomplete download ({downloaded} of {expected} bytes) — "
                 "the connection dropped"
             )
+
+
+def resume_offset(
+    partial: Path, expected_size: Optional[int], expected_sha256: Optional[str]
+) -> int:
+    """How many bytes of *partial* a new attempt may keep; discards the rest.
+
+    0 when there is nothing to resume from. A partial that cannot be resumed
+    (no size or digest to check it against, or larger than the model) is removed
+    so the attempt starts clean.
+    """
+    try:
+        size = partial.stat().st_size
+    except OSError:
+        return 0
+    if expected_size and expected_sha256 and size <= expected_size:
+        return size
+    partial.unlink(missing_ok=True)
+    return 0
+
+
+_CONTENT_RANGE = re.compile(r"^\s*bytes\s+(\d+)-(\d+)/(\d+)\s*$", re.IGNORECASE)
+
+
+def resume_start(
+    status: int,
+    content_range: Optional[str],
+    content_length: Optional[int],
+    offset: int,
+    expected_size: Optional[int],
+) -> int:
+    """Where this response's body belongs in the file.
+
+    A plain 200 is the whole file, so it starts at 0 and the partial is replaced.
+    A 206 must be exactly the rest of the file we asked for; anything else raises
+    ResumeRejected rather than splicing unknown bytes onto the partial.
+    """
+    if status != 206:
+        return 0
+    match = _CONTENT_RANGE.match(content_range or "")
+    if not match:
+        raise ResumeRejected(f"unusable Content-Range: {content_range!r}")
+    start, end, total = (int(group) for group in match.groups())
+    if start != offset or end != total - 1 or total != expected_size:
+        raise ResumeRejected(
+            f"asked for byte {offset} of {expected_size}, got {content_range!r}"
+        )
+    if content_length and content_length != total - start:
+        raise ResumeRejected(
+            f"Content-Length {content_length} does not match {content_range!r}"
+        )
+    return start
 
 
 def https_only_get(

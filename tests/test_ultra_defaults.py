@@ -16,6 +16,9 @@ from wayfinder.core.ultra_defaults import (
     RECOMMENDED_SPEECH_MODEL,
     RECOMMENDED_SPEECH_MODEL_ID,
     ULTRA_DEFAULTS_KEY,
+    ULTRA_MODEL_PENDING_KEY,
+    pending_speech_model_action,
+    ultra_model_download_text,
     apply_ultra_defaults,
     describe_changes,
     gpu_is_default_capable,
@@ -814,3 +817,225 @@ def test_ultra_defaults_enables_cleanup_when_raw_transcription_was_on(monkeypatc
 
 
 
+
+
+# --- An interrupted Turbo Q5 download continues at the next launch -----------
+
+
+def _pending_config(**overrides):
+    return _free_config(
+        use_gpu=True,
+        **{ULTRA_DEFAULTS_KEY: True, ULTRA_MODEL_PENDING_KEY: True},
+        **overrides,
+    )
+
+
+def test_pending_action_needs_the_marker_and_ultra():
+    assert pending_speech_model_action(_free_config(use_gpu=True), _gate(), on_disk=False) == "none"
+    assert pending_speech_model_action(_pending_config(), _gate(premium=False), on_disk=False) == "none"
+
+
+def test_pending_action_downloads_activates_or_clears():
+    assert pending_speech_model_action(_pending_config(), _gate(), on_disk=False) == "download"
+    assert pending_speech_model_action(_pending_config(), _gate(), on_disk=True) == "activate"
+    picked = _pending_config(model_path="~/models/ggml-small.en.bin")
+    assert pending_speech_model_action(picked, _gate(), on_disk=False) == "clear"
+
+
+def _resume_app(gate, config, *, on_disk=None):
+    gate.refresh_pending = getattr(gate, "refresh_pending", False)
+    events = []
+    app = SimpleNamespace(
+        feature_gate=gate,
+        config=config,
+        app_state=wayfinder_main.AppState.IDLE,
+        log=lambda message: events.append(("log", message)),
+        _gpu_default_capable=lambda: True,
+        _recommended_speech_model_on_disk=lambda: on_disk,
+        _apply_transcription_hardware_change=lambda on: None,
+        _download_recommended_speech_model=lambda **kw: events.append(("download", kw)),
+        _finish_recommended_speech_model=lambda path: events.append(("finish", path)),
+    )
+    return app, events
+
+
+def test_launch_continues_a_pending_download(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    app, events = _resume_app(_gate(), _pending_config())
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app)
+    assert ("download", {"resuming": True}) in events
+
+
+def test_launch_does_not_start_a_second_copy(monkeypatch):
+    # _apply_ultra_defaults also runs after the background license refresh.
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    app, events = _resume_app(_gate(), _pending_config())
+    app._ultra_model_downloading = True
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app)
+    assert not any(kind == "download" for kind, *_ in events)
+
+
+def test_launch_waits_for_the_license_refresh_and_for_idle(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    gate = _gate()
+    gate.refresh_pending = True
+    app, events = _resume_app(gate, _pending_config())
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app)
+    assert events == []
+
+    gate.refresh_pending = False
+    app.app_state = wayfinder_main.AppState.PROCESSING
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app)
+    assert events == []
+
+
+def test_launch_finishes_a_model_that_landed_before_the_switch(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    path = "/m/" + RECOMMENDED_SPEECH_MODEL
+    app, events = _resume_app(_gate(), _pending_config(), on_disk=path)
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app)
+    assert ("finish", path) in events
+    assert not any(kind == "download" for kind, *_ in events)
+
+
+def test_launch_drops_the_marker_once_the_user_picked_a_model(monkeypatch):
+    saved = []
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: saved.append(dict(cfg)))
+    app, events = _resume_app(
+        _gate(), _pending_config(model_path="~/models/ggml-small.en.bin")
+    )
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app)
+    assert not any(kind == "download" for kind, *_ in events)
+    assert saved[-1][ULTRA_MODEL_PENDING_KEY] is False
+
+
+def test_a_lapsed_license_keeps_the_marker_and_downloads_nothing(monkeypatch):
+    saved = []
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: saved.append(dict(cfg)))
+    app, events = _resume_app(_gate(premium=False), _pending_config())
+    wayfinder_main.WayfinderApp._apply_ultra_defaults(app)
+    assert not any(kind == "download" for kind, *_ in events)
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is True
+
+
+class _ScriptedDownloader:
+    """Stands in for ModelDownloader: records callbacks, outcome set by the test."""
+
+    instances = []
+
+    def __init__(self):
+        self.last_error_retryable = False
+        self.callbacks = {}
+        _ScriptedDownloader.instances.append(self)
+
+    def download_model(self, model_id, **callbacks):
+        self.callbacks = callbacks
+
+
+def _download_app(monkeypatch):
+    saved = []
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda cfg: saved.append(dict(cfg)))
+    monkeypatch.setattr(wayfinder_main, "ModelDownloader", _ScriptedDownloader)
+    _ScriptedDownloader.instances = []
+    ran = []
+    logs = []
+    app = SimpleNamespace(
+        config=_free_config(use_gpu=True, **{ULTRA_DEFAULTS_KEY: True}),
+        feature_gate=_gate(),
+        event_queue=SimpleNamespace(put=lambda item: ran.append(item[1]) or item[1]()),
+        log=logs.append,
+        get_display=lambda: "",
+        _activate_downloaded_model=lambda role, path, info=None: "active",
+    )
+    return app, saved, logs
+
+
+def test_the_marker_is_on_disk_before_the_transfer_starts(monkeypatch):
+    app, saved, _logs = _download_app(monkeypatch)
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app)
+    assert saved[-1][ULTRA_MODEL_PENDING_KEY] is True
+    assert _ScriptedDownloader.instances[-1].callbacks  # started after the save
+
+
+def test_the_log_says_it_is_in_the_background_and_safe_to_close(monkeypatch):
+    app, _saved, logs = _download_app(monkeypatch)
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app)
+    assert "background" in logs[-1] and "next" in logs[-1]
+
+    app, _saved, logs = _download_app(monkeypatch)
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app, resuming=True)
+    assert "Continuing" in logs[-1]
+
+
+def test_a_transport_failure_keeps_the_marker(monkeypatch):
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    app, _saved, logs = _download_app(monkeypatch)
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app)
+    downloader = _ScriptedDownloader.instances[-1]
+    downloader.last_error_retryable = True
+    downloader.callbacks["error_callback"]("connection dropped")
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is True
+    assert "next" in logs[-1]
+
+
+def test_a_settled_refusal_clears_the_marker(monkeypatch):
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    app, _saved, logs = _download_app(monkeypatch)
+    wayfinder_main.WayfinderApp._download_recommended_speech_model(app)
+    downloader = _ScriptedDownloader.instances[-1]
+    downloader.last_error_retryable = False
+    downloader.callbacks["error_callback"]("This model entry doesn't match")
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is False
+    assert "Settings" in logs[-1]
+
+
+@pytest.mark.parametrize("outcome, kept", [("active", False), ("skipped", False), ("deferred", True)])
+def test_finishing_clears_the_marker_unless_the_switch_is_still_queued(monkeypatch, outcome, kept):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    app = SimpleNamespace(
+        config=_pending_config(),
+        feature_gate=_gate(),
+        log=lambda _m: None,
+        _activate_downloaded_model=lambda role, path, info=None: outcome,
+    )
+    wayfinder_main.WayfinderApp._finish_recommended_speech_model(app, "/m/" + RECOMMENDED_SPEECH_MODEL)
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is kept
+
+
+def test_finishing_clears_the_marker_when_the_user_picked_a_model(monkeypatch):
+    monkeypatch.setattr(wayfinder_main, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(wayfinder_main.WayfinderApp, "_refresh_basic_settings", lambda self: None)
+    app = SimpleNamespace(
+        config=_pending_config(model_path="~/models/ggml-small.en.bin"),
+        feature_gate=_gate(),
+        log=lambda _m: None,
+    )
+    wayfinder_main.WayfinderApp._finish_recommended_speech_model(app, "/m/" + RECOMMENDED_SPEECH_MODEL)
+    assert app.config[ULTRA_MODEL_PENDING_KEY] is False
+
+
+def test_banner_text_says_background_and_safe_to_close():
+    text = ultra_model_download_text(42)
+    assert "42%" in text and "background" in text and "safe to close" in text
+    assert "%" not in ultra_model_download_text()
+
+
+def test_quit_logs_a_download_in_flight(monkeypatch):
+    monkeypatch.setattr(wayfinder_main.ModelDownloader, "_in_flight", {"small.en"})
+    logs = []
+    app = SimpleNamespace(log=logs.append)
+    wayfinder_main.WayfinderApp._log_downloads_on_quit(app)
+    assert logs and "where it left off" in logs[0]
+
+    logs.clear()
+    app = SimpleNamespace(log=logs.append, _ultra_model_downloading=True)
+    wayfinder_main.WayfinderApp._log_downloads_on_quit(app)
+    assert "Large v3 Turbo Q5" in logs[0] and "next" in logs[0]
+
+
+def test_quit_stays_quiet_with_no_download(monkeypatch):
+    monkeypatch.setattr(wayfinder_main.ModelDownloader, "_in_flight", set())
+    logs = []
+    app = SimpleNamespace(log=logs.append, _inline_download_active=False)
+    wayfinder_main.WayfinderApp._log_downloads_on_quit(app)
+    assert logs == []

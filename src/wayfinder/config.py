@@ -415,6 +415,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # None = not decided yet, False = seen on Free, True = the one-time Ultra
     # setup has run (or the install was Ultra before it existed).
     "ultra_defaults_applied": None,
+    # True while the Ultra setup's Turbo Q5 download is unfinished, so the next
+    # launch continues it (core/ultra_defaults.py).
+    "ultra_model_download_pending": False,
     "gpu_layers": 0,  # 0 = auto (all layers), or specific layer count for whisper.cpp
     "gpu_device": "auto",  # "auto" = benchmark and pick fastest, or "0", "1", "2" for manual selection
     "gpu_benchmark_cache": {},  # Cached GPU benchmark results: {"0": 0.6, "1": 7.5, "2": 52.0, "fastest": "0"}

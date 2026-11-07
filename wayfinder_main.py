@@ -6,6 +6,7 @@ Toggle-to-record with whisper.cpp transcription.
 
 import atexit
 import copy
+import http.client
 import json
 import math
 import os
@@ -2127,6 +2128,9 @@ class ModelDownloader:
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self._cancel_requested = False
         self._current_download = None
+        # Whether the last failure is worth trying again later (a dropped
+        # connection) rather than a settled answer (refused, wrong bytes, cancelled).
+        self.last_error_retryable = False
 
     def _filename(self, model_id: str) -> str | None:
         info = WHISPER_CPP_MODELS.get(model_id)
@@ -2220,6 +2224,8 @@ class ModelDownloader:
 
         Always writes to a `.downloading` temp file then atomically replaces the
         destination so a re-download after uninstall (or a half-file) is clean.
+        A transfer that is interrupted keeps that file, so the next attempt (even
+        after a relaunch) only fetches the rest; see core/download_guard.py.
         """
         if model_id not in WHISPER_CPP_MODELS:
             if error_callback:
@@ -2227,6 +2233,7 @@ class ModelDownloader:
             return
         
         self._cancel_requested = False
+        self.last_error_retryable = False
         model_info = WHISPER_CPP_MODELS[model_id]
         # Ensure destination dir exists (may have been wiped)
         try:
@@ -2237,6 +2244,7 @@ class ModelDownloader:
             return
         with ModelDownloader._in_flight_lock:
             if model_id in ModelDownloader._in_flight:
+                self.last_error_retryable = True
                 if error_callback:
                     error_callback("This model is already downloading")
                 return
@@ -2262,7 +2270,10 @@ class ModelDownloader:
                     DownloadSizeMismatch,
                     HttpsOnlyRedirectHandler,
                     InsecureRedirect,
+                    ResumeRejected,
                     require_https,
+                    resume_offset,
+                    resume_start,
                 )
                 from wayfinder.license import get_feature_gate
                 from wayfinder.config import load_config
@@ -2296,13 +2307,6 @@ class ModelDownloader:
                     if error_callback:
                         error_callback(f"This model entry is invalid: {e}")
                     return
-                # Drop any leftover partial from a previous attempt
-                try:
-                    if temp_path.exists():
-                        temp_path.unlink()
-                except Exception:
-                    pass
-                
                 # Strip Authorization on cross-origin redirects (never leak token
                 # to HF) and refuse to leave https on any hop.
                 class _NoAuthRedirect(
@@ -2333,11 +2337,19 @@ class ModelDownloader:
                 class _Cancelled(Exception):
                     """Internal: user cancelled mid-transfer."""
 
-                def _fetch(source_url):
+                expected_sha = model_info.get("sha256")
+
+                def _fetch_once(source_url):
                     """Stream one attempt to temp_path, bounded and https-only."""
                     require_https(source_url)
                     bounds = DownloadBounds(size_bound)
+                    offset = resume_offset(temp_path, bounds.trusted_size, expected_sha)
+                    if offset and offset == bounds.trusted_size:
+                        # Every byte landed before the app died: the digest decides.
+                        return
                     request = urllib.request.Request(source_url)
+                    if offset:
+                        request.add_header("Range", f"bytes={offset}-")
                     for hk, hv in download_auth_headers(
                         model_info,
                         bearer_token=gate.get_bearer_token(),
@@ -2347,13 +2359,29 @@ class ModelDownloader:
                         request.add_header(hk, hv)
 
                     opener = urllib.request.build_opener(_NoAuthRedirect)
-                    with opener.open(request, timeout=60) as response:
+                    try:
+                        opened = opener.open(request, timeout=60)
+                    except urllib.error.HTTPError as e:
+                        if offset and e.code == 416:
+                            raise ResumeRejected("server refused the byte range") from e
+                        raise
+                    with opened as response:
                         header_len = int(response.headers.get("Content-Length", 0))
-                        total_size = bounds.check_header(header_len) or 0
-                        downloaded = 0
+                        start = resume_start(
+                            getattr(response, "status", 200),
+                            response.headers.get("Content-Range"),
+                            header_len,
+                            offset,
+                            bounds.trusted_size,
+                        )
+                        # The bounds count the whole file, not this response.
+                        total_size = bounds.check_header(
+                            start + header_len if header_len else 0
+                        ) or 0
+                        downloaded = start
                         chunk_size = 1024 * 1024  # 1MB chunks
 
-                        with open(temp_path, "wb") as f:
+                        with open(temp_path, "ab" if start else "wb") as f:
                             while True:
                                 if self._cancel_requested:
                                     raise _Cancelled()
@@ -2371,6 +2399,14 @@ class ModelDownloader:
                                     progress_callback(progress, downloaded, total_size)
 
                         bounds.check_complete(downloaded)
+
+                def _fetch(source_url):
+                    """One attempt; a refused resume starts over from byte zero."""
+                    try:
+                        _fetch_once(source_url)
+                    except ResumeRejected:
+                        temp_path.unlink(missing_ok=True)
+                        _fetch_once(source_url)
 
                 # One retry for TRANSPORT failures only. A correctly sized body
                 # that fails its digest is not a flaky network — it means a wrong
@@ -2398,22 +2434,18 @@ class ModelDownloader:
                         if e.code < 500 and e.code != 429:
                             raise
                         transport_error = e
-                        try:
-                            temp_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
                     except (
                         DownloadSizeMismatch,
                         InsecureRedirect,
                         urllib.error.URLError,
+                        http.client.HTTPException,
                         OSError,
                     ) as e:
                         transport_error = e
-                        try:
-                            temp_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
                 if transport_error is not None:
+                    self.last_error_retryable = True
+                    if DownloadBounds(size_bound).trusted_size and expected_sha:
+                        temp_path = None  # keep the bytes for the next attempt
                     raise transport_error
 
                 # Verify content before it can ever be loaded (audit F-C).
@@ -14283,6 +14315,7 @@ class WayfinderApp(ctk.CTk):
             return []
         try:
             from wayfinder.core.ultra_defaults import (
+                ULTRA_MODEL_PENDING_KEY,
                 apply_ultra_defaults,
                 describe_changes,
                 ultra_setup_due,
@@ -14306,6 +14339,8 @@ class WayfinderApp(ctk.CTk):
         # Turbo Q5 is the Ultra speech model: fetch it if it is not on disk yet.
         if due and wants_recommended_speech_model(self.config, gate):
             self._download_recommended_speech_model()
+        elif self.config.get(ULTRA_MODEL_PENDING_KEY):
+            WayfinderApp._continue_recommended_speech_model(self, gate)
         if not changed:
             return []
         save_config(self.config)
@@ -14337,19 +14372,53 @@ class WayfinderApp(ctk.CTk):
             self.log(message)
         return changed
 
-    def _download_recommended_speech_model(self) -> None:
+    def _continue_recommended_speech_model(self, gate) -> None:
+        """Pick an interrupted Turbo Q5 download back up, once per launch."""
+        from wayfinder.core.ultra_defaults import pending_speech_model_action
+
+        if getattr(self, "_ultra_model_downloading", False):
+            return
+        path = self._recommended_speech_model_on_disk()
+        action = pending_speech_model_action(self.config, gate, on_disk=bool(path))
+        if action == "download":
+            self._download_recommended_speech_model(resuming=True)
+        elif action == "activate":
+            self._finish_recommended_speech_model(path)
+        elif action == "clear":
+            WayfinderApp._clear_recommended_speech_model_pending(self)
+
+    def _clear_recommended_speech_model_pending(self) -> None:
+        """The Ultra setup no longer owes this install the Turbo Q5 download."""
+        from wayfinder.core.ultra_defaults import ULTRA_MODEL_PENDING_KEY
+
+        if self.config.get(ULTRA_MODEL_PENDING_KEY):
+            self.config[ULTRA_MODEL_PENDING_KEY] = False
+            save_config(self.config)
+
+    def _download_recommended_speech_model(self, *, resuming: bool = False) -> None:
         """Ultra setup: download Large v3 Turbo Q5, then switch to it.
 
         Through the same authenticated downloader as the models panel (which
         refuses a second copy of the same download). A failure only logs: the
-        Ultra tip keeps offering the model.
+        Ultra tip keeps offering the model, and one that may just be the network
+        is tried again at the next launch (ULTRA_MODEL_PENDING_KEY).
         """
-        from wayfinder.core.ultra_defaults import RECOMMENDED_SPEECH_MODEL_ID
+        from wayfinder.core.ultra_defaults import (
+            RECOMMENDED_SPEECH_MODEL_ID,
+            ULTRA_MODEL_PENDING_KEY,
+        )
 
         info = WHISPER_CPP_MODELS.get(RECOMMENDED_SPEECH_MODEL_ID) or {}
         self._ultra_model_downloading = True
         self._ultra_model_pct = -1
-        self.log(f"⬇ Ultra setup: downloading Large v3 Turbo Q5 ({info.get('size', '574 MB')})")
+        # On disk first: quitting from here on must not lose the setup's promise.
+        self.config[ULTRA_MODEL_PENDING_KEY] = True
+        save_config(self.config)
+        verb = "Continuing the" if resuming else "Ultra setup: downloading"
+        self.log(
+            f"⬇ {verb} Large v3 Turbo Q5 ({info.get('size', '574 MB')}) in the background. "
+            "You can keep dictating, and it's safe to close Aura: it continues next time."
+        )
         if hasattr(self, "model_btn"):
             try:
                 self.model_btn.configure(text="Downloading Large v3 Turbo Q5…")
@@ -14369,9 +14438,15 @@ class WayfinderApp(ctk.CTk):
         def _complete(path: str) -> None:
             _on_ui(lambda: self._finish_recommended_speech_model(path))
 
+        downloader = None
+
         def _error(message: str) -> None:
+            retryable = bool(getattr(downloader, "last_error_retryable", False))
+
             def _handle_error():
                 self._ultra_model_downloading = False
+                if not retryable:
+                    WayfinderApp._clear_recommended_speech_model_pending(self)
                 WayfinderApp._refresh_basic_settings(self)
                 if hasattr(self, "model_btn"):
                     try:
@@ -14380,13 +14455,18 @@ class WayfinderApp(ctk.CTk):
                         pass
                 self.log(
                     f"⚠ Large v3 Turbo Q5 download: {message}. "
-                    "Get it any time in Settings ▸ Whisper Model."
+                    + (
+                        "Aura continues it next time you open it."
+                        if retryable
+                        else "Get it any time in Settings ▸ Whisper Model."
+                    )
                 )
 
             _on_ui(_handle_error)
 
         try:
-            ModelDownloader().download_model(
+            downloader = ModelDownloader()
+            downloader.download_model(
                 RECOMMENDED_SPEECH_MODEL_ID,
                 progress_callback=_progress,
                 complete_callback=_complete,
@@ -14397,6 +14477,8 @@ class WayfinderApp(ctk.CTk):
 
     def _update_ultra_model_progress(self, pct: int) -> None:
         """Update Settings model button and Ultra activation banner during model setup."""
+        from wayfinder.core.ultra_defaults import ultra_model_download_text
+
         if not getattr(self, "_ultra_model_downloading", False):
             return
         WayfinderApp._refresh_basic_settings(self)
@@ -14408,9 +14490,7 @@ class WayfinderApp(ctk.CTk):
         label = getattr(self, "_ultra_banner_label", None)
         if label is not None:
             try:
-                label.configure(
-                    text=f"welcome to ultra 😇 — downloading Large v3 Turbo Q5 ({pct}%)"
-                )
+                label.configure(text=ultra_model_download_text(pct))
             except Exception:
                 pass
 
@@ -14436,11 +14516,16 @@ class WayfinderApp(ctk.CTk):
                 except Exception:
                     pass
             self.log("✓ Large v3 Turbo Q5 downloaded — keeping the model you chose")
+            WayfinderApp._clear_recommended_speech_model_pending(self)
             return
         # Deferred to the next IDLE if a dictation is running.
-        self._activate_downloaded_model(
+        outcome = self._activate_downloaded_model(
             "whisper", path, WHISPER_CPP_MODELS.get(RECOMMENDED_SPEECH_MODEL_ID)
         )
+        # A queued switch is still owed: quitting before IDLE would lose it, so
+        # the marker stays and the next launch finishes the job.
+        if outcome != "deferred":
+            WayfinderApp._clear_recommended_speech_model_pending(self)
 
     # === Post-Processing Handlers ===
 
@@ -15414,7 +15499,10 @@ class WayfinderApp(ctk.CTk):
                 from wayfinder.core.download_guard import (
                     DownloadBounds,
                     DownloadSizeMismatch,
+                    ResumeRejected,
                     https_only_get,
+                    resume_offset,
+                    resume_start,
                 )
                 from wayfinder.license import get_feature_gate
                 from wayfinder.config import load_config
@@ -15468,8 +15556,9 @@ class WayfinderApp(ctk.CTk):
                 # See the whisper path: an unshipped entry falls back to its own
                 # declared size, which the merge required it to carry.
                 size_bound = trusted.get("size_bytes") or model_info.get("size_bytes")
+                expected_sha = model_info.get("sha256")
 
-                def _attempt(source_url):
+                def _attempt_once(source_url):
                     """One bounded, https-only transfer into temp_path.
 
                     Redirects are followed by hand so a hop to plaintext http is
@@ -15477,23 +15566,46 @@ class WayfinderApp(ctk.CTk):
                     Authorization on a same-host downgrade).
                     """
                     bounds = DownloadBounds(size_bound)
+                    offset = resume_offset(temp_path, bounds.trusted_size, expected_sha)
+                    if offset and offset == bounds.trusted_size:
+                        # Every byte landed before the app died: the digest decides.
+                        return offset, time_module.time(), offset
+
+                    def _hop_headers(hop_url):
+                        headers = dict(_headers_for(hop_url) or {})
+                        if offset:
+                            headers["Range"] = f"bytes={offset}-"
+                        return headers
+
                     response = https_only_get(
-                        session, source_url, timeout=(15, 30), headers_for=_headers_for
+                        session, source_url, timeout=(15, 30), headers_for=_hop_headers
                     )
+                    if offset and response.status_code == 416:
+                        response.close()
+                        raise ResumeRejected("server refused the byte range")
                     response.raise_for_status()
 
                     # Check for cancel after connection
                     if self._cancel_download:
                         raise Exception("Download cancelled by user")
 
+                    header_len = int(response.headers.get('content-length', 0))
+                    resumed = resume_start(
+                        response.status_code,
+                        response.headers.get('content-range'),
+                        header_len,
+                        offset,
+                        bounds.trusted_size,
+                    )
+                    # The bounds count the whole file, not this response.
                     total_size = bounds.check_header(
-                        int(response.headers.get('content-length', 0))
+                        resumed + header_len if header_len else 0
                     ) or 0
-                    downloaded = 0
+                    downloaded = resumed
                     start_time = time_module.time()
                     last_update_time = start_time
 
-                    with open(temp_path, 'wb') as f:
+                    with open(temp_path, 'ab' if resumed else 'wb') as f:
                         for chunk in response.iter_content(chunk_size=1024 * 256):  # 256KB chunks for smoother progress
                             # Check for cancel
                             if self._cancel_download:
@@ -15507,7 +15619,7 @@ class WayfinderApp(ctk.CTk):
                                 current_time = time_module.time()
                                 if current_time - last_update_time >= 0.3:  # Update every 300ms
                                     elapsed = current_time - start_time
-                                    speed = downloaded / elapsed if elapsed > 0 else 0
+                                    speed = (downloaded - resumed) / elapsed if elapsed > 0 else 0
 
                                     if total_size > 0:
                                         progress = downloaded / total_size
@@ -15529,7 +15641,15 @@ class WayfinderApp(ctk.CTk):
                     bounds.check_complete(downloaded)
                     # start_time comes back out so the final stats describe the
                     # attempt that actually succeeded, not an abandoned one.
-                    return downloaded, start_time
+                    return downloaded, start_time, resumed
+
+                def _attempt(source_url):
+                    """One attempt; a refused resume starts over from byte zero."""
+                    try:
+                        return _attempt_once(source_url)
+                    except ResumeRejected:
+                        temp_path.unlink(missing_ok=True)
+                        return _attempt_once(source_url)
 
                 # One retry for transport failures, matching the whisper panel:
                 # an ungated model retries against the URL we shipped, a paid one
@@ -15539,11 +15659,12 @@ class WayfinderApp(ctk.CTk):
                 attempts.append(llm_fallback if llm_fallback and llm_fallback != url else url)
 
                 downloaded = 0
+                resumed = 0
                 start_time = time_module.time()
                 transport_error = None
                 for attempt_url in attempts:
                     try:
-                        downloaded, start_time = _attempt(attempt_url)
+                        downloaded, start_time, resumed = _attempt(attempt_url)
                         transport_error = None
                         break
                     except requests.HTTPError as e:
@@ -15553,12 +15674,9 @@ class WayfinderApp(ctk.CTk):
                         transport_error = e
                     except (DownloadSizeMismatch, requests.RequestException, OSError) as e:
                         transport_error = e
-                    if transport_error is not None:
-                        try:
-                            temp_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
                 if transport_error is not None:
+                    if DownloadBounds(size_bound).trusted_size and expected_sha:
+                        temp_path = None  # keep the bytes for the next attempt
                     raise transport_error
 
                 # Verify content before it can ever be loaded (audit F-C).
@@ -15587,7 +15705,7 @@ class WayfinderApp(ctk.CTk):
                 
                 # Calculate final stats
                 total_time = time_module.time() - start_time
-                avg_speed = downloaded / total_time if total_time > 0 else 0
+                avg_speed = (downloaded - resumed) / total_time if total_time > 0 else 0
                 
                 # Success
                 def on_success():
@@ -19045,8 +19163,10 @@ class WayfinderApp(ctk.CTk):
             )
             banner.pack(fill="x", padx=SPACING["tile_pad"], pady=(0, SPACING["tile_pad_y"]))
             self._ultra_banner = banner
+            from wayfinder.core.ultra_defaults import ultra_model_download_text
+
             banner_text = (
-                "welcome to ultra 😇 — downloading Large v3 Turbo Q5…"
+                ultra_model_download_text()
                 if getattr(self, "_ultra_model_downloading", False)
                 else "welcome to ultra 😇 — everything unlocked"
             )
@@ -22796,8 +22916,26 @@ class WayfinderApp(ctk.CTk):
         self.quit_app()
         return True
 
+    def _log_downloads_on_quit(self) -> None:
+        """Note a model download cut short by quitting; its bytes stay on disk."""
+        if getattr(self, "_ultra_model_downloading", False):
+            self.log(
+                "⏸ Quitting mid-download: Large v3 Turbo Q5 continues next time you open Aura."
+            )
+            return
+        with ModelDownloader._in_flight_lock:
+            downloading = bool(ModelDownloader._in_flight)
+        if downloading or getattr(self, "_inline_download_active", False):
+            self.log(
+                "⏸ Quitting mid-download: it picks up where it left off when you download it again."
+            )
+
     def quit_app(self, icon=None, item=None):
         """Clean shutdown of the app and all subprocesses."""
+        try:
+            WayfinderApp._log_downloads_on_quit(self)
+        except Exception:
+            pass
         # A deliberate quit is not a crash: drop this launch's native crash file.
         try:
             from wayfinder.core import crash_reports
