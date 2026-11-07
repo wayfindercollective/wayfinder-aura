@@ -25,7 +25,9 @@ so a bad splice is caught before anything is loaded.
 
 from __future__ import annotations
 
+import errno
 import re
+import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -114,6 +116,56 @@ class DownloadBounds:
             )
 
 
+#: Shown when a download stops because the disk is full.
+DISK_FULL_MESSAGE = (
+    "There isn't enough disk space for this model. Free up some space and download it again."
+)
+
+#: A partial nobody has touched for this long is not coming back.
+STALE_PARTIAL_SECONDS = 30 * 24 * 60 * 60
+
+
+def is_disk_full(error: BaseException) -> bool:
+    """A full disk won't clear by retrying, so the partial should free its space."""
+    return isinstance(error, OSError) and error.errno in (errno.ENOSPC, errno.EDQUOT)
+
+
+def can_resume(expected_size: Optional[int], expected_sha256: Optional[str]) -> bool:
+    """Only a known size and a well-formed digest can catch a bad splice.
+
+    `verify_model_digest` skips a malformed pin, so it has to count as no pin.
+    """
+    from wayfinder.model_catalog import safe_sha256
+
+    return bool(expected_size and safe_sha256(expected_sha256))
+
+
+def sweep_stale_partials(
+    directory: Path, suffix: str, *, keep: frozenset[str] | set[str] = frozenset()
+) -> list[Path]:
+    """Delete old partial downloads in *directory*; returns what went.
+
+    Interrupted transfers now stay on disk, and a model nobody downloads again
+    would otherwise hold that space forever. ``keep`` names files still in use.
+    """
+    removed: list[Path] = []
+    cutoff = time.time() - STALE_PARTIAL_SECONDS
+    try:
+        candidates = list(Path(directory).glob(f"*{suffix}"))
+    except OSError:
+        return removed
+    for path in candidates:
+        if path.name in keep:
+            continue
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed.append(path)
+        except OSError:
+            continue
+    return removed
+
+
 def resume_offset(
     partial: Path, expected_size: Optional[int], expected_sha256: Optional[str]
 ) -> int:
@@ -127,7 +179,7 @@ def resume_offset(
         size = partial.stat().st_size
     except OSError:
         return 0
-    if expected_size and expected_sha256 and size <= expected_size:
+    if can_resume(expected_size, expected_sha256) and size <= expected_size:
         return size
     partial.unlink(missing_ok=True)
     return 0

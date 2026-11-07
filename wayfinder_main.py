@@ -2131,6 +2131,8 @@ class ModelDownloader:
         # Whether the last failure is worth trying again later (a dropped
         # connection) rather than a settled answer (refused, wrong bytes, cancelled).
         self.last_error_retryable = False
+        # The last failure was only "this model is already downloading".
+        self.last_error_duplicate = False
 
     def _filename(self, model_id: str) -> str | None:
         info = WHISPER_CPP_MODELS.get(model_id)
@@ -2202,6 +2204,20 @@ class ModelDownloader:
             return False
         return _resolve_whisper_model(filename) is not None
 
+    def _is_in_flight(self, model_id: str) -> bool:
+        with ModelDownloader._in_flight_lock:
+            return model_id in ModelDownloader._in_flight
+
+    def has_only_partial(self, model_id: str) -> bool:
+        """An interrupted download is all this model has, so the panel can offer
+        to discard it. A partial still being written does not count."""
+        if self.is_installed(model_id) or self._is_in_flight(model_id):
+            return False
+        filename = self._filename(model_id)
+        return bool(filename) and any(
+            path.name == f"{filename}.downloading" for path in self.writable_copies(model_id)
+        )
+
     def is_removable(self, model_id: str) -> bool:
         """True if at least one writable copy exists (not only a bundled file)."""
         return bool(self.writable_copies(model_id))
@@ -2234,6 +2250,7 @@ class ModelDownloader:
         
         self._cancel_requested = False
         self.last_error_retryable = False
+        self.last_error_duplicate = False
         model_info = WHISPER_CPP_MODELS[model_id]
         # Ensure destination dir exists (may have been wiped)
         try:
@@ -2245,6 +2262,7 @@ class ModelDownloader:
         with ModelDownloader._in_flight_lock:
             if model_id in ModelDownloader._in_flight:
                 self.last_error_retryable = True
+                self.last_error_duplicate = True
                 if error_callback:
                     error_callback("This model is already downloading")
                 return
@@ -2269,8 +2287,9 @@ class ModelDownloader:
                     DownloadBounds,
                     DownloadSizeMismatch,
                     HttpsOnlyRedirectHandler,
-                    InsecureRedirect,
                     ResumeRejected,
+                    can_resume,
+                    is_disk_full,
                     require_https,
                     resume_offset,
                     resume_start,
@@ -2339,13 +2358,19 @@ class ModelDownloader:
 
                 expected_sha = model_info.get("sha256")
 
+                # This pass kept bytes from an earlier transfer, so a digest
+                # mismatch may only mean the partial was bad.
+                spliced = False
+
                 def _fetch_once(source_url):
                     """Stream one attempt to temp_path, bounded and https-only."""
+                    nonlocal spliced
                     require_https(source_url)
                     bounds = DownloadBounds(size_bound)
                     offset = resume_offset(temp_path, bounds.trusted_size, expected_sha)
                     if offset and offset == bounds.trusted_size:
                         # Every byte landed before the app died: the digest decides.
+                        spliced = True
                         return
                     request = urllib.request.Request(source_url)
                     if offset:
@@ -2379,6 +2404,7 @@ class ModelDownloader:
                             start + header_len if header_len else 0
                         ) or 0
                         downloaded = start
+                        spliced = spliced or bool(start)
                         chunk_size = 1024 * 1024  # 1MB chunks
 
                         with open(temp_path, "ab" if start else "wb") as f:
@@ -2417,55 +2443,77 @@ class ModelDownloader:
                 fallback = fallback_url_for(model_info, shipped_whisper_trust())
                 attempts.append(fallback if fallback and fallback != url else url)
 
-                transport_error = None
-                for attempt_url in attempts:
-                    try:
-                        _fetch(attempt_url)
-                        transport_error = None
-                        break
-                    except _Cancelled:
+                refetched = False
+                while True:
+                    spliced = False
+                    transport_error = None
+                    for attempt_url in attempts:
+                        if self._cancel_requested:
+                            break
+                        try:
+                            _fetch(attempt_url)
+                            transport_error = None
+                            break
+                        except _Cancelled:
+                            if error_callback:
+                                error_callback("Download cancelled")
+                            return  # finally: removes the temp file
+                        except urllib.error.HTTPError as e:
+                            # 4xx is a settled answer (missing object, expired or
+                            # rejected license) — asking again wastes the user's
+                            # time. 429/5xx are worth the one retry.
+                            if e.code < 500 and e.code != 429:
+                                if transport_error is not None:
+                                    # The other origin refusing says nothing about
+                                    # the bytes the dropped attempt already has.
+                                    break
+                                self.last_error_retryable = e.code not in (401, 403)
+                                raise
+                            transport_error = e
+                        except (
+                            DownloadSizeMismatch,
+                            urllib.error.URLError,
+                            http.client.HTTPException,
+                            OSError,
+                        ) as e:
+                            if is_disk_full(e):
+                                raise
+                            transport_error = e
+                    # Cancel beats whatever the dead connection reported.
+                    if self._cancel_requested:
                         if error_callback:
                             error_callback("Download cancelled")
                         return  # finally: removes the temp file
-                    except urllib.error.HTTPError as e:
-                        # 4xx is a settled answer (missing object, expired or
-                        # rejected license) — asking again wastes the user's
-                        # time. 429/5xx are worth the one retry.
-                        if e.code < 500 and e.code != 429:
-                            raise
-                        transport_error = e
-                    except (
-                        DownloadSizeMismatch,
-                        InsecureRedirect,
-                        urllib.error.URLError,
-                        http.client.HTTPException,
-                        OSError,
-                    ) as e:
-                        transport_error = e
-                if transport_error is not None:
-                    self.last_error_retryable = True
-                    if DownloadBounds(size_bound).trusted_size and expected_sha:
-                        temp_path = None  # keep the bytes for the next attempt
-                    raise transport_error
+                    if transport_error is not None:
+                        self.last_error_retryable = True
+                        if can_resume(DownloadBounds(size_bound).trusted_size, expected_sha):
+                            temp_path = None  # keep the bytes for the next attempt
+                        raise transport_error
 
-                # Verify content before it can ever be loaded (audit F-C).
-                # Hashing a multi-GB model takes real time, so it honors Cancel
-                # too — otherwise the UI says "Cancelling…" and installs anyway.
-                try:
-                    verify_model_digest(
-                        temp_path,
-                        model_info.get("sha256"),
-                        should_cancel=lambda: self._cancel_requested,
-                    )
-                except DigestCheckCancelled:
-                    if error_callback:
-                        error_callback("Download cancelled")
-                    return  # finally: removes the temp file
-                except ModelDigestMismatch as e:
-                    log_digest_mismatch(filename, url, e)
-                    if error_callback:
-                        error_callback(e.user_message)
-                    return  # finally: removes the temp file
+                    # Verify content before it can ever be loaded (audit F-C).
+                    # Hashing a multi-GB model takes real time, so it honors Cancel
+                    # too — otherwise the UI says "Cancelling…" and installs anyway.
+                    try:
+                        verify_model_digest(
+                            temp_path,
+                            model_info.get("sha256"),
+                            should_cancel=lambda: self._cancel_requested,
+                        )
+                    except DigestCheckCancelled:
+                        if error_callback:
+                            error_callback("Download cancelled")
+                        return  # finally: removes the temp file
+                    except ModelDigestMismatch as e:
+                        log_digest_mismatch(filename, url, e)
+                        if spliced and not refetched:
+                            # A bad partial is not a bad model: start clean, once.
+                            refetched = True
+                            temp_path.unlink(missing_ok=True)
+                            continue
+                        if error_callback:
+                            error_callback(e.user_message)
+                        return  # finally: removes the temp file
+                    break
 
                 # Last cancel check: hashing a 3 GB model takes long enough that
                 # a click can land between the final poll and the rename.
@@ -2488,7 +2536,11 @@ class ModelDownloader:
                     error_callback(f"Network error: {getattr(e, 'reason', e)}")
             except Exception as e:
                 if error_callback:
-                    error_callback(f"Download failed: {str(e)}")
+                    from wayfinder.core.download_guard import DISK_FULL_MESSAGE, is_disk_full
+
+                    error_callback(
+                        DISK_FULL_MESSAGE if is_disk_full(e) else f"Download failed: {str(e)}"
+                    )
             finally:
                 # Don't leave a half-written .downloading file on failure
                 if temp_path is not None:
@@ -2535,6 +2587,9 @@ class ModelDownloader:
             result["skipped_bundled"] = True
 
         targets = self.writable_copies(model_id)
+        if self._is_in_flight(model_id):
+            # Its transfer still owns the partial.
+            targets = [path for path in targets if not path.name.endswith(".downloading")]
         if not targets:
             if result["skipped_bundled"]:
                 result["error"] = "This model is bundled with the app and can’t be removed."
@@ -15497,10 +15552,13 @@ class WayfinderApp(ctk.CTk):
                     verify_model_digest,
                 )
                 from wayfinder.core.download_guard import (
+                    DISK_FULL_MESSAGE,
                     DownloadBounds,
                     DownloadSizeMismatch,
                     ResumeRejected,
+                    can_resume,
                     https_only_get,
+                    is_disk_full,
                     resume_offset,
                     resume_start,
                 )
@@ -15558,6 +15616,9 @@ class WayfinderApp(ctk.CTk):
                 size_bound = trusted.get("size_bytes") or model_info.get("size_bytes")
                 expected_sha = model_info.get("sha256")
 
+                # See the whisper path: bytes kept from an earlier transfer.
+                spliced = False
+
                 def _attempt_once(source_url):
                     """One bounded, https-only transfer into temp_path.
 
@@ -15565,10 +15626,12 @@ class WayfinderApp(ctk.CTk):
                     refused rather than silently taken (requests would keep
                     Authorization on a same-host downgrade).
                     """
+                    nonlocal spliced
                     bounds = DownloadBounds(size_bound)
                     offset = resume_offset(temp_path, bounds.trusted_size, expected_sha)
                     if offset and offset == bounds.trusted_size:
                         # Every byte landed before the app died: the digest decides.
+                        spliced = True
                         return offset, time_module.time(), offset
 
                     def _hop_headers(hop_url):
@@ -15602,6 +15665,7 @@ class WayfinderApp(ctk.CTk):
                         resumed + header_len if header_len else 0
                     ) or 0
                     downloaded = resumed
+                    spliced = spliced or bool(resumed)
                     start_time = time_module.time()
                     last_update_time = start_time
 
@@ -15661,37 +15725,55 @@ class WayfinderApp(ctk.CTk):
                 downloaded = 0
                 resumed = 0
                 start_time = time_module.time()
-                transport_error = None
-                for attempt_url in attempts:
-                    try:
-                        downloaded, start_time, resumed = _attempt(attempt_url)
-                        transport_error = None
-                        break
-                    except requests.HTTPError as e:
-                        status = getattr(e.response, "status_code", 0) or 0
-                        if status < 500 and status != 429:
-                            raise  # settled answer — do not ask twice
-                        transport_error = e
-                    except (DownloadSizeMismatch, requests.RequestException, OSError) as e:
-                        transport_error = e
-                if transport_error is not None:
-                    if DownloadBounds(size_bound).trusted_size and expected_sha:
-                        temp_path = None  # keep the bytes for the next attempt
-                    raise transport_error
-
-                # Verify content before it can ever be loaded (audit F-C).
-                if temp_path.exists():
-                    try:
-                        verify_model_digest(
-                            temp_path,
-                            model_info.get("sha256"),
-                            should_cancel=lambda: self._cancel_download,
-                        )
-                    except DigestCheckCancelled:
+                refetched = False
+                while True:
+                    spliced = False
+                    transport_error = None
+                    for attempt_url in attempts:
+                        if self._cancel_download:
+                            break
+                        try:
+                            downloaded, start_time, resumed = _attempt(attempt_url)
+                            transport_error = None
+                            break
+                        except requests.HTTPError as e:
+                            status = getattr(e.response, "status_code", 0) or 0
+                            if status < 500 and status != 429:
+                                if transport_error is not None:
+                                    break  # see the whisper path
+                                raise  # settled answer — do not ask twice
+                            transport_error = e
+                        except (DownloadSizeMismatch, requests.RequestException, OSError) as e:
+                            if is_disk_full(e):
+                                raise Exception(DISK_FULL_MESSAGE) from e
+                            transport_error = e
+                    # Cancel beats whatever the dead connection reported.
+                    if self._cancel_download:
                         raise Exception("Download cancelled by user")
-                    except ModelDigestMismatch as e:
-                        log_digest_mismatch(filename, url, e)
-                        raise Exception(e.user_message)
+                    if transport_error is not None:
+                        if can_resume(DownloadBounds(size_bound).trusted_size, expected_sha):
+                            temp_path = None  # keep the bytes for the next attempt
+                        raise transport_error
+
+                    # Verify content before it can ever be loaded (audit F-C).
+                    if temp_path.exists():
+                        try:
+                            verify_model_digest(
+                                temp_path,
+                                model_info.get("sha256"),
+                                should_cancel=lambda: self._cancel_download,
+                            )
+                        except DigestCheckCancelled:
+                            raise Exception("Download cancelled by user")
+                        except ModelDigestMismatch as e:
+                            log_digest_mismatch(filename, url, e)
+                            if spliced and not refetched:
+                                # A bad partial is not a bad model: start clean, once.
+                                refetched = True
+                                temp_path.unlink(missing_ok=True)
+                                continue
+                            raise Exception(e.user_message)
+                    break
 
                 # Last cancel check before the rename — see the whisper path.
                 if self._cancel_download:

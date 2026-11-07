@@ -7,6 +7,7 @@ resume that spliced the wrong bytes fails the same check real installs use.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import http.server
 import os
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -27,13 +29,17 @@ from wayfinder.core.download_guard import (
     DownloadBounds,
     DownloadSizeMismatch,
     ResumeRejected,
+    can_resume,
+    is_disk_full,
     resume_offset,
     resume_start,
+    sweep_stale_partials,
 )
 
 MB = 1024 * 1024
 PAYLOAD = hashlib.sha256(b"seed").digest() * (3 * MB // 32)
 SHA = hashlib.sha256(PAYLOAD).hexdigest()
+GOOD_SHA = "a" * 64
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -46,13 +52,15 @@ class ModelServer:
     bad-start 206 whose Content-Range starts somewhere else
     bad-total 206 whose Content-Range describes a different object
     416       Range Not Satisfiable
-    401       a settled refusal
+    401/404   a settled refusal
     503       a transient failure
+    insecure  redirects to plain http
     """
 
     def __init__(self, script):
         self.script = list(script)
         self.ranges = []
+        self.on_request = None
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -61,8 +69,16 @@ class ModelServer:
 
             def do_GET(self):
                 outer.ranges.append(self.headers.get("Range"))
+                if outer.on_request:
+                    outer.on_request()
                 step = outer.script.pop(0) if len(outer.script) > 1 else outer.script[0]
-                if step in ("401", "416", "503"):
+                if step == "insecure":
+                    self.send_response(302)
+                    self.send_header("Location", "http://insecure.invalid/model.bin")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if step in ("401", "403", "404", "416", "503"):
                     self.send_response(int(step))
                     self.send_header("Content-Length", "0")
                     self.end_headers()
@@ -257,7 +273,7 @@ def test_a_complete_partial_is_verified_without_touching_the_network(tmp_path, s
     assert dest.read_bytes() == PAYLOAD
 
 
-def test_a_corrupt_partial_fails_the_digest_and_is_deleted(tmp_path, serve, monkeypatch):
+def test_a_corrupt_partial_gets_one_clean_refetch(tmp_path, serve, monkeypatch):
     server = serve("full")
     entry = _pin_whisper(monkeypatch, server.url)
     dest, partial = _paths(tmp_path, entry)
@@ -265,10 +281,97 @@ def test_a_corrupt_partial_fails_the_digest_and_is_deleted(tmp_path, serve, monk
 
     outcome = _run_whisper(tmp_path)
 
+    assert outcome.completed and not outcome.errors
+    assert server.ranges == [f"bytes={MB}-", None]
+    assert dest.read_bytes() == PAYLOAD
+    assert not partial.exists()
+
+
+def test_a_corrupt_complete_partial_gets_one_clean_refetch(tmp_path, serve, monkeypatch):
+    server = serve("full")
+    entry = _pin_whisper(monkeypatch, server.url)
+    dest, partial = _paths(tmp_path, entry)
+    partial.write_bytes(b"\xff" * len(PAYLOAD))
+
+    outcome = _run_whisper(tmp_path)
+
+    assert outcome.completed
+    assert server.ranges == [None]
+    assert dest.read_bytes() == PAYLOAD
+
+
+def test_a_mismatch_on_the_clean_refetch_is_settled(tmp_path, serve, monkeypatch):
+    server = serve("full")
+    entry = _pin_whisper(monkeypatch, server.url, sha="0" * 64)
+    dest, partial = _paths(tmp_path, entry)
+    partial.write_bytes(PAYLOAD[:MB])
+
+    outcome = _run_whisper(tmp_path)
+
     assert outcome.errors and not outcome.completed
     assert outcome.downloader.last_error_retryable is False
+    assert server.ranges == [f"bytes={MB}-", None]
     assert not dest.exists()
     assert not partial.exists()
+
+
+def test_a_mismatch_with_no_resume_is_not_refetched(tmp_path, serve, monkeypatch):
+    server = serve("full")
+    entry = _pin_whisper(monkeypatch, server.url, sha="0" * 64)
+    _, partial = _paths(tmp_path, entry)
+
+    outcome = _run_whisper(tmp_path)
+
+    assert outcome.errors
+    assert server.ranges == [None]
+    assert not partial.exists()
+
+
+def _fill_the_disk(monkeypatch, *, after=0):
+    """open() on a partial hands back a file whose writes hit ENOSPC."""
+    real_open = open
+
+    class _FullFile:
+        def __init__(self, handle):
+            self._handle = handle
+            self._left = after
+
+        def write(self, data):
+            if self._left <= 0:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            self._left -= 1
+            return self._handle.write(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            return False
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        handle = real_open(path, mode, *args, **kwargs)
+        name = str(path)
+        if "b" in mode and ("w" in mode or "a" in mode) and name.endswith((".downloading", ".tmp")):
+            return _FullFile(handle)
+        return handle
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+
+def test_a_full_disk_is_settled_and_frees_the_partial(tmp_path, serve, monkeypatch):
+    server = serve("full")
+    entry = _pin_whisper(monkeypatch, server.url)
+    dest, partial = _paths(tmp_path, entry)
+    partial.write_bytes(PAYLOAD[:MB])
+    _fill_the_disk(monkeypatch)
+
+    outcome = _run_whisper(tmp_path)
+
+    assert outcome.errors and "space" in outcome.errors[0].lower()
+    assert outcome.downloader.last_error_retryable is False
+    assert len(server.ranges) == 1  # no second attempt on a full disk
+    assert not partial.exists() and not dest.exists()
 
 
 def test_a_model_without_a_digest_never_resumes(tmp_path, serve, monkeypatch):
@@ -310,6 +413,109 @@ def test_a_503_keeps_the_partial_and_is_retryable(tmp_path, serve, monkeypatch):
     assert outcome.errors
     assert outcome.downloader.last_error_retryable is True
     assert partial.read_bytes() == PAYLOAD[:MB]
+
+
+def test_a_404_keeps_the_marker_alive_but_a_401_or_403_does_not(tmp_path, serve, monkeypatch):
+    for step, retryable in (("404", True), ("401", False), ("403", False)):
+        server = serve(step)
+        entry = _pin_whisper(monkeypatch, server.url)
+        outcome = _run_whisper(tmp_path)
+        assert outcome.errors
+        assert outcome.downloader.last_error_retryable is retryable, step
+        assert len(server.ranges) == 1
+
+
+def test_a_4xx_after_a_dropped_attempt_keeps_the_partial_and_the_transport_error(
+    tmp_path, serve, monkeypatch
+):
+    server = serve(f"cut:{MB}", "404")
+    entry = _pin_whisper(monkeypatch, server.url)
+    dest, partial = _paths(tmp_path, entry)
+
+    outcome = _run_whisper(tmp_path)
+
+    assert outcome.errors and "404" not in outcome.errors[0]
+    assert outcome.downloader.last_error_retryable is True
+    assert partial.read_bytes() == PAYLOAD[:MB]
+    assert not dest.exists()
+
+
+def test_an_insecure_redirect_is_settled(tmp_path, serve, monkeypatch):
+    server = serve("insecure")
+    entry = _pin_whisper(monkeypatch, server.url)
+    _, partial = _paths(tmp_path, entry)
+    partial.write_bytes(PAYLOAD[:MB])
+    # Keep the https rule live for the redirect target; the server itself is http.
+    monkeypatch.setattr(
+        download_guard,
+        "require_https",
+        lambda url: (_ for _ in ()).throw(download_guard.InsecureRedirect(url))
+        if "insecure.invalid" in url
+        else None,
+    )
+
+    outcome = _run_whisper(tmp_path)
+
+    assert outcome.errors
+    assert outcome.downloader.last_error_retryable is False
+    assert len(server.ranges) == 1
+    assert not partial.exists()
+
+
+def test_cancel_during_a_dead_network_reports_cancelled_and_deletes(tmp_path, serve, monkeypatch):
+    server = serve("503")
+    entry = _pin_whisper(monkeypatch, server.url)
+    _, partial = _paths(tmp_path, entry)
+    partial.write_bytes(PAYLOAD[:MB])
+    downloader = wayfinder_main.ModelDownloader(models_dir=tmp_path)
+    server.on_request = downloader.cancel_download
+    errors = []
+
+    downloader.download_model("base.en", error_callback=errors.append)
+    downloader._current_download.join(timeout=30)
+
+    assert errors and "cancelled" in errors[0].lower()
+    assert downloader.last_error_retryable is False
+    assert len(server.ranges) == 1  # no second attempt after Cancel
+    assert not partial.exists()
+
+
+def test_a_malformed_digest_never_resumes(tmp_path, serve, monkeypatch):
+    # verify_model_digest ignores a malformed pin, so nothing would catch a splice.
+    server = serve(f"cut:{MB}")
+    entry = _pin_whisper(monkeypatch, server.url, sha="not-a-digest")
+    _, partial = _paths(tmp_path, entry)
+    partial.write_bytes(PAYLOAD[:MB])
+
+    outcome = _run_whisper(tmp_path)
+
+    assert outcome.errors
+    assert server.ranges == [None, None]
+    assert not partial.exists()
+
+
+def test_removing_a_partial_only_model_works_but_never_while_it_downloads(tmp_path, monkeypatch):
+    entry = wayfinder_main.WHISPER_CPP_MODELS["base.en"]
+    monkeypatch.setattr(wayfinder_main, "_get_whisper_models_dir", lambda: tmp_path)
+    monkeypatch.setattr(wayfinder_main, "_whisper_model_search_dirs", lambda: [tmp_path])
+    partial = tmp_path / f"{entry['filename']}.downloading"
+    partial.write_bytes(b"partial")
+    downloader = wayfinder_main.ModelDownloader(models_dir=tmp_path)
+    assert downloader.has_only_partial("base.en") is True
+
+    monkeypatch.setattr(wayfinder_main.ModelDownloader, "_in_flight", {"base.en"})
+    assert downloader.has_only_partial("base.en") is False
+    downloader.delete_model("base.en")
+    assert partial.exists()
+
+    monkeypatch.setattr(wayfinder_main.ModelDownloader, "_in_flight", set())
+    assert downloader.delete_model("base.en")["ok"] is True
+    assert not partial.exists()
+    assert downloader.has_only_partial("base.en") is False
+
+    (tmp_path / entry["filename"]).write_bytes(b"full")
+    partial.write_bytes(b"partial")
+    assert downloader.has_only_partial("base.en") is False
 
 
 def test_cancel_still_deletes_the_partial(tmp_path, serve, monkeypatch):
@@ -491,14 +697,72 @@ def test_cleanup_download_restarts_on_a_refused_resume(cleanup_model, step):
     assert dest.read_bytes() == PAYLOAD
 
 
-def test_cleanup_download_deletes_a_corrupt_partial(cleanup_model):
+def test_cleanup_corrupt_partial_gets_one_clean_refetch(cleanup_model):
     server, info, dest, partial = cleanup_model("full")
     partial.write_bytes(b"\xff" * MB)
 
     _CleanupApp(info)._download_selected_llamacpp_model()
 
+    assert server.ranges == [f"bytes={MB}-", None]
+    assert dest.read_bytes() == PAYLOAD
+    assert not partial.exists()
+
+
+def test_cleanup_mismatch_on_the_clean_refetch_is_settled(cleanup_model):
+    server, info, dest, partial = cleanup_model("full", sha256="0" * 64)
+    partial.write_bytes(PAYLOAD[:MB])
+
+    _CleanupApp(info)._download_selected_llamacpp_model()
+
+    assert server.ranges == [f"bytes={MB}-", None]
     assert not dest.exists()
     assert not partial.exists()
+
+
+def test_cleanup_full_disk_is_settled_and_frees_the_partial(cleanup_model, monkeypatch):
+    server, info, dest, partial = cleanup_model("full")
+    partial.write_bytes(PAYLOAD[:MB])
+    _fill_the_disk(monkeypatch)
+    app = _CleanupApp(info)
+
+    app._download_selected_llamacpp_model()
+
+    assert any("space" in message.lower() for message in app.logs)
+    assert len(server.ranges) == 1
+    assert not partial.exists() and not dest.exists()
+
+
+def test_cleanup_4xx_after_a_drop_keeps_the_partial(cleanup_model):
+    server, info, dest, partial = cleanup_model(f"cut:{MB}", "404")
+    app = _CleanupApp(info)
+
+    app._download_selected_llamacpp_model()
+
+    assert partial.read_bytes() == PAYLOAD[:MB]
+    assert not any("404" in message for message in app.logs)
+
+
+def test_cleanup_cancel_during_a_dead_network_deletes(cleanup_model):
+    server, info, dest, partial = cleanup_model("503")
+    partial.write_bytes(PAYLOAD[:MB])
+    app = _CleanupApp(info)
+    server.on_request = lambda: setattr(app, "_cancel_download", True)
+
+    app._download_selected_llamacpp_model()
+
+    assert any("cancel" in message.lower() for message in app.logs)
+    assert len(server.ranges) == 1
+    assert not partial.exists()
+
+
+def test_cleanup_malformed_digest_never_resumes(cleanup_model):
+    server, info, dest, partial = cleanup_model("full", sha256="not-a-digest")
+    partial.write_bytes(b"\xff" * MB)
+
+    _CleanupApp(info)._download_selected_llamacpp_model()
+
+    assert server.ranges == [None]
+    assert dest.read_bytes() == PAYLOAD
 
 
 def test_cleanup_download_does_not_resume_without_a_digest(cleanup_model):
@@ -530,9 +794,9 @@ def test_cleanup_cancel_deletes_the_partial(cleanup_model):
 def test_resume_offset_needs_a_size_and_a_digest(tmp_path):
     partial = tmp_path / "m.downloading"
     partial.write_bytes(b"x" * 10)
-    assert resume_offset(partial, 100, "abc") == 10
-    assert resume_offset(partial, 10, "abc") == 10
-    assert resume_offset(partial, None, "abc") == 0
+    assert resume_offset(partial, 100, GOOD_SHA) == 10
+    assert resume_offset(partial, 10, GOOD_SHA) == 10
+    assert resume_offset(partial, None, GOOD_SHA) == 0
     assert not partial.exists()
 
     partial.write_bytes(b"x" * 10)
@@ -540,10 +804,56 @@ def test_resume_offset_needs_a_size_and_a_digest(tmp_path):
     assert not partial.exists()
 
     partial.write_bytes(b"x" * 10)
-    assert resume_offset(partial, 9, "abc") == 0
+    assert resume_offset(partial, 9, GOOD_SHA) == 0
     assert not partial.exists()
 
-    assert resume_offset(tmp_path / "missing", 100, "abc") == 0
+    partial.write_bytes(b"x" * 10)
+    assert resume_offset(partial, 100, "abc") == 0
+    assert not partial.exists()
+
+    assert resume_offset(tmp_path / "missing", 100, GOOD_SHA) == 0
+
+
+def test_can_resume_needs_a_size_and_a_well_formed_digest():
+    assert can_resume(100, GOOD_SHA)
+    assert can_resume(100, "sha256:" + GOOD_SHA.upper())
+    assert not can_resume(None, GOOD_SHA)
+    assert not can_resume(100, None)
+    assert not can_resume(100, "abc")
+
+
+def _aged(path, days):
+    old = time.time() - days * 86400
+    os.utime(path, (old, old))
+
+
+def test_sweep_removes_only_old_partials_it_does_not_have_to_keep(tmp_path):
+    old = tmp_path / "ggml-a.bin.downloading"
+    recent = tmp_path / "ggml-b.bin.downloading"
+    owned = tmp_path / "ggml-c.bin.downloading"
+    finished = tmp_path / "ggml-d.bin"
+    other_kind = tmp_path / "ggml-e.tmp"
+    for path in (old, recent, owned, finished, other_kind):
+        path.write_bytes(b"x")
+    for path in (old, owned, finished, other_kind):
+        _aged(path, 31)
+    _aged(recent, 29)
+
+    removed = sweep_stale_partials(tmp_path, ".downloading", keep={owned.name})
+
+    assert removed == [old]
+    assert not old.exists()
+    assert recent.exists() and owned.exists() and finished.exists() and other_kind.exists()
+
+
+def test_sweep_tolerates_a_missing_directory(tmp_path):
+    assert sweep_stale_partials(tmp_path / "nope", ".tmp") == []
+
+
+def test_is_disk_full_only_for_a_full_disk():
+    assert is_disk_full(OSError(errno.ENOSPC, "full"))
+    assert not is_disk_full(OSError(errno.EACCES, "denied"))
+    assert not is_disk_full(ValueError("x"))
 
 
 def test_resume_start_accepts_only_the_exact_continuation():
