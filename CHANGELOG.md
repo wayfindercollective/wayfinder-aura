@@ -17,7 +17,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
   the Ultra download continues by itself the next time you open Aura. The banner
   says it's in the background and safe to close. Every finished model is still
   checked against its known checksum before it can load. Pressing Cancel still
-  deletes the partial file.
+  deletes the partial file. If the disk fills up, Aura frees the partial and asks
+  you to make room. If the Ultra download keeps failing, it stops after five
+  tries and says so. Unfinished downloads nobody picks back up are cleared after
+  30 days, and the models panel can discard one sooner.
 - **Your custom vocabulary no longer gets typed in place of silence.** On a
   quiet stretch, Whisper sometimes wrote back the vocabulary list Aura gives
   it ("and Aura, Wayfinder, r.") instead of what you said, and Aura typed it
