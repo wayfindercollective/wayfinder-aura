@@ -27,6 +27,7 @@ INSTALLED_FILES=(
   "${BIN_DIR}/wayfinder-trigger-daemon.py"
   "${BIN_DIR}/wayfinder-mode-supervisor.py"
   "${BIN_DIR}/wayfinder-aura-show-or-start"
+  "${BIN_DIR}/wayfinder-aura-wait-desktop"
   "${APPLICATION_DIR}/wayfinder-aura.desktop"
   "${ICON_DIR}/io.wayfindercollective.WayfinderAura.png"
   "${UNIT_DIR}/wayfinder-trigger.service"
@@ -56,10 +57,12 @@ for f in "${INSTALLED_FILES[@]}"; do
   fi
 done
 
-# Remove the drop-in dir if it's now empty.
-if [[ -d "${DROPIN_DIR}" ]]; then
-  rmdir --ignore-fail-on-non-empty "${DROPIN_DIR}" 2>/dev/null || true
-fi
+# Clear the hand fixes the installer replaces, then any drop-in dir now empty.
+for service in wayfinder-aura wayfinder-mode-supervisor wayfinder-trigger; do
+  rm -f -- "${UNIT_DIR}/${service}.service.d/journal-logs.conf" \
+           "${UNIT_DIR}/${service}.service.d/wait-desktop.conf"
+  rmdir --ignore-fail-on-non-empty "${UNIT_DIR}/${service}.service.d" 2>/dev/null || true
+done
 
 # --- 3. reload systemd ----------------------------------------------------
 say "Reloading systemd user manager"

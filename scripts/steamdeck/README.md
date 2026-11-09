@@ -39,6 +39,7 @@ installer is idempotent.
 | `wayfinder-trigger-daemon.py` | `~/.local/bin/wayfinder-trigger-daemon.py` (executable) |
 | `wayfinder-mode-supervisor.py` | `~/.local/bin/wayfinder-mode-supervisor.py` (executable) |
 | `wayfinder-aura-show-or-start.py` | `~/.local/bin/wayfinder-aura-show-or-start` (executable) |
+| `wayfinder-aura-wait-desktop.sh` | `~/.local/bin/wayfinder-aura-wait-desktop` (executable) |
 | `wayfinder-aura.desktop` | `~/.local/share/applications/wayfinder-aura.desktop` |
 | `systemd/wayfinder-trigger.service` | `~/.config/systemd/user/wayfinder-trigger.service` |
 | `systemd/wayfinder-mode-supervisor.service` | `~/.config/systemd/user/wayfinder-mode-supervisor.service` |
@@ -152,6 +153,26 @@ The unit is `WantedBy=default.target` (**not** `graphical-session.target`) and
 declares `Before=wayfinder-aura.service` with **no** `PartOf`/`Requires`/
 `BindsTo` on the unit it controls — binding the supervisor to the app it
 starts and stops would create a dependency cycle.
+
+### `wayfinder-aura-wait-desktop`: wait for Plasma when leaving Game Mode
+
+Aura reads the desktop's portals once at startup. Leaving Game Mode it can
+start before Plasma publishes its environment, and the portal it wakes then
+serves gamescope's backends for the whole session: no global shortcuts and no
+typing into native apps.
+
+`wayfinder-aura.service` runs this helper as `ExecStartPre`. In Game Mode it
+returns at once. Otherwise it waits for `XDG_CURRENT_DESKTOP=KDE`, then for the
+portal to offer GlobalShortcuts, restarting the portal once if it came up
+without them.
+
+The `-` prefix means a failed wait never stops Aura starting. It does not cover
+an expired `TimeoutStartSec`, so `timeout` caps the wait below it: keep
+`TimeoutStartSec` above that cap.
+
+The installer removes the earlier hand-made `journal-logs.conf` and
+`wait-desktop.conf` drop-ins, so the unit stays the single source of this
+behaviour. Any other drop-in is left alone.
 
 ### Trigger daemon rebound to `default.target`
 

@@ -10,6 +10,7 @@
 #   ~/.local/bin/wayfinder-trigger-daemon.py         (executable)
 #   ~/.local/bin/wayfinder-mode-supervisor.py        (executable)
 #   ~/.local/bin/wayfinder-aura-show-or-start         (executable)
+#   ~/.local/bin/wayfinder-aura-wait-desktop          (executable)
 #   ~/.local/share/applications/wayfinder-aura.desktop
 #   ~/.config/systemd/user/wayfinder-trigger.service
 #   ~/.config/systemd/user/wayfinder-mode-supervisor.service
@@ -102,6 +103,7 @@ require() {
 require "${SCRIPT_DIR}/wayfinder-trigger-daemon.py"
 require "${SCRIPT_DIR}/wayfinder-mode-supervisor.py"
 require "${SCRIPT_DIR}/wayfinder-aura-show-or-start.py"
+require "${SCRIPT_DIR}/wayfinder-aura-wait-desktop.sh"
 require "${SCRIPT_DIR}/wayfinder-aura.desktop"
 require "${SYSTEMD_SRC}/wayfinder-trigger.service"
 require "${SYSTEMD_SRC}/wayfinder-mode-supervisor.service"
@@ -258,6 +260,7 @@ say "Installing daemon scripts to ${BIN_DIR}"
 install -Dm755 "${SCRIPT_DIR}/wayfinder-trigger-daemon.py"  "${BIN_DIR}/wayfinder-trigger-daemon.py"
 install -Dm755 "${SCRIPT_DIR}/wayfinder-mode-supervisor.py" "${BIN_DIR}/wayfinder-mode-supervisor.py"
 install -Dm755 "${SCRIPT_DIR}/wayfinder-aura-show-or-start.py" "${BIN_DIR}/wayfinder-aura-show-or-start"
+install -Dm755 "${SCRIPT_DIR}/wayfinder-aura-wait-desktop.sh" "${BIN_DIR}/wayfinder-aura-wait-desktop"
 
 say "Host trigger input backend: $("${BIN_DIR}/wayfinder-trigger-daemon.py" --print-input-backend)"
 
@@ -282,7 +285,15 @@ install -Dm644 "${SYSTEMD_SRC}/wayfinder-aura-failed.service"     "${UNIT_DIR}/w
 # v1.1.4 and earlier used a drop-in over a source-build service. The service
 # now launches Flatpak directly; remove only that obsolete installer-owned file.
 rm -f -- "${DROPIN_DIR}/flatpak.conf"
-rmdir --ignore-fail-on-non-empty "${DROPIN_DIR}" 2>/dev/null || true
+
+# Hand fixes for the 209/STDOUT and portal bugs, now shipped in the units. A
+# leftover wait-desktop.conf would repeat the wait without the "-" that stops
+# a failed wait from blocking Aura.
+for service in wayfinder-aura wayfinder-mode-supervisor wayfinder-trigger; do
+  rm -f -- "${UNIT_DIR}/${service}.service.d/journal-logs.conf" \
+           "${UNIT_DIR}/${service}.service.d/wait-desktop.conf"
+  rmdir --ignore-fail-on-non-empty "${UNIT_DIR}/${service}.service.d" 2>/dev/null || true
+done
 
 # --- 3. reload systemd ----------------------------------------------------
 say "Reloading systemd user manager"

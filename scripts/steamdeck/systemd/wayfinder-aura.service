@@ -8,8 +8,12 @@ OnFailure=wayfinder-aura-failed.service
 
 [Service]
 Type=simple
+# "-" lets Aura start even if the wait fails. It does not cover an expired
+# TimeoutStartSec, so timeout caps the wait below it.
+ExecStartPre=-/usr/bin/timeout --kill-after=5 110 %h/.local/bin/wayfinder-aura-wait-desktop
 ExecStart=/usr/bin/flatpak run io.wayfindercollective.WayfinderAura
 ExecStopPost=-/usr/bin/flatpak kill io.wayfindercollective.WayfinderAura
+TimeoutStartSec=130
 Environment=DISPLAY=:0
 UMask=0077
 Restart=on-failure

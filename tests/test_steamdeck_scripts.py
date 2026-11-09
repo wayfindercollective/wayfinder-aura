@@ -277,3 +277,208 @@ def test_nothing_points_at_the_retired_runtime_log_files():
     assert "journalctl --user -u wayfinder-aura.service" in _read(
         "systemd/wayfinder-aura-failed.service"
     )
+
+
+WAIT_HELPER = STEAMDECK / "wayfinder-aura-wait-desktop.sh"
+
+
+def _stub(directory: Path, name: str, body: str) -> None:
+    path = directory / name
+    path.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _run_wait_helper(tmp_path, *, game=False, kde_after=0, portal="ok"):
+    """Run the helper against stubs and return (exit code, calls it made).
+
+    systemctl, busctl and sleep all resolve to stubs, so nothing real is
+    touched and no time passes. kde_after is how many environment reads still
+    see gamescope's stale value. portal is "ok", "after-restart" or "never".
+    """
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    log = tmp_path / "calls.log"
+    log.touch()
+    _stub(stubs, "systemctl", """\
+echo "systemctl $*" >> "$STUB_LOG"
+case "$*" in
+  *is-active*) [ "$STUB_GAME" = 1 ]; exit $? ;;
+  *show-environment*)
+    seen=$(grep -c show-environment "$STUB_LOG")
+    if [ "$seen" -gt "$STUB_KDE_AFTER" ]; then
+      echo XDG_CURRENT_DESKTOP=KDE
+    else
+      echo XDG_CURRENT_DESKTOP=gamescope
+    fi ;;
+esac
+exit 0
+""")
+    _stub(stubs, "busctl", """\
+echo "busctl $*" >> "$STUB_LOG"
+case "$STUB_PORTAL" in
+  ok) exit 0 ;;
+  after-restart) grep -q 'restart xdg-desktop-portal' "$STUB_LOG" ;;
+  *) exit 1 ;;
+esac
+""")
+    _stub(stubs, "sleep", 'echo "sleep $*" >> "$STUB_LOG"\n')
+    env = {
+        **os.environ,
+        "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+        "STUB_LOG": str(log),
+        "STUB_GAME": "1" if game else "0",
+        "STUB_KDE_AFTER": str(kde_after),
+        "STUB_PORTAL": portal,
+    }
+    result = subprocess.run(
+        ["sh", str(WAIT_HELPER)],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+    return result.returncode, log.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.linux_only
+def test_wait_helper_does_not_wait_in_game_mode(tmp_path):
+    code, calls = _run_wait_helper(tmp_path, game=True)
+
+    assert code == 0
+    assert calls == ["systemctl --user -q is-active gamescope-session.service"]
+
+
+@pytest.mark.linux_only
+def test_wait_helper_holds_the_portal_back_until_plasma_publishes_its_environment(tmp_path):
+    """Waking the portal on gamescope's stale environment is the whole bug: it
+    then serves gamescope's backends for the rest of the session."""
+    code, calls = _run_wait_helper(tmp_path, kde_after=3)
+
+    assert code == 0
+    environment_reads = [i for i, call in enumerate(calls) if "show-environment" in call]
+    first_portal_call = next(i for i, call in enumerate(calls) if call.startswith("busctl"))
+    assert len(environment_reads) == 4
+    assert first_portal_call > environment_reads[-1]
+    assert calls.count("sleep 1") == 3
+    assert not any("restart" in call for call in calls)
+
+
+@pytest.mark.linux_only
+def test_wait_helper_restarts_a_portal_that_came_up_without_global_shortcuts(tmp_path):
+    code, calls = _run_wait_helper(tmp_path, portal="after-restart")
+
+    assert code == 0
+    assert [call for call in calls if "restart" in call] == [
+        "systemctl --user --no-block restart xdg-desktop-portal.service"
+    ]
+    assert calls[-1].startswith("busctl")
+
+
+@pytest.mark.linux_only
+def test_aura_start_timeout_exceeds_the_wait_helpers_worst_case(tmp_path):
+    """A leading "-" forgives a failed ExecStartPre but not an expired
+    TimeoutStartSec, so the wait has to be capped below the start timeout."""
+    code, calls = _run_wait_helper(tmp_path, kde_after=100000, portal="never")
+    assert code == 0, "a helper that gives up must still let Aura start"
+
+    sleeps = [call for call in calls if call.startswith("sleep")]
+    assert set(sleeps) == {"sleep 1"}
+    portal_calls = [call for call in calls if call.startswith("busctl")]
+    per_call = int(re.search(r"--timeout=(\d+)", portal_calls[0]).group(1))
+    worst_case = len(sleeps) + len(portal_calls) * per_call
+
+    unit = _read("systemd/wayfinder-aura.service")
+    capped = re.search(
+        r"^ExecStartPre=-/usr/bin/timeout --kill-after=(\d+) (\d+) "
+        r"%h/\.local/bin/wayfinder-aura-wait-desktop$",
+        unit,
+        re.MULTILINE,
+    )
+    assert capped, "the wait must be failure-tolerant (-) and capped"
+    kill_after, limit = int(capped.group(1)), int(capped.group(2))
+    start_timeout = int(re.search(r"^TimeoutStartSec=(\d+)$", unit, re.MULTILINE).group(1))
+
+    assert worst_case <= limit
+    assert limit + kill_after < start_timeout
+
+
+def _run_deck_script(tmp_path, script: str, *args: str) -> Path:
+    """Run an installer script with HOME sandboxed and systemctl/flatpak stubbed."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir(exist_ok=True)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    _stub(stubs, "systemctl", "exit 0\n")
+    _stub(stubs, "flatpak", 'echo "     Version: 9.9.9"\n')
+    result = subprocess.run(
+        ["bash", str(STEAMDECK / script), *args],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+        },
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return home
+
+
+@pytest.mark.linux_only
+def test_uninstall_removes_every_file_install_adds(tmp_path):
+    home = _run_deck_script(tmp_path, "install-steamdeck.sh", "--skip-flatpak")
+    helper = home / ".local" / "bin" / "wayfinder-aura-wait-desktop"
+    assert os.access(helper, os.X_OK)
+    assert helper.read_text(encoding="utf-8") == WAIT_HELPER.read_text(encoding="utf-8")
+
+    _run_deck_script(tmp_path, "uninstall-steamdeck.sh")
+
+    assert [path for path in home.rglob("*") if not path.is_dir()] == []
+
+
+@pytest.mark.linux_only
+def test_uninstall_clears_hand_made_drop_ins_on_a_deck_that_never_reinstalled(tmp_path):
+    """Otherwise wait-desktop.conf is left naming a helper uninstall just removed."""
+    units = tmp_path / "home" / ".config" / "systemd" / "user"
+    aura_drop_ins = units / "wayfinder-aura.service.d"
+    aura_drop_ins.mkdir(parents=True)
+    (aura_drop_ins / "wait-desktop.conf").write_text("[Service]\n")
+    (aura_drop_ins / "journal-logs.conf").write_text("[Service]\n")
+
+    _run_deck_script(tmp_path, "uninstall-steamdeck.sh")
+
+    assert not aura_drop_ins.exists()
+
+
+@pytest.mark.linux_only
+def test_reinstall_over_the_hand_made_drop_ins_leaves_one_failure_tolerant_wait(tmp_path):
+    """The hand-made wait-desktop.conf has no "-" prefix. Left in place it would
+    run the wait a second time, and that run could fail the start."""
+    units = tmp_path / "home" / ".config" / "systemd" / "user"
+    for service in ("wayfinder-aura", "wayfinder-mode-supervisor", "wayfinder-trigger"):
+        drop_ins = units / f"{service}.service.d"
+        drop_ins.mkdir(parents=True)
+        (drop_ins / "journal-logs.conf").write_text("[Service]\nStandardOutput=journal\n")
+    aura_drop_ins = units / "wayfinder-aura.service.d"
+    (aura_drop_ins / "wait-desktop.conf").write_text(
+        "[Service]\nExecStartPre=%h/.local/bin/wayfinder-aura-wait-desktop\n"
+    )
+    (aura_drop_ins / "local.conf").write_text("[Service]\nEnvironment=KEEP=1\n")
+
+    _run_deck_script(tmp_path, "install-steamdeck.sh", "--skip-flatpak")
+
+    assert [path.name for path in aura_drop_ins.iterdir()] == ["local.conf"]
+    assert not (units / "wayfinder-trigger.service.d").exists()
+    assert not (units / "wayfinder-mode-supervisor.service.d").exists()
+    effective = (units / "wayfinder-aura.service").read_text() + (
+        aura_drop_ins / "local.conf"
+    ).read_text()
+    assert effective.count("ExecStartPre=") == 1
+    assert "ExecStartPre=-/usr/bin/timeout" in effective
+
+    _run_deck_script(tmp_path, "uninstall-steamdeck.sh")
+
+    assert [path.name for path in aura_drop_ins.iterdir()] == ["local.conf"]
