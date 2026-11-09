@@ -104,7 +104,7 @@ if ! ./.venv/bin/python -c "$SMOKE" >"$SMOKE_OUT" 2>&1; then
 
     if ! ./.venv/bin/pip install --quiet -r /tmp/wfa-req.txt; then
         /usr/bin/notify-send -u critical -i dialog-error "Wayfinder Aura" \
-            "Venv rebuild failed — see /tmp/wfa-stderr.log and $STATE_LOG. Run: cd ~/dev/wayfinder-aura && rm -rf .venv && python3 -m venv --system-site-packages .venv && grep -vE '$SKIP_RE' requirements.txt > /tmp/wfa-req.txt && .venv/bin/pip install -r /tmp/wfa-req.txt"
+            "Venv rebuild failed. See journalctl --user -u wayfinder-aura.service and $STATE_LOG. Run: cd ~/dev/wayfinder-aura && rm -rf .venv && python3 -m venv --system-site-packages .venv && grep -vE '$SKIP_RE' requirements.txt > /tmp/wfa-req.txt && .venv/bin/pip install -r /tmp/wfa-req.txt"
         exit 1
     fi
     /usr/bin/notify-send -u normal -i emblem-default "Wayfinder Aura" "Venv rebuilt successfully."

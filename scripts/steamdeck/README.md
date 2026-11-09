@@ -56,6 +56,10 @@ systemctl --user enable  --now wayfinder-aura.service wayfinder-trigger.service 
                                 wayfinder-mode-supervisor.service
 ```
 
+Every unit logs to the journal. Do not point `StandardOutput=` at a file under
+`%t`: that path is a tmpfs, systemd opens the file before it creates
+`RuntimeDirectory=`, and on a fresh boot the unit dies with `209/STDOUT`.
+
 The desktop entry uses the one-shot `wayfinder-aura-show-or-start` helper. A click sends
 `show` to the existing app socket and returns immediately; only a genuinely stopped or
 unhealthy app touches systemd/Flatpak. The helper exits after the click and is not a daemon.
@@ -84,7 +88,7 @@ already available and otherwise its bundled standard-library Linux input
 reader, so a stock immutable SteamOS install needs no Python package. The socket is
 `$XDG_RUNTIME_DIR/wayfinder-aura/wayfinder-aura.sock`. **No X11/Wayland
 involvement at all**, which is the whole point: it works identically in Desktop
-Mode and Game Mode. Logs to `$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log`.
+Mode and Game Mode. Logs to the journal: `journalctl --user -u wayfinder-trigger.service`.
 
 It watches two devices:
 
@@ -111,8 +115,8 @@ fresh Deck hotplug/suspend check after packaging changes.
 By default you don't want the dictation app eating RAM while you game: its
 warm whisper/llama servers hold a meaningful chunk of the Deck's 16 GB. But
 some users keybind dictation onto a controller and *do* want it live in Game
-Mode. A host-side `systemd --user` daemon reconciles this every 5s. Logs to
-`$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-mode-supervisor.log`.
+Mode. A host-side `systemd --user` daemon reconciles this every 5s. Logs to the
+journal: `journalctl --user -u wayfinder-mode-supervisor.service`.
 
 * **Mode detection** is self-contained — it reads
   `systemctl --user is-active gamescope-session.service` (active → Game Mode,

@@ -10,14 +10,11 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart=/home/deck/.local/bin/r4-f3-bridge.py
-RuntimeDirectory=wayfinder-aura-logs
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
 UMask=0077
 Restart=on-failure
 RestartSec=3
-StandardOutput=append:%t/wayfinder-aura-logs/r4-f3-bridge.log
-StandardError=append:%t/wayfinder-aura-logs/r4-f3-bridge.log
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=graphical-session.target

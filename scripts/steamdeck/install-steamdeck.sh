@@ -310,8 +310,7 @@ Next steps:
       systemctl --user status wayfinder-aura.service wayfinder-trigger.service wayfinder-mode-supervisor.service
 
   * Watch the host-side logs:
-      tail -f $XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log
-      tail -f $XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-mode-supervisor.log
+      journalctl --user -f -u wayfinder-trigger.service -u wayfinder-mode-supervisor.service
 
   * Trigger dictation: bind R4 (or another back/custom button) to Right Joystick
     Click in Steam's Desktop Layout. In Game Mode, repeat it in each game's

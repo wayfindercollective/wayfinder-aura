@@ -84,20 +84,20 @@ On Windows the log is:
 journalctl --user -u wayfinder-aura.service --no-pager -n 200
 
 # The host-side trigger daemon (back button / side-grid keys)
-$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log
+journalctl --user -u wayfinder-trigger.service --no-pager -n 200
 
 # The Game Mode / Desktop Mode lifecycle supervisor
-$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-mode-supervisor.log
+journalctl --user -u wayfinder-mode-supervisor.service --no-pager -n 200
 ```
 
-The app service also mirrors stdout/stderr to `$XDG_RUNTIME_DIR/wayfinder-aura-logs/wfa-stdout.log` and
-`$XDG_RUNTIME_DIR/wayfinder-aura-logs/wfa-stderr.log`, which are worth attaching if the app crashes on launch.
+The journal keeps these across reboots, so it also covers a service that failed
+during boot. The app's output is worth attaching if it crashes on launch; skim
+it first, as it can include snippets of your transcribed text.
 
-To grab the trigger/supervisor logs and the recent journal in one shot:
+To grab all three logs in one shot:
 
 ```sh
-journalctl --user -u wayfinder-aura.service --no-pager -n 200 > ~/wfa-journal.txt
-cp $XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log $XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-mode-supervisor.log ~/  2>/dev/null
+journalctl --user -u wayfinder-aura.service -u wayfinder-trigger.service -u wayfinder-mode-supervisor.service --no-pager -n 500 > ~/wfa-journal.txt
 ```
 
 ## Troubleshooting checklist
@@ -190,7 +190,7 @@ ratio (a plain number, not dBFS) — include all of them in a bug report.
   it works in both Desktop Mode and Game Mode. If the button stops firing:
   - Check the daemon is running:
     `systemctl --user status wayfinder-trigger.service`
-    and read `$XDG_RUNTIME_DIR/wayfinder-aura-logs/wayfinder-trigger.log`.
+    and read `journalctl --user -u wayfinder-trigger.service --no-pager -n 200`.
   - **USB hotplug can wedge Steam Input.** Plugging in devices that expose a
     joystick HID interface (e.g. a Keychron Link dongle or Corsair Scimitar)
     can knock the Deck controller from PollState 2 → 1, silencing every Steam

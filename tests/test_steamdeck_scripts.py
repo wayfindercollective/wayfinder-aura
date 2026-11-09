@@ -234,3 +234,46 @@ def test_steamdeck_readme_documents_socket_daemon_as_primary_trigger_path():
     assert "wayfinder-trigger-daemon.py` — the primary" in readme
     assert "WAYFINDER_ALLOW_LEGACY_R4_F3=1" in readme
     assert "The app itself listens for **F3** (its default record hotkey)" not in readme
+
+
+def test_steamdeck_units_log_to_the_journal_not_a_runtime_dir_file():
+    """systemd opens StandardOutput=append: before it creates RuntimeDirectory=.
+
+    %t is a tmpfs, so on a fresh boot the directory is missing, the open fails
+    and the unit dies with 209/STDOUT before RuntimeDirectory= is ever reached.
+    Nothing then creates the directory, so Restart= cannot recover either.
+    """
+    for name in (
+        "wayfinder-aura.service",
+        "wayfinder-mode-supervisor.service",
+        "wayfinder-trigger.service",
+        "r4-f3-bridge.service",
+    ):
+        unit = _read(f"systemd/{name}")
+        assert "StandardOutput=journal" in unit, name
+        assert "StandardError=journal" in unit, name
+        assert not re.search(
+            r"^Standard(Output|Error)=(append|file|truncate):", unit, re.MULTILINE
+        ), name
+        assert "RuntimeDirectory" not in unit, name
+
+
+def test_nothing_points_at_the_retired_runtime_log_files():
+    support = (REPO / "SUPPORT.md").read_text(encoding="utf-8")
+    readme = _read("README.md")
+    for text in (
+        support,
+        readme,
+        _read("install-steamdeck.sh"),
+        _read("systemd/wayfinder-aura-failed.service"),
+        (REPO / "scripts" / "wayfinder-aura-launcher-steamdeck.sh").read_text(encoding="utf-8"),
+    ):
+        assert "wayfinder-aura-logs" not in text
+        assert "/tmp/wfa-stderr" not in text
+
+    for service in ("wayfinder-trigger.service", "wayfinder-mode-supervisor.service"):
+        assert f"journalctl --user -u {service}" in support
+        assert f"journalctl --user -u {service}" in readme
+    assert "journalctl --user -u wayfinder-aura.service" in _read(
+        "systemd/wayfinder-aura-failed.service"
+    )
