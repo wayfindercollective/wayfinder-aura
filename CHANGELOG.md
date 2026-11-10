@@ -9,6 +9,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Linux on KDE: much less chance of a dictation turning into capitals
+  partway through.** Now and then a dictation arrived like "OkaY< WHAT IS THE
+  CURRENT STATUS?": Shift switched on after a capital letter and stayed on
+  until the next one. KDE's virtual keyboard, which is on by default on Fedora
+  KDE and Bazzite, could put Shift back down just after Aura let go of it. Aura
+  now pauses briefly after each Shift press and release, which stopped it in
+  testing. If it still happens, setting System Settings → Keyboard → Virtual
+  Keyboard to None removes the cause.
 - **Closing Aura no longer throws away a model download.** Upgrading to Ultra
   downloads Large v3 Turbo Q5 in the background, and it was easy to close the
   app without noticing. That lost all the progress and, because the Ultra setup

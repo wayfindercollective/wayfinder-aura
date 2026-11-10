@@ -299,6 +299,36 @@ def test_layout_typing_sends_keys_with_shift_around_shifted_runs(monkeypatch, tm
         kb.close()
 
 
+def test_layout_typing_pauses_after_every_shift_change(monkeypatch, tmp_path):
+    """KDE's virtual keyboard echoes modifier state back to KWin; a late echo
+    of Shift down after the release left Shift on ("GivE ME THE SUMMARY>")."""
+    bus = _FakeBus()
+    kb, _path = _session(monkeypatch, tmp_path, bus)
+    real_sleep = time.sleep
+
+    def sleep(s):
+        if s == pk.SHIFT_SETTLE_S:
+            bus.codes.append("settle")
+        else:
+            real_sleep(s)
+
+    try:
+        kb.start()
+        _settle(kb, kb.READY)
+        monkeypatch.setattr(pk, "time", types.SimpleNamespace(
+            sleep=sleep, monotonic=time.monotonic, time=time.time))
+        kb.type_text("Hi A", 0, pk.X11Layout(display_factory=_Disp))
+        shift = 42
+        assert bus.codes == [
+            (shift, 1), "settle", (35, 1), (35, 0),
+            (shift, 0), "settle", (23, 1), (23, 0), (57, 1), (57, 0),
+            (shift, 1), "settle", (30, 1), (30, 0),
+            (shift, 0), "settle",                    # final release, before Enter
+        ]
+    finally:
+        kb.close()
+
+
 def test_layout_typing_reports_what_landed_when_a_key_fails(monkeypatch, tmp_path):
     bus = _FakeBus(fail_after=3)          # Shift down, H down, H up, then gone
     kb, _path = _session(monkeypatch, tmp_path, bus)
