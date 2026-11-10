@@ -1948,6 +1948,14 @@ class WhisperServerBackend(TranscriptionBackend):
                 body += f"--{boundary}\r\n".encode()
                 body += b'Content-Disposition: form-data; name="no_timestamps"\r\n\r\n'
                 body += b"true\r\n"
+            else:
+                # Linux keeps timestamps, so whisper-server wraps its text into
+                # 60-character lines and Aura joins them with a space. Without
+                # this it wraps at any token, inside a word too: "dictation"
+                # came out "dict ation". Wrap only between words.
+                body += f"--{boundary}\r\n".encode()
+                body += b'Content-Disposition: form-data; name="split_on_word"\r\n\r\n'
+                body += b"true\r\n"
             if final_prompt:
                 body += f"--{boundary}\r\n".encode()
                 body += b'Content-Disposition: form-data; name="prompt"\r\n\r\n'

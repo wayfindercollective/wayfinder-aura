@@ -9,6 +9,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Linux: words no longer come out split in two.** A dictation could arrive
+  with a space inside a word, like "dict ation", "ins pected" or "Le ads".
+  On Linux, Whisper's server breaks its text into short lines, which Aura
+  joins with spaces, and it could break a line inside a word. Aura now asks
+  it to break lines only between words.
 - **Linux on KDE: much less chance of a dictation turning into capitals
   partway through.** Now and then a dictation arrived like "OkaY< WHAT IS THE
   CURRENT STATUS?": Shift switched on after a capital letter and stayed on

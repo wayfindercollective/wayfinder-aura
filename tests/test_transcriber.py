@@ -2775,9 +2775,16 @@ class TestMacServerRequestFields:
         body = self._body_for("win32", sample_audio_file, monkeypatch)
         assert b'name="no_timestamps"\r\n\r\ntrue' in body
 
-    def test_linux_request_is_unchanged(self, sample_audio_file, monkeypatch):
+    def test_linux_keeps_timestamps_and_wraps_only_between_words(self, sample_audio_file, monkeypatch):
+        # Measured 2026-11-10 on whisper-server v1.9.1: without split_on_word the
+        # 60-character wrap cut "inefficiencies" and "dictation" in two.
         body = self._body_for("linux", sample_audio_file, monkeypatch)
         assert b"no_timestamps" not in body
+        assert b'name="split_on_word"\r\n\r\ntrue' in body
+
+    def test_macos_and_windows_do_not_send_split_on_word(self, sample_audio_file, monkeypatch):
+        for platform in ("darwin", "win32"):
+            assert b"split_on_word" not in self._body_for(platform, sample_audio_file, monkeypatch)
 
 
 @pytest.mark.usefixtures("no_host_binaries")
