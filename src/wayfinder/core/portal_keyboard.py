@@ -54,6 +54,15 @@ _REGISTRY_IFACE = "org.freedesktop.host.portal.Registry"
 
 DEVICE_KEYBOARD = 1
 KEY_LEFTSHIFT = 42  # evdev; used when the layout has no Shift_L
+# Pause after every Shift press and release when typing by key code. On KDE
+# the virtual keyboard (plasma-keyboard, KWin's default input method on Fedora
+# KDE and Bazzite) receives each key and modifier change and echoes the
+# modifier state back, and KWin applies that echo to its own state. An echo of
+# "Shift down" that lands after Aura's Shift release leaves Shift on until the
+# next Shift key, so "Give me the summary." arrives as "GivE ME THE SUMMARY>".
+# Stress test 2026-11-10 (KWin 6.7.5): 5 stuck lines in 200 with no pause,
+# 0 with this pause, 0 with the virtual keyboard turned off.
+SHIFT_SETTLE_S = 0.012
 _MAIN_BLOCK_LAST = 88  # evdev KEY_F12: Esc..F12 incl. letters, digits, keypad
 PERSIST_UNTIL_REVOKED = 2
 _RESPONSE_OK = 0
@@ -764,6 +773,7 @@ class PortalKeyboard:
                         if shifted != shift_down:
                             self._key(shift_code, shifted)
                             shift_down = shifted
+                            time.sleep(SHIFT_SETTLE_S)
                         self._tap(self._key, code)
                     except PortalKeyboardError as e:
                         e.typed = typed  # characters that already landed
@@ -774,6 +784,7 @@ class PortalKeyboard:
                 if shift_down:
                     try:
                         self._key(shift_code, False)
+                        time.sleep(SHIFT_SETTLE_S)  # before Auto-Enter or the user's next key
                     except PortalKeyboardError:
                         pass
 
