@@ -2786,6 +2786,25 @@ class TestMacServerRequestFields:
         for platform in ("darwin", "win32"):
             assert b"split_on_word" not in self._body_for(platform, sample_audio_file, monkeypatch)
 
+    @pytest.mark.parametrize("seconds, one_window", [(30, True), (31, False)])
+    def test_macos_and_windows_keep_timestamps_past_one_30s_window(
+        self, seconds, one_window, tmp_path, monkeypatch
+    ):
+        # Measured 2026-11-10: without timestamps whisper.cpp skipped speech after
+        # each 30 s window (192 of 375 words lost at 121 s); with them, none.
+        import wave as _wave
+
+        wav = tmp_path / "long.wav"
+        with _wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * 16000 * seconds)
+        for platform in ("darwin", "win32"):
+            body = self._body_for(platform, wav, monkeypatch)
+            assert (b'name="no_timestamps"\r\n\r\ntrue' in body) is one_window
+            assert (b'name="split_on_word"\r\n\r\ntrue' in body) is not one_window
+
 
 @pytest.mark.usefixtures("no_host_binaries")
 class TestGreedyDecoding:
