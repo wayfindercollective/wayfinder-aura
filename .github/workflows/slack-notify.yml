@@ -1,5 +1,6 @@
 # Slack notifications, mirroring Wayfinder OS: main and stable releases go to
-# the prod channel, every other branch and pre-releases go to dev.
+# the prod channel, dev and pre-releases go to dev, and feature/fix branches go
+# to #deployments-feature.
 # Logic lives in .github/scripts/slack-notify.sh (DRY_RUN=1 to try it locally).
 
 name: Notify Slack
@@ -38,6 +39,8 @@ jobs:
         env:
           SLACK_WEBHOOK_DEV: ${{ secrets.SLACK_WEBHOOK_DEV }}
           SLACK_WEBHOOK_PROD: ${{ secrets.SLACK_WEBHOOK_PROD }}
+          SLACK_WEBHOOK_FEATURE: ${{ secrets.SLACK_WEBHOOK_FEATURE }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
           LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}

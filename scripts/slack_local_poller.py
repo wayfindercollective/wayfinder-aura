@@ -97,11 +97,21 @@ def mark_done(state: Dict, action: Dict) -> Dict:
 
 # --- git mirror ----------------------------------------------------------------
 
+def _git_binary() -> str:
+    for candidate in ("/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "/usr/bin/git"
+
+
 def git(*args: str, check: bool = True) -> str:
-    out = subprocess.run(["/usr/bin/git", "-C", str(MIRROR), *args],
-                         capture_output=True, text=True, timeout=300)
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    out = subprocess.run([_git_binary(), "-c", "core.hooksPath=/dev/null", "-C", str(MIRROR), *args],
+                         env=env, capture_output=True, text=True, timeout=300)
     if check and out.returncode != 0:
-        raise RuntimeError(f"git {args[0]} failed: {out.stderr.strip()[:200]}")
+        detail = (out.stderr.strip() or out.stdout.strip())[:200]
+        raise RuntimeError(f"git {args[0]} failed: {detail}")
     return out.stdout
 
 
@@ -176,7 +186,7 @@ def litellm_key() -> str:
 # --- posting -------------------------------------------------------------------
 
 def notify_env(webhooks: Dict[str, str]) -> Dict[str, str]:
-    return {
+    env = {
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "HOME": str(Path.home()),
         "GITHUB_REPOSITORY": REPO,
@@ -188,6 +198,11 @@ def notify_env(webhooks: Dict[str, str]) -> Dict[str, str]:
         "LITELLM_API_KEY": litellm_key(),
         "LITELLM_STATUS_PATH": "/omlx/status",
     }
+    if webhooks.get("feature"):
+        env["SLACK_WEBHOOK_FEATURE"] = webhooks["feature"]
+    if webhooks.get("bot_token"):
+        env["SLACK_BOT_TOKEN"] = webhooks["bot_token"]
+    return env
 
 
 def post(action: Dict, heads: Dict[str, str], webhooks: Dict[str, str],
@@ -250,11 +265,19 @@ def main() -> int:
 
 
 def _run() -> int:
-    webhooks = {"dev": keychain("SLACK_WEBHOOK_DEV"), "prod": keychain("SLACK_WEBHOOK_PROD")}
+    webhooks = {
+        "dev": keychain("SLACK_WEBHOOK_DEV"),
+        "prod": keychain("SLACK_WEBHOOK_PROD"),
+        "feature": keychain("SLACK_WEBHOOK_FEATURE"),
+        "bot_token": keychain("SLACK_BOT_TOKEN"),
+    }
     if not webhooks["dev"] or not webhooks["prod"]:
         log("Slack webhooks are not in the Keychain yet (see install_slack_local_poller.sh); waiting")
         return 0
-    bad = [name for name, value in webhooks.items() if not valid_webhook(value)]
+    bad = [
+        name for name in ("dev", "prod", "feature")
+        if webhooks.get(name) and not valid_webhook(webhooks[name])
+    ]
     if bad:
         # Never log the value: it may be something the user typed by mistake.
         log(f"Keychain entry for {', '.join(bad)} is not a Slack webhook URL "

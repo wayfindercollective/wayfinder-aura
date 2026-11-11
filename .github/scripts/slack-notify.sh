@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Slack notifications for Wayfinder Aura, mirroring Wayfinder OS's
-# slack-push-notify.yml so both products post to the same channels:
-#   main (and stable releases)  -> SLACK_WEBHOOK_PROD
-#   every other branch / pre-release -> SLACK_WEBHOOK_DEV
+# slack-push-notify.yml so both products post to the same three channels:
+#   main (and stable releases)  -> prod    (SLACK_WEBHOOK_PROD)
+#   dev (and pre-releases)      -> dev     (SLACK_WEBHOOK_DEV)
+#   every other branch          -> feature (SLACK_WEBHOOK_FEATURE, or
+#                                           SLACK_BOT_TOKEN -> SLACK_FEATURE_CHANNEL)
 #
 # Events (GITHUB_EVENT_NAME):
 #   push          commit list + AI summary (local LiteLLM model, then GPT-4o)
@@ -32,6 +34,74 @@ PRODUCT="*Wayfinder Aura*"
 
 ev() { jq -r "$1 // empty" "$EVENT_PATH" 2>/dev/null; }
 
+escape_mrkdwn() {
+  local raw="${1:-}" max_len="${2:-300}"
+  printf '%s' "$raw" | ESCAPE_MAX_LEN="$max_len" node -e '
+    const fs = require("node:fs");
+    const raw = fs.readFileSync(0, "utf8");
+    const maxLen = Number(process.env.ESCAPE_MAX_LEN) || 300;
+    const defang = (t) =>
+      t
+        .replace(/\b([A-Za-z][A-Za-z0-9+.-]{1,15}:\/\/|mailto:|tel:)([^\s<>]+)/gi, (_m, s, r) => s.replace(":", "[:]") + r.replace(/\./g, "[.]"))
+        .replace(/\b([A-Za-z0-9._%+-]+@)([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b/g, (_m, local, domain) => local + domain.replace(/\./g, "[.]"))
+        .replace(/\bwww\.[A-Za-z0-9.-]+\.[A-Za-z]{2,24}(?:[/?#][^\s<>]*)?/gi, (m) => m.replace(/\./g, "[.]"))
+        .replace(/(?<![A-Za-z0-9/_.-])\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24})([/?#][^\s<>]*)/g, (_m, h, p) => h.replace(/\./g, "[.]") + p)
+        .replace(/(?<![A-Za-z0-9/_.-])\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:com|org|net|edu|gov|mil|int|io|co|ai|xyz|info|biz|example|invalid|link|click|online|site|shop|store|top))\b(?![A-Za-z0-9/_.-])/gi, (m) => m.replace(/\./g, "[.]"));
+    const cleaned = defang(raw.replace(/[\r\n\t\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maxLen))
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    const clipped = cleaned.length <= maxLen ? cleaned : cleaned.slice(0, maxLen).replace(/&[a-z0-9#]*$/i, "");
+    process.stdout.write(clipped);
+  '
+}
+
+escape_code() {
+  local s
+  s="$(escape_mrkdwn "${1:-}" "${2:-200}")"
+  printf '%s' "${s//\`/\'}"
+}
+
+safe_repo_url() {  # $1 = candidate URL, $2 = fallback URL
+  local u="${1:-}" fallback="${2:-}" prefix="${SERVER%/}/${REPO}/" lc
+  lc="$(printf '%s' "$u" | tr '[:upper:]' '[:lower:]')"
+  if [[ -n "$u" && "${#u}" -le 1024 && "$u" == "${prefix}"* ]] \
+    && [[ ! "$u" =~ [[:space:]\<\>\|\"\'\`\\[:cntrl:]] ]] \
+    && [[ "$lc" != *"/../"* && "$lc" != *"/./"* && "$lc" != *"/.." && "$lc" != *"/." ]] \
+    && [[ "$lc" != *"/..?"* && "$lc" != *"/.?"* && "$lc" != *"/..#"* && "$lc" != *"/.#"* ]] \
+    && [[ "$lc" != *"%2e"* && "$lc" != *"%2f"* && "$lc" != *"%5c"* ]]; then
+    printf '%s' "$u"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+sanitize_summary_mrkdwn() {
+  node -e '
+    const fs = require("node:fs");
+    const raw = fs.readFileSync(0, "utf8");
+    const defang = (t) =>
+      t
+        .replace(/\b([A-Za-z][A-Za-z0-9+.-]{1,15}:\/\/|mailto:|tel:)([^\s<>]+)/gi, (_m, s, r) => s.replace(":", "[:]") + r.replace(/\./g, "[.]"))
+        .replace(/\b([A-Za-z0-9._%+-]+@)([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b/g, (_m, local, domain) => local + domain.replace(/\./g, "[.]"))
+        .replace(/\bwww\.[A-Za-z0-9.-]+\.[A-Za-z]{2,24}(?:[/?#][^\s<>]*)?/gi, (m) => m.replace(/\./g, "[.]"))
+        .replace(/(?<![A-Za-z0-9/_.-])\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24})([/?#][^\s<>]*)/g, (_m, h, p) => h.replace(/\./g, "[.]") + p)
+        .replace(/(?<![A-Za-z0-9/_.-])\b([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:com|org|net|edu|gov|mil|int|io|co|ai|xyz|info|biz|example|invalid|link|click|online|site|shop|store|top))\b(?![A-Za-z0-9/_.-])/gi, (m) => m.replace(/\./g, "[.]"));
+    const rewritten = raw
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+      .replace(/\*\*([^*\n]+)\*\*/g, "*$1*")
+      .replace(/<!(channel|here|everyone)(?:\|[^>]*)?>/gi, "@$1")
+      .replace(/<!subteam\^[A-Za-z0-9]+(?:\|@?([^>]+))?>/gi, (_m, l) => "@" + (l || "subteam"))
+      .replace(/<@([A-Za-z0-9]+)(?:\|([^>]+))?>/g, (_m, id, l) => "@" + (l || id))
+      .replace(/<#([A-Za-z0-9]+)(?:\|([^>]+))?>/g, (_m, id, l) => "#" + (l || id));
+    const out = defang(rewritten)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    process.stdout.write(out.length <= 7000 ? out : out.slice(0, 7000).replace(/&[a-z0-9#]*$/i, "") + "\n_...[truncated]_");
+  '
+}
+
 platform_tag() {
   case "$1" in
     main) echo " · all platforms" ;;
@@ -43,21 +113,36 @@ platform_tag() {
 }
 
 # --- destination -------------------------------------------------------------
-destination_for() {  # $1 = prod|dev
-  if [ "$1" = "prod" ]; then
-    printf '%s' "${SLACK_WEBHOOK_PROD:-}"
-  else
-    printf '%s' "${SLACK_WEBHOOK_DEV:-}"
-  fi
+destination_for() {  # $1 = prod|dev|feature
+  case "$1" in
+    prod)    printf '%s' "${SLACK_WEBHOOK_PROD:-}" ;;
+    dev)     printf '%s' "${SLACK_WEBHOOK_DEV:-}" ;;
+    feature) printf '%s' "${SLACK_WEBHOOK_FEATURE:-}" ;;
+  esac
 }
 
-post() {  # $1 = prod|dev, $2 = text
-  local channel="$1" text="$2" webhook payload response code
+post() {  # $1 = prod|dev|feature, $2 = text
+  local channel="$1" text="$2" webhook payload response code feature_channel ok err
   if [ "$DRY_RUN" = "1" ]; then
     printf '=== DRY RUN -> %s ===\n%s\n' "$channel" "$text"
     return 0
   fi
   webhook="$(destination_for "$channel")"
+  if [ -z "$webhook" ] && [ "$channel" = "feature" ] && [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+    feature_channel="${SLACK_FEATURE_CHANNEL:-C0AUYDJD362}"
+    payload=$(jq -cn --arg text "$text" --arg channel "$feature_channel" '{ channel: $channel, text: $text, parse: "none", unfurl_links: false, unfurl_media: false }')
+    response=$(curl -sS --connect-timeout 10 --max-time 30 -X POST "https://slack.com/api/chat.postMessage" \
+      -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+      -H 'Content-Type: application/json' -d "$payload" 2>&1)
+    ok=$(echo "$response" | jq -r '.ok // "false"' 2>/dev/null)
+    if [ "$ok" != "true" ]; then
+      err=$(echo "$response" | jq -r '.error // "unknown"' 2>/dev/null)
+      echo "::error::Slack bot post failed: ${err}"
+      return 1
+    fi
+    echo "Slack response: 200"
+    return 0
+  fi
   if [ -z "$webhook" ]; then
     echo "::warning::SLACK_WEBHOOK_$(echo "$channel" | tr '[:lower:]' '[:upper:]') is not set on this repo; skipping the Slack post."
     return 0
@@ -68,7 +153,7 @@ post() {  # $1 = prod|dev, $2 = text
       echo "::error::SLACK_WEBHOOK_$(echo "$channel" | tr '[:lower:]' '[:upper:]') is not a Slack webhook URL; not posting."
       return 1 ;;
   esac
-  payload=$(jq -n --arg text "$text" '{ text: $text }')
+  payload=$(jq -cn --arg text "$text" '{ text: $text, parse: "none", unfurl_links: false, unfurl_media: false }')
   response=$(curl -sS --connect-timeout 10 --max-time 30 -w $'\n%{http_code}' -X POST "$webhook" \
     -H 'Content-Type: application/json' -d "$payload" 2>&1)
   code=$(echo "$response" | tail -1)
@@ -165,19 +250,34 @@ notify_push() {
   fi
   [ -z "$shas" ] && shas="$after"
 
-  local commits="" authors="" count=0 sha short subject author
+  local commits="" authors="" count=0 sha short subject author safe_subject
   while IFS= read -r sha; do
     [ -z "$sha" ] && continue
     short="${sha:0:8}"
     subject=$(git -C "$GIT_ROOT" log -1 --format=%s "$sha")
-    author=$(git -C "$GIT_ROOT" log -1 --format=%an "$sha")
+    author=$(git -C "$GIT_ROOT" log -1 --format=%an "$sha" | tr '\r\n\t' '   ' | sed 's/  */ /g; s/^ //; s/ $//')
+    safe_subject=$(escape_mrkdwn "$subject" 240)
     count=$((count + 1))
-    commits="${commits}${count}. <${SERVER}/${REPO}/commit/${sha}|\`${short}\`> ${subject}"$'\n'
-    authors="${authors}${author}"$'\n'
+    commits="${commits}${count}. <${SERVER}/${REPO}/commit/${sha}|\`${short}\`> ${safe_subject}"$'\n'
+    [ -n "$author" ] && authors="${authors}${author}"$'\n'
   done <<< "$shas"
   [ -z "$commits" ] && { echo "::error::No commits resolved for ${after}."; return 1; }
-  local unique_authors
-  unique_authors=$(echo "$authors" | sed '/^$/d' | sort -u | paste -sd ',' - | sed 's/,/, /g')
+  local unique_authors="" author_total raw_author esc_author
+  author_total=$(printf '%s' "$authors" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')
+  while IFS= read -r raw_author; do
+    [ -z "$raw_author" ] && continue
+    esc_author=$(escape_mrkdwn "$raw_author" 60)
+    [ -z "$esc_author" ] && continue
+    if [ -z "$unique_authors" ]; then
+      unique_authors="$esc_author"
+    else
+      unique_authors="${unique_authors}, ${esc_author}"
+    fi
+  done < <(printf '%s' "$authors" | sed '/^$/d' | sort -u | head -5)
+  [ -z "$unique_authors" ] && unique_authors="unknown"
+  if [ "${author_total:-0}" -gt 5 ]; then
+    unique_authors="${unique_authors} +$((author_total - 5)) others"
+  fi
 
   AI_INPUT_FILE=$(mktemp)
   {
@@ -208,10 +308,13 @@ notify_push() {
     fi
   } > "$AI_INPUT_FILE"
 
-  local channel="dev" prompt_file="slack-engineering-summary.txt"
+  local channel="feature" prompt_file="slack-engineering-summary.txt"
   if [ "$branch" = "main" ]; then
     channel="prod"
     prompt_file="slack-release-summary.txt"
+  elif [ "$branch" = "dev" ]; then
+    channel="dev"
+    prompt_file="slack-engineering-summary.txt"
   fi
 
   local summary="" source="" result=""
@@ -219,8 +322,8 @@ notify_push() {
     result=$(summarize "$(<"$PROMPTS/$prompt_file")" || true)
     if [ -n "$result" ]; then
       source="${result%%|||*}"
-      # Slack mrkdwn bolds with single asterisks; models write Markdown's **x**.
-      summary=$(printf '%s' "${result#*|||}" | sed -E 's/\*\*([^*]+)\*\*/*\1*/g')
+      # Convert Markdown **bold** and escape Slack mentions/links in model output.
+      summary=$(printf '%s' "${result#*|||}" | sanitize_summary_mrkdwn)
     else
       echo "No summary model answered; posting the commit list only."
     fi
@@ -228,13 +331,17 @@ notify_push() {
   rm -f "$AI_INPUT_FILE"
 
   if [ "$count" -gt 15 ]; then
-    commits="$(echo "$commits" | head -15)"$'\n'"_...and $((count - 15)) more commits_"$'\n'
+    commits="$(printf '%s' "$commits" | head -15)"$'\n'"_...and $((count - 15)) more commits_"$'\n'
   fi
 
-  local header text model_tag=""
-  header="${PRODUCT} · *${unique_authors}* pushed to \`${branch}\`$(platform_tag "$branch")"
+  local header text model_tag="" safe_branch safe_model
+  safe_branch=$(escape_code "$branch")
+  header="${PRODUCT} · *${unique_authors}* pushed to \`${safe_branch}\`$(platform_tag "$branch")"
   case "$source" in
-    local:*) model_tag="🏠 _${source#local:} (Mac Studio)_" ;;
+    local:*)
+      safe_model=$(escape_mrkdwn "${source#local:}")
+      model_tag="🏠 _${safe_model} (Mac Studio)_"
+      ;;
     gpt-4o)  model_tag="☁️ _GPT-4o (cloud fallback)_" ;;
   esac
   text="$header"
@@ -249,36 +356,63 @@ notify_push() {
 
 # --- releases ----------------------------------------------------------------
 release_assets_text() {  # $1 = release JSON
-  echo "$1" | jq -r '
+  local prefix="${SERVER%/}/${REPO}/"
+  printf '%s\n' "$1" | jq -r --arg prefix "$prefix" '
     def platform($n):
       if ($n | test("\\.dmg$"; "i")) then "🍎 macOS"
       elif ($n | test("\\.(appimage|flatpak(ref)?|deb|rpm)$|linux"; "i")) then "🐧 Linux"
       elif ($n | test("\\.(exe|msi|msix)$|windows"; "i")) then "🪟 Windows"
       else empty end;
-    [.assets[]? | {p: platform(.name), n: .name, u: .browser_download_url} | select(.p != null)]
+    def has_traversal($s):
+      ($s | ascii_downcase) as $lc
+      | ($lc | contains("\\"))
+        or ($lc | contains("/../"))
+        or ($lc | contains("/./"))
+        or ($lc | endswith("/.."))
+        or ($lc | endswith("/."))
+        or ($lc | contains("/..?"))
+        or ($lc | contains("/.?"))
+        or ($lc | contains("/..#"))
+        or ($lc | contains("/.#"))
+        or ($lc | contains("%2e"))
+        or ($lc | contains("%2f"))
+        or ($lc | contains("%5c"));
+    def safe_url($u):
+      ($u | type == "string")
+      and (($u | length) > 0 and ($u | length) <= 1024)
+      and ($u | startswith($prefix))
+      and (has_traversal($u) | not)
+      and (($u | explode | any(. <= 32 or . == 34 or . == 39 or . == 60 or . == 62 or . == 92 or . == 96 or . == 124 or . == 127)) | not);
+    def esc($s):
+      ($s | tostring | gsub("[\\r\\n]+"; " ") | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\\|"; "/"));
+    [.assets[]? | select(.name != null and safe_url(.browser_download_url))
+      | {p: platform(.name), n: esc(.name), u: .browser_download_url} | select(.p != null)]
     | group_by(.p)
     | map(.[0].p + ": " + (map("<" + .u + "|" + .n + ">") | join(", ")))
     | .[]'
 }
 
 announce_release() {  # $1 = release JSON, $2 = who
-  local rel="$1" who="$2" tag name url pre channel="prod" kind="released" assets text
-  tag=$(echo "$rel" | jq -r '.tag_name')
-  name=$(echo "$rel" | jq -r '.name // .tag_name')
-  url=$(echo "$rel" | jq -r '.html_url')
-  pre=$(echo "$rel" | jq -r '.prerelease')
+  local rel="$1" who="$2" tag name url pre channel="prod" kind="released" assets text safe_name safe_who safe_url
+  tag=$(printf '%s\n' "$rel" | jq -r '.tag_name')
+  name=$(printf '%s\n' "$rel" | jq -r '.name // .tag_name')
+  url=$(printf '%s\n' "$rel" | jq -r '.html_url')
+  pre=$(printf '%s\n' "$rel" | jq -r '.prerelease')
+  safe_name=$(escape_mrkdwn "$name")
+  safe_who=$(escape_mrkdwn "$who")
+  safe_url=$(safe_repo_url "$url" "${SERVER%/}/${REPO}/releases")
   if [ "$pre" = "true" ]; then
     channel="dev"
     kind="pre-release published"
   fi
   assets=$(release_assets_text "$rel")
   if [[ "$name" == *"Wayfinder Aura"* ]]; then
-    text="🚀 *${name}* ${kind}${who:+ by *$who*}"
+    text="🚀 *${safe_name}* ${kind}${safe_who:+ by *$safe_who*}"
   else
-    text="🚀 ${PRODUCT} *${name}* ${kind}${who:+ by *$who*}"
+    text="🚀 ${PRODUCT} *${safe_name}* ${kind}${safe_who:+ by *$safe_who*}"
   fi
   [ -n "$assets" ] && text="${text}"$'\n\n'"${assets}"
-  text="${text}"$'\n\n'"<${url}|Release notes and downloads>"
+  text="${text}"$'\n\n'"<${safe_url}|Release notes and downloads>"
   post "$channel" "$text"
 }
 
@@ -298,18 +432,21 @@ notify_release_event() {
 }
 
 notify_release_workflow() {
-  local conclusion head url tag rel who
+  local conclusion head url tag rel who safe_head safe_conclusion safe_url
   conclusion=$(ev '.workflow_run.conclusion')
   head=$(ev '.workflow_run.head_branch')
   url=$(ev '.workflow_run.html_url')
   who=$(ev '.workflow_run.actor.login')
+  safe_head=$(escape_code "$head")
+  safe_conclusion=$(escape_mrkdwn "$conclusion")
+  safe_url=$(safe_repo_url "$url" "${SERVER%/}/${REPO}/actions")
   case "$conclusion" in
     success) ;;
     cancelled|skipped) echo "Release run ${conclusion}; nothing to announce."; return 0 ;;
     *)
       local channel="dev"
       case "$head" in v[0-9]*) [[ "$head" != *-* ]] && channel="prod" ;; esac
-      post "$channel" "⚠️ ${PRODUCT} release build for \`${head}\` finished with *${conclusion}*. <${url}|See the run>"
+      post "$channel" "⚠️ ${PRODUCT} release build for \`${safe_head}\` finished with *${safe_conclusion}*. <${safe_url}|See the run>"
       return $?
       ;;
   esac
@@ -318,13 +455,13 @@ notify_release_workflow() {
       tag="$head"
       rel=$(fetch_release "$tag")
       if [ -z "$rel" ]; then
-        post "dev" "⚠️ ${PRODUCT} release build for \`${tag}\` passed, but no GitHub release was found. <${url}|See the run>"
+        post "dev" "⚠️ ${PRODUCT} release build for \`${safe_head}\` passed, but no GitHub release was found. <${safe_url}|See the run>"
         return $?
       fi
       announce_release "$rel" "$who"
       ;;
     *)
-      post "dev" "📦 ${PRODUCT} manual build on \`${head}\` finished. <${url}|Artifacts>"
+      post "dev" "📦 ${PRODUCT} manual build on \`${safe_head}\` finished. <${safe_url}|Artifacts>"
       ;;
   esac
 }
