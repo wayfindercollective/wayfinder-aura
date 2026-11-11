@@ -108,7 +108,7 @@ def test_notify_script_reads_commits_from_another_git_dir(tmp_path):
     out = subprocess.run(["bash", str(ROOT / ".github/scripts/slack-notify.sh")], env=env,
                          cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
-    assert "=== DRY RUN -> dev ===" in out.stdout and head[:8] in out.stdout
+    assert "=== DRY RUN -> feature ===" in out.stdout and head[:8] in out.stdout
 
 
 @pytest.mark.parametrize("value,ok", [

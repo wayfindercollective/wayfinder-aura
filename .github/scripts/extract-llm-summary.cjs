@@ -21,14 +21,16 @@ function selectFinalContent(content) {
   const startCount = content.split(FINAL_START).length - 1;
   const endCount = content.split(FINAL_END).length - 1;
 
-  if (startCount === 0 && endCount === 0) return content;
   if (startCount !== 1 || endCount !== 1) {
-    fail("final-answer envelope was incomplete or ambiguous");
+    fail("final-answer envelope was missing, incomplete, or ambiguous");
   }
 
   const start = content.indexOf(FINAL_START) + FINAL_START.length;
   const end = content.indexOf(FINAL_END);
   if (end <= start) fail("final-answer envelope was malformed");
+  if (content.slice(end + FINAL_END.length).trim().length > 0) {
+    fail("unexpected content appeared after closing final-answer marker");
+  }
   return content.slice(start, end);
 }
 
@@ -60,7 +62,7 @@ function extractLlmSummary(rawBody) {
     fail("content did not begin with a final Slack bullet or changelog title");
   }
 
-  const reasoningLeak = /(?:^|\n)\s*(?:let me\b|i (?:need|should|will|can|want)\b|i['’]ll\b|hmm\b|now (?:write|craft|compose|structure|refine)\b|draft\s*:|key areas\s*:|rough breakdown\s*:|commit count\s*:|the instructions? (?:say|says|ask|asks)\b)/im;
+  const reasoningLeak = /(?:^|\n)\s*(?:[-*•]\s*)?(?:(?:\p{Extended_Pictographic}[\p{Emoji_Modifier}\uFE0F\u200D\p{Extended_Pictographic}]*|:[a-z0-9_+-]+:)\s*)?(?:let me\b|i (?:need|should|will|can|want)\b|i['’]ll\b|hmm\b|now (?:write|craft|compose|structure|refine)\b|draft\s*:|key areas\s*:|rough breakdown\s*:|commit count\s*:|the instructions? (?:say|says|ask|asks)\b)/imu;
   if (reasoningLeak.test(summary)) {
     fail("analysis or drafting language was present");
   }
