@@ -1126,6 +1126,21 @@ from wayfinder.core.whisper_timings import format_bench_seconds, warm_benchmark_
 # The Linux probe runs whisper-cli with a 30 s timeout; past this the warm-up
 # gives up and the first dictation starts the server instead.
 _GPU_SETUP_WARM_UP_WAIT_S = 45.0
+
+_WARM_UP_STAGE_LABELS = (
+    ("checks", "checks"),
+    ("lock", "waiting to load"),
+    ("load", "loading the speech model"),
+    ("cleanup", "cleanup model"),
+)
+
+
+def _warm_up_timing_line(total: float, stages: dict) -> str:
+    """'⏱ Start-up warm-up took 124s: checks 0s · … · loading the speech
+    model 120s' - every stage that ran, in order."""
+    parts = [f"{label} {stages[key]:.0f}s" for key, label in _WARM_UP_STAGE_LABELS
+             if key in stages]
+    return f"⏱ Start-up warm-up took {total:.0f}s: " + " · ".join(parts)
 # A CPU/GPU switch stops the old mode's servers in the background; the new
 # mode's warm-up waits this long for that, then leaves loading to the first
 # dictation.
@@ -24032,6 +24047,11 @@ class WayfinderApp(ctk.CTk):
         self._warm_up_generation = generation
 
         def _warm():
+            # Windows: one log line with where a start-up warm-up's time went
+            # (11 Nov: the model took 2 min after login and a dictation waited
+            # 73 s, with nothing saying which step was slow).
+            warm_started = time.monotonic()
+            stages: dict = {}
             if startup and IS_MACOS:
                 # A helper an earlier Aura left running keeps a model loaded and
                 # port 8178 open; a second server would then share that port.
@@ -24055,10 +24075,13 @@ class WayfinderApp(ctk.CTk):
             except Exception as e:
                 ready = False
                 self.log(f"⚠️ Transcription warm-up skipped: {e}")
+            stages["checks"] = time.monotonic() - warm_started
             # Checks and loads happen under the lock a CPU/GPU switch's teardown
             # takes, so a switch landing between them cannot leave this warm-up's
             # old-mode models running.
+            lock_wait_started = time.monotonic()
             with lock:
+                stages["lock"] = time.monotonic() - lock_wait_started
                 try:
                     from wayfinder.core.transcriber import warm_up_transcription
                     if ready and self._warm_up_generation != generation:
@@ -24067,7 +24090,9 @@ class WayfinderApp(ctk.CTk):
                     elif ready:
                         if config.get("whisper_server_mode"):
                             self.log("⏳ Warming up transcription model (first dictation will be instant)…")
+                        load_started = time.monotonic()
                         loaded = warm_up_transcription(config)
+                        stages["load"] = time.monotonic() - load_started
                         if config.get("whisper_server_mode") and (
                                 loaded or not (IS_MACOS or IS_WINDOWS)):
                             # macOS/Windows only claim "loaded" when a server really
@@ -24081,9 +24106,16 @@ class WayfinderApp(ctk.CTk):
                     from wayfinder.core.postprocessor import warm_up_postprocessing
                     # Its llama-server takes the same CPU/GPU mode and Vulkan device.
                     if ready and self._warm_up_generation == generation:
+                        cleanup_started = time.monotonic()
                         warm_up_postprocessing(config)
+                        stages["cleanup"] = time.monotonic() - cleanup_started
                 except Exception as e:
                     self.log(f"⚠️ Post-processing warm-up skipped: {e}")
+            if startup and IS_WINDOWS and not IS_MACOS and ready:
+                try:
+                    self.log(_warm_up_timing_line(time.monotonic() - warm_started, stages))
+                except Exception:
+                    pass
             if not startup:
                 return
             # Pre-arm Wayland text injection: surface KDE's one-time "allow input control"
