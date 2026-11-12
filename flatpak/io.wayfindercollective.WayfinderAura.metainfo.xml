@@ -127,6 +127,21 @@
   </supports>
 
   <releases>
+    <release version="1.3.2-beta.9" date="2026-11-12" type="development">
+      <description>
+        <p>Beta built from main on 2026-11-12. Changes since the last stable release:</p>
+        <ul>
+          <li>Mac and Windows: dictations longer than 30 seconds no longer lose words.</li>
+          <li>Linux: Whisper's line breaks no longer put spaces inside words.</li>
+          <li>Linux on KDE: much less chance of a dictation turning into capitals partway through.</li>
+          <li>Closing Aura no longer throws away a model download.</li>
+          <li>Your custom vocabulary no longer gets typed in place of silence.</li>
+          <li>Corrections no longer change part of a contraction.</li>
+          <li>Cleanup no longer types the model's own notes.</li>
+          <li>Gemma 3 1B cleans up faster and more often.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.1" date="2026-10-23">
       <description>
         <p>Wayfinder Aura 1.3.1:</p>
