@@ -9,6 +9,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Mac and Windows: dictations longer than 30 seconds no longer lose
+  words.** With Chunk Processing off (always the case on the free tier), a
+  long dictation goes to Whisper in one piece. Whisper hears it 30 seconds
+  at a time and could skip whatever it had not finished in each stretch: in
+  testing, 14 of 196 words at one minute and about half the words at two
+  minutes. Aura now keeps Whisper's timestamps for anything over 30 seconds,
+  which lost no words in the same test.
+- **Linux: Whisper's line breaks no longer put spaces inside words.** A
+  dictation could arrive with a space inside a word, like "dict ation" or
+  "ins pected". On Linux, Whisper's server breaks its text into short lines,
+  which Aura joins with spaces, and it could break a line inside a word. Aura
+  now asks it to break lines only between words.
 - **Linux on KDE: much less chance of a dictation turning into capitals
   partway through.** Now and then a dictation arrived like "OkaY< WHAT IS THE
   CURRENT STATUS?": Shift switched on after a capital letter and stayed on

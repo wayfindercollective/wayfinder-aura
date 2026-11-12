@@ -1941,12 +1941,30 @@ class WhisperServerBackend(TranscriptionBackend):
             body += f"--{boundary}\r\n".encode()
             body += b'Content-Disposition: form-data; name="temperature_inc"\r\n\r\n'
             body += b"0.0\r\n"
-            if sys.platform in ("darwin", "win32"):
+            # Whisper reads audio in 30 s windows. Without timestamps, whisper.cpp
+            # moves a whole window ahead after each one and skips any speech the
+            # model left out (whisper-server v1.9.1, 2026-11-10: 14 of 196 words
+            # lost at 60 s, 192 of 375 at 121 s; none with timestamps). So only
+            # audio that fits in one window goes without them.
+            try:
+                with contextlib.closing(wave.open(audio_path, "rb")) as _wf:
+                    _one_window = _wf.getnframes() <= 30 * (_wf.getframerate() or 16000)
+            except Exception:
+                _one_window = False
+            if sys.platform in ("darwin", "win32") and _one_window:
                 # Only the text is read. The server otherwise computes per-token
                 # timestamps: MEASURED 3-14% slower (base.en, M3 Ultra), same WER;
                 # ~5% on Windows (pinned b4938 CPU build, base.en), one line of text.
                 body += f"--{boundary}\r\n".encode()
                 body += b'Content-Disposition: form-data; name="no_timestamps"\r\n\r\n'
+                body += b"true\r\n"
+            else:
+                # With timestamps, whisper-server wraps its text into 60-character
+                # lines and Aura joins them with a space. Without this it wraps at
+                # any token, inside a word too: "dictation" came out "dict ation".
+                # Wrap only between words.
+                body += f"--{boundary}\r\n".encode()
+                body += b'Content-Disposition: form-data; name="split_on_word"\r\n\r\n'
                 body += b"true\r\n"
             if final_prompt:
                 body += f"--{boundary}\r\n".encode()
