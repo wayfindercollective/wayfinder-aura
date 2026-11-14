@@ -9,6 +9,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Windows: the dictation pill moves back above the taskbar after a display
+  change.** When Windows briefly reported a different display scale (on wake,
+  or a display reconnecting), the pill was placed for that scale and stayed
+  there, half behind the taskbar, until Aura restarted. It now re-places itself
+  after every scale, resolution, screen or taskbar change.
+
 - **Mac and Windows: dictations longer than 30 seconds no longer lose
   words.** With Chunk Processing off (always the case on the free tier), a
   long dictation goes to Whisper in one piece. Whisper hears it 30 seconds

@@ -3334,19 +3334,47 @@ def run_overlay():
             except Exception as e:
                 _debug_log(f"screen event emit failed: {e}")
 
+        # Re-place the pill after every display change. 14 Nov: Windows briefly
+        # reported the laptop panel at 100% (2560x1600, scale 1.0) and the pill
+        # was placed for that; back at 175% nothing moved it again (persistent
+        # mode places it once at start-up), so it sat half behind the taskbar
+        # until Aura restarted. Windows reports a change in steps (scale, then
+        # geometry, then the work area), so place it shortly after the last
+        # event, and once more when everything has settled.
+        def _reposition_after_display_change():
+            try:
+                overlay._position_at_bottom()
+            except Exception as e:
+                _debug_log(f"reposition after display change failed: {e}")
+
+        _reposition_timer = QTimer()
+        _reposition_timer.setSingleShot(True)
+        _reposition_timer.timeout.connect(_reposition_after_display_change)
+        _settle_timer = QTimer()
+        _settle_timer.setSingleShot(True)
+        _settle_timer.timeout.connect(_reposition_after_display_change)
+
+        def _on_display_change(kind: str, screen=None):
+            _emit_screen_event(kind, screen)
+            _reposition_timer.start(400)
+            _settle_timer.start(2500)
+
         def _watch_screen(screen):
             try:
-                screen.geometryChanged.connect(lambda _g, s=screen: _emit_screen_event("resized", s))
-                screen.logicalDotsPerInchChanged.connect(lambda _d, s=screen: _emit_screen_event("scale", s))
+                screen.geometryChanged.connect(lambda _g, s=screen: _on_display_change("resized", s))
+                screen.logicalDotsPerInchChanged.connect(lambda _d, s=screen: _on_display_change("scale", s))
+                # The taskbar moving, resizing or auto-hiding changes only this.
+                screen.availableGeometryChanged.connect(
+                    lambda _g, s=screen: _on_display_change("work area", s))
             except Exception:
                 pass
 
         try:
             for _s in app.screens():
                 _watch_screen(_s)
-            app.screenAdded.connect(lambda s: (_watch_screen(s), _emit_screen_event("added", s)))
-            app.screenRemoved.connect(lambda s: _emit_screen_event("removed", s))
-            app.primaryScreenChanged.connect(lambda s: _emit_screen_event("primary", s))
+            app.screenAdded.connect(lambda s: (_watch_screen(s), _on_display_change("added", s)))
+            app.screenRemoved.connect(lambda s: _on_display_change("removed", s))
+            app.primaryScreenChanged.connect(lambda s: _on_display_change("primary", s))
         except Exception as e:
             _debug_log(f"screen watch setup failed: {e}")
 
