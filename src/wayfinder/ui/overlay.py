@@ -1575,7 +1575,7 @@ class GlassmorphicOverlay(QWidget):
     
     @staticmethod
     def _remap_on_reveal() -> bool:
-        """Transient pill on Linux XWayland: unmap + remap before each reveal."""
+        """Linux XWayland (Qt xcb): unmap + remap the pill to drop a KWin stray frame."""
         return sys.platform.startswith("linux") and QApplication.platformName() == "xcb"
 
     def _try_kde_keep_above(self):
@@ -2085,6 +2085,21 @@ class GlassmorphicOverlay(QWidget):
         self._idle_frozen = False
         if not self._render_timer.isActive():
             self._render_timer.start()
+
+        # Persistent pill on Linux XWayland: it never leaves the screen, so a KWin
+        # stray frame (see _delayed_show) would stay until restart. Remap it at each
+        # dictation start and fade it back in, so a frame lasts one dictation at most.
+        if (state == OverlayState.LISTENING
+                and old_state != OverlayState.HIDDEN
+                and getattr(self, "_overlay_mode", "persistent") == "persistent"
+                and not getattr(self, "_boot_hold_reveal", False)
+                and self._remap_on_reveal()
+                and self.isVisible()):
+            self.setWindowOpacity(0.0)
+            self._opacity._value = 0.0
+            self.hide()
+            self.show()
+            self._opacity.animate_to(1.0, self.FADE_MS if animate else 0)
 
         # Show and fade in if hidden
         if old_state == OverlayState.HIDDEN:
