@@ -800,6 +800,38 @@ def test_linux_xcb_transient_pill_remaps_on_each_reveal(monkeypatch):
         overlay.deleteLater()
 
 
+def test_linux_xcb_persistent_pill_remaps_at_dictation_start_only(monkeypatch):
+    """The persistent pill never leaves the screen, so on Linux xcb it remaps
+    when dictation starts (READY -> LISTENING) and fades back in; other
+    transitions leave the window alone."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "persistent"
+        overlay.show()
+        overlay.set_state(OverlayState.READY, animate=False)
+        app.processEvents()
+        calls = []
+        monkeypatch.setattr(overlay, "_remap_on_reveal", lambda: True)
+        monkeypatch.setattr(overlay, "hide", lambda: calls.append("hide"))
+        monkeypatch.setattr(overlay, "show", lambda: calls.append("show"))
+
+        overlay.set_state(OverlayState.LISTENING, animate=False)
+        assert calls == ["hide", "show"]
+        assert overlay._opacity._value == 1.0
+
+        overlay.set_state(OverlayState.PROCESSING, animate=False)
+        overlay.set_state(OverlayState.READY, animate=False)
+        assert calls == ["hide", "show"]
+    finally:
+        overlay.deleteLater()
+
+
 def test_pill_hwnd_for_keeper_skips_hidden_minimized_and_cloaked(monkeypatch):
     """20 Oct: persistent mode never calls hide() — _finish_hide() parks the
     pill off-screen instead (see test_disappearing_qt_pill_... above), so
