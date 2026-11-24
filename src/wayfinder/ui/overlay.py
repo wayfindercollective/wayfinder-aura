@@ -1573,6 +1573,11 @@ class GlassmorphicOverlay(QWidget):
             except Exception:
                 pass
     
+    @staticmethod
+    def _remap_on_reveal() -> bool:
+        """Transient pill on Linux XWayland: unmap + remap before each reveal."""
+        return sys.platform.startswith("linux") and QApplication.platformName() == "xcb"
+
     def _try_kde_keep_above(self):
         """Attempt to set window position via KDE KWin scripting (only way that works on Wayland)."""
         try:
@@ -2188,7 +2193,15 @@ class GlassmorphicOverlay(QWidget):
         elif mode == "transient":
             # Already mapped offscreen. Geometry + opacity reveal it without
             # show()/raise_(), which would activate the helper on macOS.
-            pass
+            if self._remap_on_reveal():
+                # Linux XWayland (Flatpak): KWin bug — reloading window rules
+                # (any kwinrulesrc write) attaches a Breeze frame to this
+                # override-redirect window, drawn as a dark box around the pill
+                # until it is unmapped. Remap on every reveal so a stray frame
+                # lasts one dictation at most. Override-redirect windows are
+                # never focused, so this steals nothing; opacity is already 0.
+                self.hide()
+                self.show()
         else:
             # Standard mode: show the window
             self.show()
