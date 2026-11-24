@@ -771,6 +771,35 @@ def test_disappearing_qt_pill_moves_without_remapping_or_raising(monkeypatch):
         overlay.deleteLater()
 
 
+def test_linux_xcb_transient_pill_remaps_on_each_reveal(monkeypatch):
+    """KWin attaches a Breeze frame to the override-redirect XWayland pill
+    whenever window rules reload; only an unmap clears it. On Linux xcb the
+    transient pill therefore remaps (hide then show) on every reveal."""
+    pytest.importorskip("PyQt6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QApplication
+    from wayfinder.ui.overlay import GlassmorphicOverlay, OverlayState
+
+    app = QApplication.instance() or QApplication([])
+    overlay = GlassmorphicOverlay()
+    try:
+        overlay._overlay_mode = "transient"
+        overlay.setWindowOpacity(0.0)
+        overlay.show()
+        app.processEvents()
+        calls = []
+        monkeypatch.setattr(overlay, "_remap_on_reveal", lambda: True)
+        monkeypatch.setattr(overlay, "hide", lambda: calls.append("hide"))
+        monkeypatch.setattr(overlay, "show", lambda: calls.append("show"))
+        monkeypatch.setattr(overlay, "raise_", lambda: pytest.fail("raised during dictation"))
+
+        overlay._state = OverlayState.LISTENING
+        overlay._delayed_show(animate=False)
+        assert calls == ["hide", "show"]
+    finally:
+        overlay.deleteLater()
+
+
 def test_pill_hwnd_for_keeper_skips_hidden_minimized_and_cloaked(monkeypatch):
     """20 Oct: persistent mode never calls hide() — _finish_hide() parks the
     pill off-screen instead (see test_disappearing_qt_pill_... above), so
